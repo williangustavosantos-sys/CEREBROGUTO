@@ -10,6 +10,7 @@ app.use(express.json());
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
 const VOICE_API_KEY = (process.env.VOICE_API_KEY || "").replace(/['"]/g, "");
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const MODEL = "gemini-1.5-flash";
 
 function evaluateUser(profile: any) {
@@ -106,7 +107,7 @@ app.post("/guto", async (req, res) => {
   }
 
   try {
-    const systemPrompt = \`Você é o GUTO. Você não é um assistente, você é o sócio do usuário no processo.
+    const systemPrompt = `Você é o GUTO. Você não é um assistente, você é o sócio do usuário no processo.
 REGRA DE OURO: Use sempre "a gente" ou "nós".
 
 Se o usuário falha, NÓS falhamos.
@@ -118,7 +119,7 @@ Tom: Seco, direto, comprometido e altamente cobrador. Sem lixo motivacional. É 
 
 ---
 REGRAS TÉCNICAS OBRIGATÓRIAS:
-1. Idioma de resposta: Responda obrigatoriamente no idioma: \${lang}.
+1. Idioma de resposta: Responda obrigatoriamente no idioma: ${lang}.
 2. FORMATO DE SAÍDA: Retorne APENAS um JSON válido com as chaves "fala" e "acao".
 {
   "fala": "Sua resposta no tom e regras acima.",
@@ -127,7 +128,7 @@ REGRAS TÉCNICAS OBRIGATÓRIAS:
 
 - "lock": Use quando o usuário estiver de palhaçada, sendo incoerente ou demonstrando preguiça extrema. Isso trava o nosso progresso.
 - "updateWorkout": Use apenas quando houver uma mudança real e validada no nosso plano.
-- "none": Use para o fluxo normal de execução e cobrança.\`;
+- "none": Use para o fluxo normal de execução e cobrança.`;
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`;
     const payload = {
@@ -223,6 +224,44 @@ app.post("/voz", async (req, res) => {
   } catch (e) {
     console.error("Erro na rota /voz:", e);
     res.status(500).json({ error: "Falha ao gerar o áudio da voz." });
+  }
+});
+
+app.post("/gerar-emblema", async (req, res) => {
+  const { nomeDaDupla } = req.body;
+  
+  if (!nomeDaDupla) {
+    return res.status(400).json({ error: "Nome da dupla não fornecido." });
+  }
+
+  try {
+    const prompt = `Um emblema circular 3D de super-herói de elite, feito de metal escovado e fibra de carbono ciano metálico, com iluminação cinematográfica épica. No centro, gravado em fonte futurista e pesada, o texto "${nomeDaDupla}". A imagem deve ser limpa, focada no brazão.`;
+
+    if (!OPENAI_API_KEY) {
+      console.warn("⚠️ OPENAI_API_KEY não encontrada. Retornando imagem de fallback.");
+      return res.json({ imageUrl: "https://via.placeholder.com/512/111111/00C3FF?text=" + encodeURIComponent(nomeDaDupla) });
+    }
+
+    const response = await fetch("https://api.openai.com/v1/images/generations", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({ model: "dall-e-3", prompt, n: 1, size: "1024x1024" })
+    });
+
+    const data: any = await response.json();
+    
+    if (!response.ok || data.error) {
+      console.error("ERRO DALL-E:", data.error || data);
+      return res.status(500).json({ error: "Falha na geração da imagem", details: data.error });
+    }
+
+    res.json({ imageUrl: data.data[0].url });
+  } catch (e) {
+    console.error("Erro na rota /gerar-emblema:", e);
+    res.status(500).json({ error: "Erro interno no servidor ao gerar emblema." });
   }
 });
 
