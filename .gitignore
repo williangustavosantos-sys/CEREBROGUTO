@@ -1,35 +1,26 @@
-# Dependencies
-node_modules/
+# dependencies
+node_modules
+
+# build
+dist/
+build/
+coverage/
+*.tsbuildinfo
+data/
+
+# logs
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
 
-# Build outputs
-dist/
-build/
-*.log
-
-# Environment files
+# env files
 .env
 .env.*
 !.env.example
 
-# IDE files
+# OS / editor
+.DS_Store
 .vscode/
 .idea/
-*.swp
-*.swo
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Temporary files
-*.tmp
-*.temp
-.cache/
-
-# Sensitive files (auto-detected)
-.env
-node_modules
-
