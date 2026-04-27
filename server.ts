@@ -12,6 +12,12 @@ import { requestLog } from "./src/http/request-log";
 type Acao = "none" | "updateWorkout" | "lock";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
 type GutoAvatarEmotion = "default" | "alert" | "critical" | "reward";
+type GutoTelemetryEvent =
+  | "user_created"
+  | "pact_completed"
+  | "first_message_sent"
+  | "mission_completed"
+  | "user_returned_next_day";
 
 interface Profile {
   name?: string;
@@ -171,6 +177,38 @@ app.get("/health", (_req, res) => {
     service: "guto-cerebro",
     time: new Date().toISOString(),
   });
+});
+
+app.post("/guto/events", (req, res) => {
+  const body = req.body as {
+    event?: GutoTelemetryEvent;
+    userId?: string;
+    language?: string;
+    metadata?: Record<string, unknown>;
+    timestamp?: string;
+  };
+  const allowedEvents: GutoTelemetryEvent[] = [
+    "user_created",
+    "pact_completed",
+    "first_message_sent",
+    "mission_completed",
+    "user_returned_next_day",
+  ];
+
+  if (!body.event || !allowedEvents.includes(body.event)) {
+    res.status(400).json({ message: "Evento do GUTO inválido." });
+    return;
+  }
+
+  console.log(JSON.stringify({
+    event: "guto_behavior_event",
+    name: body.event,
+    userId: body.userId || DEFAULT_USER_ID,
+    language: normalizeLanguage(body.language),
+    metadata: body.metadata || {},
+    timestamp: body.timestamp || new Date().toISOString(),
+  }));
+  res.json({ ok: true });
 });
 
 // --- HELPERS ---
