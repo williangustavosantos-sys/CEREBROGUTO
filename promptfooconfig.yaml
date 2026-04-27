@@ -1,0 +1,14 @@
+description: GUTO behavior evals
+
+prompts:
+  - id: guto-user-input
+    raw: "{{input}}"
+
+providers:
+  - id: file://evals/promptfoo/guto-provider.cjs
+    label: guto-backend
+    config:
+      baseUrl: http://localhost:3001
+
+tests:
+  - file://evals/promptfoo/generate-tests.cjs
