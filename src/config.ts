@@ -1,0 +1,20 @@
+import { join } from "path";
+
+export const config = {
+  port: Number(process.env.PORT || 3001),
+  geminiApiKey: process.env.GEMINI_API_KEY || "",
+  geminiModel: process.env.GUTO_GEMINI_MODEL || "gemini-2.5-flash",
+  modelTimeoutMs: Number(process.env.GUTO_MODEL_TIMEOUT_MS || 30_000),
+  modelTemperature: Number(process.env.GUTO_MODEL_TEMPERATURE || 0.28),
+  voiceApiKey: (process.env.VOICE_API_KEY || "").replace(/['"]/g, ""),
+  openaiApiKey: process.env.OPENAI_API_KEY || "",
+  memoryFile: process.env.GUTO_MEMORY_FILE || join(process.cwd(), "data", "guto-memory.json"),
+  defaultUserId: process.env.GUTO_DEFAULT_USER_ID || "local-user",
+  timeZone: process.env.GUTO_TIME_ZONE || process.env.TZ || "Europe/Rome",
+  allowedOrigins: (process.env.GUTO_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+  rateLimitWindowMs: Number(process.env.GUTO_RATE_LIMIT_WINDOW_MS || 60_000),
+  rateLimitMaxRequests: Number(process.env.GUTO_RATE_LIMIT_MAX_REQUESTS || 120),
+};

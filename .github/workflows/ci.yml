@@ -1,0 +1,28 @@
+name: GUTO Cerebro CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - feat/round2-hardening
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Run deterministic evals
+        if: ${{ env.GEMINI_API_KEY != '' }}
+        run: |
+          npm run start > /tmp/guto-cerebro.log 2>&1 &
+          sleep 3
+          npm run eval:guto -- --no-judge

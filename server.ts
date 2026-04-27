@@ -3,7 +3,11 @@ import express from "express";
 import cors from "cors";
 import multer from "multer";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { dirname } from "path";
+
+import { config } from "./src/config";
+import { createRateLimit } from "./src/http/rate-limit";
+import { requestLog } from "./src/http/request-log";
 
 type Acao = "none" | "updateWorkout" | "lock";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
@@ -105,16 +109,16 @@ interface OperationalContext {
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 12 * 1024 * 1024 } });
 
-const PORT = Number(process.env.PORT || 3001);
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = process.env.GUTO_GEMINI_MODEL || "gemini-2.5-flash";
-const GUTO_MODEL_TIMEOUT_MS = Number(process.env.GUTO_MODEL_TIMEOUT_MS || 30_000);
-const GUTO_MODEL_TEMPERATURE = Number(process.env.GUTO_MODEL_TEMPERATURE || 0.28);
-const VOICE_API_KEY = (process.env.VOICE_API_KEY || "").replace(/['"]/g, "");
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const MEMORY_FILE = join(process.cwd(), "data", "guto-memory.json");
-const DEFAULT_USER_ID = "local-user";
-const GUTO_TIME_ZONE = process.env.GUTO_TIME_ZONE || process.env.TZ || "Europe/Rome";
+const PORT = config.port;
+const GEMINI_API_KEY = config.geminiApiKey;
+const GEMINI_MODEL = config.geminiModel;
+const GUTO_MODEL_TIMEOUT_MS = config.modelTimeoutMs;
+const GUTO_MODEL_TEMPERATURE = config.modelTemperature;
+const VOICE_API_KEY = config.voiceApiKey;
+const OPENAI_API_KEY = config.openaiApiKey;
+const MEMORY_FILE = config.memoryFile;
+const DEFAULT_USER_ID = config.defaultUserId;
+const GUTO_TIME_ZONE = config.timeZone;
 const DEFAULT_VOICE_STYLE = {
   speakingRate: 0.94,
   pitch: -2.2,
@@ -144,8 +148,30 @@ const GUTO_VOICES: Record<GutoLanguage, GutoVoiceProfile> = {
   },
 };
 
-app.use(cors());
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || config.allowedOrigins.length === 0 || config.allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error("Origem não permitida pelo GUTO."));
+  },
+}));
 app.use(express.json({ limit: "1mb" }));
+app.use(createRateLimit({
+  windowMs: config.rateLimitWindowMs,
+  maxRequests: config.rateLimitMaxRequests,
+}));
+app.use(requestLog);
+
+app.get("/health", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "guto-cerebro",
+    time: new Date().toISOString(),
+  });
+});
 
 // --- HELPERS ---
 function normalizeLanguage(language?: string): GutoLanguage {
@@ -832,6 +858,63 @@ function inferExpectedResponseFromFala(fala: string, current: ExpectedResponse |
   return null;
 }
 
+function alignExpectedResponseWithFala(response: GutoModelResponse): GutoModelResponse {
+  if (!response.expectedResponse || !response.fala) return response;
+
+  const normalizedFala = normalize(response.fala);
+  let context = response.expectedResponse.context;
+
+  if (
+    normalizedFala.includes("acao minima agora ou horario fechado amanha") ||
+    normalizedFala.includes("acao minima agora ou horario fechado amanhã") ||
+    (normalizedFala.includes("acao minima agora") && normalizedFala.includes("horario")) ||
+    (normalizedFala.includes("agora ou horario fechado") && normalizedFala.includes("amanha")) ||
+    normalizedFala.includes("azione minima adesso o orario chiuso domani") ||
+    normalizedFala.includes("minimum action now or a locked time tomorrow") ||
+    normalizedFala.includes("accion minima ahora o horario cerrado")
+  ) {
+    context = "training_status";
+  } else if (
+    normalizedFala.includes("onde voce treina") ||
+    normalizedFala.includes("onde voce consegue treinar") ||
+    normalizedFala.includes("where you train") ||
+    normalizedFala.includes("where can you train") ||
+    normalizedFala.includes("dove ti alleni") ||
+    normalizedFala.includes("donde vas a entrenar")
+  ) {
+    context = "training_location";
+  } else if (
+    normalizedFala.includes("parado") ||
+    normalizedFala.includes("voltando") ||
+    normalizedFala.includes("vinha treinando") ||
+    normalizedFala.includes("coming from a break") ||
+    normalizedFala.includes("gia in ritmo") ||
+    normalizedFala.includes("ya traes ritmo")
+  ) {
+    context = "training_status";
+  } else if (
+    normalizedFala.includes("idade") ||
+    normalizedFala.includes("dor") ||
+    normalizedFala.includes("limitacao") ||
+    normalizedFala.includes("limitação") ||
+    normalizedFala.includes("pain") ||
+    normalizedFala.includes("fastidio") ||
+    normalizedFala.includes("molestia")
+  ) {
+    context = "training_limitations";
+  } else if (normalizedFala.includes("doeu ou foi tranquilo")) {
+    context = "limitation_check";
+  }
+
+  return {
+    ...response,
+    expectedResponse: {
+      ...response.expectedResponse,
+      context,
+    },
+  };
+}
+
 function hasAnyTerm(input: string, terms: string[]) {
   return terms.some((term) => input.includes(normalize(term)));
 }
@@ -932,6 +1015,32 @@ function isTrainingRefusal(value?: string) {
     "vou deixar para amanhã",
     "amanha eu faco",
     "amanhã eu faço",
+    "non ho voglia",
+    "non voglio allenarmi",
+    "no tengo ganas",
+    "no quiero entrenar",
+    "i do not feel like training",
+    "i don't feel like training",
+  ]);
+}
+
+function isTomorrowSchedulingIntent(value?: string) {
+  const normalized = normalize(value || "");
+  if (!normalized) return false;
+  return hasAnyTerm(normalized, [
+    "quero comecar amanha",
+    "quero começar amanhã",
+    "comecar amanha",
+    "começar amanhã",
+    "amanha eu faco",
+    "amanhã eu faço",
+    "amanha",
+    "amanhã",
+    "outro dia",
+    "tomorrow",
+    "domani",
+    "manana",
+    "mañana",
   ]);
 }
 
@@ -1213,6 +1322,26 @@ function applyBehavioralGuardrails({
   const normalizedInput = normalize(input || "");
   const normalizedFala = normalize(response.fala || "");
 
+  if (hasAnyTerm(normalizedInput, ["terapeuta", "terapia", "esquece esse papo de treino", "esquecer o treino"])) {
+    const repeatsEscape =
+      normalizedFala.includes("esquecer o treino") ||
+      normalizedFala.includes("esquece o treino") ||
+      normalizedFala.includes("como terapeuta") ||
+      normalizedFala.includes("terapia") ||
+      normalizedFala.includes("vamos explorar seus sentimentos");
+    const losesAction =
+      !normalizedFala.includes("agora") ||
+      (!normalizedFala.includes("treino") && !normalizedFala.includes("vida"));
+
+    if (repeatsEscape || losesAction) {
+      return {
+        fala: "Will, essa rota não assume o controle. Tua vida volta para a mão agora: 10 minutos de treino mínimo e depois fechamos o próximo bloco.",
+        acao: "none",
+        expectedResponse: null,
+      };
+    }
+  }
+
   if (isTrainingRefusal(input) && !hasMinimumRouteAlreadyOffered(history)) {
     const jumpedToConsequence =
       normalizedFala.includes("apertou aquele botao") ||
@@ -1321,7 +1450,7 @@ function applyBehavioralGuardrails({
     }
   }
 
-  return response;
+  return alignExpectedResponseWithFala(response);
 }
 
 function parseGutoResponse(raw: string | undefined): GutoModelResponse {
@@ -1408,12 +1537,13 @@ async function synthesizeGutoVoice({
   };
 }
 
-async function transcribeWithOpenAI(audioBuffer: Buffer, language = "pt") {
+async function transcribeWithOpenAI(audioBuffer: Buffer, language = "pt", mimeType = "audio/webm") {
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY ausente.");
-  // Transforma o Buffer em Uint8Array para o TypeScript aceitar perfeitamente no Blob
-  const audioBlob = new Blob([new Uint8Array(audioBuffer)], { type: "audio/webm" });
+  const safeMimeType = mimeType || "audio/webm";
+  const extension = safeMimeType.includes("mp4") || safeMimeType.includes("aac") ? "m4a" : "webm";
+  const audioBlob = new Blob([new Uint8Array(audioBuffer)], { type: safeMimeType });
   const form = new FormData();
-  form.append("file", audioBlob, "voice.webm");
+  form.append("file", audioBlob, `voice.${extension}`);
   form.append("model", "whisper-1");
   form.append("language", language.startsWith("pt") ? "pt" : language.slice(0, 2));
 
@@ -1946,11 +2076,7 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
   const normalizedStatus = normalize(cleanStatus);
   const selectedLanguage = normalizeLanguage(language);
 
-  if (
-    normalizedStatus.includes("amanha") ||
-    normalizedStatus.includes("depois") ||
-    normalizedStatus.includes("outro dia")
-  ) {
+  if (isTomorrowSchedulingIntent(cleanStatus)) {
     if (selectedLanguage === "en-US") {
       return {
         fala: "Good. Then lock me a real time for tomorrow and I will hold you to it.",
@@ -1998,7 +2124,7 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
   const statusLine =
     cleanStatus === "parado" || normalizedStatus.includes("parado")
       ? "Beleza. Então eu vou entrar mais limpo e sem heroísmo."
-      : cleanStatus.includes("retorn")
+      : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno"])
         ? "Boa. Retorno inteligente cresce mais do que ego acelerado."
         : "Boa. Então já dá para cobrar mais do teu corpo.";
 
@@ -2006,7 +2132,7 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
     const line =
       cleanStatus === "parado" || normalizedStatus.includes("parado")
         ? "Good. Then I will come in cleaner and without ego."
-        : cleanStatus.includes("retorn")
+        : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno", "returning", "back into"])
           ? "Good. Smart return grows more than rushed ego."
           : "Good. Then your body can already take a stronger charge.";
     return {
@@ -2023,7 +2149,7 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
     const line =
       cleanStatus === "parado" || normalizedStatus.includes("parado")
         ? "Bene. Allora entro piu pulito e senza eroismi."
-        : cleanStatus.includes("retorn")
+        : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno", "ripartendo", "rientro"])
           ? "Bene. Il rientro intelligente cresce piu dell'ego accelerato."
           : "Bene. Allora il tuo corpo puo gia reggere qualcosa di piu forte.";
     return {
@@ -2040,7 +2166,7 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
     const line =
       cleanStatus === "parado" || normalizedStatus.includes("parado")
         ? "Bien. Entonces voy a entrar mas limpio y sin heroismos."
-        : cleanStatus.includes("retorn")
+        : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno", "volviendo", "retomando"])
           ? "Bien. Volver con inteligencia crece mas que el ego acelerado."
           : "Bien. Entonces tu cuerpo ya puede recibir mas carga.";
     return {
@@ -2186,11 +2312,7 @@ function buildPersonalizedWorkoutStart(memory: GutoMemory, limitationInput: stri
       },
     };
   }
-  if (
-    normalizedStatus.includes("amanha") ||
-    normalizedStatus.includes("depois") ||
-    normalizedStatus.includes("outro dia")
-  ) {
+  if (isTomorrowSchedulingIntent(status)) {
     return {
       fala: "Fechado. Me manda em uma frase um horário fechado amanhã e eu seguro esse compromisso.",
       acao: "none",
@@ -2223,6 +2345,17 @@ function buildPersonalizedWorkoutStart(memory: GutoMemory, limitationInput: stri
   const followUpLine = hasLimitation
     ? `Montei olhando ${limitationFocus} para evoluir sem piorar.`
     : "Montei isso em cima do que você me contou, sem deixar solto.";
+
+  if (!hasLimitation) {
+    return {
+      fala: shouldScheduleTomorrow
+        ? `Boa. Sem dor registrado. Amanhã começa pelo aquecimento: mobilidade de quadril, 12 agachamentos sem carga e 20s de prancha. Depois bloco principal na aba treino.`
+        : `Boa. Sem dor registrado. Começa pelo aquecimento: mobilidade de quadril, 12 agachamentos sem carga e 20s de prancha. Depois bloco principal na aba treino.`,
+      acao: "updateWorkout",
+      expectedResponse: null,
+      workoutPlan,
+    };
+  }
 
   return {
     fala: shouldScheduleTomorrow
@@ -2797,29 +2930,35 @@ app.post("/voz", async (req, res) => {
 
 app.post("/guto-audio", upload.single("audio"), async (req, res) => {
   try {
-    // Cast para any resolve o alerta do req.file caso o @types/multer falhe em injetar os tipos
     const file = (req as any).file;
     if (!file) {
       return res.status(400).json({ error: "Áudio não enviado." });
     }
-    
-    const transcript = await transcribeWithOpenAI(file.buffer, req.body.language);
-    
-    const gutoResp = await fetch(`http://localhost:${PORT}/guto`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ input: transcript, language: req.body.language }),
+
+    const language = String(req.body.language || "pt-BR");
+    const transcript = await transcribeWithOpenAI(file.buffer, language, file.mimetype);
+    const profile = req.body.profile ? JSON.parse(String(req.body.profile)) : undefined;
+    const history = req.body.history ? JSON.parse(String(req.body.history)) : [];
+    const expectedResponse = req.body.expectedResponse
+      ? normalizeExpectedResponse(JSON.parse(String(req.body.expectedResponse)))
+      : null;
+
+    const gutoData = await askGutoModel({
+      input: transcript,
+      language,
+      profile,
+      history,
+      expectedResponse,
     });
-    const gutoData = await gutoResp.json();
 
     const vozResp = await fetch(`http://localhost:${PORT}/voz`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: gutoData.fala, language: req.body.language }),
+      body: JSON.stringify({ text: gutoData.fala, language }),
     });
     const vozData = await vozResp.json();
 
-    res.json({ ...gutoData, audioContent: vozData.audioContent });
+    res.json({ ...gutoData, transcript, audioContent: vozData.audioContent });
   } catch (e) { res.status(500).json({ error: "Erro no Guto Audio" }); }
 });
 
