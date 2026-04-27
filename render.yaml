@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: guto-cerebro
+    env: node
+    plan: free
+    branch: feat/round2-hardening
+    buildCommand: npm ci
+    startCommand: npm run start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: GUTO_TIME_ZONE
+        value: Europe/Rome
+      - key: GUTO_GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: GUTO_MODEL_TIMEOUT_MS
+        value: 30000
+      - key: GUTO_MODEL_TEMPERATURE
+        value: 0.28
+      - key: GUTO_RATE_LIMIT_WINDOW_MS
+        value: 60000
+      - key: GUTO_RATE_LIMIT_MAX_REQUESTS
+        value: 120
+      - key: GUTO_MEMORY_FILE
+        value: data/guto-memory.json
+      - key: GUTO_ALLOWED_ORIGINS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: VOICE_API_KEY
+        sync: false
