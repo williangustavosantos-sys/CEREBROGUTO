@@ -1591,6 +1591,28 @@ async function fetchJsonWithTimeout<T>(url: string, init: RequestInit, timeoutMs
   }
 }
 
+function parseJsonObject<T>(raw: string | undefined): T | null {
+  if (!raw) return null;
+
+  const cleaned = raw
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
+  try {
+    return JSON.parse(cleaned) as T;
+  } catch {
+    const objectMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (!objectMatch) return null;
+    try {
+      return JSON.parse(objectMatch[0]) as T;
+    } catch {
+      return null;
+    }
+  }
+}
+
 async function synthesizeGutoVoice({
   text,
   language,
@@ -1760,10 +1782,82 @@ function parseAgeFromText(value?: string) {
   return match ? Number(match[1]) : undefined;
 }
 
+async function validateExpectedResponseWithModel({
+  raw,
+  expectedResponse,
+  language,
+}: {
+  raw: string;
+  expectedResponse: ExpectedResponse;
+  language: string;
+}) {
+  if (!GEMINI_API_KEY) {
+    return { valid: false, matchedOption: raw };
+  }
+
+  const selectedLanguage = normalizeLanguage(language);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const prompt = [
+    "Você é uma camada de validação do sistema GUTO.",
+    "Classifique se a resposta do usuário atende à etapa esperada.",
+    "Não exija palavras exatas. Aceite sinônimos, idioma selecionado, inglês comum e frases curtas naturais.",
+    "Rejeite lixo operacional, brincadeira sem função, pergunta desviando do fluxo ou resposta que não entrega o dado pedido.",
+    "",
+    `Idioma selecionado: ${selectedLanguage}`,
+    `Contexto esperado: ${expectedResponse.context || "generic"}`,
+    `Instrução visível/operacional: ${expectedResponse.instruction || "sem instrução"}`,
+    `Resposta do usuário: ${raw}`,
+    "",
+    "Regras por contexto:",
+    "- training_schedule: aceita quando o usuário define agora, hoje, amanhã, depois, noite/manhã/tarde ou um horário.",
+    "- training_location: aceita qualquer local ou ambiente plausível de treino, mesmo fora das opções, no idioma escolhido ou em inglês.",
+    "- training_status: aceita estado atual, nível, ritmo, cansaço, retorno, parado, iniciante, avançado ou frase equivalente.",
+    "- training_limitations: aceita idade, dor, ausência de dor, limitação, lesão, ponto de cuidado ou frase livre sobre o corpo.",
+    "- limitation_check: aceita relato se doeu, melhorou, piorou, ficou tranquilo ou equivalente.",
+    "",
+    'Retorne somente JSON: {"valid":true|false,"matchedOption":"texto limpo que deve ser salvo"}.',
+  ].join("\n");
+
+  try {
+    const { data } = await fetchJsonWithTimeout<any>(
+      url,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0,
+            maxOutputTokens: 80,
+            responseMimeType: "application/json",
+          },
+        }),
+      },
+      Math.min(GUTO_MODEL_TIMEOUT_MS, 4500)
+    );
+
+    const parsed = parseJsonObject<{ valid?: boolean; matchedOption?: string }>(
+      data?.candidates?.[0]?.content?.parts?.[0]?.text
+    );
+
+    if (!parsed || typeof parsed.valid !== "boolean") {
+      return { valid: false, matchedOption: raw };
+    }
+
+    return {
+      valid: parsed.valid,
+      matchedOption: normalizeMemoryValue(parsed.matchedOption || raw),
+    };
+  } catch (error) {
+    console.warn("Validação semântica do expectedResponse falhou:", error);
+    return { valid: false, matchedOption: raw };
+  }
+}
+
 function getLocationMode(location?: string) {
   const normalized = normalize(location || "");
-  if (hasAnyTerm(normalized, ["academia", "palestra", "gym", "gimnasio", "box"])) return "gym";
-  if (hasAnyTerm(normalized, ["parque", "parco", "park", "rua", "pista", "quadra"])) return "park";
+  if (hasAnyTerm(normalized, ["academia", "palestra", "gym", "gimnasio", "fitness", "box"])) return "gym";
+  if (hasAnyTerm(normalized, ["parque", "parco", "park", "rua", "calle", "street", "pista", "quadra"])) return "park";
   return "home";
 }
 
@@ -1771,7 +1865,7 @@ function shouldFastTrackLocationReply(input?: string) {
   const raw = (input || "").replace(/\s+/g, " ").trim();
   const normalized = normalize(raw);
   if (!raw || raw.length > 80) return false;
-  if (!hasAnyTerm(normalized, ["academia", "palestra", "gym", "gimnasio", "box", "casa", "home", "house", "parque", "parco", "park", "rua", "condominio", "condomínio"])) {
+  if (!hasAnyTerm(normalized, ["academia", "palestra", "gym", "gimnasio", "fitness", "box", "casa", "home", "house", "parque", "parco", "park", "rua", "calle", "street", "condominio", "condomínio"])) {
     return false;
   }
   if (hasCompletionSignal(raw) || hasResistanceSignal(raw) || Boolean(parseAgeFromText(raw))) {
@@ -2582,20 +2676,31 @@ async function validateExpectedResponse({
       "hoje",
       "amanha",
       "amanhã",
+      "mais tarde",
+      "depois",
       "acao minima",
       "ação mínima",
       "horario",
       "horário",
       "tomorrow",
+      "today",
+      "tonight",
+      "later",
       "now",
       "domani",
+      "oggi",
+      "stasera",
+      "dopo",
       "adesso",
       "manana",
       "mañana",
+      "hoy",
+      "noche",
+      "luego",
       "ahora",
     ];
     const valid = hasAnyTerm(normalized, scheduleTerms) || hasTime;
-    return { valid, matchedOption: input };
+    return valid ? { valid, matchedOption: input } : validateExpectedResponseWithModel({ raw, expectedResponse, language });
   }
 
   if (expectedResponse.context === "training_location") {
@@ -2603,34 +2708,57 @@ async function validateExpectedResponse({
       "casa",
       "home",
       "house",
+      "apartment",
+      "appartamento",
+      "departamento",
       "condominio",
       "condomínio",
       "academia",
       "palestra",
       "gym",
       "gimnasio",
+      "fitness",
       "rua",
+      "calle",
+      "street",
       "parque",
       "parco",
       "park",
       "garagem",
+      "garage",
+      "garaje",
       "quarto",
+      "camera",
+      "bedroom",
       "sala",
       "predio",
       "prédio",
+      "building",
+      "palazzo",
+      "piscina",
+      "pool",
       "halter",
+      "dumbbell",
+      "manubri",
+      "mancuernas",
       "banco",
+      "bench",
       "esteira",
+      "tapis roulant",
+      "treadmill",
       "bike",
       "bicicleta",
+      "bici",
       "barra",
       "peso",
+      "weights",
+      "pesi",
     ];
     const valid =
       hasAnyTerm(normalized, locationTerms) ||
       hasTime ||
       (normalized.split(/\s+/).length >= 2 && hasMeaningfulText);
-    return { valid, matchedOption: input };
+    return valid ? { valid, matchedOption: input } : validateExpectedResponseWithModel({ raw, expectedResponse, language });
   }
 
   if (expectedResponse.context === "training_status") {
@@ -2644,35 +2772,86 @@ async function validateExpectedResponse({
       "energia",
       "disposicao",
       "disposição",
+      "beginner",
+      "advanced",
+      "returning",
+      "stopped",
+      "tired",
+      "allenato",
+      "fermo",
+      "ripresa",
+      "stanco",
+      "principiante",
+      "avanzato",
+      "parado",
+      "volviendo",
+      "cansado",
+      "principiante",
+      "avanzado",
       "bem",
       "mal",
       "leve",
     ];
     const valid = hasAnyTerm(normalized, statusTerms) || hasTime || hasMeaningfulText;
-    return { valid, matchedOption: input };
+    return valid ? { valid, matchedOption: input } : validateExpectedResponseWithModel({ raw, expectedResponse, language });
   }
 
   if (expectedResponse.context === "training_limitations") {
     const limitationTerms = [
       "sem dor",
       "livre",
+      "no pain",
+      "no injury",
+      "senza dolore",
+      "nessun dolore",
+      "sin dolor",
+      "sin lesion",
       "joelho",
+      "knee",
+      "ginocchio",
+      "rodilla",
       "ombro",
+      "shoulder",
+      "spalla",
+      "hombro",
       "lombar",
+      "lower back",
+      "schiena",
+      "espalda",
       "costas",
       "quadril",
+      "hip",
+      "anca",
+      "cadera",
       "tornozelo",
+      "ankle",
+      "caviglia",
+      "tobillo",
       "punho",
+      "wrist",
+      "polso",
+      "muneca",
+      "muñeca",
       "dor",
+      "pain",
+      "dolore",
+      "dolor",
       "incomoda",
       "incomoda",
+      "hurts",
+      "fastidio",
+      "molestia",
       "limitacao",
       "limitação",
+      "limitation",
+      "limitazione",
+      "limitacion",
+      "limitación",
       "serio",
       "sério",
     ];
     const valid = hasAnyTerm(normalized, limitationTerms) || hasMeaningfulText;
-    return { valid, matchedOption: input };
+    return valid ? { valid, matchedOption: input } : validateExpectedResponseWithModel({ raw, expectedResponse, language });
   }
 
   if (expectedResponse.context === "limitation_check") {
@@ -2686,12 +2865,28 @@ async function validateExpectedResponse({
       "pegou",
       "senti",
       "sentiu",
+      "hurt",
+      "better",
+      "worse",
+      "same",
+      "fine",
+      "dolore",
+      "meglio",
+      "peggio",
+      "tranquillo",
+      "dolió",
+      "dolio",
+      "mejor",
+      "peor",
+      "tranquilo",
     ];
     const valid = hasAnyTerm(normalized, checkTerms) || hasMeaningfulText;
-    return { valid, matchedOption: input };
+    return valid ? { valid, matchedOption: input } : validateExpectedResponseWithModel({ raw, expectedResponse, language });
   }
 
-  return { valid: hasMeaningfulText, matchedOption: input };
+  return hasMeaningfulText
+    ? { valid: true, matchedOption: input }
+    : validateExpectedResponseWithModel({ raw, expectedResponse, language });
 }
 
 async function askGutoModel({
