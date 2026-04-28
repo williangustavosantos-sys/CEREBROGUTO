@@ -3,7 +3,12 @@ import { mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
 type Acao = "none" | "updateWorkout" | "lock";
-type ExpectedContext = "training_location" | "training_status" | "training_limitations" | "limitation_check";
+type ExpectedContext =
+  | "training_schedule"
+  | "training_location"
+  | "training_status"
+  | "training_limitations"
+  | "limitation_check";
 
 interface GutoExpectedResponse {
   type: "text";

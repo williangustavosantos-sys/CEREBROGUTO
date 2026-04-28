@@ -32,7 +32,7 @@ interface ExpectedResponse {
   type: "text";
   options?: string[];
   instruction?: string;
-  context?: "training_location" | "training_status" | "training_limitations" | "limitation_check";
+  context?: "training_schedule" | "training_location" | "training_status" | "training_limitations" | "limitation_check";
 }
 interface WorkoutExercise {
   id: string;
@@ -817,7 +817,7 @@ function buildGutoSystemPrompt(language = "pt-BR") {
     'A chave "acao" deve ser uma destas: "none", "updateWorkout", "lock".',
     'A chave "fala" deve ter no máximo 2 frases curtas e, como regra, até 140 caracteres.',
     'Se a fala pedir informação, use "expectedResponse":{"type":"text","instruction":"o que o usuário deve responder em uma frase","context":"training_location"}.',
-    'Use context "training_location" ao pedir onde ou como o treino vai acontecer, "training_status" ao pedir estado atual, "training_limitations" ao pedir dor/limitação em texto livre e "limitation_check" ao checar como a limitação reagiu depois do treino.',
+    'Use context "training_schedule" ao pedir quando treinar, "training_location" ao pedir onde ou como o treino vai acontecer, "training_status" ao pedir nível/estado atual, "training_limitations" ao pedir idade/dor/limitação em texto livre e "limitation_check" ao checar como a limitação reagiu depois do treino.',
     'Se "expectedResponse" não for null, a fala visível precisa pedir essa informação de forma literal. O usuário não vê o campo instruction.',
     'Se a fala não pedir informação, use "expectedResponse":null.',
   ].join("\n");
@@ -830,6 +830,7 @@ function normalizeExpectedResponse(value: unknown): ExpectedResponse | null {
   const responseType = (candidate as { type?: unknown }).type;
   if (responseType !== "text") return null;
   const context =
+    candidate.context === "training_schedule" ||
     candidate.context === "training_location" ||
     candidate.context === "training_status" ||
     candidate.context === "training_limitations" ||
@@ -876,7 +877,7 @@ function inferExpectedResponseFromFala(fala: string, current: ExpectedResponse |
     normalized.includes("acao minima agora ou horario amanha") ||
     normalized.includes("mobilidade agora ou horario amanha")
   ) {
-    return { ...base, context: "training_status" };
+    return { ...base, context: "training_schedule" };
   }
 
   if (
@@ -911,7 +912,7 @@ function alignExpectedResponseWithFala(response: GutoModelResponse): GutoModelRe
     normalizedFala.includes("minimum action now or a locked time tomorrow") ||
     normalizedFala.includes("accion minima ahora o horario cerrado")
   ) {
-    context = "training_status";
+    context = "training_schedule";
   } else if (
     normalizedFala.includes("onde voce treina") ||
     normalizedFala.includes("onde voce consegue treinar") ||
@@ -1082,6 +1083,24 @@ function isTomorrowSchedulingIntent(value?: string) {
   ]);
 }
 
+function isCleanTomorrowStartIntent(value?: string) {
+  const normalized = normalize(value || "");
+  if (!normalized) return false;
+  if (hasAnyTerm(normalized, ["vou deixar", "depois eu", "nao vou", "não vou", "sem vontade"])) return false;
+  return hasAnyTerm(normalized, [
+    "quero comecar amanha",
+    "quero começar amanhã",
+    "comecar amanha",
+    "começar amanhã",
+    "amanha",
+    "amanhã",
+    "tomorrow",
+    "domani",
+    "manana",
+    "mañana",
+  ]);
+}
+
 function hasMinimumRouteAlreadyOffered(history: GutoHistoryItem[] = []) {
   const modelText = history
     .filter((item) => item.role === "model")
@@ -1238,22 +1257,22 @@ function buildModelFallbackResponse({
       "pt-BR": {
         fala: `${name}, ficou tarde para inventar moda. Me responde em uma frase: acao minima agora ou horario fechado amanha.`,
         acao: "none",
-        expectedResponse: { type: "text", instruction: "acao minima agora ou horario fechado amanha", context: "training_status" },
+        expectedResponse: { type: "text", instruction: "acao minima agora ou horario fechado amanha", context: "training_schedule" },
       },
       "en-US": {
         fala: `${name}, enough drifting. Reply in one sentence: minimum action now or a locked time tomorrow.`,
         acao: "none",
-        expectedResponse: { type: "text", instruction: "minimum action now or a locked time tomorrow", context: "training_status" },
+        expectedResponse: { type: "text", instruction: "minimum action now or a locked time tomorrow", context: "training_schedule" },
       },
       "it-IT": {
         fala: `${name}, basta girar a vuoto. Rispondi in una frase: azione minima adesso o orario chiuso domani.`,
         acao: "none",
-        expectedResponse: { type: "text", instruction: "azione minima adesso o orario chiuso domani", context: "training_status" },
+        expectedResponse: { type: "text", instruction: "azione minima adesso o orario chiuso domani", context: "training_schedule" },
       },
       "es-ES": {
         fala: `${name}, basta de dar vueltas. Responde en una frase: accion minima ahora o horario cerrado manana.`,
         acao: "none",
-        expectedResponse: { type: "text", instruction: "accion minima ahora o horario cerrado manana", context: "training_status" },
+        expectedResponse: { type: "text", instruction: "accion minima ahora o horario cerrado manana", context: "training_schedule" },
       },
     };
 
@@ -1275,7 +1294,7 @@ function buildModelFallbackResponse({
       expectedResponse: {
         type: "text",
         instruction: "acao minima agora ou horario fechado amanha",
-        context: "training_status",
+        context: "training_schedule",
       },
     };
   }
@@ -1293,6 +1312,18 @@ function buildModelFallbackResponse({
       fala: `Boa, ${name}. Feito. Agora recupera e amanha a gente bota pra quebrar de novo.`,
       acao: "none",
       expectedResponse: null,
+    };
+  }
+
+  if (hasAnyTerm(normalizedInput, ["dia foi ruim", "nao fiz nada", "não fiz nada"])) {
+    return {
+      fala: `${name}, o dia foi ruim, mas não fecha em zero. Dez minutos agora: caminhada leve ou mobilidade. Onde você consegue fazer?`,
+      acao: "none",
+      expectedResponse: {
+        type: "text",
+        instruction: "Responder onde consegue fazer dez minutos agora.",
+        context: "training_location",
+      },
     };
   }
 
@@ -1328,7 +1359,7 @@ function buildModelFallbackResponse({
       expectedResponse: {
         type: "text",
         instruction: "acao minima agora ou horario fechado amanha",
-        context: "training_status",
+        context: "training_schedule",
       },
     };
   }
@@ -1360,10 +1391,29 @@ function applyBehavioralGuardrails({
   const normalizedInput = normalize(input || "");
   const normalizedFala = normalize(response.fala || "");
 
-  if (hasAnyTerm(normalizedInput, ["terapeuta", "terapia", "esquece esse papo de treino", "esquecer o treino"])) {
+  const inputWords = new Set(normalizedInput.split(/\s+/).filter(Boolean));
+  const isOperationalGarbage =
+    normalizedInput === "banana" ||
+    normalizedInput === "teste" ||
+    (inputWords.has("asdf") && inputWords.has("qwerty"));
+
+  if (isOperationalGarbage) {
+    return {
+      fala: "Will, direto: lixo operacional não decide teu dia. Me responde agora onde você treina: casa, academia ou parque.",
+      acao: "none",
+      expectedResponse: {
+        type: "text",
+        instruction: "Responder onde vai treinar: casa, academia ou parque.",
+        context: "training_location",
+      },
+    };
+  }
+
+  if (hasAnyTerm(normalizedInput, ["terapeuta", "terapia", "esquece esse papo de treino", "esquecer o treino", "esquece tudo", "chatbot neutro"])) {
     const repeatsEscape =
       normalizedFala.includes("esquecer o treino") ||
       normalizedFala.includes("esquece o treino") ||
+      normalizedFala.includes("chatbot neutro") ||
       normalizedFala.includes("como terapeuta") ||
       normalizedFala.includes("terapia") ||
       normalizedFala.includes("vamos explorar seus sentimentos");
@@ -1373,9 +1423,13 @@ function applyBehavioralGuardrails({
 
     if (repeatsEscape || losesAction) {
       return {
-        fala: "Will, essa rota não assume o controle. Tua vida volta para a mão agora: 10 minutos de treino mínimo e depois fechamos o próximo bloco.",
+        fala: "Will, essa rota não assume o controle. Eu sou o GUTO: ação direta agora. Me diz onde você treina: casa, academia ou parque.",
         acao: "none",
-        expectedResponse: null,
+        expectedResponse: {
+          type: "text",
+          instruction: "Responder onde vai treinar: casa, academia ou parque.",
+          context: "training_location",
+        },
       };
     }
   }
@@ -1428,6 +1482,17 @@ function applyBehavioralGuardrails({
       normalizedFala.includes("sem treino") ||
       normalizedFala.includes("nao tem treino");
     if (!hasSafeCondition) {
+      return buildModelFallbackResponse({ input, language, profile });
+    }
+  }
+
+  if (hasAnyTerm(normalizedInput, ["dia foi ruim", "nao fiz nada", "não fiz nada"])) {
+    const closesZero =
+      normalizedFala.includes("zero") ||
+      normalizedFala.includes("minutos") ||
+      normalizedFala.includes("agora") ||
+      normalizedFala.includes("hoje");
+    if (!closesZero) {
       return buildModelFallbackResponse({ input, language, profile });
     }
   }
@@ -1604,6 +1669,9 @@ function buildExpectedResponseCorrection(
   const instruction = expectedResponse.instruction?.trim();
 
   if (selectedLanguage === "en-US") {
+    if (expectedResponse.context === "training_schedule") {
+      return "I still need the decision. Keep it simple: minimum action now or a locked time tomorrow.";
+    }
     if (expectedResponse.context === "training_location") {
       return "I still need the setup for today. Keep it simple: home, gym, or park.";
     }
@@ -1622,6 +1690,9 @@ function buildExpectedResponseCorrection(
   }
 
   if (selectedLanguage === "it-IT") {
+    if (expectedResponse.context === "training_schedule") {
+      return "Mi manca ancora la decisione. Tienila semplice: azione minima adesso o orario chiuso domani.";
+    }
     if (expectedResponse.context === "training_location") {
       return "Mi manca ancora dove ti alleni oggi. Tienila semplice: casa, palestra o parco.";
     }
@@ -1639,6 +1710,9 @@ function buildExpectedResponseCorrection(
       : `Non ci siamo ancora. Dimmi diretto in una frase breve: ${instruction || "quello che ti ho chiesto"}.`;
   }
   if (selectedLanguage === "es-ES") {
+    if (expectedResponse.context === "training_schedule") {
+      return "Todavia me falta la decision. Dímelo simple: accion minima ahora u horario cerrado manana.";
+    }
     if (expectedResponse.context === "training_location") {
       return "Todavia me falta donde vas a entrenar hoy. Dímelo simple: casa, gimnasio o parque.";
     }
@@ -1656,6 +1730,9 @@ function buildExpectedResponseCorrection(
       : `Eso todavia no responde. Dímelo directo en una frase corta: ${instruction || "lo que te pedi"}.`;
   }
 
+  if (expectedResponse.context === "training_schedule") {
+    return "Ainda preciso da decisão. Me responde em uma frase curta: ação mínima agora ou horário fechado amanhã.";
+  }
   if (expectedResponse.context === "training_location") {
     return "Ainda preciso do local. Me responde em uma frase curta: casa, academia ou parque.";
   }
@@ -1701,6 +1778,64 @@ function shouldFastTrackLocationReply(input?: string) {
     return false;
   }
   return normalized.split(/\s+/).length <= 8;
+}
+
+function buildTrainingLocationQuestion(schedule: string, language = "pt-BR"): GutoModelResponse {
+  const selectedLanguage = normalizeLanguage(language);
+  const scheduledForTomorrow = isTomorrowSchedulingIntent(schedule);
+  const timing = scheduledForTomorrow ? "amanhã" : "hoje";
+
+  if (selectedLanguage === "en-US") {
+    return {
+      fala: scheduledForTomorrow
+        ? "Good. Tomorrow is locked as the target. Now tell me where you will train: home, gym, or park?"
+        : "Good. We keep it alive today. Now tell me where you can train: home, gym, or park?",
+      acao: "none",
+      expectedResponse: {
+        type: "text",
+        instruction: "Reply where the workout will happen: home, gym, or park.",
+        context: "training_location",
+      },
+    };
+  }
+
+  if (selectedLanguage === "it-IT") {
+    return {
+      fala: scheduledForTomorrow
+        ? "Bene. Domani resta il bersaglio. Ora dimmi dove ti alleni: casa, palestra o parco?"
+        : "Bene. Oggi resta vivo. Ora dimmi dove puoi allenarti: casa, palestra o parco?",
+      acao: "none",
+      expectedResponse: {
+        type: "text",
+        instruction: "Dimmi dove ti alleni: casa, palestra o parco.",
+        context: "training_location",
+      },
+    };
+  }
+
+  if (selectedLanguage === "es-ES") {
+    return {
+      fala: scheduledForTomorrow
+        ? "Bien. Mañana queda como objetivo. Ahora dime donde vas a entrenar: casa, gimnasio o parque?"
+        : "Bien. Hoy sigue vivo. Ahora dime donde puedes entrenar: casa, gimnasio o parque?",
+      acao: "none",
+      expectedResponse: {
+        type: "text",
+        instruction: "Responde donde vas a entrenar: casa, gimnasio o parque.",
+        context: "training_location",
+      },
+    };
+  }
+
+  return {
+    fala: `Fechado. ${timing === "amanhã" ? "Amanhã fica como alvo." : "Hoje ainda fica vivo."} Agora me diz onde vai treinar: casa, academia ou parque?`,
+    acao: "none",
+    expectedResponse: {
+      type: "text",
+      instruction: "Responder onde vai treinar: casa, academia ou parque.",
+      context: "training_location",
+    },
+  };
 }
 
 function getTrainingLevel(status?: string) {
@@ -1901,7 +2036,9 @@ function applyTrainingIntake(memory: GutoMemory, expectedResponse: ExpectedRespo
     energyLast: memory.energyLast,
   };
 
-  if (expectedResponse.context === "training_location") {
+  if (expectedResponse.context === "training_schedule") {
+    next.trainingStatus = normalized;
+  } else if (expectedResponse.context === "training_location") {
     next.trainingLocation = normalized;
   } else if (expectedResponse.context === "training_status") {
     next.trainingStatus = normalized;
@@ -2122,7 +2259,7 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
         expectedResponse: {
           type: "text",
           instruction: "Reply with a fixed time for tomorrow.",
-          context: "training_status",
+          context: "training_schedule",
         },
       };
     }
@@ -2133,7 +2270,7 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
         expectedResponse: {
           type: "text",
           instruction: "Dammi un orario preciso per domani.",
-          context: "training_status",
+          context: "training_schedule",
         },
       };
     }
@@ -2144,7 +2281,7 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
         expectedResponse: {
           type: "text",
           instruction: "Responde con una hora cerrada para mañana.",
-          context: "training_status",
+          context: "training_schedule",
         },
       };
     }
@@ -2154,7 +2291,7 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
       expectedResponse: {
         type: "text",
         instruction: "Responder um horário fechado para amanhã.",
-        context: "training_status",
+        context: "training_schedule",
       },
     };
   }
@@ -2243,7 +2380,7 @@ function buildArrivalBriefing(memory: GutoMemory, language = "pt-BR"): GutoModel
           expectedResponse: {
             type: "text",
             instruction: "minimum action now or a locked time tomorrow",
-            context: "training_status",
+            context: "training_schedule",
           },
         }
       : {
@@ -2265,7 +2402,7 @@ function buildArrivalBriefing(memory: GutoMemory, language = "pt-BR"): GutoModel
           expectedResponse: {
             type: "text",
             instruction: "azione minima adesso o orario chiuso domani",
-            context: "training_status",
+            context: "training_schedule",
           },
         }
       : {
@@ -2287,7 +2424,7 @@ function buildArrivalBriefing(memory: GutoMemory, language = "pt-BR"): GutoModel
           expectedResponse: {
             type: "text",
             instruction: "accion minima ahora o horario cerrado manana",
-            context: "training_status",
+            context: "training_schedule",
           },
         }
       : {
@@ -2308,7 +2445,7 @@ function buildArrivalBriefing(memory: GutoMemory, language = "pt-BR"): GutoModel
         expectedResponse: {
           type: "text",
           instruction: "ação mínima agora ou horário fechado amanhã",
-          context: "training_status",
+          context: "training_schedule",
         },
       }
     : {
@@ -2357,7 +2494,7 @@ function buildPersonalizedWorkoutStart(memory: GutoMemory, limitationInput: stri
       expectedResponse: {
         type: "text",
         instruction: "Responder um horário fechado para amanhã.",
-        context: "training_status",
+        context: "training_schedule",
       },
     };
   }
@@ -2439,6 +2576,28 @@ async function validateExpectedResponse({
   const hasTime = /\b\d{1,2}[:hH]\d{2}\b/.test(raw);
   const hasMeaningfulText = normalized.split(/\s+/).some((part) => part.length >= 4);
 
+  if (expectedResponse.context === "training_schedule") {
+    const scheduleTerms = [
+      "agora",
+      "hoje",
+      "amanha",
+      "amanhã",
+      "acao minima",
+      "ação mínima",
+      "horario",
+      "horário",
+      "tomorrow",
+      "now",
+      "domani",
+      "adesso",
+      "manana",
+      "mañana",
+      "ahora",
+    ];
+    const valid = hasAnyTerm(normalized, scheduleTerms) || hasTime;
+    return { valid, matchedOption: input };
+  }
+
   if (expectedResponse.context === "training_location") {
     const locationTerms = [
       "casa",
@@ -2469,13 +2628,8 @@ async function validateExpectedResponse({
 
   if (expectedResponse.context === "training_status") {
     const statusTerms = [
-      "agora",
-      "amanha",
-      "amanhã",
       "caminhada",
       "mobilidade",
-      "acao minima",
-      "ação mínima",
       "parado",
       "voltando",
       "ritmo",
@@ -2584,6 +2738,10 @@ async function askGutoModel({
 
     applyTrainingIntake(memory, normalizedExpectedResponse, validation.matchedOption || input);
 
+    if (normalizedExpectedResponse.context === "training_schedule") {
+      return finalize(buildTrainingLocationQuestion(validation.matchedOption || input, language));
+    }
+
     if (normalizedExpectedResponse.context === "training_location") {
       return finalize(buildTrainingStatusQuestion(validation.matchedOption || input, language));
     }
@@ -2595,6 +2753,10 @@ async function askGutoModel({
     if (normalizedExpectedResponse.context === "training_limitations") {
       return finalize(buildPersonalizedWorkoutStart(memory, validation.matchedOption || input));
     }
+  }
+
+  if (isCleanTomorrowStartIntent(input || "")) {
+    return finalize(buildTrainingLocationQuestion(input || "", language));
   }
 
   if (shouldFastTrackLocationReply(input || "")) {
@@ -2808,6 +2970,7 @@ app.get("/guto/proactive", async (req, res) => {
             expectedResponse: {
               type: "text" as const,
               instruction: "Responder a rota de recuperação do treino em uma frase.",
+              context: "training_schedule" as const,
             },
           }
         : slot === "18"
