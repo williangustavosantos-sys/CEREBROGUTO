@@ -1997,6 +1997,36 @@ function shouldSwitchFromSuggestedGymFocus(input?: string) {
   return hasAnyTerm(normalized, completionTerms) && hasAnyTerm(normalized, suggestedFocusTerms);
 }
 
+function isTrainingHistoryInsteadOfLimitation(input?: string) {
+  const normalized = normalize(input || "");
+  if (!normalized) return false;
+
+  return hasAnyTerm(normalized, [
+    "treinei",
+    "ja treinei",
+    "ja fiz",
+    "fiz isso",
+    "fiz esse",
+    "treinei isso hoje",
+    "treinei isso ontem",
+    "trained",
+    "already did",
+    "did that",
+    "yesterday",
+    "yesterday's",
+    "ontem",
+    "hoje",
+    "gia fatto",
+    "ho allenato",
+    "ieri",
+    "oggi",
+    "ya hice",
+    "ya entrene",
+    "ayer",
+    "hoy",
+  ]);
+}
+
 function buildWorkoutPlan({
   language,
   location,
@@ -3063,6 +3093,14 @@ async function askGutoModel({
     }
 
     if (normalizedExpectedResponse.context === "training_limitations") {
+      if (isTrainingHistoryInsteadOfLimitation(input || "")) {
+        return finalize({
+          fala: "Anotado como histórico de treino, não como dor. A troca continua: costas e bíceps. Agora me manda só idade e dor/limitação real, ou responde: sem dor.",
+          acao: "none" as Acao,
+          expectedResponse: normalizedExpectedResponse,
+        });
+      }
+
       return finalize(buildPersonalizedWorkoutStart(memory, validation.matchedOption || input));
     }
   }
