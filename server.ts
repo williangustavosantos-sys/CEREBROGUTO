@@ -1762,8 +1762,8 @@ function parseAgeFromText(value?: string) {
 
 function getLocationMode(location?: string) {
   const normalized = normalize(location || "");
-  if (hasAnyTerm(normalized, ["academia", "gym", "box"])) return "gym";
-  if (hasAnyTerm(normalized, ["parque", "rua", "pista", "quadra"])) return "park";
+  if (hasAnyTerm(normalized, ["academia", "palestra", "gym", "gimnasio", "box"])) return "gym";
+  if (hasAnyTerm(normalized, ["parque", "parco", "park", "rua", "pista", "quadra"])) return "park";
   return "home";
 }
 
@@ -1771,7 +1771,7 @@ function shouldFastTrackLocationReply(input?: string) {
   const raw = (input || "").replace(/\s+/g, " ").trim();
   const normalized = normalize(raw);
   if (!raw || raw.length > 80) return false;
-  if (!hasAnyTerm(normalized, ["academia", "gym", "box", "casa", "parque", "rua", "condominio", "condomínio"])) {
+  if (!hasAnyTerm(normalized, ["academia", "palestra", "gym", "gimnasio", "box", "casa", "home", "house", "parque", "parco", "park", "rua", "condominio", "condomínio"])) {
     return false;
   }
   if (hasCompletionSignal(raw) || hasResistanceSignal(raw) || Boolean(parseAgeFromText(raw))) {
@@ -2601,11 +2601,18 @@ async function validateExpectedResponse({
   if (expectedResponse.context === "training_location") {
     const locationTerms = [
       "casa",
+      "home",
+      "house",
       "condominio",
       "condomínio",
       "academia",
+      "palestra",
+      "gym",
+      "gimnasio",
       "rua",
       "parque",
+      "parco",
+      "park",
       "garagem",
       "quarto",
       "sala",
