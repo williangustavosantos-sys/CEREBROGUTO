@@ -601,7 +601,7 @@ function buildProactiveInput(memory: GutoMemory, slot: string, context: Operatio
     "Gere uma mensagem curta, proativa e acionável.",
     slot === "force"
       ? "Na primeira abertura do chat, comece com confiança e condução: presença, direção simples e pergunta fácil de responder. Não comece duro demais."
-      : "Se o vínculo já está ativo, mantenha cobrança e condução sem perder humanidade.",
+      : "Se o vínculo já está ativo, mantenha cobrança e condução senza perdere l'umanità.",
     slot === "limitation_check"
       ? "O usuário já treinou. Pergunte como a limitação registrada respondeu durante o treino e peça resposta objetiva."
       : "Use a limitação registrada como prova de memória: mencione cuidado/fortalecimento específico quando montar ou cobrar treino.",
@@ -764,7 +764,7 @@ function buildGutoSystemPrompt(language = "pt-BR") {
     "REGRA DE CONTINUIDADE",
     "Quando o usuário terminar uma atividade, defina imediatamente a próxima ação.",
     "Se o usuário disser que já treinou, terminou, fez o treino ou está com energia depois de treinar, não reabra intake de local/estado para o treino do dia.",
-    "Nesses casos, reconheça a execução com uma palavra de fechamento, marque sequência e defina o próximo passo: recuperação curta, registro objetivo ou compromisso de amanhã.",
+    "Nesses casos, reconheça a execution com uma palavra de fechamento, marque sequência e defina o próximo passo: recuperação curta, registro objetivo ou compromisso de amanhã.",
     "Se o usuário disser que treinou e está com energia, trate isso como execução concluída com boa resposta. Reforce que foi feito e defina a próxima ação de continuidade.",
     "Depois de treino concluído, não pergunte 'o que você fez' só para registrar. Feche com recuperação, segundo bloco útil ou compromisso de amanhã.",
     "A resposta pós-treino precisa conter pelo menos um sinal claro de sequência: feito, próximo bloco, recuperação, amanhã ou energia bem usada.",
@@ -1345,8 +1345,29 @@ function buildModelFallbackResponse({
 
   const scheduledTime = extractScheduledTime(input || "");
   if (scheduledTime) {
+    const match = scheduledTime.match(/(\d{2})h(\d{2})/);
+    let isTomorrow = false;
+    
+    if (match) {
+      const schedHour = Number(match[1]);
+      const schedMinute = Number(match[2]);
+      if (schedHour < context.hour || (schedHour === context.hour && schedMinute <= context.minute)) {
+        isTomorrow = true;
+      }
+    }
+    
+    if (selectedLanguage === "en-US") {
+      return { fala: `${name}, locked: ${isTomorrow ? "tomorrow" : "today"} at ${scheduledTime}, no negotiating.`, acao: "none", expectedResponse: null };
+    }
+    if (selectedLanguage === "it-IT") {
+      return { fala: `${name}, chiuso: ${isTomorrow ? "domani" : "oggi"} alle ${scheduledTime}, senza negoziare.`, acao: "none", expectedResponse: null };
+    }
+    if (selectedLanguage === "es-ES") {
+      return { fala: `${name}, cerrado: ${isTomorrow ? "mañana" : "hoy"} a las ${scheduledTime}, sin negociar.`, acao: "none", expectedResponse: null };
+    }
+    
     return {
-      fala: `${name}, ${scheduledTime} ja passou. Fechado: amanha as ${scheduledTime}, sem renegociar.`,
+      fala: `${name}, fechado: ${isTomorrow ? "amanhã" : "hoje"} às ${scheduledTime}, sem renegociar.`,
       acao: "none",
       expectedResponse: null,
     };
@@ -1675,7 +1696,7 @@ async function transcribeWithOpenAI(audioBuffer: Buffer, language = "pt", mimeTy
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Math.min(GUTO_MODEL_TIMEOUT_MS, 30_000));
 
-  const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+  const res = await fetch("[https://api.openai.com/v1/audio/transcriptions](https://api.openai.com/v1/audio/transcriptions)", {
     method: "POST",
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
     body: form,
@@ -2246,8 +2267,8 @@ function buildTrainingStatusQuestion(location: string, language = "pt-BR"): Guto
         type: "text",
         instruction: "Responder se estava parado, voltando ou já vinha treinando.",
         context: "training_status",
-      },
-    };
+        },
+      };
   }
 
   if (mode === "park") {
@@ -2930,6 +2951,16 @@ async function askGutoModel({
       input,
     });
 
+  // --- INTERCEPTAÇÃO ABSOLUTA (Sobrepõe qualquer coleta em andamento) ---
+  if (isTrainingRefusal(input || "") && !hasMinimumRouteAlreadyOffered(history)) {
+    return finalize(buildResistanceEscalationResponse({ language, profile }));
+  }
+
+  if (shouldTreatInputAsScheduledTime(input || "")) {
+    return finalize(buildModelFallbackResponse({ input: input || "", language, profile }));
+  }
+  // ----------------------------------------------------------------------
+
   if (normalizedExpectedResponse) {
     const validation = await validateExpectedResponse({
       input,
@@ -2970,14 +3001,6 @@ async function askGutoModel({
 
   if (shouldFastTrackLocationReply(input || "")) {
     return finalize(buildTrainingStatusQuestion(input || "", language));
-  }
-
-  if (shouldTreatInputAsScheduledTime(input || "")) {
-    return finalize(buildModelFallbackResponse({ input, language, profile }));
-  }
-
-  if (isTrainingRefusal(input || "") && !hasMinimumRouteAlreadyOffered(history)) {
-    return finalize(buildResistanceEscalationResponse({ language, profile }));
   }
 
   const { response, data } = await fetchJsonWithTimeout<any>(
