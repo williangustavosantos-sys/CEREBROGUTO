@@ -909,6 +909,7 @@ function alignExpectedResponseWithFala(response: GutoModelResponse): GutoModelRe
     (normalizedFala.includes("acao minima agora") && normalizedFala.includes("horario")) ||
     (normalizedFala.includes("agora ou horario fechado") && normalizedFala.includes("amanha")) ||
     normalizedFala.includes("azione minima adesso o orario chiuso domani") ||
+    normalizedFala.includes("azione minima adesso o orario fissato per domani") ||
     normalizedFala.includes("minimum action now or a locked time tomorrow") ||
     normalizedFala.includes("accion minima ahora o horario cerrado")
   ) {
@@ -1154,7 +1155,7 @@ function buildResistanceEscalationResponse({
 
   if (selectedLanguage === "it-IT") {
     return {
-      fala: `${name}, lo zero non passa. L'allenamento completo scende a 12 minuti: piegamenti, squat, remata e camminata. Inizia adesso.`,
+      fala: `${name}, lo zero oggi non passa. Riduciamo: 12 minuti, piegamenti, squat, rematore e camminata. Parti adesso.`,
       acao: "none",
       expectedResponse: null,
       avatarEmotion: "alert",
@@ -1267,7 +1268,7 @@ function buildModelFallbackResponse({
       if (selectedLanguage === "en-US") {
         return { fala: `${name}, locked: ${isTomorrow ? "tomorrow" : "today"} at ${scheduledTime}, no negotiating.`, acao: "none", expectedResponse: null };
       } else if (selectedLanguage === "it-IT") {
-        return { fala: `${name}, chiuso: ${isTomorrow ? "domani" : "oggi"} alle ${scheduledTime}, senza negoziare.`, acao: "none", expectedResponse: null };
+        return { fala: `${name}, fissato: ${isTomorrow ? "domani" : "oggi"} alle ${scheduledTime}. Non si rinegozia.`, acao: "none", expectedResponse: null };
       } else if (selectedLanguage === "es-ES") {
         return { fala: `${name}, cerrado: ${isTomorrow ? "mañana" : "hoy"} a las ${scheduledTime}, sin negociar.`, acao: "none", expectedResponse: null };
       }
@@ -1286,7 +1287,7 @@ function buildModelFallbackResponse({
       if (selectedLanguage === "en-US") {
         return { fala: `${name}, I am here with you. Right now: water, rest, and no chaos. Tomorrow we get back on track.`, acao: "none", expectedResponse: null };
       } else if (selectedLanguage === "it-IT") {
-        return { fala: `${name}, io sono qui con te. Adesso acqua, recupero e niente caos. Domani ripartiamo.`, acao: "none", expectedResponse: null };
+        return { fala: `${name}, ci sono io con te. Adesso acqua, recupero e niente caos. Domani ripartiamo.`, acao: "none", expectedResponse: null };
       } else if (selectedLanguage === "es-ES") {
         return { fala: `${name}, estoy aqui contigo. Ahora agua, descanso y nada de caos. Manana retomamos.`, acao: "none", expectedResponse: null };
       }
@@ -1301,9 +1302,9 @@ function buildModelFallbackResponse({
       };
     } else if (selectedLanguage === "it-IT") {
       return {
-        fala: `${name}, basta girar a vuoto. Rispondi in una frase: azione minima adesso o orario chiuso domani.`,
+        fala: `${name}, basta girare a vuoto. Rispondi in una frase: azione minima adesso o orario fissato per domani.`,
         acao: "none",
-        expectedResponse: { type: "text", instruction: "azione minima adesso o orario chiuso domani", context: "training_schedule" },
+        expectedResponse: { type: "text", instruction: "azione minima adesso o orario fissato per domani", context: "training_schedule" },
       };
     } else if (selectedLanguage === "es-ES") {
       return {
@@ -1713,19 +1714,19 @@ function buildExpectedResponseCorrection(
 
   if (selectedLanguage === "it-IT") {
     if (expectedResponse.context === "training_schedule") {
-      return "Mi manca ancora la decisione. Tienila semplice: azione minima adesso o orario chiuso domani.";
+      return "Mi manca ancora la decisione. Tienila semplice: azione minima adesso o orario fissato per domani.";
     }
     if (expectedResponse.context === "training_location") {
       return "Mi manca ancora dove ti alleni oggi. Tienila semplice: casa, palestra o parco.";
     }
     if (expectedResponse.context === "training_status") {
-      return "Mi manca ancora il tuo stato adesso. Dimmi in breve: fermo, in ripresa o gia allenato.";
+      return "Mi manca ancora il tuo stato adesso. Dimmi in breve: fermo, in ripresa o già allenato.";
     }
     if (expectedResponse.context === "training_limitations") {
-      return "Mi servono ancora eta e punto da proteggere. Dimmi tutto in una frase breve.";
+      return "Mi servono ancora età e punto da proteggere. Dimmi tutto in una frase breve.";
     }
     if (expectedResponse.context === "limitation_check") {
-      return "Mi manca ancora il check. Dimmi in breve: ha dato fastidio, e andata meglio o e rimasto tranquillo?";
+      return "Mi manca ancora il check. Dimmi in breve: ha dato fastidio, è andata meglio o è rimasto tranquillo?";
     }
     return earlyStage
       ? `Mi manca ancora la risposta giusta. Dimmi in una frase breve: ${instruction || "quello che ti ho chiesto"}.`
@@ -1896,7 +1897,7 @@ function buildTrainingLocationQuestion(schedule: string, language = "pt-BR"): Gu
   if (selectedLanguage === "it-IT") {
     return {
       fala: scheduledForTomorrow
-        ? "Bene. Domani resta il bersaglio. Ora dimmi dove ti alleni: casa, palestra o parco?"
+        ? "Bene. Domani resta l'obiettivo. Ora dimmi dove ti alleni: casa, palestra o parco?"
         : "Bene. Oggi resta vivo. Ora dimmi dove puoi allenarti: casa, palestra o parco?",
       acao: "none",
       expectedResponse: {
@@ -1934,8 +1935,8 @@ function buildTrainingLocationQuestion(schedule: string, language = "pt-BR"): Gu
 
 function getTrainingLevel(status?: string) {
   const normalized = normalize(status || "");
-  if (hasAnyTerm(normalized, ["parado", "sem treinar", "nunca", "voltando agora depois de semanas"])) return "beginner";
-  if (hasAnyTerm(normalized, ["voltando", "retornando", "retorno"])) return "returning";
+  if (hasAnyTerm(normalized, ["parado", "sem treinar", "nunca", "voltando agora depois de semanas", "fermo", "mai allenato", "principiante"])) return "beginner";
+  if (hasAnyTerm(normalized, ["voltando", "retornando", "retorno", "ripresa", "ripartendo", "rientro"])) return "returning";
   return "trained";
 }
 
@@ -2053,7 +2054,7 @@ function buildWorkoutPlan({
   const normalizedLimitation = normalize(limitation);
   const hasNoLimitation =
     !normalizedLimitation ||
-    ["sem dor", "nao", "não", "livre", "nenhuma", "zero", "nada"].some((term) =>
+    ["sem dor", "nao", "não", "livre", "nenhuma", "zero", "nada", "senza dolore", "nessun dolore", "nessun fastidio", "libero"].some((term) =>
       normalizedLimitation.includes(normalize(term))
     );
   const limitationFocus = getLimitationFocus(limitation);
@@ -2238,7 +2239,8 @@ function applyTrainingIntake(memory: GutoMemory, expectedResponse: ExpectedRespo
 }
 
 function buildTrainingStatusQuestion(location: string, language = "pt-BR"): GutoModelResponse {
-  const cleanLocation = normalizeMemoryValue(location).toLowerCase();
+  const cleanLocation = normalizeMemoryValue(location).toLowerCase().replace(/[.!?]+$/g, "");
+  const displayLocation = cleanLocation ? `${cleanLocation.charAt(0).toLocaleUpperCase("it-IT")}${cleanLocation.slice(1)}` : cleanLocation;
   const normalizedLocation = normalize(cleanLocation);
   const selectedLanguage = normalizeLanguage(language);
   const context = getOperationalContext(new Date(), selectedLanguage);
@@ -2254,7 +2256,7 @@ function buildTrainingStatusQuestion(location: string, language = "pt-BR"): Guto
     }
     if (selectedLanguage === "it-IT") {
       return {
-        fala: "Bene. Se l'hai gia chiuso oggi, non ti riapro lo stesso allenamento. Dimmi solo se domani alziamo il carico o cambiamo focus.",
+        fala: "Bene. Se l'hai già chiuso oggi, non ti riapro lo stesso allenamento. Dimmi solo se domani alziamo il carico o cambiamo focus.",
         acao: "none",
         expectedResponse: null,
       };
@@ -2291,12 +2293,12 @@ function buildTrainingStatusQuestion(location: string, language = "pt-BR"): Guto
     if (selectedLanguage === "it-IT") {
       return {
         fala: late
-          ? "Perfetto, palestra va benissimo. Adesso e tardi, quindi ti preparo petto e tricipiti per domani. Dimmi solo se arrivi da uno stop o se sei gia in ritmo."
-          : "Perfetto, palestra va benissimo. Oggi la base e petto e tricipiti. Dimmi solo se arrivi da uno stop o se sei gia in ritmo.",
+          ? "Perfetto, palestra va benissimo. Adesso è tardi, quindi ti preparo petto e tricipiti per domani. Dimmi solo se arrivi da uno stop o se sei già in ritmo."
+          : "Perfetto, palestra va benissimo. Oggi la base è petto e tricipiti. Dimmi solo se arrivi da uno stop o se sei già in ritmo.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Dimmi se eri fermo, se stai ripartendo o se sei gia in ritmo.",
+          instruction: "Dimmi se eri fermo, se stai ripartendo o se sei già in ritmo.",
           context: "training_status",
         },
       };
@@ -2341,11 +2343,11 @@ function buildTrainingStatusQuestion(location: string, language = "pt-BR"): Guto
     }
     if (selectedLanguage === "it-IT") {
       return {
-        fala: "Parco va bene. Li ti porto su cardio e corpo libero. Dimmi solo se arrivi da uno stop o se sei gia in ritmo.",
+        fala: "Parco va bene. Lì ti porto su cardio e corpo libero. Dimmi solo se arrivi da uno stop o se sei già in ritmo.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Dimmi se eri fermo, se stai ripartendo o se sei gia in ritmo.",
+          instruction: "Dimmi se eri fermo, se stai ripartendo o se sei già in ritmo.",
           context: "training_status",
         },
       };
@@ -2388,12 +2390,12 @@ function buildTrainingStatusQuestion(location: string, language = "pt-BR"): Guto
   if (selectedLanguage === "it-IT") {
     return {
       fala: normalizedLocation.includes("casa")
-        ? "Perfetto, casa va bene. Li ti costruisco corpo libero, cardio e quello che hai a disposizione. Dimmi solo se arrivi da uno stop o se sei gia in ritmo."
-        : `${cleanLocation} va bene. Dimmi solo se arrivi da uno stop o se sei gia in ritmo.`,
+        ? "Perfetto, casa va bene. Lì ti preparo corpo libero, cardio e quello che hai a disposizione. Dimmi solo se arrivi da uno stop o se sei già in ritmo."
+        : `${displayLocation} va bene. Dimmi solo se arrivi da uno stop o se sei già in ritmo.`,
       acao: "none",
       expectedResponse: {
         type: "text",
-        instruction: "Dimmi se eri fermo, se stai ripartendo o se sei gia in ritmo.",
+        instruction: "Dimmi se eri fermo, se stai ripartendo o se sei già in ritmo.",
         context: "training_status",
       },
     };
@@ -2443,11 +2445,11 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
     }
     if (selectedLanguage === "it-IT") {
       return {
-        fala: "Segnalazione giusta. Non ripeto petto e tricipiti. Domani cambio su schiena e bicipiti. Ora dimmi eta e qualsiasi fastidio che devo rispettare.",
+        fala: "Correzione giusta. Non ripeto petto e tricipiti. Domani passo a schiena e bicipiti. Ora dimmi età e qualsiasi fastidio che devo rispettare.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Dimmi eta e qualsiasi fastidio, limitazione oppure che sei libero.",
+          instruction: "Dimmi età e qualsiasi fastidio, limitazione oppure dimmi che sei libero.",
           context: "training_limitations",
         },
       };
@@ -2545,17 +2547,17 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
   }
   if (selectedLanguage === "it-IT") {
     const line =
-      cleanStatus === "parado" || normalizedStatus.includes("parado")
-        ? "Bene. Allora entro piu pulito e senza eroismi."
-        : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno", "ripartendo", "rientro"])
-          ? "Bene. Il rientro intelligente cresce piu dell'ego accelerato."
-          : "Bene. Allora il tuo corpo puo gia reggere qualcosa di piu forte.";
+      cleanStatus === "parado" || normalizedStatus.includes("parado") || hasAnyTerm(normalizedStatus, ["fermo", "stop", "principiante", "mai allenato"])
+        ? "Bene. Allora entro più pulito e senza eroismi."
+        : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno", "ripresa", "ripartendo", "rientro"])
+          ? "Bene. Un rientro intelligente vale più dell'ego accelerato."
+          : "Bene. Allora il tuo corpo può già reggere qualcosa di più forte.";
     return {
-      fala: `${line} Ora dimmi eta e qualsiasi fastidio che devo tenere in conto. La vita amorosa la lasciamo per dopo.`,
+      fala: `${line} Ora dimmi età e qualsiasi fastidio che devo tenere in conto. La vita amorosa la lasciamo per dopo.`,
       acao: "none",
         expectedResponse: {
           type: "text",
-        instruction: "Dimmi eta e qualsiasi fastidio, limitazione oppure che sei libero.",
+        instruction: "Dimmi età e qualsiasi fastidio, limitazione oppure dimmi che sei libero.",
           context: "training_limitations",
         },
       };
@@ -2620,16 +2622,16 @@ function buildArrivalBriefing(memory: GutoMemory, language = "pt-BR"): GutoModel
   if (selectedLanguage === "it-IT") {
     return late
       ? {
-          fala: `${name}, ci sono con te. Ora niente piano lungo. Rispondi in una frase: azione minima adesso o orario chiuso domani?`,
+          fala: `${name}, ci sono con te. Ora niente piano lungo. Rispondi in una frase: azione minima adesso o orario fissato per domani?`,
           acao: "none",
           expectedResponse: {
             type: "text",
-            instruction: "azione minima adesso o orario chiuso domani",
+            instruction: "azione minima adesso o orario fissato per domani",
             context: "training_schedule",
           },
         }
       : {
-          fala: `${name}, eccoti. Ti stavo aspettando. Intanto ti ho tenuto pronte tre strade: palestra, casa o parco. Quale ha piu senso oggi?`,
+          fala: `${name}, eccoti. Ti stavo aspettando. Intanto ti ho tenuto pronte tre strade: palestra, casa o parco. Quale ha più senso oggi?`,
           acao: "none",
           expectedResponse: {
             type: "text",
@@ -2685,21 +2687,33 @@ function buildArrivalBriefing(memory: GutoMemory, language = "pt-BR"): GutoModel
 function getLimitationFocus(limitations?: string) {
   const value = (limitations || "").toLocaleLowerCase("pt-BR");
   if (!value) return "o ponto que você marcou";
-  if (value.includes("joelho")) return "o joelho";
-  if (value.includes("ombro")) return "o ombro";
-  if (value.includes("lombar") || value.includes("coluna") || value.includes("costas")) return "a lombar";
-  if (value.includes("quadril")) return "o quadril";
-  if (value.includes("tornozelo")) return "o tornozelo";
-  if (value.includes("punho")) return "o punho";
+  if (value.includes("joelho") || value.includes("ginocchio")) return "o joelho";
+  if (value.includes("ombro") || value.includes("spalla")) return "o ombro";
+  if (value.includes("lombar") || value.includes("coluna") || value.includes("costas") || value.includes("schiena")) return "a lombar";
+  if (value.includes("quadril") || value.includes("anca")) return "o quadril";
+  if (value.includes("tornozelo") || value.includes("caviglia")) return "o tornozelo";
+  if (value.includes("punho") || value.includes("polso")) return "o punho";
   return "esse ponto";
 }
 
 function buildPersonalizedWorkoutStart(memory: GutoMemory, limitationInput: string): GutoModelResponse {
+  const selectedLanguage = normalizeLanguage(memory.language);
   const location = memory.trainingLocation || "rota definida no chat";
   const status = memory.trainingStatus || "retornando ao treino";
   const limitation = normalizeMemoryValue(limitationInput).toLowerCase();
   const normalizedStatus = normalize(status);
   if (isOperationalNoise(limitation)) {
+    if (selectedLanguage === "it-IT") {
+      return {
+        fala: "Non ho ancora preso il punto da proteggere. Rispondi in una frase: hai dolori, limitazioni o sei libero?",
+        acao: "none",
+        expectedResponse: {
+          type: "text",
+          instruction: "Dimmi dolore, limitazione oppure dimmi che sei libero.",
+          context: "training_limitations",
+        },
+      };
+    }
     return {
       fala: "Ainda não peguei o ponto de atenção. Me responde em uma frase: tem dor, limitação ou está livre?",
       acao: "none",
@@ -2711,6 +2725,17 @@ function buildPersonalizedWorkoutStart(memory: GutoMemory, limitationInput: stri
     };
   }
   if (isTomorrowSchedulingIntent(status)) {
+    if (selectedLanguage === "it-IT") {
+      return {
+        fala: "Fissato. Mandami un orario preciso per domani e io tengo fermo l'impegno.",
+        acao: "none",
+        expectedResponse: {
+          type: "text",
+          instruction: "Dammi un orario preciso per domani.",
+          context: "training_schedule",
+        },
+      };
+    }
     return {
       fala: "Fechado. Me manda em uma frase um horário fechado amanhã e eu seguro esse compromisso.",
       acao: "none",
@@ -2723,7 +2748,7 @@ function buildPersonalizedWorkoutStart(memory: GutoMemory, limitationInput: stri
   }
   const hasNoLimitation =
     !limitation ||
-    ["não", "nao", "nada", "nenhuma", "livre", "zero", "sem dor"].some((signal) => limitation.includes(signal));
+    ["não", "nao", "nada", "nenhuma", "livre", "zero", "sem dor", "senza dolore", "nessun dolore", "nessun fastidio", "libero"].some((signal) => limitation.includes(signal));
   const hasLimitation =
     limitation && !hasNoLimitation;
   const limitationFocus = getLimitationFocus(limitation);
@@ -2739,18 +2764,24 @@ function buildPersonalizedWorkoutStart(memory: GutoMemory, limitationInput: stri
   saveMemory(memory);
   const scheduledDate = new Date(workoutPlan.scheduledFor);
   const shouldScheduleTomorrow = todayKey(scheduledDate) !== todayKey(new Date());
-  const followUpLine = hasLimitation
-    ? `Montei olhando ${limitationFocus} para evoluir sem piorar.`
-    : "";
+  const finalMessage = (() => {
+    if (selectedLanguage === "it-IT") {
+      const care = hasLimitation ? " Ho tenuto conto del punto da proteggere, senza peggiorarlo." : "";
+      const base = `Perfetto, ho chiuso tutto.${care} Parti dal riscaldamento: mobilità dell'anca, squat senza carico e plank breve. Il workout principale è nella scheda allenamento.`;
+      return shouldScheduleTomorrow ? `${base} Domani si parte senza rumore.` : `${base} Adesso si parte.`;
+    }
 
-  const warmupLine = "Começa pelo aquecimento: mobilidade de quadril, agachamentos sem carga e prancha curta.";
-  const baseMessage = hasLimitation
-    ? `Perfeito, já organizei tudo. ${followUpLine} ${warmupLine} O treino principal já está na aba treino do dia. Qualquer dúvida é só clicar no botão ao lado do exercício e eu te respondo.`
-    : `Perfeito, já organizei tudo. ${warmupLine} O treino principal já está na aba treino do dia. Qualquer dúvida é só clicar no botão ao lado do exercício e eu te respondo.`;
-
-  const finalMessage = shouldScheduleTomorrow
-    ? `${baseMessage} Amanhã a gente começa com tudo.`
-    : `${baseMessage} Bora começar com tudo.`;
+    const followUpLine = hasLimitation
+      ? `Montei olhando ${limitationFocus} para evoluir sem piorar.`
+      : "";
+    const warmupLine = "Começa pelo aquecimento: mobilidade de quadril, agachamentos sem carga e prancha curta.";
+    const baseMessage = hasLimitation
+      ? `Perfeito, já organizei tudo. ${followUpLine} ${warmupLine} O treino principal já está na aba treino do dia. Qualquer dúvida é só clicar no botão ao lado do exercício e eu te respondo.`
+      : `Perfeito, já organizei tudo. ${warmupLine} O treino principal já está na aba treino do dia. Qualquer dúvida é só clicar no botão ao lado do exercício e eu te respondo.`;
+    return shouldScheduleTomorrow
+      ? `${baseMessage} Amanhã a gente começa com tudo.`
+      : `${baseMessage} Bora começar com tudo.`;
+  })();
 
   return {
     fala: finalMessage,
@@ -3094,6 +3125,14 @@ async function askGutoModel({
 
     if (normalizedExpectedResponse.context === "training_limitations") {
       if (isTrainingHistoryInsteadOfLimitation(input || "")) {
+        if (normalizeLanguage(language) === "it-IT") {
+          return finalize({
+            fala: "Registrato come storico di allenamento, non come dolore. La correzione resta: schiena e bicipiti. Ora mandami solo età e dolore reale, oppure: senza dolore.",
+            acao: "none" as Acao,
+            expectedResponse: normalizedExpectedResponse,
+          });
+        }
+
         return finalize({
           fala: "Anotado como histórico de treino, não como dor. A troca continua: costas e bíceps. Agora me manda só idade e dor/limitação real, ou responde: sem dor.",
           acao: "none" as Acao,
