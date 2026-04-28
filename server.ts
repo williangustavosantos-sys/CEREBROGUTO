@@ -1961,6 +1961,55 @@ function makeWorkoutExercise(
   return { id, name, sets, reps, rest, cue, note };
 }
 
+function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
+  if (normalizeLanguage(language) !== "it-IT") return plan;
+
+  const exerciseCopy: Record<string, Pick<WorkoutExercise, "name" | "cue" | "note">> = {
+    "puxada-frente": { name: "Lat machine avanti", cue: "Petto alto, tira la barra fino al mento e controlla il ritorno.", note: "Apri la schiena senza rubare." },
+    "remada-baixa": { name: "Rematore basso al cavo", cue: "Schiena ferma e gomiti che vanno indietro.", note: "La schiena lavora, il braccio accompagna." },
+    "remada-curvada": { name: "Rematore con bilanciere", cue: "Busto fermo, bilanciere vicino al corpo e gomiti indietro.", note: "Densità di schiena senza fretta." },
+    "pulldown-neutro": { name: "Pulldown presa neutra", cue: "Spalle basse e tirata controllata fino alla parte alta del petto.", note: "Controllo prima del carico." },
+    "rosca-direta": { name: "Curl bilanciere", cue: "Gomiti fermi e salita senza usare il busto.", note: "Bicipite pulito." },
+    "rosca-inclinada": { name: "Curl inclinato con manubri", cue: "Braccio allungato in basso e salita senza rubare.", note: "Chiudi il bicipite con ampiezza." },
+    "supino-reto": { name: "Panca piana", cue: "Scapole ferme, piedi stabili e bilanciere che scende controllato al petto.", note: "Primo blocco pesante e pulito." },
+    "supino-inclinado-halteres": { name: "Panca inclinata con manubri", cue: "Panca inclinata e gomiti allineati con il petto.", note: "Ampiezza buona prima del carico." },
+    crossover: { name: "Croci ai cavi", cue: "Braccia semi-flesse e chiusura senza far battere le mani.", note: "Qui è controllo, non ego." },
+    "chest-press": { name: "Chest press", cue: "Schiena appoggiata e spalle ferme.", note: "Chiudi il petto con volume." },
+    "triceps-corda": { name: "Pushdown corda", cue: "Gomiti fermi ed estensione completa.", note: "Il tricipite chiude la missione." },
+    "triceps-frances": { name: "French press al cavo", cue: "Allungamento controllato dietro la testa.", note: "Niente fretta nell'allungamento." },
+    "paralela-assistida": { name: "Dip assistite", cue: "Scendi controllato e sali senza lanciare il corpo.", note: "Mantieni il petto aperto." },
+    "flexao-fechada": { name: "Push-up presa stretta", cue: "Mani sotto il petto e corpo in linea.", note: "Ultimo blocco con sangue freddo." },
+    "caminhada-corrida": { name: "Camminata + corsa", cue: "Alterna corsa leggera e recupero senza bloccare il corpo.", note: "Accendi il sistema prima del resto." },
+    "agachamento-livre": { name: "Squat libero", cue: "Anca giù pulita e ginocchio in linea con il piede.", note: "Ritmo costante." },
+    "flexao-banco": { name: "Push-up su panca", cue: "Mani stabili sulla panca e tronco allineato.", note: "Petto e tricipiti svegli." },
+    "afundo-caminhando": { name: "Affondi camminati", cue: "Passo lungo e busto alto.", note: "Non collassare verso l'interno." },
+    "mountain-climber": { name: "Mountain climber", cue: "Anca bassa e ritmo controllato.", note: "Chiudi il cardio senza caos." },
+    polichinelo: { name: "Jumping jack", cue: "Apri e chiudi senza perdere ritmo.", note: "Accendi il motore subito." },
+    "agachamento-cadeira": { name: "Squat alla sedia", cue: "Siedi e risali senza crollare.", note: "Base ferma." },
+    "flexao-inclinada": { name: "Push-up inclinato sul divano", cue: "Mani appoggiate e tronco rigido.", note: "Petto e tricipiti senza inventare." },
+    "remada-mochila": { name: "Rematore con zaino", cue: "Tira lo zaino vicino al busto e tieni un secondo.", note: "Zaino o tanica: si risolve." },
+    "triceps-cadeira": { name: "Dip su sedia", cue: "Mani stabili e discesa controllata.", note: "Chiudi le braccia senza slancio." },
+    "corrida-parada": { name: "Corsa sul posto", cue: "Ginocchio su senza irrigidire il busto.", note: "Finitura aerobica." },
+  };
+
+  const focusCopy: Record<string, string> = {
+    "Costas e bíceps": "Schiena e bicipiti",
+    "Peito e tríceps": "Petto e tricipiti",
+    "Cardio e corpo livre": "Cardio e corpo libero",
+    "Condicionamento em casa": "Condizionamento a casa",
+  };
+
+  return {
+    ...plan,
+    focus: focusCopy[plan.focus] || plan.focus,
+    summary: (focusCopy[plan.focus] || plan.focus) + ".",
+    exercises: plan.exercises.map((exercise) => ({
+      ...exercise,
+      ...(exerciseCopy[exercise.id] || {}),
+    })),
+  };
+}
+
 function shouldSwitchFromSuggestedGymFocus(input?: string) {
   const normalized = normalize(input || "");
   if (!normalized) return false;
@@ -2066,7 +2115,7 @@ function buildWorkoutPlan({
 
   if (mode === "gym") {
     if (hasAnyTerm(normalize(status), ["trocar foco", "nao repetir peito", "não repetir peito", "costas e biceps", "costas e bíceps"])) {
-      return {
+      return localizeWorkoutPlan({
         focus: "Costas e bíceps",
         dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
         scheduledFor: scheduledFor.toISOString(),
@@ -2079,14 +2128,14 @@ function buildWorkoutPlan({
           makeWorkoutExercise("rosca-direta", "Rosca direta", 4, "8-10", "60s", "Cotovelo parado e subida sem jogar o tronco.", "Bíceps entra limpo."),
           makeWorkoutExercise("rosca-inclinada", "Rosca inclinada com halteres", 3, "10-12", "60s", "Braço alonga embaixo e sobe sem roubar.", "Fecha bíceps com amplitude."),
         ],
-      };
+      }, selectedLanguage);
     }
 
     const beginner = level === "beginner";
     const returning = level === "returning";
     const repsMain = beginner ? "10" : returning ? "8-10" : "8";
     const repsAccessory = beginner ? "12" : "10-12";
-    return {
+    return localizeWorkoutPlan({
       focus: "Peito e tríceps",
       dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
       scheduledFor: scheduledFor.toISOString(),
@@ -2165,12 +2214,12 @@ function buildWorkoutPlan({
           "Último bloco com sangue frio."
         ),
       ],
-    };
+    }, selectedLanguage);
   }
 
   if (mode === "park") {
     const interval = level === "beginner" ? "30s forte / 60s leve" : level === "returning" ? "40s forte / 50s leve" : "45s forte / 45s leve";
-    return {
+    return localizeWorkoutPlan({
       focus: "Cardio e corpo livre",
       dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
       scheduledFor: scheduledFor.toISOString(),
@@ -2182,10 +2231,10 @@ function buildWorkoutPlan({
         makeWorkoutExercise("afundo-caminhando", "Afundo caminhando", 3, "10 por perna", "45s", "Passo longo e tronco alto.", "Sem colapsar para dentro."),
         makeWorkoutExercise("mountain-climber", "Mountain climber", 3, "30-40s", "40s", "Quadril baixo e ritmo controlado.", "Fecha o cardio sem bagunça."),
       ],
-    };
+    }, selectedLanguage);
   }
 
-  return {
+  return localizeWorkoutPlan({
     focus: "Condicionamento em casa",
     dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
     scheduledFor: scheduledFor.toISOString(),
@@ -2198,7 +2247,7 @@ function buildWorkoutPlan({
       makeWorkoutExercise("triceps-cadeira", "Tríceps na cadeira", 3, level === "beginner" ? "8" : "12", "45s", "Mãos estáveis e descida controlada.", hasNoLimitation ? "Fecha os braços sem balanço." : `Se ${limitationFocus} reclamar, reduz amplitude.`),
       makeWorkoutExercise("corrida-parada", "Corrida parada", 3, "40s", "30s", "Joelho sobe sem travar o tronco.", "Acabamento aeróbico."),
     ],
-  };
+  }, selectedLanguage);
 }
 
 function applyTrainingIntake(memory: GutoMemory, expectedResponse: ExpectedResponse, value: string) {
