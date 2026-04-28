@@ -250,21 +250,21 @@ function fallbackLine(language: string, key: FallbackLineKey) {
       speech_short: "Áudio curto demais. Segure o microfone e fale uma frase completa.",
     },
     "en-US": {
-      system_key: "Action key missing. Fix the backend and come back with one direct sentence.",
-      parse: "Execute now. Ten minutes, no negotiating.",
-      internal_error: "Internal error on my side. Try again in a few seconds.",
+      system_key: "Action key missing. Fix the backend and give me a straight answer.",
+      parse: "Get it done. Ten minutes, no negotiating.",
+      internal_error: "Something broke on my end. Give it a few seconds and try again.",
       speech_short: "Audio too short. Hold the mic and say one full sentence.",
     },
     "it-IT": {
       system_key: "Manca la chiave d'azione. Sistema il backend e torna con una frase diretta.",
-      parse: "Esegui adesso. Dieci minuti, senza negoziare.",
-      internal_error: "Errore interno da parte mia. Riprova tra qualche secondo.",
+      parse: "Fallo e basta. Dieci minuti, senza trattare.",
+      internal_error: "C'è un problema tecnico. Riprova tra un attimo.",
       speech_short: "Audio troppo corto. Tieni premuto il microfono e dì una frase completa.",
     },
     "es-ES": {
       system_key: "Falta la clave de acción. Corrige el backend y vuelve con una frase directa.",
-      parse: "Ejecuta ahora. Diez minutos, sin negociar.",
-      internal_error: "Error interno de mi lado. Intenta otra vez en unos segundos.",
+      parse: "Hazlo ya. Diez minutos, sin negociar.",
+      internal_error: "Un fallo por aquí. Dale unos segundos y vuelve a intentar.",
       speech_short: "Audio demasiado corto. Mantén el micrófono y di una frase completa.",
     },
   };
@@ -282,24 +282,24 @@ function expectedInstruction(context: NonNullable<ExpectedResponse["context"]>, 
       limitation_check: "Responder como a limitação reagiu ao treino.",
     },
     "en-US": {
-      training_schedule: "Reply with minimum action now or a locked time tomorrow.",
+      training_schedule: "start with something small now, or lock a time for tomorrow",
       training_location: "Reply where the workout will happen.",
       training_status: "Reply with current training level or state.",
       training_limitations: "Reply with age and any pain, limitation, or say you are clear.",
       limitation_check: "Reply how the limitation reacted during training.",
     },
     "it-IT": {
-      training_schedule: "Rispondi: azione minima adesso o orario fissato per domani.",
-      training_location: "Dimmi dove si farà l'allenamento.",
-      training_status: "Dimmi livello o stato attuale di allenamento.",
-      training_limitations: "Dimmi età e dolore, limitazione oppure che sei libero.",
-      limitation_check: "Dimmi come ha reagito la limitazione durante l'allenamento.",
+      training_schedule: "parti adesso con qualcosa di breve o fissiamo un orario preciso per domani",
+      training_location: "Dimmi dove ti alleni oggi.",
+      training_status: "Dimmi se riparti da zero o se sei già in ritmo.",
+      training_limitations: "Dimmi la tua età e se c'è qualche fastidio.",
+      limitation_check: "Dimmi se ti ha dato fastidio o è rimasto tranquillo.",
     },
     "es-ES": {
-      training_schedule: "Responde: acción mínima ahora u horario cerrado mañana.",
-      training_location: "Responde dónde será el entrenamiento.",
-      training_status: "Responde nivel o estado actual de entrenamiento.",
-      training_limitations: "Responde edad y dolor, limitación o di que estás libre.",
+      training_schedule: "hacemos algo corto ahora o cerramos una hora para mañana",
+      training_location: "Dime dónde vas a entrenar.",
+      training_status: "Dime si vuelves de un parón o ya traes ritmo.",
+      training_limitations: "Dime tu edad y cualquier dolorcito.",
       limitation_check: "Responde cómo reaccionó la limitación durante el entrenamiento.",
     },
   };
@@ -705,6 +705,17 @@ function buildGutoSystemPrompt(language = "pt-BR") {
     "Você está no mesmo time do usuário, mas exige postura.",
     "Você é sócio de vida e mentor de performance. Você não é assistente, chatbot, Wikipédia ou entretenimento.",
     "",
+    "REGRA MULTILÍNGUE NATIVA",
+    "O GUTO deve falar NATIVAMENTE no idioma selecionado, não traduzir frase por frase.",
+    "- Não traduza literalmente do português.",
+    "- Não reutilize estrutura sintática do português.",
+    "- Não use expressões artificiais como 'ação mínima' em idiomas onde isso não soa natural.",
+    "- Se language = pt-BR, use português brasileiro, direto, firme e natural.",
+    "- Se language = it-IT, escreva come un madrelingua italiano, corto, diretto, senza giri di parole. Usa espressioni naturali.",
+    "- Se language = en-US, escreva como inglês nativo americano, direto, com ritmo próprio. Sem estrutura brasileira.",
+    "- Se language = es-ES, escreva como espanhol europeu natural, coloquial e firme. Sem tradução literal brasileira.",
+    "- Adapte expressões, ritmo, comandos e tom ao idioma. Preserve a personalidade firme, mas com roupagem nativa.",
+    "",
     "MISSÃO CENTRAL",
     "Você existe para fazer o usuário completar o treino do dia ou, se isso estiver inviável, completar uma ação física mínima que mantenha a identidade ativa.",
     "Você não entretém, não agrada, não enrola e não deixa intenção virar abstração.",
@@ -969,9 +980,12 @@ function inferExpectedResponseFromFala(fala: string, current: ExpectedResponse |
     normalized.includes("acao minima agora ou horario amanha") ||
     normalized.includes("mobilidade agora ou horario amanha") ||
     normalized.includes("minimum action now or a locked time tomorrow") ||
+    normalized.includes("start with something small now") ||
     normalized.includes("azione minima adesso") ||
     normalized.includes("orario fissato") ||
+    normalized.includes("qualcosa di breve") ||
     normalized.includes("accion minima ahora") ||
+    normalized.includes("algo corto ahora") ||
     normalized.includes("horario cerrado")
   ) {
     return { ...base, context: "training_schedule" };
@@ -1019,7 +1033,10 @@ function alignExpectedResponseWithFala(response: GutoModelResponse): GutoModelRe
     normalizedFala.includes("azione minima adesso o orario chiuso domani") ||
     normalizedFala.includes("azione minima adesso o orario fissato per domani") ||
     normalizedFala.includes("minimum action now or a locked time tomorrow") ||
-    normalizedFala.includes("accion minima ahora o horario cerrado")
+    normalizedFala.includes("accion minima ahora o horario cerrado") ||
+    normalizedFala.includes("start with something small now") ||
+    normalizedFala.includes("qualcosa di breve") ||
+    normalizedFala.includes("algo corto ahora")
   ) {
     context = "training_schedule";
   } else if (
@@ -1307,7 +1324,7 @@ function buildResistanceEscalationResponse({
 
   if (selectedLanguage === "en-US") {
     return {
-      fala: `${name}, I am not accepting zero. Full training drops to 12 minutes: push-ups, squats, rows, and a walk. Start now.`,
+      fala: `${name}, I won't accept a zero. The full workout drops to 12 minutes: push-ups, squats, rows, and a walk. Get to it.`,
       acao: "none",
       expectedResponse: null,
       avatarEmotion: "alert",
@@ -1316,7 +1333,7 @@ function buildResistanceEscalationResponse({
 
   if (selectedLanguage === "it-IT") {
     return {
-      fala: `${name}, lo zero oggi non passa. Riduciamo: 12 minuti, piegamenti, squat, rematore e camminata. Parti adesso.`,
+      fala: `${name}, oggi lo zero non è un'opzione. Riduciamo a 12 minuti: piegamenti, squat, rematore e camminata. Inizia subito.`,
       acao: "none",
       expectedResponse: null,
       avatarEmotion: "alert",
@@ -1325,7 +1342,7 @@ function buildResistanceEscalationResponse({
 
   if (selectedLanguage === "es-ES") {
     return {
-      fala: `${name}, cero no pasa. El entreno completo baja a 12 minutos: flexiones, sentadillas, remo y caminata. Empieza ahora.`,
+      fala: `${name}, hoy el cero no vale. El entreno baja a 12 minutos: flexiones, sentadillas, remo y caminata. Dale duro ahora.`,
       acao: "none",
       expectedResponse: null,
       avatarEmotion: "alert",
@@ -1429,9 +1446,9 @@ function buildModelFallbackResponse({
       if (selectedLanguage === "en-US") {
         return { fala: `${name}, locked: ${isTomorrow ? "tomorrow" : "today"} at ${scheduledTime}, no negotiating.`, acao: "none", expectedResponse: null };
       } else if (selectedLanguage === "it-IT") {
-        return { fala: `${name}, fissato: ${isTomorrow ? "domani" : "oggi"} alle ${scheduledTime}. Non si rinegozia.`, acao: "none", expectedResponse: null };
+      return { fala: `${name}, affare fatto. Fissato: ${isTomorrow ? "domani" : "oggi"} alle ${scheduledTime}. Senza negoziare.`, acao: "none", expectedResponse: null };
       } else if (selectedLanguage === "es-ES") {
-        return { fala: `${name}, cerrado: ${isTomorrow ? "mañana" : "hoy"} a las ${scheduledTime}, sin negociar.`, acao: "none", expectedResponse: null };
+      return { fala: `${name}, trato cerrado: ${isTomorrow ? "mañana" : "hoy"} a las ${scheduledTime}, sin negociar.`, acao: "none", expectedResponse: null };
       }
       
       return {
@@ -1446,32 +1463,32 @@ function buildModelFallbackResponse({
     // Bloco de Risco Real
     if (hasAnyTerm(normalizedInput, ["fear", "besteira", "mal", "bebi", "febre", "tonto", "dolore", "dolor", "vergogna", "verguenza"])) {
       if (selectedLanguage === "en-US") {
-        return { fala: `${name}, I am here with you. Right now: water, rest, and no chaos. Tomorrow we get back on track.`, acao: "none", expectedResponse: null };
+        return { fala: `${name}, I’ve got your back. Right now: water, rest, no chaos. Tomorrow we get back on track.`, acao: "none", expectedResponse: null };
       } else if (selectedLanguage === "it-IT") {
-        return { fala: `${name}, ci sono io con te. Adesso acqua, recupero e niente caos. Domani ripartiamo.`, acao: "none", expectedResponse: null };
+        return { fala: `${name}, sono qui. Adesso acqua, riposo e niente caos. Domani ripartiamo.`, acao: "none", expectedResponse: null };
       } else if (selectedLanguage === "es-ES") {
-        return { fala: `${name}, estoy aquí contigo. Ahora agua, descanso y nada de caos. Mañana retomamos.`, acao: "none", expectedResponse: null };
+        return { fala: `${name}, aquí estoy. Ahora toca agua, descanso y cero caos. Mañana retomamos.`, acao: "none", expectedResponse: null };
       }
     }
 
     // Bloco Genérico
     if (selectedLanguage === "en-US") {
       return {
-        fala: `${name}, enough drifting. Reply in one sentence: minimum action now or a locked time tomorrow.`,
+        fala: `${name}, enough drifting. Tell me: do we start with something small now, or lock a time for tomorrow?`,
         acao: "none",
-        expectedResponse: { type: "text", instruction: "minimum action now or a locked time tomorrow", context: "training_schedule" },
+        expectedResponse: { type: "text", instruction: "start with something small now, or lock a time for tomorrow", context: "training_schedule" },
       };
     } else if (selectedLanguage === "it-IT") {
       return {
-        fala: `${name}, basta girare a vuoto. Rispondi in una frase: azione minima adesso o orario fissato per domani.`,
+        fala: `${name}, basta girare a vuoto. Dimmi solo questo: parti adesso con qualcosa di breve o fissiamo un orario preciso per domani?`,
         acao: "none",
-        expectedResponse: { type: "text", instruction: "azione minima adesso o orario fissato per domani", context: "training_schedule" },
+        expectedResponse: { type: "text", instruction: "parti adesso con qualcosa di breve o fissiamo un orario preciso per domani", context: "training_schedule" },
       };
     } else if (selectedLanguage === "es-ES") {
       return {
-        fala: `${name}, basta de dar vueltas. Responde en una frase: acción mínima ahora u horario cerrado mañana.`,
+        fala: `${name}, basta de dar vueltas. Dime una cosa: hacemos algo corto ahora o cerramos una hora para mañana?`,
         acao: "none",
-        expectedResponse: { type: "text", instruction: "acción mínima ahora u horario cerrado mañana", context: "training_schedule" },
+        expectedResponse: { type: "text", instruction: "hacemos algo corto ahora o cerramos una hora para mañana", context: "training_schedule" },
       };
     }
   }
@@ -1919,19 +1936,19 @@ function buildExpectedResponseCorrection(
 
   if (selectedLanguage === "en-US") {
     if (expectedResponse.context === "training_schedule") {
-      return "I still need the decision. Keep it simple: minimum action now or a locked time tomorrow.";
+      return "I still need an answer. Keep it simple: do we start with something small now, or lock a time for tomorrow?";
     }
     if (expectedResponse.context === "training_location") {
-      return "I still need the setup for today. Keep it simple: home, gym, or park.";
+      return "I still need the setup for today. Tell me: home, gym, or park.";
     }
     if (expectedResponse.context === "training_status") {
-      return "I still need your current level. Keep it short: out of rhythm, getting back into it, or already training.";
+      return "I still need your current level. Keep it short: coming off a break or already in rhythm.";
     }
     if (expectedResponse.context === "training_limitations") {
-      return "I still need your age and any pain point I should account for. One short sentence.";
+      return "I still need your age and any pain I need to respect. One short sentence.";
     }
     if (expectedResponse.context === "limitation_check") {
-      return "I still need the check-in. Keep it short: did it hurt, ease up, or stay quiet?";
+      return "I still need the check-in. Keep it short: did it hurt or stay quiet?";
     }
     return earlyStage
       ? `I still need the exact answer. Keep it to one short sentence: ${instruction || "what I asked"}.`
@@ -1940,19 +1957,19 @@ function buildExpectedResponseCorrection(
 
   if (selectedLanguage === "it-IT") {
     if (expectedResponse.context === "training_schedule") {
-      return "Mi manca ancora la decisione. Tienila semplice: azione minima adesso o orario fissato per domani.";
+      return "Mi serve una risposta chiara. Tienila semplice: parti adesso con qualcosa di breve o fissiamo un orario per domani?";
     }
     if (expectedResponse.context === "training_location") {
-      return "Mi manca ancora dove ti alleni oggi. Tienila semplice: casa, palestra o parco.";
+      return "Mi manca ancora dove ti alleni oggi. Rispondi diretto: casa, palestra o parco?";
     }
     if (expectedResponse.context === "training_status") {
-      return "Mi manca ancora il tuo stato adesso. Dimmi in breve: fermo, in ripresa o già allenato.";
+      return "Mi manca ancora il tuo stato. Dimmi in breve: riparti da zero o sei già in ritmo?";
     }
     if (expectedResponse.context === "training_limitations") {
-      return "Mi servono ancora età e punto da proteggere. Dimmi tutto in una frase breve.";
+      return "Mi servono ancora età e se hai qualche dolorino. Dimmi tutto in una frase breve.";
     }
     if (expectedResponse.context === "limitation_check") {
-      return "Mi manca ancora il check. Dimmi in breve: ha dato fastidio, è andata meglio o è rimasto tranquillo?";
+      return "Mi manca ancora il check. Dimmi in breve: ti ha dato fastidio o è rimasto tranquillo?";
     }
     return earlyStage
       ? `Mi manca ancora la risposta giusta. Dimmi in una frase breve: ${instruction || "quello che ti ho chiesto"}.`
@@ -1960,19 +1977,19 @@ function buildExpectedResponseCorrection(
   }
   if (selectedLanguage === "es-ES") {
     if (expectedResponse.context === "training_schedule") {
-      return "Todavía me falta la decisión. Dímelo simple: acción mínima ahora u horario cerrado mañana.";
+      return "Aún me falta una respuesta clara. Dímelo fácil: hacemos algo corto ahora o cerramos una hora para mañana?";
     }
     if (expectedResponse.context === "training_location") {
-      return "Todavía me falta dónde vas a entrenar hoy. Dímelo simple: casa, gimnasio o parque.";
+      return "Todavía me falta dónde vas a entrenar hoy. Dímelo directo: casa, gimnasio o parque?";
     }
     if (expectedResponse.context === "training_status") {
-      return "Todavía me falta tu punto de partida. Dímelo corto: parado, volviendo o ya entrenando.";
+      return "Aún me falta tu nivel actual. Dímelo corto: vuelves de un parón o ya traes ritmo?";
     }
     if (expectedResponse.context === "training_limitations") {
-      return "Todavía necesito tu edad y cualquier molestia que deba cuidar. Dímelo en una frase corta.";
+      return "Todavía necesito tu edad y cualquier dolorcito que deba respetar. Dímelo en una frase corta.";
     }
     if (expectedResponse.context === "limitation_check") {
-      return "Todavía me falta el control. Dímelo corto: dolió, mejoró o siguió tranquilo?";
+      return "Todavía me falta el chequeo. Dímelo corto: dolió o quedó tranquilo?";
     }
     return earlyStage
       ? `Todavía me falta la respuesta exacta. Dímelo en una frase corta: ${instruction || "lo que te pedí"}.`
@@ -2110,12 +2127,12 @@ function buildTrainingLocationQuestion(schedule: string, language = "pt-BR"): Gu
   if (selectedLanguage === "en-US") {
     return {
       fala: scheduledForTomorrow
-        ? "Good. Tomorrow is locked as the target. Now tell me where you will train: home, gym, or park?"
-        : "Good. We keep it alive today. Now tell me where you can train: home, gym, or park?",
+        ? "Got it. Tomorrow is locked. Now tell me where we're doing it: home, gym, or park?"
+        : "Good. The day isn't over. Tell me where you're training: home, gym, or park?",
       acao: "none",
       expectedResponse: {
         type: "text",
-        instruction: "Reply where the workout will happen: home, gym, or park.",
+        instruction: "home, gym, or park",
         context: "training_location",
       },
     };
@@ -2124,12 +2141,12 @@ function buildTrainingLocationQuestion(schedule: string, language = "pt-BR"): Gu
   if (selectedLanguage === "it-IT") {
     return {
       fala: scheduledForTomorrow
-        ? "Bene. Domani resta l'obiettivo. Ora dimmi dove ti alleni: casa, palestra o parco?"
-        : "Bene. Oggi resta vivo. Ora dimmi dove puoi allenarti: casa, palestra o parco?",
+        ? "Perfetto. L'obiettivo è fissato a domani. Ora dimmi dove lo facciamo: casa, palestra o parco?"
+        : "Bene. La giornata non è ancora persa. Dimmi dove ti alleni: casa, palestra o parco?",
       acao: "none",
       expectedResponse: {
         type: "text",
-        instruction: "Dimmi dove ti alleni: casa, palestra o parco.",
+        instruction: "casa, palestra o parco",
         context: "training_location",
       },
     };
@@ -2138,12 +2155,12 @@ function buildTrainingLocationQuestion(schedule: string, language = "pt-BR"): Gu
   if (selectedLanguage === "es-ES") {
     return {
       fala: scheduledForTomorrow
-        ? "Bien. Mañana queda como objetivo. Ahora dime donde vas a entrenar: casa, gimnasio o parque?"
-        : "Bien. Hoy sigue vivo. Ahora dime donde puedes entrenar: casa, gimnasio o parque?",
+        ? "Hecho. Mañana cerramos el trato. Ahora dime dónde entrenamos: gimnasio, casa o parque?"
+        : "Bien. El día no está perdido. Dime dónde puedes entrenar: casa, gimnasio o parque?",
       acao: "none",
       expectedResponse: {
         type: "text",
-        instruction: "Responde donde vas a entrenar: casa, gimnasio o parque.",
+        instruction: "casa, gimnasio o parque",
         context: "training_location",
       },
     };
@@ -2607,21 +2624,21 @@ function buildTrainingStatusQuestion(location: string, language = "pt-BR"): Guto
   if (hasCompletionSignal(cleanLocation)) {
     if (selectedLanguage === "en-US") {
       return {
-        fala: "Good. If you already handled that today, I am not reopening the same session. Tell me if tomorrow we push load or change focus.",
+        fala: "Nice work. Since it's done, I won't reopen the session. Just tell me if tomorrow we push harder or switch focus.",
         acao: "none",
         expectedResponse: null,
       };
     }
     if (selectedLanguage === "it-IT") {
       return {
-        fala: "Bene. Se l'hai già chiuso oggi, non ti riapro lo stesso allenamento. Dimmi solo se domani alziamo il carico o cambiamo focus.",
+        fala: "Ottimo lavoro. Visto che l'hai già fatto, non riapro la sessione. Dimmi solo se domani spingiamo di più o cambiamo focus.",
         acao: "none",
         expectedResponse: null,
       };
     }
     if (selectedLanguage === "es-ES") {
       return {
-        fala: "Bien. Si eso ya lo cerraste hoy, no voy a reabrir el mismo entrenamiento. Dime si mañana subimos carga o cambiamos el foco.",
+        fala: "Buen trabajo. Como ya está hecho, no voy a reabrir la sesión. Solo dime si mañana subimos el nivel o cambiamos de foco.",
         acao: "none",
         expectedResponse: null,
       };
@@ -2638,12 +2655,12 @@ function buildTrainingStatusQuestion(location: string, language = "pt-BR"): Guto
     if (selectedLanguage === "en-US") {
       return {
         fala: late
-          ? "Perfect, the gym works. It is late now, so I will set chest and triceps for tomorrow. Tell me if you are coming from a break or already in rhythm."
-          : "Perfect, the gym works. Today the base is chest and triceps. Tell me if you are coming from a break or already in rhythm.",
+          ? "Gym it is. It's late now, so I'm locking in chest and triceps for tomorrow. Just tell me if you're coming off a break or already in rhythm."
+          : "Gym it is. Today we're hitting chest and triceps. Just tell me if you're coming off a break or already in rhythm.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Reply whether you were inactive, returning, or already training.",
+          instruction: "coming off a break or already in rhythm",
           context: "training_status",
         },
       };
@@ -2651,12 +2668,12 @@ function buildTrainingStatusQuestion(location: string, language = "pt-BR"): Guto
     if (selectedLanguage === "it-IT") {
       return {
         fala: late
-          ? "Perfetto, palestra va benissimo. Adesso è tardi, quindi ti preparo petto e tricipiti per domani. Dimmi solo se arrivi da uno stop o se sei già in ritmo."
-          : "Perfetto, palestra va benissimo. Oggi la base è petto e tricipiti. Dimmi solo se arrivi da uno stop o se sei già in ritmo.",
+          ? "Andata per la palestra. Ormai è tardi, quindi blocco petto e tricipiti per domani. Dimmi solo se riparti da zero o se sei già in ritmo."
+          : "Andata per la palestra. Oggi la base è petto e tricipiti. Dimmi solo se riparti da zero o se sei già in ritmo.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Dimmi se eri fermo, se stai ripartendo o se sei già in ritmo.",
+          instruction: "riparti da zero o sei già in ritmo",
           context: "training_status",
         },
       };
@@ -2664,12 +2681,12 @@ function buildTrainingStatusQuestion(location: string, language = "pt-BR"): Guto
     if (selectedLanguage === "es-ES") {
       return {
         fala: late
-          ? "Perfecto, el gimnasio encaja bien. Ya es tarde, así que te dejo pecho y tríceps para mañana. Dime si vienes de un parón o si ya traes ritmo."
-          : "Perfecto, el gimnasio encaja bien. Hoy la base es pecho y tríceps. Dime si vienes de un parón o si ya traes ritmo.",
+          ? "El gimnasio me vale. Ya es tarde, así que cerramos pecho y tríceps para mañana. Dime si vuelves de un parón o ya traes ritmo."
+          : "El gimnasio me vale. Hoy la base es pecho y tríceps. Dime si vuelves de un parón o ya traes ritmo.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Responde si estabas parado, volviendo o ya entrenando.",
+          instruction: "vuelves de un parón o ya traes ritmo",
           context: "training_status",
         },
       };
@@ -2690,33 +2707,33 @@ function buildTrainingStatusQuestion(location: string, language = "pt-BR"): Guto
   if (mode === "park") {
     if (selectedLanguage === "en-US") {
       return {
-        fala: "The park works. I can pull cardio and bodyweight there. Tell me if you are coming from a break or already in rhythm.",
+        fala: "The park works. I'll set up some cardio and bodyweight. Tell me if you're coming off a break or already in rhythm.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Reply whether you were inactive, returning, or already training.",
+          instruction: "coming off a break or already in rhythm",
           context: "training_status",
         },
       };
     }
     if (selectedLanguage === "it-IT") {
       return {
-        fala: "Parco va bene. Lì ti porto su cardio e corpo libero. Dimmi solo se arrivi da uno stop o se sei già in ritmo.",
+        fala: "Il parco è perfetto. Lì andiamo di cardio e corpo libero. Dimmi solo se riparti da zero o se sei già in ritmo.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Dimmi se eri fermo, se stai ripartendo o se sei già in ritmo.",
+          instruction: "riparti da zero o sei già in ritmo",
           context: "training_status",
         },
       };
     }
     if (selectedLanguage === "es-ES") {
       return {
-        fala: "El parque va bien. Ahí te llevo a cardio y peso corporal. Dime si vienes de un parón o si ya traes ritmo.",
+        fala: "El parque me parece bien. Ahí tiramos de cardio y peso corporal. Dime si vuelves de un parón o ya traes ritmo.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Responde si estabas parado, volviendo o ya entrenando.",
+          instruction: "vuelves de un parón o ya traes ritmo",
           context: "training_status",
         },
       };
@@ -2735,12 +2752,12 @@ function buildTrainingStatusQuestion(location: string, language = "pt-BR"): Guto
   if (selectedLanguage === "en-US") {
     return {
       fala: normalizedLocation.includes("home")
-        ? "Good, home works. I can build bodyweight, cardio, and whatever you have there. Tell me if you are coming from a break or already in rhythm."
-        : `${cleanLocation} works. Tell me if you are coming from a break or already in rhythm.`,
+        ? "Home it is. I'll put together some bodyweight, cardio, and whatever you have around. Tell me if you're coming off a break or already in rhythm."
+        : `${cleanLocation} works. Tell me if you're coming off a break or already in rhythm.`,
       acao: "none",
       expectedResponse: {
         type: "text",
-        instruction: "Reply whether you were inactive, returning, or already training.",
+        instruction: "coming off a break or already in rhythm",
         context: "training_status",
       },
     };
@@ -2748,12 +2765,12 @@ function buildTrainingStatusQuestion(location: string, language = "pt-BR"): Guto
   if (selectedLanguage === "it-IT") {
     return {
       fala: normalizedLocation.includes("casa")
-        ? "Perfetto, casa va bene. Lì ti preparo corpo libero, cardio e quello che hai a disposizione. Dimmi solo se arrivi da uno stop o se sei già in ritmo."
-        : `${displayLocation} va bene. Dimmi solo se arrivi da uno stop o se sei già in ritmo.`,
+        ? "Casa va bene. Ti preparo corpo libero, cardio e sfruttiamo quello che hai. Dimmi solo se riparti da zero o se sei già in ritmo."
+        : `${displayLocation} va bene. Dimmi solo se riparti da zero o se sei già in ritmo.`,
       acao: "none",
       expectedResponse: {
         type: "text",
-        instruction: "Dimmi se eri fermo, se stai ripartendo o se sei già in ritmo.",
+        instruction: "riparti da zero o sei già in ritmo",
         context: "training_status",
       },
     };
@@ -2761,12 +2778,12 @@ function buildTrainingStatusQuestion(location: string, language = "pt-BR"): Guto
   if (selectedLanguage === "es-ES") {
     return {
       fala: normalizedLocation.includes("casa")
-        ? "Perfecto, casa va bien. Ahí te monto peso corporal, cardio y lo que tengas a mano. Dime si vienes de un parón o si ya traes ritmo."
-        : `${cleanLocation} va bien. Dime si vienes de un parón o si ya traes ritmo.`,
+        ? "Casa me vale. Te preparo algo de peso corporal, cardio y aprovechamos lo que tengas. Dime si vuelves de un parón o ya traes ritmo."
+        : `${cleanLocation} va bien. Dime si vuelves de un parón o ya traes ritmo.`,
       acao: "none",
       expectedResponse: {
         type: "text",
-        instruction: "Responde si estabas parado, volviendo o ya entrenando.",
+        instruction: "vuelves de un parón o ya traes ritmo",
         context: "training_status",
       },
     };
@@ -2792,33 +2809,33 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
   if (hasAnyTerm(normalizedStatus, ["trocar foco", "nao repetir peito", "não repetir peito", "costas e biceps", "costas e bíceps"])) {
     if (selectedLanguage === "en-US") {
       return {
-        fala: "Good catch. I am not repeating chest and triceps. Tomorrow switches to back and biceps. Now give me your age and any pain I need to respect.",
+        fala: "Good catch. We're not repeating chest and triceps. Tomorrow is back and biceps. Now give me your age and any nagging pain I need to work around.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Reply with your age and any pain, limitation, or say you are clear.",
+          instruction: "age and any pain I need to respect",
           context: "training_limitations",
         },
       };
     }
     if (selectedLanguage === "it-IT") {
       return {
-        fala: "Correzione giusta. Non ripeto petto e tricipiti. Domani passo a schiena e bicipiti. Ora dimmi età e qualsiasi fastidio che devo rispettare.",
+        fala: "Ottima correzione. Niente petto e tricipiti due volte. Domani passiamo a schiena e bicipiti. Ora dimmi la tua età e se c'è qualche fastidio che devo rispettare.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Dimmi età e qualsiasi fastidio, limitazione oppure dimmi che sei libero.",
+          instruction: "età e se hai qualche dolorino",
           context: "training_limitations",
         },
       };
     }
     if (selectedLanguage === "es-ES") {
       return {
-        fala: "Bien marcado. No repito pecho y triceps. Mañana cambio a espalda y biceps. Ahora dime tu edad y cualquier molestia que deba respetar.",
+        fala: "Buena corrección. No repetiremos pecho y tríceps. Mañana pasamos a espalda y bíceps. Ahora dime tu edad y si tienes alguna molestia que deba cuidar.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Responde con tu edad y cualquier dolor, limitación o di que estás libre.",
+          instruction: "edad y cualquier dolorcito",
           context: "training_limitations",
         },
       };
@@ -2837,33 +2854,33 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
   if (isTomorrowSchedulingIntent(cleanStatus)) {
     if (selectedLanguage === "en-US") {
       return {
-        fala: "Good. Then lock me a real time for tomorrow and I will hold you to it.",
+        fala: "Done. Give me a solid time for tomorrow and I'll hold you to it.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Reply with a fixed time for tomorrow.",
+          instruction: "a fixed time for tomorrow",
           context: "training_schedule",
         },
       };
     }
     if (selectedLanguage === "it-IT") {
       return {
-        fala: "Perfetto. Dammi un orario vero per domani e te lo tengo fermo.",
+        fala: "Affare fatto. Dammi un orario preciso per domani e lo blocco.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Dammi un orario preciso per domani.",
+          instruction: "un orario preciso per domani",
           context: "training_schedule",
         },
       };
     }
     if (selectedLanguage === "es-ES") {
       return {
-        fala: "Perfecto. Dame una hora real para mañana y te la dejo cerrada.",
+        fala: "Hecho. Dame una hora exacta para mañana y te la dejo cerrada.",
         acao: "none",
         expectedResponse: {
           type: "text",
-          instruction: "Responde con una hora cerrada para mañana.",
+          instruction: "una hora exacta para mañana",
           context: "training_schedule",
         },
       };
@@ -2889,16 +2906,16 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
   if (selectedLanguage === "en-US") {
     const line =
       cleanStatus === "parado" || normalizedStatus.includes("parado")
-        ? "Good. Then I will come in cleaner and without ego."
-        : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno", "returning", "back into"])
-          ? "Good. Smart return grows more than rushed ego."
-          : "Good. Then your body can already take a stronger charge.";
+        ? "Alright. We'll ease into it, leave the ego at the door."
+        : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno", "returning", "back into", "getting back"])
+          ? "Smart move. A solid comeback beats a rushed ego."
+          : "Good. That means we can push the pace a bit more.";
     return {
-      fala: `${line} Now give me your age and any nagging pain I need to work around. The love life can wait.`,
+      fala: `${line} Now tell me your age and any nagging pain I need to respect. Keep the drama out of it.`,
       acao: "none",
       expectedResponse: {
         type: "text",
-        instruction: "Reply with your age and any pain, limitation, or say you are clear.",
+        instruction: "age and any pain I need to respect",
         context: "training_limitations",
       },
     };
@@ -2906,16 +2923,16 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
   if (selectedLanguage === "it-IT") {
     const line =
       cleanStatus === "parado" || normalizedStatus.includes("parado") || hasAnyTerm(normalizedStatus, ["fermo", "stop", "principiante", "mai allenato"])
-        ? "Bene. Allora entro più pulito e senza eroismi."
+        ? "Va bene. Riprendiamo con calma, niente eroismi."
         : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno", "ripresa", "ripartendo", "rientro"])
-          ? "Bene. Un rientro intelligente vale più dell'ego accelerato."
-          : "Bene. Allora il tuo corpo può già reggere qualcosa di più forte.";
+          ? "Scelta saggia. Un rientro intelligente conta più dell'ego."
+          : "Bene. Allora possiamo spingere un po' di più.";
     return {
-      fala: `${line} Ora dimmi età e qualsiasi fastidio che devo tenere in conto. La vita amorosa la lasciamo per dopo.`,
+      fala: `${line} Ora dimmi la tua età e se hai qualche dolorino da tenere d'occhio. La tua vita amorosa la lasciamo per dopo.`,
       acao: "none",
         expectedResponse: {
           type: "text",
-        instruction: "Dimmi età e qualsiasi fastidio, limitazione oppure dimmi che sei libero.",
+        instruction: "età e se hai qualche dolorino",
           context: "training_limitations",
         },
       };
@@ -2923,16 +2940,16 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
   if (selectedLanguage === "es-ES") {
     const line =
       cleanStatus === "parado" || normalizedStatus.includes("parado")
-        ? "Bien. Entonces voy a entrar mas limpio y sin heroismos."
-        : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno", "volviendo", "retomando"])
-          ? "Bien. Volver con inteligencia crece mas que el ego acelerado."
-          : "Bien. Entonces tu cuerpo ya puede recibir mas carga.";
+        ? "Vale. Empezaremos poco a poco, sin hacernos los héroes."
+        : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno", "volviendo", "retomando", "regresando"])
+          ? "Bien pensado. Volver con cabeza es mejor que tirar de ego."
+          : "Perfecto. Entonces ya podemos meterle más caña.";
     return {
-      fala: `${line} Ahora dime tu edad y cualquier molestia que deba tener en cuenta. La vida amorosa la dejamos para despues.`,
+      fala: `${line} Ahora dime tu edad y cualquier dolorcito que deba respetar. Los dramas amorosos los dejamos para luego.`,
       acao: "none",
       expectedResponse: {
         type: "text",
-        instruction: "Responde con tu edad y cualquier dolor, limitación o di que estás libre.",
+        instruction: "edad y cualquier dolorcito",
         context: "training_limitations",
       },
     };
@@ -2958,16 +2975,16 @@ function buildArrivalBriefing(memory: GutoMemory, language = "pt-BR"): GutoModel
   if (selectedLanguage === "en-US") {
     return late
       ? {
-          fala: `${name}, I am with you on this. It is late for a full session. Reply in one sentence: minimum action now or a locked time tomorrow?`,
+          fala: `${name}, it’s late. No big plan now. Tell me: do we start with something small now, or lock a time for tomorrow?`,
           acao: "none",
           expectedResponse: {
             type: "text",
-            instruction: "minimum action now or a locked time tomorrow",
+            instruction: "start with something small now, or lock a time for tomorrow",
             context: "training_schedule",
           },
         }
       : {
-          fala: `${name}, there you are. I was waiting for you. I already lined up three routes: gym, home, or park. Which one makes the most sense today?`,
+          fala: `${name}, finally. Been waiting for you. I've got three routes ready: gym, home, or park. What's the move today?`,
           acao: "none",
           expectedResponse: {
             type: "text",
@@ -2980,16 +2997,16 @@ function buildArrivalBriefing(memory: GutoMemory, language = "pt-BR"): GutoModel
   if (selectedLanguage === "it-IT") {
     return late
       ? {
-          fala: `${name}, ci sono con te. Ora niente piano lungo. Rispondi in una frase: azione minima adesso o orario fissato per domani?`,
+          fala: `${name}, sono qui. Niente giri lunghi. Parti adesso con qualcosa di breve o fissiamo un orario preciso per domani?`,
           acao: "none",
           expectedResponse: {
             type: "text",
-            instruction: "azione minima adesso o orario fissato per domani",
+            instruction: "parti adesso con qualcosa di breve o fissiamo un orario preciso per domani",
             context: "training_schedule",
           },
         }
       : {
-          fala: `${name}, eccoti. Ti stavo aspettando. Intanto ti ho tenuto pronte tre strade: palestra, casa o parco. Quale ha più senso oggi?`,
+          fala: `${name}, finalmente. Ti stavo aspettando. Ho già preparato tre opzioni: palestra, casa o parco. Cosa facciamo oggi?`,
           acao: "none",
           expectedResponse: {
             type: "text",
@@ -3002,16 +3019,16 @@ function buildArrivalBriefing(memory: GutoMemory, language = "pt-BR"): GutoModel
   if (selectedLanguage === "es-ES") {
     return late
       ? {
-          fala: `${name}, estoy contigo en esto. Ya es tarde para una sesión larga. Responde en una frase: acción mínima ahora u horario cerrado mañana?`,
+          fala: `${name}, ya es tarde para complicarlo. Dime una cosa: hacemos algo corto ahora o cerramos una hora para mañana?`,
           acao: "none",
           expectedResponse: {
             type: "text",
-            instruction: "acción mínima ahora u horario cerrado mañana",
+            instruction: "hacemos algo corto ahora o cerramos una hora para mañana",
             context: "training_schedule",
           },
         }
       : {
-          fala: `${name}, ahí estás. Te estaba esperando. Mientras tanto te dejé tres rutas listas: gimnasio, casa o parque. ¿Cuál tiene más sentido hoy?`,
+          fala: `${name}, por fin. Te estaba esperando. Ya tengo tres rutas listas: gimnasio, casa o parque. ¿Por dónde tiramos hoy?`,
           acao: "none",
           expectedResponse: {
             type: "text",
