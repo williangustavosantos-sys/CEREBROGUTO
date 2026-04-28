@@ -3369,14 +3369,25 @@ app.post("/guto-audio", upload.single("audio"), async (req, res) => {
       expectedResponse,
     });
 
-    const vozResp = await fetch(`http://localhost:${PORT}/voz`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: gutoData.fala, language }),
-    });
-    const vozData = await vozResp.json();
+    const fala = gutoData.fala?.trim();
+    if (!fala) {
+      return res.status(502).json({ error: "GUTO recebeu o áudio, mas não gerou resposta. Envie por texto." });
+    }
 
-    res.json({ ...gutoData, transcript, audioContent: vozData.audioContent });
+    let audioContent: string | undefined;
+    try {
+      const vozResp = await fetch(`http://localhost:${PORT}/voz`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: fala, language }),
+      });
+      const vozData = await vozResp.json().catch(() => ({}));
+      audioContent = vozResp.ok ? vozData.audioContent : undefined;
+    } catch (voiceError) {
+      console.warn("Voz do GUTO indisponível no áudio:", voiceError);
+    }
+
+    res.json({ ...gutoData, fala, transcript, audioContent });
   } catch (error) {
     console.warn("Erro no Guto Audio:", error);
     res.status(500).json({ error: "Falha ao processar áudio. Envie a mesma resposta por texto." });
