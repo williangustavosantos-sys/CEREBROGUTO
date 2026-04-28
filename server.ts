@@ -601,7 +601,7 @@ function buildProactiveInput(memory: GutoMemory, slot: string, context: Operatio
     "Gere uma mensagem curta, proativa e acionável.",
     slot === "force"
       ? "Na primeira abertura do chat, comece com confiança e condução: presença, direção simples e pergunta fácil de responder. Não comece duro demais."
-      : "Se o vínculo já está ativo, mantenha cobrança e condução senza perdere l'umanità.",
+      : "Se o vínculo já está ativo, mantenha cobrança e condução sem perder humanidade.",
     slot === "limitation_check"
       ? "O usuário já treinou. Pergunte como a limitação registrada respondeu durante o treino e peça resposta objetiva."
       : "Use a limitação registrada como prova de memória: mencione cuidado/fortalecimento específico quando montar ou cobrar treino.",
@@ -764,7 +764,7 @@ function buildGutoSystemPrompt(language = "pt-BR") {
     "REGRA DE CONTINUIDADE",
     "Quando o usuário terminar uma atividade, defina imediatamente a próxima ação.",
     "Se o usuário disser que já treinou, terminou, fez o treino ou está com energia depois de treinar, não reabra intake de local/estado para o treino do dia.",
-    "Nesses casos, reconheça a execution com uma palavra de fechamento, marque sequência e defina o próximo passo: recuperação curta, registro objetivo ou compromisso de amanhã.",
+    "Nesses casos, reconheça a execução com uma palavra de fechamento, marque sequência e defina o próximo passo: recuperação curta, registro objetivo ou compromisso de amanhã.",
     "Se o usuário disser que treinou e está com energia, trate isso como execução concluída com boa resposta. Reforce que foi feito e defina a próxima ação de continuidade.",
     "Depois de treino concluído, não pergunte 'o que você fez' só para registrar. Feche com recuperação, segundo bloco útil ou compromisso de amanhã.",
     "A resposta pós-treino precisa conter pelo menos um sinal claro de sequência: feito, próximo bloco, recuperação, amanhã ou energia bem usada.",
@@ -977,6 +977,15 @@ function shouldTreatInputAsScheduledTime(rawInput: string) {
   const clean = rawInput.replace(/\s+/g, " ").trim();
   if (!clean || clean.length > 120) return false;
   if (clean.includes("Contexto temporal:") || clean.includes("Memória:") || clean.includes("Objetivo da mensagem:")) {
+    return false;
+  }
+
+  const normalized = normalize(clean);
+  const ignoreTerms = [
+    "parado", "voltando", "vinha treinando", "idade", "anos", "dor", "limitacao", "limitação",
+    "lesao", "lesão", "cansado", "energia", "disposicao", "disposição", "historico", "histórico", "treinava"
+  ];
+  if (hasAnyTerm(normalized, ignoreTerms)) {
     return false;
   }
 
@@ -1239,115 +1248,105 @@ function buildModelFallbackResponse({
   const normalizedInput = normalize(input || "");
   const name = getSafeProfileName(profile);
   const context = getOperationalContext(new Date(), selectedLanguage);
-  const evening =
-    context.dayPeriod === "evening" || context.dayPeriod === "late_night";
+  const evening = context.dayPeriod === "evening" || context.dayPeriod === "late_night";
+
+  if (shouldTreatInputAsScheduledTime(input || "")) {
+    const scheduledTime = extractScheduledTime(input || "");
+    if (scheduledTime) {
+      const match = scheduledTime.match(/(\d{2})h(\d{2})/);
+      let isTomorrow = false;
+      
+      if (match) {
+        const schedHour = Number(match[1]);
+        const schedMinute = Number(match[2]);
+        if (schedHour < context.hour || (schedHour === context.hour && schedMinute <= context.minute)) {
+          isTomorrow = true;
+        }
+      }
+      
+      if (selectedLanguage === "en-US") {
+        return { fala: `${name}, locked: ${isTomorrow ? "tomorrow" : "today"} at ${scheduledTime}, no negotiating.`, acao: "none", expectedResponse: null };
+      } else if (selectedLanguage === "it-IT") {
+        return { fala: `${name}, chiuso: ${isTomorrow ? "domani" : "oggi"} alle ${scheduledTime}, senza negoziare.`, acao: "none", expectedResponse: null };
+      } else if (selectedLanguage === "es-ES") {
+        return { fala: `${name}, cerrado: ${isTomorrow ? "mañana" : "hoy"} a las ${scheduledTime}, sin negociar.`, acao: "none", expectedResponse: null };
+      }
+      
+      return {
+        fala: `${name}, fechado: ${isTomorrow ? "amanhã" : "hoje"} às ${scheduledTime}, sem renegociar.`,
+        acao: "none",
+        expectedResponse: null,
+      };
+    }
+  }
 
   if (selectedLanguage !== "pt-BR") {
+    // Bloco de Risco Real
     if (hasAnyTerm(normalizedInput, ["fear", "besteira", "mal", "bebi", "febre", "tonto", "dolore", "dolor", "vergogna", "verguenza"])) {
-      const riskLines: Record<GutoLanguage, string> = {
-        "pt-BR": `${name}, eu to aqui com voce. Agora segura o corpo, agua e descanso. Amanhã a gente retoma.`,
-        "en-US": `${name}, I am here with you. Right now: water, rest, and no chaos. Tomorrow we get back on track.`,
-        "it-IT": `${name}, io sono qui con te. Adesso acqua, recupero e niente caos. Domani ripartiamo.`,
-        "es-ES": `${name}, estoy aqui contigo. Ahora agua, descanso y nada de caos. Manana retomamos.`,
-      };
-      return { fala: riskLines[selectedLanguage], acao: "none", expectedResponse: null };
+      if (selectedLanguage === "en-US") {
+        return { fala: `${name}, I am here with you. Right now: water, rest, and no chaos. Tomorrow we get back on track.`, acao: "none", expectedResponse: null };
+      } else if (selectedLanguage === "it-IT") {
+        return { fala: `${name}, io sono qui con te. Adesso acqua, recupero e niente caos. Domani ripartiamo.`, acao: "none", expectedResponse: null };
+      } else if (selectedLanguage === "es-ES") {
+        return { fala: `${name}, estoy aqui contigo. Ahora agua, descanso y nada de caos. Manana retomamos.`, acao: "none", expectedResponse: null };
+      }
     }
 
-    const genericLines: Record<GutoLanguage, GutoModelResponse> = {
-      "pt-BR": {
-        fala: `${name}, ficou tarde para inventar moda. Me responde em uma frase: acao minima agora ou horario fechado amanha.`,
-        acao: "none",
-        expectedResponse: { type: "text", instruction: "acao minima agora ou horario fechado amanha", context: "training_schedule" },
-      },
-      "en-US": {
+    // Bloco Genérico
+    if (selectedLanguage === "en-US") {
+      return {
         fala: `${name}, enough drifting. Reply in one sentence: minimum action now or a locked time tomorrow.`,
         acao: "none",
         expectedResponse: { type: "text", instruction: "minimum action now or a locked time tomorrow", context: "training_schedule" },
-      },
-      "it-IT": {
+      };
+    } else if (selectedLanguage === "it-IT") {
+      return {
         fala: `${name}, basta girar a vuoto. Rispondi in una frase: azione minima adesso o orario chiuso domani.`,
         acao: "none",
         expectedResponse: { type: "text", instruction: "azione minima adesso o orario chiuso domani", context: "training_schedule" },
-      },
-      "es-ES": {
+      };
+    } else if (selectedLanguage === "es-ES") {
+      return {
         fala: `${name}, basta de dar vueltas. Responde en una frase: accion minima ahora o horario cerrado manana.`,
         acao: "none",
         expectedResponse: { type: "text", instruction: "accion minima ahora o horario cerrado manana", context: "training_schedule" },
-      },
-    };
-
-    return genericLines[selectedLanguage];
+      };
+    }
   }
 
+  // Lógica padrão PT-BR
   if (hasAnyTerm(normalizedInput, ["medo de fazer besteira", "fazer besteira", "nao passa por isso sozinho"])) {
-    return {
-      fala: `${name}, fica comigo agora. Respira comigo e nao passa por isso sozinho.`,
-      acao: "none",
-      expectedResponse: null,
-    };
+    return { fala: `${name}, fica comigo agora. Respira comigo e nao passa por isso sozinho.`, acao: "none", expectedResponse: null };
   }
 
   if (hasAnyTerm(normalizedInput, ["me sinto um lixo", "falhei", "falhado", "falhei de novo"])) {
-    return {
-      fala: `${name}, a gente falhou hoje, mas nao vai fechar em zero. Me responde em uma frase: acao minima agora ou horario fechado amanha.`,
-      acao: "none",
-      expectedResponse: {
-        type: "text",
-        instruction: "acao minima agora ou horario fechado amanha",
-        context: "training_schedule",
-      },
-    };
+    return { fala: `${name}, a gente falhou hoje, mas nao vai fechar em zero. Me responde em uma frase: acao minima agora ou horario fechado amanha.`, acao: "none", expectedResponse: { type: "text", instruction: "acao minima agora ou horario fechado amanha", context: "training_schedule" } };
   }
 
   if (hasAnyTerm(normalizedInput, ["bebi muito", "estou mal", "vergonha", "febre", "tonto"])) {
-    return {
-      fala: `${name}, eu to aqui com voce. Hoje e agua, comida simples, banho e cama. Amanhã, se estiver melhor, a gente retoma.`,
-      acao: "none",
-      expectedResponse: null,
-    };
+    return { fala: `${name}, eu to aqui com voce. Hoje e agua, comida simples, banho e cama. Amanhã, se estiver melhor, a gente retoma.`, acao: "none", expectedResponse: null };
   }
 
   if (hasAnyTerm(normalizedInput, ["ja fiz o treino", "treinei", "terminei tudo", "estou com energia"])) {
-    return {
-      fala: `Boa, ${name}. Feito. Agora recupera e amanha a gente bota pra quebrar de novo.`,
-      acao: "none",
-      expectedResponse: null,
-    };
+    return { fala: `Boa, ${name}. Feito. Agora recupera e amanha a gente bota pra quebrar de novo.`, acao: "none", expectedResponse: null };
   }
 
-  if (hasAnyTerm(normalizedInput, ["dia foi ruim", "nao fiz nada", "não fiz nada"])) {
-    return {
-      fala: `${name}, o dia foi ruim, mas não fecha em zero. Dez minutos agora: caminhada leve ou mobilidade. Onde você consegue fazer?`,
-      acao: "none",
-      expectedResponse: {
-        type: "text",
-        instruction: "Responder onde consegue fazer dez minutos agora.",
-        context: "training_location",
-      },
-    };
+  if (hasAnyTerm(normalizedInput, ["dia foi ruim", "nao fiz nada"])) {
+    return { fala: `${name}, o dia foi ruim, mas não fecha em zero. Dez minutos agora: caminhada leve ou mobilidade. Onde você consegue fazer?`, acao: "none", expectedResponse: { type: "text", instruction: "Responder onde consegue fazer dez minutos agora.", context: "training_location" } };
   }
 
-  if (hasAnyTerm(normalizedInput, ["me fala o que eu faco hoje", "qual treino hoje", "o que eu faco hoje", "me fala o plano"])) {
-    return {
-      fala: `${name}, hoje comeca agora: 5 min de aquecimento, depois 4 voltas de 12 agachamentos, 10 flexoes e 12 remadas, fechando com 5 min de caminhada leve. Primeiro bloco ja.`,
-      acao: "none",
-      expectedResponse: null,
-    };
+  if (hasAnyTerm(normalizedInput, ["me fala o que eu faco hoje", "qual treino hoje", "me fala o plano"])) {
+    return { fala: `${name}, hoje comeca agora: 5 min de aquecimento, depois 4 voltas de 12 agachamentos, 10 flexoes e 12 remadas, fechando com 5 min de caminhada leve. Primeiro bloco ja.`, acao: "none", expectedResponse: null };
   }
 
   if (hasAnyTerm(normalizedInput, ["set de dj", "preparar meu set", "meu set de dj", "set travado"])) {
-    return {
-      fala: `${name}, abre o set agora: 10 min escolhendo a abertura, 10 min montando o bloco central e 10 min fechando a saida. Primeiro track ja.`,
-      acao: "none",
-      expectedResponse: null,
-    };
+    return { fala: `${name}, abre o set agora: 10 min escolhendo a abertura, 10 min montando o bloco central e 10 min fechando a saida. Primeiro track ja.`, acao: "none", expectedResponse: null };
   }
 
   const scheduledTime = extractScheduledTime(input || "");
   if (scheduledTime) {
     const match = scheduledTime.match(/(\d{2})h(\d{2})/);
     let isTomorrow = false;
-    
     if (match) {
       const schedHour = Number(match[1]);
       const schedMinute = Number(match[2]);
@@ -1355,17 +1354,6 @@ function buildModelFallbackResponse({
         isTomorrow = true;
       }
     }
-    
-    if (selectedLanguage === "en-US") {
-      return { fala: `${name}, locked: ${isTomorrow ? "tomorrow" : "today"} at ${scheduledTime}, no negotiating.`, acao: "none", expectedResponse: null };
-    }
-    if (selectedLanguage === "it-IT") {
-      return { fala: `${name}, chiuso: ${isTomorrow ? "domani" : "oggi"} alle ${scheduledTime}, senza negoziare.`, acao: "none", expectedResponse: null };
-    }
-    if (selectedLanguage === "es-ES") {
-      return { fala: `${name}, cerrado: ${isTomorrow ? "mañana" : "hoy"} a las ${scheduledTime}, sin negociar.`, acao: "none", expectedResponse: null };
-    }
-    
     return {
       fala: `${name}, fechado: ${isTomorrow ? "amanhã" : "hoje"} às ${scheduledTime}, sem renegociar.`,
       acao: "none",
@@ -1374,26 +1362,10 @@ function buildModelFallbackResponse({
   }
 
   if (evening) {
-    return {
-      fala: `${name}, ficou tarde para inventar moda. Me responde em uma frase: acao minima agora ou horario fechado amanha.`,
-      acao: "none",
-      expectedResponse: {
-        type: "text",
-        instruction: "acao minima agora ou horario fechado amanha",
-        context: "training_schedule",
-      },
-    };
+    return { fala: `${name}, ficou tarde para inventar moda. Me responde em uma frase: acao minima agora ou horario fechado amanha.`, acao: "none", expectedResponse: { type: "text", instruction: "acao minima agora ou horario fechado amanha", context: "training_schedule" } };
   }
 
-  return {
-    fala: `${name}, ainda da tempo hoje. Me manda em uma frase onde voce treina agora e como esta o corpo.`,
-    acao: "none",
-    expectedResponse: {
-      type: "text",
-      instruction: "onde voce treina agora e como esta o corpo",
-      context: "training_location",
-    },
-  };
+  return { fala: `${name}, ainda da tempo hoje. Me manda em uma frase onde voce treina agora e como esta o corpo.`, acao: "none", expectedResponse: { type: "text", instruction: "onde voce treina agora e como esta o corpo", context: "training_location" } };
 }
 
 function applyBehavioralGuardrails({
@@ -1696,7 +1668,7 @@ async function transcribeWithOpenAI(audioBuffer: Buffer, language = "pt", mimeTy
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Math.min(GUTO_MODEL_TIMEOUT_MS, 30_000));
 
-  const res = await fetch("[https://api.openai.com/v1/audio/transcriptions](https://api.openai.com/v1/audio/transcriptions)", {
+  const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
     body: form,
@@ -2267,8 +2239,8 @@ function buildTrainingStatusQuestion(location: string, language = "pt-BR"): Guto
         type: "text",
         instruction: "Responder se estava parado, voltando ou já vinha treinando.",
         context: "training_status",
-        },
-      };
+      },
+    };
   }
 
   if (mode === "park") {
@@ -2638,26 +2610,21 @@ function buildPersonalizedWorkoutStart(memory: GutoMemory, limitationInput: stri
   saveMemory(memory);
   const scheduledDate = new Date(workoutPlan.scheduledFor);
   const shouldScheduleTomorrow = todayKey(scheduledDate) !== todayKey(new Date());
-  const firstBlock = workoutPlan.exercises[0];
   const followUpLine = hasLimitation
     ? `Montei olhando ${limitationFocus} para evoluir sem piorar.`
-    : "Montei isso em cima do que você me contou, sem deixar solto.";
+    : "";
 
-  if (!hasLimitation) {
-    return {
-      fala: shouldScheduleTomorrow
-        ? `Boa. Sem dor registrado. Amanhã começa pelo aquecimento: mobilidade de quadril, 12 agachamentos sem carga e 20s de prancha. Depois bloco principal na aba treino.`
-        : `Boa. Sem dor registrado. Começa pelo aquecimento: mobilidade de quadril, 12 agachamentos sem carga e 20s de prancha. Depois bloco principal na aba treino.`,
-      acao: "updateWorkout",
-      expectedResponse: null,
-      workoutPlan,
-    };
-  }
+  const warmupLine = "Começa pelo aquecimento: mobilidade de quadril, agachamentos sem carga e prancha curta.";
+  const baseMessage = hasLimitation
+    ? `Perfeito, já organizei tudo. ${followUpLine} ${warmupLine} O treino principal já está na aba treino do dia. Qualquer dúvida é só clicar no botão ao lado do exercício e eu te respondo.`
+    : `Perfeito, já organizei tudo. ${warmupLine} O treino principal já está na aba treino do dia. Qualquer dúvida é só clicar no botão ao lado do exercício e eu te respondo.`;
+
+  const finalMessage = shouldScheduleTomorrow
+    ? `${baseMessage} Amanhã a gente começa com tudo.`
+    : `${baseMessage} Bora começar com tudo.`;
 
   return {
-    fala: shouldScheduleTomorrow
-      ? `Boa. ${followUpLine} O treino de ${workoutPlan.focus.toLowerCase()} de ${workoutPlan.dateLabel} já está na aba treino do dia. Começa por ${firstBlock.name} e, se travar, aperta dúvida.`
-      : `Boa. ${followUpLine} Teu treino de ${workoutPlan.focus.toLowerCase()} já está na aba treino do dia. Abre por ${firstBlock.name} e, se travar, aperta dúvida.`,
+    fala: finalMessage,
     acao: "updateWorkout",
     expectedResponse: null,
     workoutPlan,
@@ -2956,10 +2923,6 @@ async function askGutoModel({
     return finalize(buildResistanceEscalationResponse({ language, profile }));
   }
 
-  if (shouldTreatInputAsScheduledTime(input || "")) {
-    return finalize(buildModelFallbackResponse({ input: input || "", language, profile }));
-  }
-  // ----------------------------------------------------------------------
 
   if (normalizedExpectedResponse) {
     const validation = await validateExpectedResponse({
@@ -2995,11 +2958,16 @@ async function askGutoModel({
     }
   }
 
+  if (shouldTreatInputAsScheduledTime(input || "")) {
+    return finalize(buildModelFallbackResponse({ input: input || "", language, profile }));
+  }
+
   if (isCleanTomorrowStartIntent(input || "")) {
     return finalize(buildTrainingLocationQuestion(input || "", language));
   }
 
   if (shouldFastTrackLocationReply(input || "")) {
+    applyTrainingIntake(memory, { type: "text", context: "training_location" }, input || "");
     return finalize(buildTrainingStatusQuestion(input || "", language));
   }
 
@@ -3415,6 +3383,12 @@ app.post("/guto-audio", upload.single("audio"), async (req, res) => {
     console.warn("Erro no Guto Audio:", error);
     res.status(500).json({ error: "Falha ao processar áudio. Envie a mesma resposta por texto." });
   }
+});
+
+// Middleware global para capturar erros não tratados e evitar crash do Node
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error("🔥 Erro Crítico não capturado:", err);
+  res.status(500).json({ error: "Falha interna crítica no Cérebro do GUTO.", acao: "none", fala: "Deu um erro interno aqui. Tenta de novo em alguns segundos." });
 });
 
 app.listen(PORT, () => console.log(`🦾 GUTO ONLINE NA PORTA ${PORT}`));
