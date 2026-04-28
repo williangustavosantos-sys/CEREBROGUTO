@@ -1672,12 +1672,19 @@ async function transcribeWithOpenAI(audioBuffer: Buffer, language = "pt", mimeTy
   form.append("model", "whisper-1");
   form.append("language", language.startsWith("pt") ? "pt" : language.slice(0, 2));
 
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.min(GUTO_MODEL_TIMEOUT_MS, 30_000));
+
   const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
     body: form,
-  });
+    signal: controller.signal,
+  }).finally(() => clearTimeout(timer));
   const data: any = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || "Falha na transcrição.");
+  }
   return data?.text?.trim() || "";
 }
 
@@ -3338,8 +3345,16 @@ app.post("/guto-audio", upload.single("audio"), async (req, res) => {
       return res.status(400).json({ error: "Áudio não enviado." });
     }
 
+    if (!file.buffer?.length || file.buffer.length < 800) {
+      return res.status(400).json({ error: "Áudio curto demais. Segure o microfone e fale uma frase completa." });
+    }
+
     const language = String(req.body.language || "pt-BR");
     const transcript = await transcribeWithOpenAI(file.buffer, language, file.mimetype);
+    if (!transcript) {
+      return res.status(422).json({ error: "Não consegui transcrever o áudio. Repita em uma frase curta." });
+    }
+
     const profile = req.body.profile ? JSON.parse(String(req.body.profile)) : undefined;
     const history = req.body.history ? JSON.parse(String(req.body.history)) : [];
     const expectedResponse = req.body.expectedResponse
@@ -3362,7 +3377,10 @@ app.post("/guto-audio", upload.single("audio"), async (req, res) => {
     const vozData = await vozResp.json();
 
     res.json({ ...gutoData, transcript, audioContent: vozData.audioContent });
-  } catch (e) { res.status(500).json({ error: "Erro no Guto Audio" }); }
+  } catch (error) {
+    console.warn("Erro no Guto Audio:", error);
+    res.status(500).json({ error: "Falha ao processar áudio. Envie a mesma resposta por texto." });
+  }
 });
 
 app.listen(PORT, () => console.log(`🦾 GUTO ONLINE NA PORTA ${PORT}`));
