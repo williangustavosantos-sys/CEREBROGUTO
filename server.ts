@@ -2034,19 +2034,19 @@ function buildWorkoutPlan({
     : `prestando atenção em ${limitationFocus}`;
 
   if (mode === "gym") {
-    if (hasAnyTerm(normalize(status), ["trocar foco", "nao repetir peito", "não repetir peito", "costas e pernas"])) {
+    if (hasAnyTerm(normalize(status), ["trocar foco", "nao repetir peito", "não repetir peito", "costas e biceps", "costas e bíceps"])) {
       return {
-        focus: "Costas e pernas",
+        focus: "Costas e bíceps",
         dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
         scheduledFor: scheduledFor.toISOString(),
-        summary: `Costas e pernas com ${careLine}, sem repetir peito e tríceps.`,
+        summary: `Costas e bíceps com ${careLine}, sem repetir peito e tríceps.`,
         exercises: [
           makeWorkoutExercise("puxada-frente", "Puxada frente", 4, level === "beginner" ? "10-12" : "8-10", "75s", "Peito alto, puxa a barra até a linha do queixo e controla a volta.", "Abre costas sem roubar."),
           makeWorkoutExercise("remada-baixa", "Remada baixa", 4, "10-12", "75s", "Coluna firme e cotovelo indo para trás.", "Costas trabalham, braço só acompanha."),
-          makeWorkoutExercise("leg-press", "Leg press", 4, level === "beginner" ? "12" : "10", "90s", "Pé firme, desce controlado e sobe sem travar joelho.", hasNoLimitation ? "Bloco principal de perna." : `Controle para respeitar ${limitationFocus}.`),
-          makeWorkoutExercise("mesa-flexora", "Mesa flexora", 3, "10-12", "60s", "Quadril colado e flexão sem impulso.", "Posterior entra no jogo."),
-          makeWorkoutExercise("cadeira-extensora", "Cadeira extensora", 3, "12", "60s", "Sobe firme, segura um segundo e desce controlado.", hasNoLimitation ? "Acabamento limpo." : `Amplitude sem irritar ${limitationFocus}.`),
-          makeWorkoutExercise("panturrilha-maquina", "Panturrilha na máquina", 4, "12-15", "45s", "Alongamento embaixo e contração forte em cima.", "Fecha perna sem negociar."),
+          makeWorkoutExercise("remada-curvada", "Remada curvada", 3, "8-10", "90s", "Tronco firme, barra perto do corpo e cotovelo indo para trás.", hasNoLimitation ? "Densidade de costas sem pressa." : `Sem irritar ${limitationFocus}.`),
+          makeWorkoutExercise("pulldown-neutro", "Pulldown pegada neutra", 3, "10-12", "75s", "Ombro baixo e puxada controlada até o alto do peito.", "Controle antes de carga."),
+          makeWorkoutExercise("rosca-direta", "Rosca direta", 4, "8-10", "60s", "Cotovelo parado e subida sem jogar o tronco.", "Bíceps entra limpo."),
+          makeWorkoutExercise("rosca-inclinada", "Rosca inclinada com halteres", 3, "10-12", "60s", "Braço alonga embaixo e sobe sem roubar.", "Fecha bíceps com amplitude."),
         ],
       };
     }
@@ -2399,10 +2399,10 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
   const normalizedStatus = normalize(cleanStatus);
   const selectedLanguage = normalizeLanguage(language);
 
-  if (hasAnyTerm(normalizedStatus, ["trocar foco", "nao repetir peito", "não repetir peito", "costas e pernas"])) {
+  if (hasAnyTerm(normalizedStatus, ["trocar foco", "nao repetir peito", "não repetir peito", "costas e biceps", "costas e bíceps"])) {
     if (selectedLanguage === "en-US") {
       return {
-        fala: "Good catch. I am not repeating chest and triceps. Tomorrow switches to back and legs. Now give me your age and any pain I need to respect.",
+        fala: "Good catch. I am not repeating chest and triceps. Tomorrow switches to back and biceps. Now give me your age and any pain I need to respect.",
         acao: "none",
         expectedResponse: {
           type: "text",
@@ -2413,7 +2413,7 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
     }
     if (selectedLanguage === "it-IT") {
       return {
-        fala: "Segnalazione giusta. Non ripeto petto e tricipiti. Domani cambio su schiena e gambe. Ora dimmi eta e qualsiasi fastidio che devo rispettare.",
+        fala: "Segnalazione giusta. Non ripeto petto e tricipiti. Domani cambio su schiena e bicipiti. Ora dimmi eta e qualsiasi fastidio che devo rispettare.",
         acao: "none",
         expectedResponse: {
           type: "text",
@@ -2424,7 +2424,7 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
     }
     if (selectedLanguage === "es-ES") {
       return {
-        fala: "Bien marcado. No repito pecho y triceps. Mañana cambio a espalda y piernas. Ahora dime tu edad y cualquier molestia que deba respetar.",
+        fala: "Bien marcado. No repito pecho y triceps. Mañana cambio a espalda y biceps. Ahora dime tu edad y cualquier molestia que deba respetar.",
         acao: "none",
         expectedResponse: {
           type: "text",
@@ -2434,7 +2434,7 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
       };
     }
     return {
-      fala: "Boa correção. Não vou repetir peito e tríceps. Amanhã eu mudo para costas e pernas. Agora me manda tua idade e qualquer dorzinha que eu preciso respeitar.",
+      fala: "Boa correção. Não vou repetir peito e tríceps. Amanhã eu mudo para costas e bíceps. Agora me manda tua idade e qualquer dorzinha que eu preciso respeitar.",
       acao: "none",
       expectedResponse: {
         type: "text",
@@ -3029,7 +3029,7 @@ async function askGutoModel({
       getLocationMode(memory.trainingLocation || "") === "gym" &&
       shouldSwitchFromSuggestedGymFocus(input || "")
     ) {
-      const correctedStatus = "trocar foco para costas e pernas; não repetir peito e tríceps";
+      const correctedStatus = "trocar foco para costas e bíceps; não repetir peito e tríceps";
       applyTrainingIntake(memory, normalizedExpectedResponse, correctedStatus);
       return finalize(buildTrainingLimitationsQuestion(correctedStatus, language));
     }
