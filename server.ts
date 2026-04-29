@@ -2263,7 +2263,7 @@ function makeWorkoutExercise(
   cue: string,
   note: string
 ): WorkoutExercise {
-  const animationId = WORKOUTX_ANIMATION_BY_EXERCISE_ID[id];
+  const animationId = WORKOUTX_API_KEY ? WORKOUTX_ANIMATION_BY_EXERCISE_ID[id] : undefined;
   return {
     id,
     name,
