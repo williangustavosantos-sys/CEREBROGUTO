@@ -402,7 +402,7 @@ function enrichWorkoutPlanAnimations(plan?: WorkoutPlan | null): WorkoutPlan | n
   return {
     ...plan,
     exercises: plan.exercises.map((exercise) => {
-      if (exercise.animationUrl || !WORKOUTX_API_KEY) return exercise;
+      if (exercise.animationUrl) return exercise;
       const animationId = WORKOUTX_ANIMATION_BY_EXERCISE_ID[exercise.id];
       if (!animationId) return exercise;
       return {
@@ -2288,7 +2288,7 @@ function makeWorkoutExercise(
   cue: string,
   note: string
 ): WorkoutExercise {
-  const animationId = WORKOUTX_API_KEY ? WORKOUTX_ANIMATION_BY_EXERCISE_ID[id] : undefined;
+  const animationId = WORKOUTX_ANIMATION_BY_EXERCISE_ID[id];
   return {
     id,
     name,
