@@ -43,6 +43,9 @@ interface WorkoutExercise {
   rest: string;
   cue: string;
   note: string;
+  animationId?: string;
+  animationUrl?: string;
+  animationProvider?: "workoutx";
 }
 interface WorkoutPlan {
   focus: string;
@@ -123,6 +126,7 @@ const GUTO_MODEL_TIMEOUT_MS = config.modelTimeoutMs;
 const GUTO_MODEL_TEMPERATURE = config.modelTemperature;
 const VOICE_API_KEY = config.voiceApiKey;
 const OPENAI_API_KEY = config.openaiApiKey;
+const WORKOUTX_API_KEY = config.workoutxApiKey;
 const MEMORY_FILE = config.memoryFile;
 const DEFAULT_USER_ID = config.defaultUserId;
 const GUTO_TIME_ZONE = config.timeZone;
@@ -130,6 +134,31 @@ const DEFAULT_VOICE_STYLE = {
   speakingRate: 0.94,
   pitch: -2.2,
   volumeGainDb: 0,
+};
+
+const WORKOUTX_ANIMATION_BY_EXERCISE_ID: Record<string, string> = {
+  "puxada-frente": "2330",
+  "remada-baixa": "0239",
+  "remada-curvada": "0027",
+  "pulldown-neutro": "0818",
+  "rosca-direta": "0031",
+  "rosca-inclinada": "0072",
+  "supino-reto": "0025",
+  "supino-inclinado-halteres": "0314",
+  crossover: "0227",
+  "chest-press": "0576",
+  "triceps-corda": "0200",
+  "triceps-frances": "0194",
+  "paralela-assistida": "0009",
+  "flexao-fechada": "0259",
+  "caminhada-corrida": "0684",
+  "agachamento-livre": "0043",
+  "flexao-banco": "0493",
+  "afundo-caminhando": "1460",
+  "mountain-climber": "0630",
+  "flexao-inclinada": "0493",
+  "triceps-cadeira": "0129",
+  "corrida-parada": "0684",
 };
 
 const GUTO_VOICES: Record<GutoLanguage, GutoVoiceProfile> = {
@@ -178,6 +207,34 @@ app.get("/health", (_req, res) => {
     service: "guto-cerebro",
     time: new Date().toISOString(),
   });
+});
+
+app.get("/exercise-animations/workoutx/:animationId.gif", async (req, res) => {
+  const animationId = String(req.params.animationId || "");
+  if (!/^\d{4}$/.test(animationId)) {
+    return res.status(400).json({ message: "Animação inválida." });
+  }
+
+  if (!WORKOUTX_API_KEY) {
+    return res.status(503).json({ message: "WORKOUTX_API_KEY ausente no backend." });
+  }
+
+  try {
+    const upstream = await fetch(`https://api.workoutxapp.com/v1/gifs/${animationId}.gif`, {
+      headers: { "X-WorkoutX-Key": WORKOUTX_API_KEY },
+    });
+
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({ message: "Animação indisponível." });
+    }
+
+    const bytes = Buffer.from(await upstream.arrayBuffer());
+    res.setHeader("Content-Type", upstream.headers.get("content-type") || "image/gif");
+    res.setHeader("Cache-Control", "public, max-age=604800, s-maxage=604800, stale-while-revalidate=86400");
+    res.send(bytes);
+  } catch (error) {
+    res.status(502).json({ message: "Falha ao carregar animação do exercício." });
+  }
 });
 
 app.post("/guto/events", (req, res) => {
@@ -2206,7 +2263,23 @@ function makeWorkoutExercise(
   cue: string,
   note: string
 ): WorkoutExercise {
-  return { id, name, sets, reps, rest, cue, note };
+  const animationId = WORKOUTX_ANIMATION_BY_EXERCISE_ID[id];
+  return {
+    id,
+    name,
+    sets,
+    reps,
+    rest,
+    cue,
+    note,
+    ...(animationId
+      ? {
+          animationId,
+          animationUrl: `/exercise-animations/workoutx/${animationId}.gif`,
+          animationProvider: "workoutx" as const,
+        }
+      : {}),
+  };
 }
 
 function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {

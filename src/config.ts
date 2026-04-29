@@ -7,6 +7,7 @@ export const config = {
   modelTimeoutMs: Number(process.env.GUTO_MODEL_TIMEOUT_MS || 30_000),
   modelTemperature: Number(process.env.GUTO_MODEL_TEMPERATURE || 0.28),
   voiceApiKey: (process.env.VOICE_API_KEY || "").replace(/['"]/g, ""),
+  workoutxApiKey: (process.env.WORKOUTX_API_KEY || "").replace(/['"]/g, ""),
   openaiApiKey: process.env.OPENAI_API_KEY || "",
   memoryFile: process.env.GUTO_MEMORY_FILE || join(process.cwd(), "data", "guto-memory.json"),
   defaultUserId: process.env.GUTO_DEFAULT_USER_ID || "local-user",
