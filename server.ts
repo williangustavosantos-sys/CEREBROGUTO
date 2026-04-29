@@ -1208,10 +1208,14 @@ function getSafeProfileName(profile?: Profile) {
 }
 
 function extractScheduledTime(rawInput: string) {
-  const match = rawInput.match(/\b(\d{1,2})[:hH](\d{2})\b/);
+  const clean = rawInput.replace(/\s+/g, " ").trim();
+  const match =
+    clean.match(/\b(\d{1,2})[:hH](\d{2})\b/) ||
+    clean.match(/\b(?:as|às|a|at|alle|a las)\s+(\d{1,2})(?:[:hH](\d{2}))?\b/i) ||
+    clean.match(/\b(\d{1,2})h(?:\s*(\d{2}))?\b/i);
   if (!match) return null;
   const hour = Number(match[1]);
-  const minute = Number(match[2]);
+  const minute = Number(match[2] || 0);
   if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
   if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
   return `${String(hour).padStart(2, "0")}h${String(minute).padStart(2, "0")}`;
@@ -3083,7 +3087,9 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
   }
 
   const statusLine =
-    cleanStatus === "parado" || normalizedStatus.includes("parado")
+    hasAnyTerm(normalizedStatus, ["doente", "doenca", "doença", "mal", "voltei agora", "quero ir leve", "leve", "resfriado", "gripe"])
+      ? "Entendi. Então hoje é retorno leve, sem heroísmo e sem ego."
+      : cleanStatus === "parado" || normalizedStatus.includes("parado")
       ? "Beleza. Então eu vou entrar mais limpo e sem heroísmo."
       : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno"])
         ? "Boa. Retorno inteligente cresce mais do que ego acelerado."
@@ -3091,7 +3097,9 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
 
   if (selectedLanguage === "en-US") {
     const line =
-      cleanStatus === "parado" || normalizedStatus.includes("parado")
+      hasAnyTerm(normalizedStatus, ["sick", "ill", "not well", "light", "easy", "coming back"])
+        ? "Got it. Today is a lighter comeback, no hero act."
+        : cleanStatus === "parado" || normalizedStatus.includes("parado")
         ? "Alright. We'll ease into it, leave the ego at the door."
         : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno", "returning", "back into", "getting back"])
           ? "Smart move. A solid comeback beats a rushed ego."
@@ -3108,7 +3116,9 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
   }
   if (selectedLanguage === "it-IT") {
     const line =
-      cleanStatus === "parado" || normalizedStatus.includes("parado") || hasAnyTerm(normalizedStatus, ["fermo", "stop", "principiante", "mai allenato"])
+      hasAnyTerm(normalizedStatus, ["male", "malato", "malata", "leggero", "piano", "rientro"])
+        ? "Capito. Oggi rientro leggero, niente eroismi."
+        : cleanStatus === "parado" || normalizedStatus.includes("parado") || hasAnyTerm(normalizedStatus, ["fermo", "stop", "principiante", "mai allenato"])
         ? "Va bene. Riprendiamo con calma, niente eroismi."
         : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno", "ripresa", "ripartendo", "rientro"])
           ? "Scelta saggia. Un rientro intelligente conta più dell'ego."
@@ -3125,7 +3135,9 @@ function buildTrainingLimitationsQuestion(status: string, language = "pt-BR"): G
   }
   if (selectedLanguage === "es-ES") {
     const line =
-      cleanStatus === "parado" || normalizedStatus.includes("parado")
+      hasAnyTerm(normalizedStatus, ["mal", "enfermo", "enferma", "suave", "ligero", "leve", "volviendo"])
+        ? "Entendido. Hoy volvemos suave, sin hacernos los héroes."
+        : cleanStatus === "parado" || normalizedStatus.includes("parado")
         ? "Vale. Empezaremos poco a poco, sin hacernos los héroes."
         : hasAnyTerm(normalizedStatus, ["voltando", "retornando", "retorno", "volviendo", "retomando", "regresando"])
           ? "Bien pensado. Volver con cabeza es mejor que tirar de ego."
@@ -3369,50 +3381,6 @@ function buildPersonalizedWorkoutStart(memory: GutoMemory, limitationInput: stri
       },
     };
   }
-  if (memory.trainingSchedule === "tomorrow" || (memory.trainingSchedule !== "today" && isTomorrowSchedulingIntent(status))) {
-    if (selectedLanguage === "en-US") {
-      return {
-        fala: "Locked. Send me a real time for tomorrow and I will hold you to it.",
-        acao: "none",
-        expectedResponse: {
-          type: "text",
-          instruction: "Reply with a fixed time for tomorrow.",
-          context: "training_schedule",
-        },
-      };
-    }
-    if (selectedLanguage === "it-IT") {
-      return {
-        fala: "Affare fatto. Mandami un orario preciso per domani e io tengo fermo l'impegno.",
-        acao: "none",
-        expectedResponse: {
-          type: "text",
-          instruction: "Dammi un orario preciso per domani.",
-          context: "training_schedule",
-        },
-      };
-    }
-    if (selectedLanguage === "es-ES") {
-      return {
-        fala: "Cerrado. Mándame una hora real para mañana y sostengo ese compromiso.",
-        acao: "none",
-        expectedResponse: {
-          type: "text",
-          instruction: "Responde con una hora fija para mañana.",
-          context: "training_schedule",
-        },
-      };
-    }
-    return {
-      fala: "Fechado. Me manda em uma frase um horário fechado amanhã e eu seguro esse compromisso.",
-      acao: "none",
-      expectedResponse: {
-        type: "text",
-        instruction: "Responder um horário fechado para amanhã.",
-        context: "training_schedule",
-      },
-    };
-  }
   const hasNoLimitation =
     !limitation ||
     ["não", "nao", "nada", "nenhuma", "livre", "zero", "sem dor", "no pain", "no injury", "senza dolore", "nessun dolore", "nessun fastidio", "non ho dolori", "non ho dolore", "libero", "sin dolor", "sin lesion", "sin lesión", "no tengo dolor", "libre"].some((signal) => limitation.includes(signal));
@@ -3502,7 +3470,7 @@ async function validateExpectedResponse({
     return { valid: false, matchedOption: input };
   }
 
-  const hasTime = /\b\d{1,2}[:hH]\d{2}\b/.test(raw);
+  const hasTime = Boolean(extractScheduledTime(raw));
   const hasMeaningfulText = normalized.split(/\s+/).some((part) => part.length >= 4);
 
   if (expectedResponse.context === "training_schedule") {
@@ -3825,6 +3793,9 @@ async function askGutoModel({
     applyTrainingIntake(memory, normalizedExpectedResponse, validation.matchedOption || input);
 
     if (normalizedExpectedResponse.context === "training_schedule") {
+      if (extractScheduledTime(validation.matchedOption || input)) {
+        return finalize(buildModelFallbackResponse({ input: validation.matchedOption || input, language, profile }));
+      }
       if (memory.trainingLocation) {
         return finalize(buildTrainingStatusQuestion(memory.trainingLocation, language, memory.trainingSchedule));
       }
