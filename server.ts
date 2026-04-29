@@ -154,6 +154,9 @@ const WORKOUTX_ANIMATION_BY_EXERCISE_ID: Record<string, string> = {
   "paralela-assistida": "0009",
   flexao: "0259",
   burpee: "1160",
+  "aquecimento-polichinelo": "3220",
+  "aquecimento-perdigueiro": "3543",
+  "aquecimento-prancha": "0463",
   "agachamento-livre": "0043",
   "afundo-caminhando": "1460",
   serrote: "0292",
@@ -2346,6 +2349,38 @@ function makeWorkoutExercise(
   };
 }
 
+function buildWarmupExercises(): WorkoutExercise[] {
+  return [
+    makeWorkoutExercise(
+      "aquecimento-polichinelo",
+      "Aquecimento: polichinelo",
+      2,
+      "30s",
+      "20s",
+      "Abre e fecha sem perder ritmo, só para subir temperatura.",
+      "Primeiro liga o corpo, depois cobra carga."
+    ),
+    makeWorkoutExercise(
+      "aquecimento-perdigueiro",
+      "Aquecimento: perdigueiro",
+      2,
+      "8 por lado",
+      "20s",
+      "Braço e perna opostos estendem juntos, coluna parada.",
+      "Ativa core e lombar antes do bloco pesado."
+    ),
+    makeWorkoutExercise(
+      "aquecimento-prancha",
+      "Aquecimento: prancha curta",
+      2,
+      "20-30s",
+      "25s",
+      "Cotovelo embaixo do ombro, abdômen firme e quadril parado.",
+      "Trava o centro antes de executar."
+    ),
+  ];
+}
+
 function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
   const selectedLanguage = normalizeLanguage(language);
   if (selectedLanguage === "pt-BR") return plan;
@@ -2366,6 +2401,9 @@ function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
     "paralela-assistida": { name: "Dip assistite", cue: "Scendi controllato e sali senza lanciare il corpo.", note: "Mantieni il petto aperto." },
     flexao: { name: "Push-up", cue: "Corpo in linea, petto verso il pavimento e salita controllata.", note: "Semplice, diretto, senza trucco." },
     burpee: { name: "Burpee", cue: "Scendi, porta i piedi indietro, torna compatto e sali senza perdere controllo.", note: "Accendi il sistema subito." },
+    "aquecimento-polichinelo": { name: "Riscaldamento: jumping jack", cue: "Apri e chiudi senza perdere ritmo, solo per alzare la temperatura.", note: "Prima accendi il corpo, poi carichi." },
+    "aquecimento-perdigueiro": { name: "Riscaldamento: bird dog", cue: "Braccio e gamba opposti si estendono insieme, schiena ferma.", note: "Attiva core e lombare prima del blocco serio." },
+    "aquecimento-prancha": { name: "Riscaldamento: plank breve", cue: "Gomiti sotto le spalle, addome duro e bacino fermo.", note: "Blocca il centro prima di eseguire." },
     "agachamento-livre": { name: "Squat libero", cue: "Anca giù pulita e ginocchio in linea con il piede.", note: "Ritmo costante." },
     "afundo-caminhando": { name: "Affondi camminati", cue: "Passo lungo e busto alto.", note: "Non collassare verso l'interno." },
     serrote: { name: "Rematore a un braccio", cue: "Appoggio stabile, gomito indietro e schiena ferma.", note: "Trazione semplice e seria." },
@@ -2396,6 +2434,9 @@ function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
     "paralela-assistida": { name: "Assisted dips", cue: "Lower under control and rise without swinging.", note: "Keep the chest open." },
     flexao: { name: "Push-up", cue: "Body in line, chest down, press back up under control.", note: "Simple, direct, no tricks." },
     burpee: { name: "Burpee", cue: "Drop, kick back, come back tight, stand up under control.", note: "Wake the system now." },
+    "aquecimento-polichinelo": { name: "Warm-up: jumping jack", cue: "Open and close without losing rhythm, just bring the temperature up.", note: "Switch the body on before loading it." },
+    "aquecimento-perdigueiro": { name: "Warm-up: bird dog", cue: "Opposite arm and leg extend together, spine still.", note: "Turn on core and low back before the main block." },
+    "aquecimento-prancha": { name: "Warm-up: short plank", cue: "Elbows under shoulders, abs tight, hips still.", note: "Lock the center before execution." },
     "agachamento-livre": { name: "Bodyweight squat", cue: "Hips down clean, knees track with feet.", note: "Steady rhythm." },
     "afundo-caminhando": { name: "Walking lunges", cue: "Long step, tall torso.", note: "Do not collapse inward." },
     serrote: { name: "One-arm dumbbell row", cue: "Stable support, elbow back, spine still.", note: "Simple and serious pull." },
@@ -2419,6 +2460,9 @@ function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
     "paralela-assistida": { name: "Fondos asistidos", cue: "Baja controlado y sube sin lanzar el cuerpo.", note: "Mantén el pecho abierto." },
     flexao: { name: "Flexión", cue: "Cuerpo en línea, pecho abajo y subida controlada.", note: "Simple, directa, sin truco." },
     burpee: { name: "Burpee", cue: "Baja, lleva los pies atrás, vuelve compacto y sube con control.", note: "Enciende el sistema ahora." },
+    "aquecimento-polichinelo": { name: "Calentamiento: jumping jack", cue: "Abre y cierra sin perder ritmo, solo para subir temperatura.", note: "Primero enciende el cuerpo, luego cargas." },
+    "aquecimento-perdigueiro": { name: "Calentamiento: bird dog", cue: "Brazo y pierna contrarios se estiran juntos, espalda quieta.", note: "Activa core y lumbar antes del bloque serio." },
+    "aquecimento-prancha": { name: "Calentamiento: plancha corta", cue: "Codos bajo los hombros, abdomen firme y cadera quieta.", note: "Bloquea el centro antes de ejecutar." },
     "agachamento-livre": { name: "Sentadilla libre", cue: "Cadera baja limpia y rodilla alineada con el pie.", note: "Ritmo constante." },
     "afundo-caminhando": { name: "Zancadas caminando", cue: "Paso largo y torso alto.", note: "No colapses hacia dentro." },
     serrote: { name: "Remo a una mano", cue: "Apoyo estable, codo atrás y espalda quieta.", note: "Tracción simple y seria." },
@@ -2575,6 +2619,7 @@ function buildWorkoutPlan({
         scheduledFor: scheduledFor.toISOString(),
         summary: `Costas e bíceps com ${careLine}, sem repetir peito e tríceps.`,
         exercises: [
+          ...buildWarmupExercises(),
           makeWorkoutExercise("puxada-frente", "Puxada frente", 4, level === "beginner" ? "10-12" : "8-10", "75s", "Peito alto, puxa a barra até a linha do queixo e controla a volta.", "Abre costas sem roubar."),
           makeWorkoutExercise("remada-baixa", "Remada baixa", 4, "10-12", "75s", "Coluna firme e cotovelo indo para trás.", "Costas trabalham, braço só acompanha."),
           makeWorkoutExercise("remada-curvada", "Remada curvada", 3, "8-10", "90s", "Tronco firme, barra perto do corpo e cotovelo indo para trás.", hasNoLimitation ? "Densidade de costas sem pressa." : `Sem irritar ${limitationFocus}.`),
@@ -2595,6 +2640,7 @@ function buildWorkoutPlan({
       scheduledFor: scheduledFor.toISOString(),
       summary: `Peito e tríceps com ${careLine}.`,
       exercises: [
+        ...buildWarmupExercises(),
         makeWorkoutExercise(
           "supino-reto",
           "Supino reto",
@@ -2678,6 +2724,7 @@ function buildWorkoutPlan({
       scheduledFor: scheduledFor.toISOString(),
       summary: `Corpo livre no parque com ${careLine}.`,
       exercises: [
+        ...buildWarmupExercises(),
         makeWorkoutExercise("burpee", "Burpee", 4, level === "beginner" ? "6-8" : "8-10", "60s", "Desce, joga os pés para trás, volta compacto e sobe com controle.", "Liga o sistema sem depender de máquina."),
         makeWorkoutExercise("agachamento-livre", "Agachamento livre", 4, level === "beginner" ? "12" : "15", "45s", "Quadril desce limpo e joelho acompanha o pé.", hasNoLimitation ? "Ritmo constante." : `Sem irritar ${limitationFocus}.`),
         makeWorkoutExercise("flexao", "Flexão", 4, level === "beginner" ? "8-10" : "12", "45s", "Corpo inteiro alinhado, peito desce e sobe sem quebrar quadril.", "Peito e tríceps acordados."),
@@ -2693,11 +2740,11 @@ function buildWorkoutPlan({
     scheduledFor: scheduledFor.toISOString(),
     summary: `Corpo livre em casa com ${careLine}.`,
     exercises: [
-      makeWorkoutExercise("polichinelo", "Polichinelo", 4, level === "beginner" ? "30s" : "40s", "20s", "Abre e fecha sem perder ritmo.", "Liga o motor logo no começo."),
+      ...buildWarmupExercises(),
       makeWorkoutExercise("agachamento-livre", "Agachamento livre", 4, level === "beginner" ? "12" : "15", "40s", "Quadril desce limpo e joelho acompanha o pé.", hasNoLimitation ? "Base firme." : `Controle total para respeitar ${limitationFocus}.`),
       makeWorkoutExercise("flexao", "Flexão", 4, level === "beginner" ? "8-10" : "12", "45s", "Corpo inteiro alinhado, peito desce e sobe sem quebrar quadril.", "Peito e tríceps sem inventar variação."),
       makeWorkoutExercise("serrote", "Serrote", 4, "10-12 por lado", "45s", "Apoio firme, cotovelo vai para trás e coluna fica parada.", "Remada simples e forte."),
-      makeWorkoutExercise("prancha-isometrica", "Prancha isométrica", 3, level === "beginner" ? "25-30s" : "40s", "35s", "Cotovelo embaixo do ombro, abdômen firme e quadril parado.", "Fecha com controle."),
+      makeWorkoutExercise("burpee", "Burpee", 3, level === "beginner" ? "6-8" : "8-10", "60s", "Desce, joga os pés para trás, volta compacto e sobe com controle.", "Fecha o condicionamento sem sumir."),
     ],
   }, selectedLanguage);
 }
@@ -3377,29 +3424,29 @@ function buildPersonalizedWorkoutStart(memory: GutoMemory, limitationInput: stri
   const finalMessage = (() => {
     if (selectedLanguage === "en-US") {
       const care = hasLimitation ? " I accounted for the point to protect without making it worse." : "";
-      const base = `Perfect, I locked it.${care} Start with the warm-up: hip mobility, unloaded squats, and a short plank. The main workout is in the workout tab.`;
+      const base = `Perfect, I locked it.${care} The warm-up and the main block are both in the workout tab.`;
       return shouldScheduleTomorrow ? `${base} Tomorrow we start clean.` : `${base} Start now.`;
     }
 
     if (selectedLanguage === "it-IT") {
       const care = hasLimitation ? " Ho tenuto conto del punto da proteggere, senza peggiorarlo." : "";
-      const base = `Perfetto, ho chiuso tutto.${care} Parti dal riscaldamento: mobilità dell'anca, squat senza carico e plank breve. L'allenamento principale è nella scheda allenamento.`;
+      const base = `Perfetto, ho chiuso tutto.${care} Riscaldamento e blocco principale sono entrambi nella scheda allenamento.`;
       return shouldScheduleTomorrow ? `${base} Domani si parte senza rumore.` : `${base} Adesso si parte.`;
     }
 
     if (selectedLanguage === "es-ES") {
       const care = hasLimitation ? " Tuve en cuenta el punto a cuidar sin empeorarlo." : "";
-      const base = `Perfecto, lo dejé cerrado.${care} Empieza por el calentamiento: movilidad de cadera, sentadillas sin carga y plancha corta. El entreno principal está en la pestaña de entrenamiento.`;
+      const base = `Perfecto, lo dejé cerrado.${care} El calentamiento y el bloque principal están en la pestaña de entrenamiento.`;
       return shouldScheduleTomorrow ? `${base} Mañana arrancamos limpio.` : `${base} Empieza ahora.`;
     }
 
     const followUpLine = hasLimitation
       ? `Montei olhando ${limitationFocus} para evoluir sem piorar.`
       : "";
-    const warmupLine = "Começa pelo aquecimento: mobilidade de quadril, agachamentos sem carga e prancha curta.";
+    const warmupLine = "Coloquei aquecimento e bloco principal na aba treino do dia.";
     const baseMessage = hasLimitation
-      ? `Perfeito, já organizei tudo. ${followUpLine} ${warmupLine} O treino principal já está na aba treino do dia. Qualquer dúvida é só clicar no botão ao lado do exercício e eu te respondo.`
-      : `Perfeito, já organizei tudo. ${warmupLine} O treino principal já está na aba treino do dia. Qualquer dúvida é só clicar no botão ao lado do exercício e eu te respondo.`;
+      ? `Perfeito, já organizei tudo. ${followUpLine} ${warmupLine} Qualquer dúvida é só clicar no botão ao lado do exercício e eu te respondo.`
+      : `Perfeito, já organizei tudo. ${warmupLine} Qualquer dúvida é só clicar no botão ao lado do exercício e eu te respondo.`;
     return shouldScheduleTomorrow
       ? `${baseMessage} Amanhã a gente começa com tudo.`
       : `${baseMessage} Bora começar com tudo.`;
