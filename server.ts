@@ -12,6 +12,7 @@ import { requestLog } from "./src/http/request-log";
 type Acao = "none" | "updateWorkout" | "lock";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
 type GutoAvatarEmotion = "default" | "alert" | "critical" | "reward";
+type TrainingScheduleIntent = "today" | "tomorrow";
 type FallbackLineKey = "system_key" | "parse" | "internal_error" | "speech_short";
 type GutoTelemetryEvent =
   | "user_created"
@@ -77,6 +78,7 @@ interface GutoMemory {
   adaptedMissionToday: boolean;
   lastActiveAt: string;
   energyLast?: string;
+  trainingSchedule?: TrainingScheduleIntent;
   trainingLocation?: string;
   trainingStatus?: string;
   trainingLimitations?: string;
@@ -390,6 +392,7 @@ function sanitizeOperationalMemory(memory: GutoMemory): GutoMemory {
   return {
     ...memory,
     energyLast: isOperationalNoise(memory.energyLast) ? undefined : memory.energyLast,
+    trainingSchedule: memory.trainingSchedule === "today" || memory.trainingSchedule === "tomorrow" ? memory.trainingSchedule : undefined,
     trainingLocation: isOperationalNoise(memory.trainingLocation) ? undefined : memory.trainingLocation,
     trainingStatus: isOperationalNoise(memory.trainingStatus) ? undefined : memory.trainingStatus,
     trainingLimitations: isOperationalNoise(memory.trainingLimitations) ? undefined : memory.trainingLimitations,
@@ -559,6 +562,7 @@ function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
       adaptedMissionToday,
       lastActiveAt: existing.lastActiveAt || new Date().toISOString(),
       energyLast: existing.energyLast,
+      trainingSchedule: existing.trainingSchedule,
       trainingLocation: existing.trainingLocation,
       trainingStatus: existing.trainingStatus,
       trainingLimitations: existing.trainingLimitations,
@@ -584,6 +588,7 @@ function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
     trainedToday: false,
     adaptedMissionToday: false,
     lastActiveAt: new Date().toISOString(),
+    trainingSchedule: undefined,
     completedWorkoutDates: [],
     adaptedMissionDates: [],
     missedMissionDates: [],
@@ -1366,6 +1371,43 @@ function isCleanTomorrowStartIntent(value?: string) {
     "manana",
     "mañana",
   ]);
+}
+
+function isTodayTrainingIntent(value?: string) {
+  const normalized = normalize(value || "");
+  if (!normalized) return false;
+  if (isTomorrowSchedulingIntent(normalized) && !hasAnyTerm(normalized, ["hoje", "today", "oggi", "hoy", "agora", "now", "adesso", "ahora"])) return false;
+  return hasAnyTerm(normalized, [
+    "hoje",
+    "agora",
+    "da tempo",
+    "dá tempo",
+    "ainda da tempo",
+    "ainda dá tempo",
+    "estou indo",
+    "to indo",
+    "tô indo",
+    "indo para academia",
+    "indo pra academia",
+    "vou agora",
+    "today",
+    "now",
+    "tonight",
+    "i am going",
+    "i'm going",
+    "oggi",
+    "adesso",
+    "sto andando",
+    "hoy",
+    "ahora",
+    "voy ahora",
+  ]);
+}
+
+function resolveTrainingScheduleIntent(value?: string): TrainingScheduleIntent | undefined {
+  if (isTodayTrainingIntent(value)) return "today";
+  if (isTomorrowSchedulingIntent(value)) return "tomorrow";
+  return undefined;
 }
 
 function hasMinimumRouteAlreadyOffered(history: GutoHistoryItem[] = []) {
@@ -2511,17 +2553,19 @@ function buildWorkoutPlan({
   status,
   limitation,
   age,
+  scheduleIntent,
 }: {
   language: string;
   location: string;
   status: string;
   limitation: string;
   age?: number;
+  scheduleIntent?: TrainingScheduleIntent;
 }): WorkoutPlan {
   const selectedLanguage = normalizeLanguage(language);
   const context = getOperationalContext(new Date(), selectedLanguage);
   const scheduledFor = new Date();
-  const shouldScheduleTomorrow = context.dayPeriod === "late_night" || context.hour >= 22;
+  const shouldScheduleTomorrow = scheduleIntent === "tomorrow" || (scheduleIntent !== "today" && (context.dayPeriod === "late_night" || context.hour >= 22));
   if (shouldScheduleTomorrow) {
     scheduledFor.setDate(scheduledFor.getDate() + 1);
   }
@@ -2693,11 +2737,12 @@ function applyTrainingIntake(memory: GutoMemory, expectedResponse: ExpectedRespo
   };
 
   if (expectedResponse.context === "training_schedule") {
-    next.trainingStatus = normalized;
+    next.trainingSchedule = resolveTrainingScheduleIntent(normalized) || next.trainingSchedule;
   } else if (expectedResponse.context === "training_location") {
     next.trainingLocation = normalized;
   } else if (expectedResponse.context === "training_status") {
     next.trainingStatus = normalized;
+    next.trainingSchedule = resolveTrainingScheduleIntent(normalized) || next.trainingSchedule;
   } else if (expectedResponse.context === "training_limitations") {
     next.trainingLimitations = normalized;
     next.trainingAge = parseAgeFromText(normalized) || next.trainingAge;
@@ -2710,18 +2755,19 @@ function applyTrainingIntake(memory: GutoMemory, expectedResponse: ExpectedRespo
 
   memory.trainingLocation = next.trainingLocation;
   memory.trainingStatus = next.trainingStatus;
+  memory.trainingSchedule = next.trainingSchedule;
   memory.trainingLimitations = next.trainingLimitations;
   memory.trainingAge = next.trainingAge;
   memory.lastActiveAt = next.lastActiveAt;
 }
 
-function buildTrainingStatusQuestion(location: string, language = "pt-BR"): GutoModelResponse {
+function buildTrainingStatusQuestion(location: string, language = "pt-BR", scheduleIntent?: TrainingScheduleIntent): GutoModelResponse {
   const cleanLocation = normalizeMemoryValue(location).toLowerCase().replace(/[.!?]+$/g, "");
   const displayLocation = cleanLocation ? `${cleanLocation.charAt(0).toLocaleUpperCase("it-IT")}${cleanLocation.slice(1)}` : cleanLocation;
   const normalizedLocation = normalize(cleanLocation);
   const selectedLanguage = normalizeLanguage(language);
   const context = getOperationalContext(new Date(), selectedLanguage);
-  const late = context.dayPeriod === "evening" || context.dayPeriod === "late_night";
+  const late = scheduleIntent === "tomorrow" || (scheduleIntent !== "today" && (context.dayPeriod === "evening" || context.dayPeriod === "late_night"));
 
   if (hasCompletionSignal(cleanLocation)) {
     if (selectedLanguage === "en-US") {
@@ -3285,7 +3331,7 @@ function buildPersonalizedWorkoutStart(memory: GutoMemory, limitationInput: stri
       },
     };
   }
-  if (isTomorrowSchedulingIntent(status)) {
+  if (memory.trainingSchedule === "tomorrow" || (memory.trainingSchedule !== "today" && isTomorrowSchedulingIntent(status))) {
     if (selectedLanguage === "en-US") {
       return {
         fala: "Locked. Send me a real time for tomorrow and I will hold you to it.",
@@ -3341,6 +3387,7 @@ function buildPersonalizedWorkoutStart(memory: GutoMemory, limitationInput: stri
     status,
     limitation,
     age: parseAgeFromText(limitation) || memory.trainingAge,
+    scheduleIntent: memory.trainingSchedule,
   });
   memory.lastWorkoutPlan = workoutPlan;
   memory.trainingAge = parseAgeFromText(limitation) || memory.trainingAge;
@@ -3744,7 +3791,7 @@ async function askGutoModel({
     }
 
     if (normalizedExpectedResponse.context === "training_location") {
-      return finalize(buildTrainingStatusQuestion(validation.matchedOption || input, language));
+      return finalize(buildTrainingStatusQuestion(validation.matchedOption || input, language, memory.trainingSchedule));
     }
 
     if (normalizedExpectedResponse.context === "training_status") {
@@ -3782,7 +3829,7 @@ async function askGutoModel({
 
   if (shouldFastTrackLocationReply(input || "")) {
     applyTrainingIntake(memory, { type: "text", context: "training_location" }, input || "");
-    return finalize(buildTrainingStatusQuestion(input || "", language));
+    return finalize(buildTrainingStatusQuestion(input || "", language, memory.trainingSchedule));
   }
 
   const { response, data } = await fetchJsonWithTimeout<any>(
@@ -3872,6 +3919,7 @@ app.post("/guto/memory", (req, res) => {
     trainingLimitations,
     confirmedName,
     xpEvent,
+    trainingSchedule,
   } = req.body as Partial<GutoMemory> & { confirmedName?: boolean; xpEvent?: XpEventType };
   const memory = applyPendingMissPenalties(grantInitialXp(getMemory(userId)));
 
@@ -3905,6 +3953,7 @@ app.post("/guto/memory", (req, res) => {
     grantInitialXp(memory);
   }
   if (energyLast) memory.energyLast = energyLast;
+  if (trainingSchedule === "today" || trainingSchedule === "tomorrow") memory.trainingSchedule = trainingSchedule;
   if (trainingLocation) memory.trainingLocation = normalizeMemoryValue(trainingLocation);
   if (trainingStatus) memory.trainingStatus = normalizeMemoryValue(trainingStatus);
   if (trainingLimitations) memory.trainingLimitations = normalizeMemoryValue(trainingLimitations);
