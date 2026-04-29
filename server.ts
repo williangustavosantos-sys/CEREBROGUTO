@@ -706,15 +706,19 @@ function buildGutoSystemPrompt(language = "pt-BR") {
     "Você é sócio de vida e mentor de performance. Você não é assistente, chatbot, Wikipédia ou entretenimento.",
     "",
     "REGRA MULTILÍNGUE NATIVA",
-    "O GUTO deve falar NATIVAMENTE no idioma selecionado, não traduzir frase por frase.",
-    "- Não traduza literalmente do português.",
-    "- Não reutilize estrutura sintática do português.",
-    "- Não use expressões artificiais como 'ação mínima' em idiomas onde isso não soa natural.",
-    "- Se language = pt-BR, use português brasileiro, direto, firme e natural.",
-    "- Se language = it-IT, escreva come un madrelingua italiano, corto, diretto, senza giri di parole. Usa espressioni naturali.",
-    "- Se language = en-US, escreva como inglês nativo americano, direto, com ritmo próprio. Sem estrutura brasileira.",
-    "- Se language = es-ES, escreva como espanhol europeu natural, coloquial e firme. Sem tradução literal brasileira.",
-    "- Adapte expressões, ritmo, comandos e tom ao idioma. Preserve a personalidade firme, mas com roupagem nativa.",
+    "O GUTO deve nascer no idioma selecionado. Ele não traduz frases do português.",
+    "- Nunca use português como idioma base invisível.",
+    "- Não traduza literalmente expressões brasileiras.",
+    "- Não preserve a estrutura textual brasileira quando language não for pt-BR.",
+    "- Adapte expressão, ritmo, comando, humor seco e pressão ao idioma escolhido.",
+    "- Preserve a personalidade do GUTO: direto, presente, leal e condutor. Não preserve a frase brasileira.",
+    "- Se language = pt-BR, escreva como brasileiro: firme, natural, sem formalidade falsa.",
+    "- Se language = it-IT, escreva como italiano nativo: curto, direto, idiomático. Prefira 'sono qui', 'niente giri lunghi', 'parti adesso', 'fissiamo un orario preciso'. Evite 'ci sono con te', 'niente piano lungo', 'azione minima', 'orario fissato' como tradução literal.",
+    "- Se language = en-US, escreva como inglês nativo americano: curto, direto, com ritmo próprio. Prefira 'No big plan now', 'start with something small', 'lock a time'. Evite 'minimum action' se soar traduzido.",
+    "- Se language = es-ES, escreva como espanhol europeu natural: direto e coloquial. Prefira 'ya es tarde para complicarlo', 'hacemos algo corto', 'cerramos una hora'. Evite calques como 'acción mínima' quando soar artificial.",
+    "- Exemplos: it-IT: 'Will, sono qui. Niente giri lunghi. Parti adesso con qualcosa di breve o fissiamo un orario preciso per domani?'.",
+    "- Exemplos: en-US: 'Will, it’s late. No big plan now. Tell me: do we start with something small now, or lock a time for tomorrow?'.",
+    "- Exemplos: es-ES: 'Will, ya es tarde para complicarlo. Dime una cosa: hacemos algo corto ahora o cerramos una hora para mañana?'.",
     "",
     "MISSÃO CENTRAL",
     "Você existe para fazer o usuário completar o treino do dia ou, se isso estiver inviável, completar uma ação física mínima que mantenha a identidade ativa.",
@@ -1465,7 +1469,7 @@ function buildModelFallbackResponse({
       if (selectedLanguage === "en-US") {
         return { fala: `${name}, I’ve got your back. Right now: water, rest, no chaos. Tomorrow we get back on track.`, acao: "none", expectedResponse: null };
       } else if (selectedLanguage === "it-IT") {
-        return { fala: `${name}, sono qui. Adesso acqua, riposo e niente caos. Domani ripartiamo.`, acao: "none", expectedResponse: null };
+        return { fala: `${name}, sono qui. Acqua, riposo, zero casino. Domani ripartiamo con la testa pulita.`, acao: "none", expectedResponse: null };
       } else if (selectedLanguage === "es-ES") {
         return { fala: `${name}, aquí estoy. Ahora toca agua, descanso y cero caos. Mañana retomamos.`, acao: "none", expectedResponse: null };
       }
@@ -1572,7 +1576,7 @@ function buildGuardrailResponse({
     const copy: Record<typeof kind, GutoModelResponse> = {
       garbage: { fala: `${name}, noise does not decide the day. Tell me now where you train: home, gym, or park.`, acao: "none", expectedResponse: { type: "text", instruction: "Reply where you will train: home, gym, or park.", context: "training_location" } },
       identity: { fala: `${name}, that route does not take control. I am GUTO: direct action now. Tell me where you train: home, gym, or park.`, acao: "none", expectedResponse: { type: "text", instruction: "Reply where you will train: home, gym, or park.", context: "training_location" } },
-      guilt: { fala: `${name}, we missed today, but we do not close at zero. Reply: minimum action now or a locked time tomorrow.`, acao: "none", expectedResponse: { type: "text", instruction: "minimum action now or a locked time tomorrow", context: "training_schedule" } },
+      guilt: { fala: `${name}, we missed today, but we don't leave it at zero. Start small now or lock a time for tomorrow.`, acao: "none", expectedResponse: { type: "text", instruction: "start small now or lock a time for tomorrow", context: "training_schedule" } },
       risk: { fala: `${name}, I am with you. Today is water, simple food, shower, and bed. Tomorrow, if you are better, we return.`, acao: "none", expectedResponse: null },
       completed: { fala: `Good, ${name}. Done. Now recover, and tomorrow we hit the next block.`, acao: "none", expectedResponse: null },
       bad_day: { fala: `${name}, bad day, but not zero. Ten minutes now: light walk or mobility. Where can you do it?`, acao: "none", expectedResponse: { type: "text", instruction: "Reply where you can do ten minutes now.", context: "training_location" } },
@@ -1587,8 +1591,8 @@ function buildGuardrailResponse({
     const copy: Record<typeof kind, GutoModelResponse> = {
       garbage: { fala: `${name}, il rumore non decide la giornata. Dimmi adesso dove ti alleni: casa, palestra o parco.`, acao: "none", expectedResponse: { type: "text", instruction: "Dimmi dove ti alleni: casa, palestra o parco.", context: "training_location" } },
       identity: { fala: `${name}, quella strada non prende il controllo. Sono GUTO: azione diretta adesso. Dimmi dove ti alleni: casa, palestra o parco.`, acao: "none", expectedResponse: { type: "text", instruction: "Dimmi dove ti alleni: casa, palestra o parco.", context: "training_location" } },
-      guilt: { fala: `${name}, oggi abbiamo mancato il colpo, ma non chiudiamo a zero. Rispondi: azione minima adesso o orario fissato domani.`, acao: "none", expectedResponse: { type: "text", instruction: "azione minima adesso o orario fissato per domani", context: "training_schedule" } },
-      risk: { fala: `${name}, ci sono io con te. Oggi acqua, cibo semplice, doccia e letto. Domani, se stai meglio, ripartiamo.`, acao: "none", expectedResponse: null },
+      guilt: { fala: `${name}, oggi abbiamo mancato il colpo, ma non chiudiamo a zero. Parti con qualcosa di breve o blocchiamo un orario per domani.`, acao: "none", expectedResponse: { type: "text", instruction: "parti con qualcosa di breve o blocchiamo un orario per domani", context: "training_schedule" } },
+      risk: { fala: `${name}, sono qui. Oggi acqua, cibo semplice, doccia e letto. Domani, se stai meglio, ripartiamo.`, acao: "none", expectedResponse: null },
       completed: { fala: `Bene, ${name}. Fatto. Ora recupera, e domani attacchiamo il prossimo blocco.`, acao: "none", expectedResponse: null },
       bad_day: { fala: `${name}, giornata storta, ma non zero. Dieci minuti adesso: camminata leggera o mobilità. Dove puoi farli?`, acao: "none", expectedResponse: { type: "text", instruction: "Dimmi dove puoi fare dieci minuti adesso.", context: "training_location" } },
       daily_plan: { fala: `${name}, oggi parte adesso: 5 min riscaldamento, 4 giri da 12 squat, 10 push-up, 12 rematori, poi 5 min camminata leggera. Primo blocco ora.`, acao: "none", expectedResponse: null },
@@ -1602,7 +1606,7 @@ function buildGuardrailResponse({
     const copy: Record<typeof kind, GutoModelResponse> = {
       garbage: { fala: `${name}, el ruido no decide el día. Dime ahora dónde entrenas: casa, gimnasio o parque.`, acao: "none", expectedResponse: { type: "text", instruction: "Responde dónde vas a entrenar: casa, gimnasio o parque.", context: "training_location" } },
       identity: { fala: `${name}, esa ruta no toma el control. Soy GUTO: acción directa ahora. Dime dónde entrenas: casa, gimnasio o parque.`, acao: "none", expectedResponse: { type: "text", instruction: "Responde dónde vas a entrenar: casa, gimnasio o parque.", context: "training_location" } },
-      guilt: { fala: `${name}, hoy fallamos, pero no cerramos en cero. Responde: acción mínima ahora u horario cerrado mañana.`, acao: "none", expectedResponse: { type: "text", instruction: "acción mínima ahora u horario cerrado mañana", context: "training_schedule" } },
+      guilt: { fala: `${name}, hoy fallamos, pero no lo dejamos en cero. Hacemos algo corto ahora o cerramos una hora para mañana.`, acao: "none", expectedResponse: { type: "text", instruction: "hacemos algo corto ahora o cerramos una hora para mañana", context: "training_schedule" } },
       risk: { fala: `${name}, estoy contigo. Hoy agua, comida simple, ducha y cama. Mañana, si estás mejor, retomamos.`, acao: "none", expectedResponse: null },
       completed: { fala: `Bien, ${name}. Hecho. Ahora recupera, y mañana atacamos el próximo bloque.`, acao: "none", expectedResponse: null },
       bad_day: { fala: `${name}, día malo, pero no cero. Diez minutos ahora: caminata suave o movilidad. ¿Dónde puedes hacerlo?`, acao: "none", expectedResponse: { type: "text", instruction: "Responde dónde puedes hacer diez minutos ahora.", context: "training_location" } },
@@ -1957,7 +1961,7 @@ function buildExpectedResponseCorrection(
 
   if (selectedLanguage === "it-IT") {
     if (expectedResponse.context === "training_schedule") {
-      return "Mi serve una risposta chiara. Tienila semplice: parti adesso con qualcosa di breve o fissiamo un orario per domani?";
+      return "Mi serve una risposta chiara: parti adesso con qualcosa di breve o fissiamo un orario preciso per domani?";
     }
     if (expectedResponse.context === "training_location") {
       return "Mi manca ancora dove ti alleni oggi. Rispondi diretto: casa, palestra o parco?";
@@ -1977,7 +1981,7 @@ function buildExpectedResponseCorrection(
   }
   if (selectedLanguage === "es-ES") {
     if (expectedResponse.context === "training_schedule") {
-      return "Aún me falta una respuesta clara. Dímelo fácil: hacemos algo corto ahora o cerramos una hora para mañana?";
+      return "Aún me falta una respuesta clara: hacemos algo corto ahora o cerramos una hora para mañana?";
     }
     if (expectedResponse.context === "training_location") {
       return "Todavía me falta dónde vas a entrenar hoy. Dímelo directo: casa, gimnasio o parque?";
@@ -3082,9 +3086,9 @@ function buildProactiveFallbackResponse(slot: string, memory: GutoMemory, langua
   if (slot === "21") {
     const line: Record<GutoLanguage, string> = {
       "pt-BR": "Já ficou tarde. Me responde em uma frase: ação mínima agora ou horário fechado amanhã.",
-      "en-US": "It is late now. Reply in one sentence: minimum action now or a locked time tomorrow.",
-      "it-IT": "Ormai è tardi. Rispondi in una frase: azione minima adesso o orario fissato per domani.",
-      "es-ES": "Ya se hizo tarde. Responde en una frase: acción mínima ahora u horario cerrado mañana.",
+      "en-US": `${memory.name}, it’s late. No big plan now. Start with something small now, or lock a time for tomorrow?`,
+      "it-IT": `${memory.name}, sono qui. Niente giri lunghi. Parti adesso con qualcosa di breve o fissiamo un orario preciso per domani?`,
+      "es-ES": `${memory.name}, ya es tarde para complicarlo. Hacemos algo corto ahora o cerramos una hora para mañana?`,
     };
     return {
       fala: line[selectedLanguage],
@@ -3197,7 +3201,7 @@ function buildPersonalizedWorkoutStart(memory: GutoMemory, limitationInput: stri
     }
     if (selectedLanguage === "it-IT") {
       return {
-        fala: "Fissato. Mandami un orario preciso per domani e io tengo fermo l'impegno.",
+        fala: "Affare fatto. Mandami un orario preciso per domani e io tengo fermo l'impegno.",
         acao: "none",
         expectedResponse: {
           type: "text",
