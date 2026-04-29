@@ -1410,6 +1410,15 @@ function resolveTrainingScheduleIntent(value?: string): TrainingScheduleIntent |
   return undefined;
 }
 
+function resolveTrainingLocationIntent(value?: string): string | undefined {
+  const normalized = normalize(value || "");
+  if (!normalized) return undefined;
+  if (hasAnyTerm(normalized, ["academia", "academias", "palestra", "pales", "gym", "gimnasio", "fitness", "box"])) return "academia";
+  if (hasAnyTerm(normalized, ["parque", "parco", "park", "rua", "calle", "street", "pista", "quadra"])) return "parque";
+  if (hasAnyTerm(normalized, ["casa", "home", "house", "apartamento", "appartamento", "condominio", "condomínio", "garagem", "garage", "sala"])) return "casa";
+  return undefined;
+}
+
 function hasMinimumRouteAlreadyOffered(history: GutoHistoryItem[] = []) {
   const modelText = history
     .filter((item) => item.role === "model")
@@ -2765,11 +2774,13 @@ function applyTrainingIntake(memory: GutoMemory, expectedResponse: ExpectedRespo
 
   if (expectedResponse.context === "training_schedule") {
     next.trainingSchedule = resolveTrainingScheduleIntent(normalized) || next.trainingSchedule;
+    next.trainingLocation = resolveTrainingLocationIntent(normalized) || next.trainingLocation;
   } else if (expectedResponse.context === "training_location") {
-    next.trainingLocation = normalized;
+    next.trainingLocation = resolveTrainingLocationIntent(normalized) || normalized;
   } else if (expectedResponse.context === "training_status") {
     next.trainingStatus = normalized;
     next.trainingSchedule = resolveTrainingScheduleIntent(normalized) || next.trainingSchedule;
+    next.trainingLocation = resolveTrainingLocationIntent(normalized) || next.trainingLocation;
   } else if (expectedResponse.context === "training_limitations") {
     next.trainingLimitations = normalized;
     next.trainingAge = parseAgeFromText(normalized) || next.trainingAge;
@@ -3814,6 +3825,9 @@ async function askGutoModel({
     applyTrainingIntake(memory, normalizedExpectedResponse, validation.matchedOption || input);
 
     if (normalizedExpectedResponse.context === "training_schedule") {
+      if (memory.trainingLocation) {
+        return finalize(buildTrainingStatusQuestion(memory.trainingLocation, language, memory.trainingSchedule));
+      }
       return finalize(buildTrainingLocationQuestion(validation.matchedOption || input, language));
     }
 
