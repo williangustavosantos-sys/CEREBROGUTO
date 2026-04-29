@@ -393,7 +393,25 @@ function sanitizeOperationalMemory(memory: GutoMemory): GutoMemory {
     trainingLocation: isOperationalNoise(memory.trainingLocation) ? undefined : memory.trainingLocation,
     trainingStatus: isOperationalNoise(memory.trainingStatus) ? undefined : memory.trainingStatus,
     trainingLimitations: isOperationalNoise(memory.trainingLimitations) ? undefined : memory.trainingLimitations,
-    lastWorkoutPlan: memory.lastWorkoutPlan || null,
+    lastWorkoutPlan: enrichWorkoutPlanAnimations(memory.lastWorkoutPlan || null),
+  };
+}
+
+function enrichWorkoutPlanAnimations(plan?: WorkoutPlan | null): WorkoutPlan | null {
+  if (!plan?.exercises?.length) return plan || null;
+  return {
+    ...plan,
+    exercises: plan.exercises.map((exercise) => {
+      if (exercise.animationUrl || !WORKOUTX_API_KEY) return exercise;
+      const animationId = WORKOUTX_ANIMATION_BY_EXERCISE_ID[exercise.id];
+      if (!animationId) return exercise;
+      return {
+        ...exercise,
+        animationId,
+        animationUrl: `/exercise-animations/workoutx/${animationId}.gif`,
+        animationProvider: "workoutx",
+      };
+    }),
   };
 }
 
@@ -1712,6 +1730,13 @@ function applyBehavioralGuardrails({
 
   if (isOperationalGarbage) {
     return buildGuardrailResponse({ kind: "garbage", language, profile });
+  }
+
+  if (
+    hasAnyTerm(normalizedInput, ["me chama de", "me chame de", "chama de", "chame de"]) &&
+    hasAnyTerm(normalizedInput, ["banana", "banan", "asdf", "qwerty", "ovo", "teste"])
+  ) {
+    return buildGuardrailResponse({ kind: "identity", language, profile });
   }
 
   if (hasAnyTerm(normalizedInput, ["terapeuta", "terapia", "esquece esse papo de treino", "esquecer o treino", "esquece tudo", "chatbot neutro"])) {
