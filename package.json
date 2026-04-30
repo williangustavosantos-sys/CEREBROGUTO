@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "tsx watch server.ts",
     "start": "tsx server.ts",
+    "test": "npm run test:guto",
+    "test:guto": "node --import tsx --test tests/guto.integration.test.ts",
     "typecheck": "tsc --noEmit",
     "eval:guto": "tsx scripts/run-guto-evals.ts",
     "eval:promptfoo": "npx promptfoo@0.121.7 eval -c promptfooconfig.yaml -o evals/reports/promptfoo-results.json --no-share"
