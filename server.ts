@@ -8,6 +8,12 @@ import { dirname } from "path";
 import { config } from "./src/config";
 import { createRateLimit } from "./src/http/rate-limit";
 import { requestLog } from "./src/http/request-log";
+import {
+  getCatalogById,
+  getExerciseName,
+  ValidatedExerciseCatalog,
+  type CatalogLanguage,
+} from "./exercise-catalog";
 
 type Acao = "none" | "updateWorkout" | "lock";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
@@ -78,17 +84,24 @@ interface ExpectedResponse {
 interface WorkoutExercise {
   id: string;
   name: string;
+  canonicalNamePt: string;
+  muscleGroup: string;
   sets: number;
   reps: string;
   rest: string;
   cue: string;
   note: string;
+  videoUrl: string;
+  videoProvider: "local";
+  sourceFileName: string;
+  // kept for backward compat with plans saved before the catalog migration
   animationId?: string;
   animationUrl?: string;
   animationProvider?: "workoutx";
 }
 interface WorkoutPlan {
   focus: string;
+  focusKey?: WorkoutFocus;
   dateLabel: string;
   scheduledFor: string;
   summary: string;
@@ -97,6 +110,9 @@ interface WorkoutPlan {
 interface RecentTrainingHistoryItem {
   dateLabel: "today" | "yesterday" | "day_before_yesterday" | "recent" | "unknown";
   muscleGroup?: WorkoutFocus;
+  focusKey?: WorkoutFocus;
+  exerciseIds?: string[];
+  videoUrls?: string[];
   raw: string;
   createdAt: string;
 }
@@ -462,6 +478,9 @@ function enrichWorkoutPlanAnimations(plan?: WorkoutPlan | null): WorkoutPlan | n
   return {
     ...plan,
     exercises: plan.exercises.map((exercise) => {
+      // Local catalog exercises already have videoUrl — no animation enrichment needed.
+      if (exercise.videoProvider === "local" || exercise.videoUrl) return exercise;
+      // Backward compat: enrich pre-catalog plans that still use workoutx animations.
       if (exercise.animationUrl) return exercise;
       const animationId = WORKOUTX_ANIMATION_BY_EXERCISE_ID[exercise.id];
       if (!animationId) return exercise;
@@ -2196,6 +2215,13 @@ function applyResponseBehaviorCorrections({
       scheduleIntent: "tomorrow",
       focus: nextFocus,
     });
+    const planValidation = validateWorkoutPlan(workoutPlan, memory.recentTrainingHistory || [], getLocationMode(location));
+    if (!planValidation.valid) {
+      console.warn("[GUTO] validateWorkoutPlan errors:", planValidation.errors);
+    }
+    if (planValidation.warnings.length > 0) {
+      console.info("[GUTO] validateWorkoutPlan warnings:", planValidation.warnings);
+    }
     patchedMemory.lastWorkoutPlan = workoutPlan;
     saveMemory(patchedMemory);
     const localizedLocation = localizeLocationLabel(location, selectedLanguage);
@@ -2302,8 +2328,7 @@ function applyResponseBehaviorCorrections({
 
   if (
     hasSicknessSignal(input) &&
-    hasAnyTerm(normalizedInput, ["voltando", "retornando", "voltando agora"]) &&
-    response.expectedResponse?.context === "training_status"
+    hasAnyTerm(normalizedInput, ["voltando", "retornando", "voltando agora"])
   ) {
     const fala: Record<GutoLanguage, string> = {
       "pt-BR": "Fechado, sem heroísmo hoje. Vamos entrar leve e recuperar ritmo. Me manda onde você consegue fazer algo simples: casa, academia ou parque.",
@@ -2885,6 +2910,32 @@ ANTI-PADRÕES (NUNCA FAZER):
 - Nunca aja como chatbot médico. Se o usuário estiver doente, reduza intensidade e mantenha presença.
 `.trim();
 
+  const confrontoRegra = `
+CONFRONTO SEM GÊNERO E RECÁLCULO POR CONTEXTO:
+
+IDENTIDADE vs COMPORTAMENTO:
+- GUTO nunca ataca identidade. GUTO confronta comportamento.
+- "Hoje você não foi" — sim. "Você é fraco" — nunca.
+- GUTO nunca assume gênero do usuário. Proibido: "homem também treina perna", "vira homem", "isso é coisa de homem/mulher", qualquer variação baseada em masculino/feminino.
+
+FUGA DE PERNA (e de qualquer grupo base):
+- Quando o usuário tenta fugir de perna sem dar motivo, GUTO NÃO aceita de primeira.
+- Ele provoca de forma neutra e pede contexto real, em 1-2 frases.
+- Exemplos calibrados por idioma (não copiar literal, adaptar ao tom):
+  pt-BR: "Fugindo de perna? Suspeito. Perna não é opcional, mas eu negocio se tiver motivo real. Qual é o contexto?"
+  pt-BR: "Quer virar um triângulo premium com base de palito?"
+  en-US: "Skipping legs? Suspicious. Legs are not optional. I only negotiate if there's a real reason. What's the context?"
+  it-IT: "Scappi dalle gambe? Sospetto. Le gambe non sono opzionali. Tratto solo se c'è un motivo vero. Qual è il contesto?"
+  es-ES: "¿Escapando de piernas? Sospechoso. Piernas no es opcional. Solo negocio si hay un motivo real. ¿Cuál es el contexto?"
+
+CONTEXTO REAL MUDA A ROTA:
+- Se o usuário der motivo concreto (feriado, parque sem academia, pouco tempo, cansaço real, dor, lesão), GUTO recalcula sem insistir.
+- Parque muda tudo: sem halter, sem máquina, sem cabo, sem barra, sem banco.
+- Se local for parque e sem equipamento declarado: rota = cardio ao ar livre + abdômen/core/lombar com exercícios de corpo livre com vídeo local.
+- GUTO não inventa exercício de ombro pesado no parque. Se não há equipamento, não há ombro.
+- Quando recalcular para parque: "Boa. Agora virou contexto real. Parque muda o jogo: nada de inventar ombro sem equipamento. Fazemos cardio + abdômen e lombar. Fechado?"
+`.trim();
+
   const idiomaRegra = `
 IDIOMA OBRIGATÓRIO DA FALA: ${langName}.
 - Tudo que o usuário vê precisa estar em ${langName}.
@@ -2982,6 +3033,8 @@ Usuário entrega contexto fora de ordem:
     vinculoPhase,
     "",
     antiPadroes,
+    "",
+    confrontoRegra,
     "",
     idiomaRegra,
     "",
@@ -3791,31 +3844,92 @@ function getWorkoutDateLabel(language: string, scheduledFor: Date) {
   }).format(scheduledFor);
 }
 
-function makeWorkoutExercise(
+function makeExerciseFromCatalog(
   id: string,
-  name: string,
+  language: GutoLanguage,
   sets: number,
   reps: string,
   rest: string,
   cue: string,
   note: string
 ): WorkoutExercise {
-  const animationId = WORKOUTX_ANIMATION_BY_EXERCISE_ID[id];
+  const entry = getCatalogById(id);
+  if (!entry) {
+    throw new Error(`Exercise "${id}" not found in ValidatedExerciseCatalog. Cannot prescribe unlisted exercises.`);
+  }
   return {
-    id,
-    name,
+    id: entry.id,
+    name: entry.namesByLanguage[language as CatalogLanguage] ?? entry.canonicalNamePt,
+    canonicalNamePt: entry.canonicalNamePt,
+    muscleGroup: entry.muscleGroup,
     sets,
     reps,
     rest,
     cue,
     note,
-    ...(animationId
-      ? {
-          animationId,
-          animationUrl: `/exercise-animations/workoutx/${animationId}.gif`,
-          animationProvider: "workoutx" as const,
-        }
-      : {}),
+    videoUrl: entry.videoUrl,
+    videoProvider: "local",
+    sourceFileName: entry.sourceFileName,
+  };
+}
+
+// Legacy wrapper kept for backward compat with saved plans that have old dash IDs.
+// Maps old dash IDs → catalog underscore IDs.
+const LEGACY_ID_MAP: Record<string, string> = {
+  "supino-reto": "supino_reto",
+  "supino-inclinado-halteres": "supino_inclinado_halter",
+  crossover: "crucifixo_maquina",
+  "supino-reto-maquina": "supino_reto_maquina",
+  "puxada-frente": "puxada_frente",
+  "remada-baixa": "remada_baixa_polia",
+  "remada-curvada": "remada_cavalinho",
+  "remada-neutra-maquina": "remada_neutra_maquina",
+  "rosca-direta": "biceps_maquina",
+  "rosca-inclinada": "rosca_alternada_halter_sentado",
+  "triceps-corda": "triceps_barra_v_cabo",
+  "triceps-frances": "triceps_frances_cabo",
+  "paralela-assistida": "paralelas_gravitron",
+  flexao: "flexao",
+  burpee: "burpee",
+  "agachamento-livre": "agachamento_livre",
+  "afundo-caminhando": "afundo_halter",
+  serrote: "serrote",
+  "prancha-isometrica": "prancha_isometrica",
+  polichinelo: "polichinelo",
+  "aquecimento-bike": "bike_academia",
+  "aquecimento-escada": "escada_academia",
+  "aquecimento-prancha": "prancha_isometrica",
+  "aquecimento-polichinelo": "polichinelo",
+  "aquecimento-perdigueiro": "perdigueiro",
+};
+
+function makeWorkoutExercise(
+  id: string,
+  _name: string,
+  sets: number,
+  reps: string,
+  rest: string,
+  cue: string,
+  note: string
+): WorkoutExercise {
+  const resolvedId = LEGACY_ID_MAP[id] ?? id;
+  const entry = getCatalogById(resolvedId);
+  if (!entry) {
+    throw new Error(`Exercise "${id}" (resolved: "${resolvedId}") not found in ValidatedExerciseCatalog.`);
+  }
+  return {
+    id: entry.id,
+    name: entry.canonicalNamePt,
+    canonicalNamePt: entry.canonicalNamePt,
+    muscleGroup: entry.muscleGroup,
+    sets,
+    reps,
+    rest,
+    cue,
+    note,
+    videoUrl: entry.videoUrl,
+    videoProvider: "local",
+    sourceFileName: entry.sourceFileName,
   };
 }
 
@@ -3883,187 +3997,206 @@ function buildWarmupExercises(mode: "gym" | "park" | "home" = "home"): WorkoutEx
   ];
 }
 
-function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
-  const selectedLanguage = normalizeLanguage(language);
-  if (selectedLanguage === "pt-BR") return plan;
+// Cue/note translations keyed by catalog underscore IDs
+type CueCopy = Pick<WorkoutExercise, "cue" | "note">;
+const CUE_COPY_BY_LANG: Record<Exclude<GutoLanguage, "pt-BR">, Record<string, CueCopy>> = {
+  "it-IT": {
+    puxada_frente: { cue: "Petto alto, tira la barra fino al mento e controlla il ritorno.", note: "Apri la schiena senza rubare." },
+    remada_baixa_polia: { cue: "Schiena ferma e gomiti che vanno indietro.", note: "La schiena lavora, il braccio accompagna." },
+    remada_cavalinho: { cue: "Busto fermo, bilanciere vicino al corpo e gomiti indietro.", note: "Densità di schiena senza fretta." },
+    remada_neutra_maquina: { cue: "Petto fermo sul supporto e gomiti indietro senza strappare.", note: "Densità pulita, senza rubare." },
+    biceps_maquina: { cue: "Gomiti fermi e salita senza usare il busto.", note: "Bicipite pulito." },
+    rosca_alternada_halter_sentado: { cue: "Braccio allungato in basso e salita senza rubare.", note: "Chiudi il bicipite con ampiezza." },
+    supino_reto: { cue: "Scapole ferme, piedi stabili e bilanciere che scende controllato al petto.", note: "Primo blocco pesante e pulito." },
+    supino_inclinado_halter: { cue: "Panca inclinata e gomiti allineati con il petto.", note: "Ampiezza buona prima del carico." },
+    crucifixo_maquina: { cue: "Braccia semi-flesse e chiusura senza far battere le mani.", note: "Qui è controllo, non ego." },
+    supino_reto_maquina: { cue: "Schiena appoggiata, spalle ferme e spinta controllata.", note: "Chiudi il petto con volume." },
+    triceps_barra_v_cabo: { cue: "Gomiti fermi ed estensione completa.", note: "Il tricipite chiude la missione." },
+    triceps_frances_cabo: { cue: "Allungamento controllato dietro la testa.", note: "Niente fretta nell'allungamento." },
+    paralelas_gravitron: { cue: "Scendi controllato e sali senza lanciare il corpo.", note: "Mantieni il petto aperto." },
+    flexao: { cue: "Corpo in linea, petto verso il pavimento e salita controllata.", note: "Semplice, diretto, senza trucco." },
+    burpee: { cue: "Scendi, porta i piedi indietro, torna compatto e sali senza perdere controllo.", note: "Accendi il sistema subito." },
+    bike_academia: { cue: "Alza la temperatura e sciogli ginocchia e anche senza spremerti.", note: "Prima accendi il sistema, poi chiedi prestazione." },
+    escada_academia: { cue: "Aumenta il ritmo poco a poco, tronco fermo e passo pulito.", note: "Cardio e coordinazione svegli, senza casino." },
+    polichinelo: { cue: "Apri e chiudi senza perdere ritmo.", note: "Accendi il motore subito." },
+    perdigueiro: { cue: "Braccio e gamba opposti si estendono insieme, schiena ferma.", note: "Attiva core e lombare prima del blocco serio." },
+    prancha_isometrica: { cue: "Gomiti sotto le spalle, addome duro e bacino fermo.", note: "Blocca il centro prima di eseguire." },
+    agachamento_livre: { cue: "Anca giù pulita e ginocchio in linea con il piede.", note: "Ritmo costante." },
+    afundo_halter: { cue: "Passo lungo e busto alto.", note: "Non collassare verso l'interno." },
+    serrote: { cue: "Appoggio stabile, gomito indietro e schiena ferma.", note: "Trazione semplice e seria." },
+    prancha_lateral: { cue: "Gomito sotto la spalla, corpo in linea e bacino sollevato.", note: "Tieni il fianco fermo." },
+    legpress_45: { cue: "Piedi a larghezza spalle, scendi controllato e spingi senza bloccare le ginocchia.", note: "Tutta la gamba lavora." },
+    cadeira_extensora: { cue: "Schiena appoggiata, estendi completamente e torna controllato.", note: "Quadricipite chiude pulito." },
+    posterior_maquina: { cue: "Busto fermo, porta i talloni verso i glutei senza rimbalzare.", note: "Tendini lavorano senza fretta." },
+    desenvolvimento_sentado: { cue: "Schiena ferma, premi verso l'alto senza inarcare.", note: "Spalle prima dell'ego." },
+    elevacao_lateral_halter_sentado: { cue: "Gomiti leggermente flessi, braccia fino all'altezza delle spalle.", note: "Non dondolare il busto." },
+    remada_alta_halter: { cue: "Manubri vicino al corpo, gomiti salgono sopra le spalle.", note: "Trapezio e deltoide lavorano insieme." },
+  },
+  "en-US": {
+    puxada_frente: { cue: "Chest tall, pull to chin line, control the return.", note: "Open the back without cheating." },
+    remada_baixa_polia: { cue: "Spine firm, elbows driving back.", note: "Back works, arms only follow." },
+    remada_cavalinho: { cue: "Torso fixed, bar close, elbows back.", note: "Back density without rushing." },
+    remada_neutra_maquina: { cue: "Chest fixed on the pad, elbows back, no jerking.", note: "Clean density, no cheating." },
+    biceps_maquina: { cue: "Elbows still, lift without throwing the torso.", note: "Clean biceps work." },
+    rosca_alternada_halter_sentado: { cue: "Let the arm lengthen at the bottom and lift without cheating.", note: "Finish biceps with range." },
+    supino_reto: { cue: "Shoulder blades locked, feet firm, bar down under control.", note: "Heavy and clean first block." },
+    supino_inclinado_halter: { cue: "Incline bench, elbows tracking with the chest.", note: "Range before load." },
+    crucifixo_maquina: { cue: "Soft elbows, close without slamming the hands.", note: "Control, not ego." },
+    supino_reto_maquina: { cue: "Back against the pad, shoulders quiet, controlled press.", note: "Finish chest with volume." },
+    triceps_barra_v_cabo: { cue: "Elbows pinned, full extension.", note: "Triceps closes the mission." },
+    triceps_frances_cabo: { cue: "Controlled stretch behind the head.", note: "No rush in the stretch." },
+    paralelas_gravitron: { cue: "Lower under control and rise without swinging.", note: "Keep the chest open." },
+    flexao: { cue: "Body in line, chest down, press back up under control.", note: "Simple, direct, no tricks." },
+    burpee: { cue: "Drop, kick back, come back tight, stand up under control.", note: "Wake the system now." },
+    bike_academia: { cue: "Bring the body temperature up and loosen knees and hips without emptying the legs.", note: "Switch the system on before demanding output." },
+    escada_academia: { cue: "Build the rhythm gradually, torso steady, steps clean.", note: "Wake cardio and coordination up without chaos." },
+    polichinelo: { cue: "Open and close without losing rhythm.", note: "Start the engine now." },
+    perdigueiro: { cue: "Opposite arm and leg extend together, spine still.", note: "Turn on core and low back before the main block." },
+    prancha_isometrica: { cue: "Elbows under shoulders, abs tight, hips still.", note: "Lock the center before execution." },
+    agachamento_livre: { cue: "Hips down clean, knees track with feet.", note: "Steady rhythm." },
+    afundo_halter: { cue: "Long step, tall torso.", note: "Do not collapse inward." },
+    serrote: { cue: "Stable support, elbow back, spine still.", note: "Simple and serious pull." },
+    prancha_lateral: { cue: "Elbow under shoulder, body in line, hips lifted.", note: "Keep the side firm." },
+    legpress_45: { cue: "Feet shoulder-width, lower under control, press without locking knees.", note: "Full leg engaged." },
+    cadeira_extensora: { cue: "Back pressed, extend fully and return under control.", note: "Quads finish clean." },
+    posterior_maquina: { cue: "Torso still, curl heels toward glutes without bouncing.", note: "Hamstrings work without rush." },
+    desenvolvimento_sentado: { cue: "Back firm, press up without arching.", note: "Shoulders before ego." },
+    elevacao_lateral_halter_sentado: { cue: "Slight elbow bend, arms to shoulder height.", note: "Do not swing the torso." },
+    remada_alta_halter: { cue: "Dumbbells close to the body, elbows rise above shoulders.", note: "Traps and delts work together." },
+  },
+  "es-ES": {
+    puxada_frente: { cue: "Pecho alto, tira la barra hasta la línea del mentón y controla la vuelta.", note: "Abre espalda sin hacer trampa." },
+    remada_baixa_polia: { cue: "Columna firme y codos hacia atrás.", note: "La espalda trabaja, el brazo acompaña." },
+    remada_cavalinho: { cue: "Torso firme, barra cerca del cuerpo y codos atrás.", note: "Densidad de espalda sin prisa." },
+    remada_neutra_maquina: { cue: "Pecho fijo en el apoyo, codos atrás y sin tirones.", note: "Densidad limpia, sin trampas." },
+    biceps_maquina: { cue: "Codos quietos y subida sin lanzar el tronco.", note: "Bíceps limpio." },
+    rosca_alternada_halter_sentado: { cue: "Brazo largo abajo y subida sin hacer trampa.", note: "Cierra bíceps con amplitud." },
+    supino_reto: { cue: "Escápulas firmes, pies estables y barra bajando controlada.", note: "Primer bloque pesado y limpio." },
+    supino_inclinado_halter: { cue: "Banco inclinado y codos alineados con el pecho.", note: "Amplitud antes que carga." },
+    crucifixo_maquina: { cue: "Brazos semiflexionados y cierre sin golpear las manos.", note: "Control, no ego." },
+    supino_reto_maquina: { cue: "Espalda apoyada, hombros quietos y empuje controlado.", note: "Cierra pecho con volumen." },
+    triceps_barra_v_cabo: { cue: "Codos fijos y extensión completa.", note: "El tríceps cierra la misión." },
+    triceps_frances_cabo: { cue: "Estiramiento controlado detrás de la cabeza.", note: "Sin prisa en el estiramiento." },
+    paralelas_gravitron: { cue: "Baja controlado y sube sin lanzar el cuerpo.", note: "Mantén el pecho abierto." },
+    flexao: { cue: "Cuerpo en línea, pecho abajo y subida controlada.", note: "Simple, directa, sin truco." },
+    burpee: { cue: "Baja, lleva los pies atrás, vuelve compacto y sube con control.", note: "Enciende el sistema ahora." },
+    bike_academia: { cue: "Sube temperatura y suelta rodillas y cadera sin vaciar la pierna.", note: "Primero enciende el sistema, luego pides rendimiento." },
+    escada_academia: { cue: "Sube el ritmo poco a poco, tronco firme y paso limpio.", note: "Despierta cardio y coordinación sin caos." },
+    polichinelo: { cue: "Abre y cierra sin perder ritmo.", note: "Enciende el motor ahora." },
+    perdigueiro: { cue: "Brazo y pierna contrarios se estiran juntos, espalda quieta.", note: "Activa core y lumbar antes del bloque serio." },
+    prancha_isometrica: { cue: "Codos bajo los hombros, abdomen firme y cadera quieta.", note: "Bloquea el centro antes de ejecutar." },
+    agachamento_livre: { cue: "Cadera baja limpia y rodilla alineada con el pie.", note: "Ritmo constante." },
+    afundo_halter: { cue: "Paso largo y torso alto.", note: "No colapses hacia dentro." },
+    serrote: { cue: "Apoyo estable, codo atrás y espalda quieta.", note: "Tracción simple y seria." },
+    prancha_lateral: { cue: "Codo bajo el hombro, cuerpo en línea y cadera elevada.", note: "Mantén el lado firme." },
+    legpress_45: { cue: "Pies a la anchura de hombros, baja controlado y empuja sin bloquear rodillas.", note: "Toda la pierna trabaja." },
+    cadeira_extensora: { cue: "Espalda apoyada, extiende completamente y vuelve controlado.", note: "Cuádriceps cierra limpio." },
+    posterior_maquina: { cue: "Tronco quieto, lleva los talones hacia los glúteos sin rebotar.", note: "Los femorales trabajan sin prisa." },
+    desenvolvimento_sentado: { cue: "Espalda firme, empuja hacia arriba sin arquear.", note: "Hombros antes que el ego." },
+    elevacao_lateral_halter_sentado: { cue: "Codos ligeramente flexionados, brazos hasta la altura de los hombros.", note: "No balancees el tronco." },
+    remada_alta_halter: { cue: "Mancuernas cerca del cuerpo, codos suben por encima de los hombros.", note: "Trapecios y deltoides trabajan juntos." },
+  },
+};
 
-  const exerciseCopy: Record<string, Pick<WorkoutExercise, "name" | "cue" | "note">> = {
-    "puxada-frente": { name: "Lat machine avanti", cue: "Petto alto, tira la barra fino al mento e controlla il ritorno.", note: "Apri la schiena senza rubare." },
-    "remada-baixa": { name: "Rematore basso al cavo", cue: "Schiena ferma e gomiti che vanno indietro.", note: "La schiena lavora, il braccio accompagna." },
-    "remada-curvada": { name: "Rematore con bilanciere", cue: "Busto fermo, bilanciere vicino al corpo e gomiti indietro.", note: "Densità di schiena senza fretta." },
-    "remada-neutra-maquina": { name: "Rematore neutro alla macchina", cue: "Petto fermo sul supporto e gomiti indietro senza strappare.", note: "Densità pulita, senza rubare." },
-    "rosca-direta": { name: "Curl bilanciere", cue: "Gomiti fermi e salita senza usare il busto.", note: "Bicipite pulito." },
-    "rosca-inclinada": { name: "Curl inclinato con manubri", cue: "Braccio allungato in basso e salita senza rubare.", note: "Chiudi il bicipite con ampiezza." },
-    "supino-reto": { name: "Panca piana", cue: "Scapole ferme, piedi stabili e bilanciere che scende controllato al petto.", note: "Primo blocco pesante e pulito." },
-    "supino-inclinado-halteres": { name: "Panca inclinata con manubri", cue: "Panca inclinata e gomiti allineati con il petto.", note: "Ampiezza buona prima del carico." },
-    crossover: { name: "Croci ai cavi", cue: "Braccia semi-flesse e chiusura senza far battere le mani.", note: "Qui è controllo, non ego." },
-    "supino-reto-maquina": { name: "Panca piana alla macchina", cue: "Schiena appoggiata, spalle ferme e spinta controllata.", note: "Chiudi il petto con volume." },
-    "triceps-corda": { name: "Pushdown corda", cue: "Gomiti fermi ed estensione completa.", note: "Il tricipite chiude la missione." },
-    "triceps-frances": { name: "French press al cavo", cue: "Allungamento controllato dietro la testa.", note: "Niente fretta nell'allungamento." },
-    "paralela-assistida": { name: "Dip assistite", cue: "Scendi controllato e sali senza lanciare il corpo.", note: "Mantieni il petto aperto." },
-    flexao: { name: "Push-up", cue: "Corpo in linea, petto verso il pavimento e salita controllata.", note: "Semplice, diretto, senza trucco." },
-    burpee: { name: "Burpee", cue: "Scendi, porta i piedi indietro, torna compatto e sali senza perdere controllo.", note: "Accendi il sistema subito." },
-    "aquecimento-bike": { name: "Riscaldamento: bike", cue: "Alza la temperatura e sciogli ginocchia e anche senza spremerti.", note: "Prima accendi il sistema, poi chiedi prestazione." },
-    "aquecimento-escada": { name: "Riscaldamento: scala", cue: "Aumenta il ritmo poco a poco, tronco fermo e passo pulito.", note: "Cardio e coordinazione svegli, senza casino." },
-    "aquecimento-polichinelo": { name: "Riscaldamento: jumping jack", cue: "Apri e chiudi senza perdere ritmo, solo per alzare la temperatura.", note: "Prima accendi il corpo, poi carichi." },
-    "aquecimento-perdigueiro": { name: "Riscaldamento: bird dog", cue: "Braccio e gamba opposti si estendono insieme, schiena ferma.", note: "Attiva core e lombare prima del blocco serio." },
-    "aquecimento-prancha": { name: "Riscaldamento: plank breve", cue: "Gomiti sotto le spalle, addome duro e bacino fermo.", note: "Blocca il centro prima di eseguire." },
-    "agachamento-livre": { name: "Squat libero", cue: "Anca giù pulita e ginocchio in linea con il piede.", note: "Ritmo costante." },
-    "afundo-caminhando": { name: "Affondi camminati", cue: "Passo lungo e busto alto.", note: "Non collassare verso l'interno." },
-    serrote: { name: "Rematore a un braccio", cue: "Appoggio stabile, gomito indietro e schiena ferma.", note: "Trazione semplice e seria." },
-    polichinelo: { name: "Jumping jack", cue: "Apri e chiudi senza perdere ritmo.", note: "Accendi il motore subito." },
-    "prancha-isometrica": { name: "Plank", cue: "Gomiti sotto le spalle, addome duro e bacino fermo.", note: "Chiudi con controllo." },
-  };
-
-  const focusCopy: Record<string, string> = {
-    "Costas e bíceps": "Schiena e bicipiti",
-    "Peito e tríceps": "Petto e tricipiti",
-    "Pernas e core": "Gambe e core",
-    "Ombros e abdome": "Spalle e addome",
-    "Ombros e abdômen": "Spalle e addome",
-    "Corpo todo": "Corpo intero",
-    "Corpo inteiro": "Corpo intero",
-    "Cardio e corpo livre": "Cardio e corpo libero",
-    "Condicionamento em casa": "Condizionamento a casa",
+const FOCUS_NAME_BY_LANG: Record<GutoLanguage, Record<string, string>> = {
+  "pt-BR": {
+    chest_triceps: "Peito e tríceps",
+    back_biceps: "Costas e bíceps",
+    legs_core: "Pernas e core",
+    shoulders_abs: "Ombros e abdome",
+    full_body: "Corpo todo",
+  },
+  "it-IT": {
     chest_triceps: "Petto e tricipiti",
     back_biceps: "Schiena e bicipiti",
     legs_core: "Gambe e core",
     shoulders_abs: "Spalle e addome",
     full_body: "Corpo intero",
-  };
+    "Peito e tríceps": "Petto e tricipiti",
+    "Costas e bíceps": "Schiena e bicipiti",
+    "Pernas e core": "Gambe e core",
+    "Ombros e abdome": "Spalle e addome",
+    "Corpo todo": "Corpo intero",
+    "Corpo inteiro": "Corpo intero",
+    "Cardio e corpo livre": "Cardio e corpo libero",
+    "Condicionamento em casa": "Condizionamento a casa",
+  },
+  "en-US": {
+    chest_triceps: "Chest and triceps",
+    back_biceps: "Back and biceps",
+    legs_core: "Legs and core",
+    shoulders_abs: "Shoulders and abs",
+    full_body: "Full body",
+    "Peito e tríceps": "Chest and triceps",
+    "Costas e bíceps": "Back and biceps",
+    "Pernas e core": "Legs and core",
+    "Ombros e abdome": "Shoulders and abs",
+    "Corpo todo": "Full body",
+    "Corpo inteiro": "Full body",
+    "Cardio e corpo livre": "Cardio and bodyweight",
+    "Condicionamento em casa": "Home conditioning",
+  },
+  "es-ES": {
+    chest_triceps: "Pecho y tríceps",
+    back_biceps: "Espalda y bíceps",
+    legs_core: "Piernas y core",
+    shoulders_abs: "Hombros y abdomen",
+    full_body: "Cuerpo completo",
+    "Peito e tríceps": "Pecho y tríceps",
+    "Costas e bíceps": "Espalda y bíceps",
+    "Pernas e core": "Piernas y core",
+    "Ombros e abdome": "Hombros y abdomen",
+    "Corpo todo": "Cuerpo completo",
+    "Corpo inteiro": "Cuerpo completo",
+    "Cardio e corpo livre": "Cardio y peso corporal",
+    "Condicionamento em casa": "Condicionamiento en casa",
+  },
+};
 
-  const enExerciseCopy: Record<string, Pick<WorkoutExercise, "name" | "cue" | "note">> = {
-    "puxada-frente": { name: "Lat pulldown", cue: "Chest tall, pull to chin line, control the return.", note: "Open the back without cheating." },
-    "remada-baixa": { name: "Seated cable row", cue: "Spine firm, elbows driving back.", note: "Back works, arms only follow." },
-    "remada-curvada": { name: "Bent-over row", cue: "Torso fixed, bar close, elbows back.", note: "Back density without rushing." },
-    "remada-neutra-maquina": { name: "Neutral machine row", cue: "Chest fixed on the pad, elbows back, no jerking.", note: "Clean density, no cheating." },
-    "rosca-direta": { name: "Barbell curl", cue: "Elbows still, lift without throwing the torso.", note: "Clean biceps work." },
-    "rosca-inclinada": { name: "Incline dumbbell curl", cue: "Let the arm lengthen at the bottom and lift without cheating.", note: "Finish biceps with range." },
-    "supino-reto": { name: "Flat bench press", cue: "Shoulder blades locked, feet firm, bar down under control.", note: "Heavy and clean first block." },
-    "supino-inclinado-halteres": { name: "Incline dumbbell press", cue: "Incline bench, elbows tracking with the chest.", note: "Range before load." },
-    crossover: { name: "Cable fly", cue: "Soft elbows, close without slamming the hands.", note: "Control, not ego." },
-    "supino-reto-maquina": { name: "Machine flat press", cue: "Back against the pad, shoulders quiet, controlled press.", note: "Finish chest with volume." },
-    "triceps-corda": { name: "Rope pushdown", cue: "Elbows pinned, full extension.", note: "Triceps closes the mission." },
-    "triceps-frances": { name: "Cable overhead triceps extension", cue: "Controlled stretch behind the head.", note: "No rush in the stretch." },
-    "paralela-assistida": { name: "Assisted dips", cue: "Lower under control and rise without swinging.", note: "Keep the chest open." },
-    flexao: { name: "Push-up", cue: "Body in line, chest down, press back up under control.", note: "Simple, direct, no tricks." },
-    burpee: { name: "Burpee", cue: "Drop, kick back, come back tight, stand up under control.", note: "Wake the system now." },
-    "aquecimento-bike": { name: "Warm-up: bike", cue: "Bring the body temperature up and loosen knees and hips without emptying the legs.", note: "Switch the system on before demanding output." },
-    "aquecimento-escada": { name: "Warm-up: stair climber", cue: "Build the rhythm gradually, torso steady, steps clean.", note: "Wake cardio and coordination up without chaos." },
-    "aquecimento-polichinelo": { name: "Warm-up: jumping jack", cue: "Open and close without losing rhythm, just bring the temperature up.", note: "Switch the body on before loading it." },
-    "aquecimento-perdigueiro": { name: "Warm-up: bird dog", cue: "Opposite arm and leg extend together, spine still.", note: "Turn on core and low back before the main block." },
-    "aquecimento-prancha": { name: "Warm-up: short plank", cue: "Elbows under shoulders, abs tight, hips still.", note: "Lock the center before execution." },
-    "agachamento-livre": { name: "Bodyweight squat", cue: "Hips down clean, knees track with feet.", note: "Steady rhythm." },
-    "afundo-caminhando": { name: "Walking lunges", cue: "Long step, tall torso.", note: "Do not collapse inward." },
-    serrote: { name: "One-arm dumbbell row", cue: "Stable support, elbow back, spine still.", note: "Simple and serious pull." },
-    polichinelo: { name: "Jumping jack", cue: "Open and close without losing rhythm.", note: "Start the engine now." },
-    "prancha-isometrica": { name: "Plank", cue: "Elbows under shoulders, abs tight, hips still.", note: "Finish with control." },
-  };
+function stripExercisesWithoutVideo(plan: WorkoutPlan): WorkoutPlan {
+  const valid = plan.exercises.filter(
+    (e) => e.videoUrl && e.videoProvider === "local"
+  );
+  if (valid.length < plan.exercises.length) {
+    const removed = plan.exercises
+      .filter((e) => !e.videoUrl || e.videoProvider !== "local")
+      .map((e) => e.id);
+    console.warn(`[GUTO] Stripped exercise(s) without valid local videoUrl: ${removed.join(", ")}`);
+  }
+  return { ...plan, exercises: valid };
+}
 
-  const esExerciseCopy: Record<string, Pick<WorkoutExercise, "name" | "cue" | "note">> = {
-    "puxada-frente": { name: "Jalón al pecho", cue: "Pecho alto, tira la barra hasta la línea del mentón y controla la vuelta.", note: "Abre espalda sin hacer trampa." },
-    "remada-baixa": { name: "Remo bajo en polea", cue: "Columna firme y codos hacia atrás.", note: "La espalda trabaja, el brazo acompaña." },
-    "remada-curvada": { name: "Remo inclinado con barra", cue: "Torso firme, barra cerca del cuerpo y codos atrás.", note: "Densidad de espalda sin prisa." },
-    "remada-neutra-maquina": { name: "Remo neutro en máquina", cue: "Pecho fijo en el apoyo, codos atrás y sin tirones.", note: "Densidad limpia, sin trampas." },
-    "rosca-direta": { name: "Curl con barra", cue: "Codos quietos y subida sin lanzar el tronco.", note: "Bíceps limpio." },
-    "rosca-inclinada": { name: "Curl inclinado con mancuernas", cue: "Brazo largo abajo y subida sin hacer trampa.", note: "Cierra bíceps con amplitud." },
-    "supino-reto": { name: "Press banca plano", cue: "Escápulas firmes, pies estables y barra bajando controlada.", note: "Primer bloque pesado y limpio." },
-    "supino-inclinado-halteres": { name: "Press inclinado con mancuernas", cue: "Banco inclinado y codos alineados con el pecho.", note: "Amplitud antes que carga." },
-    crossover: { name: "Aperturas en polea", cue: "Brazos semiflexionados y cierre sin golpear las manos.", note: "Control, no ego." },
-    "supino-reto-maquina": { name: "Press plano en máquina", cue: "Espalda apoyada, hombros quietos y empuje controlado.", note: "Cierra pecho con volumen." },
-    "triceps-corda": { name: "Pushdown con cuerda", cue: "Codos fijos y extensión completa.", note: "El tríceps cierra la misión." },
-    "triceps-frances": { name: "Extensión francesa en polea", cue: "Estiramiento controlado detrás de la cabeza.", note: "Sin prisa en el estiramiento." },
-    "paralela-assistida": { name: "Fondos asistidos", cue: "Baja controlado y sube sin lanzar el cuerpo.", note: "Mantén el pecho abierto." },
-    flexao: { name: "Flexión", cue: "Cuerpo en línea, pecho abajo y subida controlada.", note: "Simple, directa, sin truco." },
-    burpee: { name: "Burpee", cue: "Baja, lleva los pies atrás, vuelve compacto y sube con control.", note: "Enciende el sistema ahora." },
-    "aquecimento-bike": { name: "Calentamiento: bici", cue: "Sube temperatura y suelta rodillas y cadera sin vaciar la pierna.", note: "Primero enciende el sistema, luego pides rendimiento." },
-    "aquecimento-escada": { name: "Calentamiento: escalera", cue: "Sube el ritmo poco a poco, tronco firme y paso limpio.", note: "Despierta cardio y coordinación sin caos." },
-    "aquecimento-polichinelo": { name: "Calentamiento: jumping jack", cue: "Abre y cierra sin perder ritmo, solo para subir temperatura.", note: "Primero enciende el cuerpo, luego cargas." },
-    "aquecimento-perdigueiro": { name: "Calentamiento: bird dog", cue: "Brazo y pierna contrarios se estiran juntos, espalda quieta.", note: "Activa core y lumbar antes del bloque serio." },
-    "aquecimento-prancha": { name: "Calentamiento: plancha corta", cue: "Codos bajo los hombros, abdomen firme y cadera quieta.", note: "Bloquea el centro antes de ejecutar." },
-    "agachamento-livre": { name: "Sentadilla libre", cue: "Cadera baja limpia y rodilla alineada con el pie.", note: "Ritmo constante." },
-    "afundo-caminhando": { name: "Zancadas caminando", cue: "Paso largo y torso alto.", note: "No colapses hacia dentro." },
-    serrote: { name: "Remo a una mano", cue: "Apoyo estable, codo atrás y espalda quieta.", note: "Tracción simple y seria." },
-    polichinelo: { name: "Jumping jack", cue: "Abre y cierra sin perder ritmo.", note: "Enciende el motor ahora." },
-    "prancha-isometrica": { name: "Plancha", cue: "Codos bajo los hombros, abdomen firme y cadera quieta.", note: "Cierra con control." },
-  };
-
-  const exerciseCopyByLanguage: Record<Exclude<GutoLanguage, "pt-BR">, Record<string, Pick<WorkoutExercise, "name" | "cue" | "note">>> = {
-    "en-US": enExerciseCopy,
-    "it-IT": exerciseCopy,
-    "es-ES": esExerciseCopy,
-  };
-
-  const focusCopyByLanguage: Record<Exclude<GutoLanguage, "pt-BR">, Record<string, string>> = {
-    "en-US": {
-      "Costas e bíceps": "Back and biceps",
-      "Peito e tríceps": "Chest and triceps",
-      "Pernas e core": "Legs and core",
-      "Ombros e abdome": "Shoulders and abs",
-      "Ombros e abdômen": "Shoulders and abs",
-      "Corpo todo": "Full body",
-      "Corpo inteiro": "Full body",
-      "Cardio e corpo livre": "Cardio and bodyweight",
-      "Condicionamento em casa": "Home conditioning",
-      chest_triceps: "Chest and triceps",
-      back_biceps: "Back and biceps",
-      legs_core: "Legs and core",
-      shoulders_abs: "Shoulders and abs",
-      full_body: "Full body",
-    },
-    "it-IT": focusCopy,
-    "es-ES": {
-      "Costas e bíceps": "Espalda y bíceps",
-      "Peito e tríceps": "Pecho y tríceps",
-      "Pernas e core": "Piernas y core",
-      "Ombros e abdome": "Hombros y abdomen",
-      "Ombros e abdômen": "Hombros y abdomen",
-      "Corpo todo": "Cuerpo completo",
-      "Corpo inteiro": "Cuerpo completo",
-      "Cardio e corpo livre": "Cardio y peso corporal",
-      "Condicionamento em casa": "Condicionamiento en casa",
-      chest_triceps: "Pecho y tríceps",
-      back_biceps: "Espalda y bíceps",
-      legs_core: "Piernas y core",
-      shoulders_abs: "Hombros y abdomen",
-      full_body: "Cuerpo completo",
-    },
-  };
-
-  const activeFocusCopy = focusCopyByLanguage[selectedLanguage];
-  const activeExerciseCopy = exerciseCopyByLanguage[selectedLanguage];
-  const localizedFocus = localizeWorkoutFocus(activeFocusCopy[plan.focus] || plan.focus, selectedLanguage);
-  const fallbackExercise: Record<Exclude<GutoLanguage, "pt-BR">, Pick<WorkoutExercise, "name" | "cue" | "note">> = {
-    "en-US": {
-      name: "Exercise",
-      cue: "Move with control and keep the form clean.",
-      note: "No rushing, no improvising.",
-    },
-    "it-IT": {
-      name: "Esercizio",
-      cue: "Muoviti con controllo e tieni pulita la tecnica.",
-      note: "Niente fretta, niente improvvisazione.",
-    },
-    "es-ES": {
-      name: "Ejercicio",
-      cue: "Muévete con control y mantén la técnica limpia.",
-      note: "Sin prisa y sin improvisar.",
-    },
-  };
+function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
+  const selectedLanguage = normalizeLanguage(language);
   const scheduledDate = new Date(plan.scheduledFor);
   const localizedDateLabel = Number.isNaN(scheduledDate.getTime())
     ? plan.dateLabel
     : getWorkoutDateLabel(selectedLanguage, scheduledDate);
 
+  const focusMap = FOCUS_NAME_BY_LANG[selectedLanguage];
+  const localizedFocus = focusMap[plan.focusKey ?? ""] || focusMap[plan.focus] || plan.focus;
+  const localizedFocusLabel = localizeWorkoutFocus(localizedFocus, selectedLanguage);
+
+  const cueCopyForLang = selectedLanguage !== "pt-BR" ? CUE_COPY_BY_LANG[selectedLanguage] : {};
+
+  const localizedExercises = stripExercisesWithoutVideo(plan).exercises.map((exercise) => {
+    // Name comes from catalog (single source of truth for translations)
+    const localizedName = getExerciseName(exercise.id, selectedLanguage as CatalogLanguage);
+    // Cue/note from translation table; fall back to original PT-BR text
+    const cueCopy = cueCopyForLang[exercise.id];
+    return {
+      ...exercise,
+      name: localizedName || exercise.name,
+      ...(cueCopy ? { cue: cueCopy.cue, note: cueCopy.note } : {}),
+    };
+  });
+
   return {
     ...plan,
-    focus: localizedFocus,
+    focus: localizedFocusLabel,
     dateLabel: localizedDateLabel,
-    summary: `${localizedFocus}.`,
-    exercises: plan.exercises.map((exercise) => ({
-      ...exercise,
-      ...(activeExerciseCopy[exercise.id] || fallbackExercise[selectedLanguage]),
-    })),
+    summary: `${localizedFocusLabel}.`,
+    exercises: localizedExercises,
   };
 }
 
@@ -4176,6 +4309,7 @@ function buildWorkoutPlan({
     if (hasAnyTerm(normalize(status), ["trocar foco", "nao repetir peito", "não repetir peito", "costas e biceps", "costas e bíceps"])) {
       return localizeWorkoutPlan({
         focus: "Costas e bíceps",
+        focusKey: "back_biceps",
         dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
         scheduledFor: scheduledFor.toISOString(),
         summary: `Costas e bíceps com ${careLine}, sem repetir peito e tríceps.`,
@@ -4197,6 +4331,7 @@ function buildWorkoutPlan({
     const repsAccessory = beginner ? "12" : "10-12";
     return localizeWorkoutPlan({
       focus: "Peito e tríceps",
+      focusKey: "chest_triceps",
       dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
       scheduledFor: scheduledFor.toISOString(),
       summary: `Peito e tríceps com ${careLine}.`,
@@ -4281,6 +4416,7 @@ function buildWorkoutPlan({
   if (mode === "park") {
     return localizeWorkoutPlan({
       focus: "Cardio e corpo livre",
+      focusKey: "full_body",
       dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
       scheduledFor: scheduledFor.toISOString(),
       summary: `Corpo livre no parque com ${careLine}.`,
@@ -4297,6 +4433,7 @@ function buildWorkoutPlan({
 
   return localizeWorkoutPlan({
     focus: "Condicionamento em casa",
+    focusKey: "full_body",
     dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
     scheduledFor: scheduledFor.toISOString(),
     summary: `Corpo livre em casa com ${careLine}.`,
@@ -4374,6 +4511,7 @@ function buildWorkoutPlanFromSemanticFocus({
   if (focus === "legs_core") {
     return localizeWorkoutPlan({
       focus: focusLabel,
+      focusKey: "legs_core",
       dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
       scheduledFor: scheduledFor.toISOString(),
       summary: commonSummary,
@@ -4388,34 +4526,126 @@ function buildWorkoutPlanFromSemanticFocus({
   }
 
   if (focus === "shoulders_abs") {
+    // Park/home: no dumbbell — replace serrote with bodyweight core work
+    const shouldersMainExercises = mode === "gym"
+      ? [
+          makeWorkoutExercise("flexao", "Flexão", 4, level === "beginner" ? "8-10" : "12-15", "50s", "Corpo em linha, peito desce controlado e volta sem quebrar quadril.", "Empurra tronco e cintura escapular sem ego."),
+          makeWorkoutExercise("serrote", "Serrote", 4, "10-12 por lado", "50s", "Apoio firme, cotovelo atrás e tronco parado.", "Estabiliza dorsal e ombro."),
+          makeWorkoutExercise("prancha-isometrica", "Prancha isométrica", 4, level === "beginner" ? "25-30s" : "40s", "35s", "Abdômen firme e quadril travado.", "Abdome fecha o bloco."),
+          makeWorkoutExercise("burpee", "Burpee", 2, level === "beginner" ? "6" : "8", "60s", "Ritmo limpo, sem desmontar a postura.", "Só para manter pressão no sistema."),
+        ]
+      : [
+          makeWorkoutExercise("flexao", "Flexão", 4, level === "beginner" ? "8-10" : "12-15", "50s", "Corpo em linha, peito desce controlado e volta sem quebrar quadril.", "Empurra sem inventar variação."),
+          makeWorkoutExercise("perdigueiro", "Perdigueiro", 3, "10 por lado", "35s", "Braço e perna opostos estendem juntos, coluna parada.", "Ativa lombar e core sem equipamento."),
+          makeWorkoutExercise("prancha-isometrica", "Prancha isométrica", 4, level === "beginner" ? "25-30s" : "40s", "35s", "Abdômen firme e quadril travado.", "Abdome fecha o bloco."),
+          makeWorkoutExercise("prancha_lateral", "Prancha lateral", 3, level === "beginner" ? "20-25s" : "30-40s", "30s", "Cotovelo embaixo do ombro, quadril elevado e corpo em linha.", "Lateral fecha o core."),
+          makeWorkoutExercise("burpee", "Burpee", 3, level === "beginner" ? "6-8" : "8-10", "60s", "Ritmo limpo sem desmontar postura.", "Fecha o cardio sem precisar de máquina."),
+        ];
     return localizeWorkoutPlan({
       focus: focusLabel,
+      focusKey: "shoulders_abs",
       dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
       scheduledFor: scheduledFor.toISOString(),
       summary: commonSummary,
       exercises: [
         ...buildWarmupExercises(mode === "gym" ? "gym" : mode === "park" ? "park" : "home"),
-        makeWorkoutExercise("flexao", "Flexão", 4, level === "beginner" ? "8-10" : "12-15", "50s", "Corpo em linha, peito desce controlado e volta sem quebrar quadril.", "Empurra tronco e cintura escapular sem ego."),
-        makeWorkoutExercise("serrote", "Serrote", 4, "10-12 por lado", "50s", "Apoio firme, cotovelo atrás e tronco parado.", "Estabiliza dorsal e ombro."),
-        makeWorkoutExercise("prancha-isometrica", "Prancha isométrica", 4, level === "beginner" ? "25-30s" : "40s", "35s", "Abdômen firme e quadril travado.", "Abdome fecha o bloco."),
-        makeWorkoutExercise("burpee", "Burpee", 2, level === "beginner" ? "6" : "8", "60s", "Ritmo limpo, sem desmontar a postura.", "Só para manter pressão no sistema."),
+        ...shouldersMainExercises,
       ],
     }, selectedLanguage);
   }
 
+  // full_body: park/home replaces serrote (halter) with perdigueiro (bodyweight)
+  const fullBodyMainExercises = mode === "gym"
+    ? [
+        makeWorkoutExercise("agachamento-livre", "Agachamento livre", 4, level === "beginner" ? "12" : "15", "45s", "Desce com controle e sobe inteiro.", "Parte inferior acordada."),
+        makeWorkoutExercise("flexao", "Flexão", 4, level === "beginner" ? "8-10" : "12", "45s", "Corpo alinhado e peito desce limpo.", "Empurra sem improviso."),
+        makeWorkoutExercise("serrote", "Serrote", 4, "10-12 por lado", "45s", "Puxa com cotovelo, não com pressa.", "Costas entram sem roubar."),
+        makeWorkoutExercise("prancha-isometrica", "Prancha isométrica", 3, level === "beginner" ? "25-30s" : "35-45s", "35s", "Centro travado até o fim.", "Fecha o corpo todo sem dispersão."),
+      ]
+    : [
+        makeWorkoutExercise("agachamento-livre", "Agachamento livre", 4, level === "beginner" ? "12" : "15", "45s", "Desce com controle e sobe inteiro.", "Parte inferior acordada."),
+        makeWorkoutExercise("flexao", "Flexão", 4, level === "beginner" ? "8-10" : "12", "45s", "Corpo alinhado e peito desce limpo.", "Empurra sem improviso."),
+        makeWorkoutExercise("perdigueiro", "Perdigueiro", 3, "10 por lado", "35s", "Braço e perna opostos estendem juntos, coluna parada.", "Core ativa sem depender de equipamento."),
+        makeWorkoutExercise("prancha-isometrica", "Prancha isométrica", 3, level === "beginner" ? "25-30s" : "35-45s", "35s", "Centro travado até o fim.", "Fecha o corpo todo sem dispersão."),
+      ];
   return localizeWorkoutPlan({
     focus: focusLabel,
+    focusKey: "full_body",
     dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
     scheduledFor: scheduledFor.toISOString(),
     summary: commonSummary,
     exercises: [
       ...buildWarmupExercises(mode === "gym" ? "gym" : mode === "park" ? "park" : "home"),
-      makeWorkoutExercise("agachamento-livre", "Agachamento livre", 4, level === "beginner" ? "12" : "15", "45s", "Desce com controle e sobe inteiro.", "Parte inferior acordada."),
-      makeWorkoutExercise("flexao", "Flexão", 4, level === "beginner" ? "8-10" : "12", "45s", "Corpo alinhado e peito desce limpo.", "Empurra sem improviso."),
-      makeWorkoutExercise("serrote", "Serrote", 4, "10-12 por lado", "45s", "Puxa com cotovelo, não com pressa.", "Costas entram sem roubar."),
-      makeWorkoutExercise("prancha-isometrica", "Prancha isométrica", 3, level === "beginner" ? "25-30s" : "35-45s", "35s", "Centro travado até o fim.", "Fecha o corpo todo sem dispersão."),
+      ...fullBodyMainExercises,
     ],
   }, selectedLanguage);
+}
+
+interface WorkoutValidationResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+// Equipment values in the catalog that require gym infrastructure — not available at park without explicit declaration.
+const PARK_INCOMPATIBLE_EQUIPMENT = new Set([
+  "halter", "maquina", "polia", "barra", "banco",
+  "bike", "esteira", "escada", "eliptico",
+  "dumbbell", "machine", "cable", "barbell", "bench",
+]);
+
+function validateWorkoutPlan(
+  plan: WorkoutPlan,
+  recentHistory: RecentTrainingHistoryItem[] = [],
+  locationMode?: "gym" | "park" | "home"
+): WorkoutValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  // Every exercise must be in the catalog
+  const seenIds = new Set<string>();
+  const seenVideoUrls = new Set<string>();
+  for (const exercise of plan.exercises) {
+    const entry = getCatalogById(exercise.id);
+    if (!entry) {
+      errors.push(`Exercise "${exercise.id}" not found in ValidatedExerciseCatalog.`);
+    }
+    if (!exercise.videoUrl) {
+      errors.push(`Exercise "${exercise.id}" has no videoUrl.`);
+    }
+    if (exercise.videoProvider !== "local") {
+      errors.push(`Exercise "${exercise.id}" uses provider "${exercise.videoProvider}" — only "local" is allowed.`);
+    }
+    // No duplicate id within same workout
+    if (seenIds.has(exercise.id)) {
+      errors.push(`Duplicate exercise id "${exercise.id}" in the same workout.`);
+    }
+    seenIds.add(exercise.id);
+    // No duplicate videoUrl within same workout
+    if (exercise.videoUrl && seenVideoUrls.has(exercise.videoUrl)) {
+      errors.push(`Duplicate videoUrl "${exercise.videoUrl}" in the same workout.`);
+    }
+    if (exercise.videoUrl) seenVideoUrls.add(exercise.videoUrl);
+    // Park: reject exercises that require gym equipment
+    if (locationMode === "park" && entry) {
+      const equip = entry.equipment ?? "";
+      if (PARK_INCOMPATIBLE_EQUIPMENT.has(equip)) {
+        errors.push(`Exercise "${exercise.id}" uses equipment "${equip}" which is not available at park.`);
+      }
+    }
+  }
+
+  // Anti-repetition: same focusKey must not repeat within 2 days (today + yesterday)
+  if (plan.focusKey) {
+    const recentFocusMatch = recentHistory
+      .filter((h) => h.dateLabel === "today" || h.dateLabel === "yesterday")
+      .find((h) => h.focusKey === plan.focusKey);
+    if (recentFocusMatch) {
+      warnings.push(`Focus "${plan.focusKey}" was already trained ${recentFocusMatch.dateLabel}. Consider switching focus.`);
+    }
+  }
+
+  return { valid: errors.length === 0, errors, warnings };
 }
 
 function applyTrainingIntake(memory: GutoMemory, expectedResponse: ExpectedResponse, value: string) {
@@ -5433,6 +5663,9 @@ function buildPersonalizedWorkoutStart(memory: GutoMemory, limitationInput: stri
     age: parseAgeFromText(limitation) || memory.trainingAge,
     scheduleIntent: memory.trainingSchedule,
   });
+  const planValidation = validateWorkoutPlan(workoutPlan, memory.recentTrainingHistory || [], getLocationMode(location));
+  if (!planValidation.valid) console.warn("[GUTO] validateWorkoutPlan errors:", planValidation.errors);
+  if (planValidation.warnings.length > 0) console.info("[GUTO] validateWorkoutPlan warnings:", planValidation.warnings);
   memory.lastWorkoutPlan = workoutPlan;
   memory.trainingAge = parseAgeFromText(limitation) || memory.trainingAge;
   saveMemory(memory);
@@ -5528,6 +5761,107 @@ async function askGutoModel({
     return finalize(runLocalFallback());
   }
 
+  // ── INTERCEPTOR DETERMINÍSTICO: anti-repetição de grupo muscular ──────────
+  // Resolve "treinei isso ontem/hoje" antes de chamar o Gemini.
+  // "isso" é resolvido para o último grupo muscular sugerido no histórico.
+  // Sem isso, o Gemini pode retornar fala vazia e o app silencia.
+  const normalizedInputForIntercept = normalize(input || "");
+  const hasDayBeforeYesterdaySignal = hasAnyTerm(normalizedInputForIntercept, ["anteontem", "day before yesterday", "avantieri", "antes de ayer"]);
+  const hasYesterdaySignal = !hasDayBeforeYesterdaySignal && hasAnyTerm(normalizedInputForIntercept, ["ontem", "yesterday", "ieri", "ayer"]);
+  const hasTodayAlreadySignal = hasAnyTerm(normalizedInputForIntercept, ["hoje ja", "ja treinei hoje", "treinei hoje"]);
+  const hasContextualRef = hasAnyTerm(normalizedInputForIntercept, ["isso", "esse", "esse treino", "isso ai", "aquele", "that", "quello", "eso"]);
+  const hasTrainingSignal = hasTrainingHistorySignal(input);
+
+  if (hasTrainingSignal && hasDayBeforeYesterdaySignal && hasContextualRef) {
+    const lastFocus = getLastSuggestedWorkoutFocus(memory, history);
+    if (lastFocus) {
+      const nextFocus = chooseNextWorkoutFocus([lastFocus]);
+      const falas: Record<GutoLanguage, string> = {
+        "pt-BR": `Boa correção. Então hoje eu não repito ${MUSCLE_GROUP_LABELS[lastFocus]?.["pt-BR"] ?? lastFocus}. Vou trocar o foco. Me manda tua idade e dor/limitação real.`,
+        "en-US": `Good correction. I am not repeating ${MUSCLE_GROUP_LABELS[lastFocus]?.["en-US"] ?? lastFocus} today. Switching focus. Send me your age and any real pain or limitation.`,
+        "it-IT": `Correzione giusta. Oggi non ripeto ${MUSCLE_GROUP_LABELS[lastFocus]?.["it-IT"] ?? lastFocus}. Cambio focus. Mandami età e dolori o limitazioni reali.`,
+        "es-ES": `Buena corrección. Hoy no repito ${MUSCLE_GROUP_LABELS[lastFocus]?.["es-ES"] ?? lastFocus}. Cambio el foco. Mándame edad y dolor o limitación real.`,
+      };
+      const deterministicResponse: GutoModelResponse = {
+        fala: falas[selectedLanguage],
+        acao: "none",
+        expectedResponse: {
+          type: "text",
+          context: "training_limitations",
+          instruction:
+            selectedLanguage === "pt-BR"
+              ? "Responder idade e dor/limitação real."
+              : selectedLanguage === "it-IT"
+              ? "Rispondere con età e dolori o limitazioni reali."
+              : selectedLanguage === "es-ES"
+              ? "Responder edad y dolor o limitación real."
+              : "Reply with your age and any real pain or limitation.",
+        },
+        avatarEmotion: "default",
+        workoutPlan: null,
+        memoryPatch: {
+          recentTrainingHistory: [
+            {
+              dateLabel: "day_before_yesterday",
+              muscleGroup: lastFocus,
+              raw: normalizeMemoryValue(input),
+              createdAt: new Date().toISOString(),
+            },
+          ],
+          nextWorkoutFocus: nextFocus,
+        },
+      };
+      applyMemoryPatch(memory, deterministicResponse.memoryPatch);
+      return finalize(deterministicResponse);
+    }
+  }
+
+  if (hasTrainingSignal && (hasYesterdaySignal || hasTodayAlreadySignal) && hasContextualRef) {
+    const lastFocus = getLastSuggestedWorkoutFocus(memory, history);
+    if (lastFocus) {
+      const nextFocus = chooseNextWorkoutFocus([lastFocus]);
+      const dateLabel: "yesterday" | "today" = hasTodayAlreadySignal ? "today" : "yesterday";
+      const falas: Record<GutoLanguage, string> = {
+        "pt-BR": `Boa correção. Então hoje eu não repito ${MUSCLE_GROUP_LABELS[lastFocus]?.["pt-BR"] ?? lastFocus}. Vou trocar o foco. Me manda tua idade e dor/limitação real.`,
+        "en-US": `Good correction. I am not repeating ${MUSCLE_GROUP_LABELS[lastFocus]?.["en-US"] ?? lastFocus} today. Switching focus. Send me your age and any real pain or limitation.`,
+        "it-IT": `Correzione giusta. Oggi non ripeto ${MUSCLE_GROUP_LABELS[lastFocus]?.["it-IT"] ?? lastFocus}. Cambio focus. Mandami età e dolori o limitazioni reali.`,
+        "es-ES": `Buena corrección. Hoy no repito ${MUSCLE_GROUP_LABELS[lastFocus]?.["es-ES"] ?? lastFocus}. Cambio el foco. Mándame edad y dolor o limitación real.`,
+      };
+      const deterministicResponse: GutoModelResponse = {
+        fala: falas[selectedLanguage],
+        acao: "none",
+        expectedResponse: {
+          type: "text",
+          context: "training_limitations",
+          instruction:
+            selectedLanguage === "pt-BR"
+              ? "Responder idade e dor/limitação real."
+              : selectedLanguage === "it-IT"
+              ? "Rispondere con età e dolori o limitazioni reali."
+              : selectedLanguage === "es-ES"
+              ? "Responder edad y dolor o limitación real."
+              : "Reply with your age and any real pain or limitation.",
+        },
+        avatarEmotion: "default",
+        workoutPlan: null,
+        memoryPatch: {
+          recentTrainingHistory: [
+            {
+              dateLabel,
+              muscleGroup: lastFocus,
+              raw: normalizeMemoryValue(input),
+              createdAt: new Date().toISOString(),
+            },
+          ],
+          nextWorkoutFocus: nextFocus,
+        },
+      };
+      applyMemoryPatch(memory, deterministicResponse.memoryPatch);
+      return finalize(deterministicResponse);
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   const brainPrompt = buildGutoBrainPrompt({
     input: input || "",
     memory,
@@ -5560,9 +5894,13 @@ async function askGutoModel({
     }
 
     const parsedResponse = parseGutoResponse(data?.candidates?.[0]?.content?.parts?.[0]?.text, language);
-    // CIRURGIA 1: guardrails desligados — confiamos no novo system prompt do GUTO.
-    // Mantidos no código apenas como histórico; não chamamos mais.
-    const correctedResponse = parsedResponse;
+    const correctedResponse = applyResponseBehaviorCorrections({
+      input: input || "",
+      language: selectedLanguage,
+      history,
+      memory,
+      response: parsedResponse,
+    });
 
     applyMemoryPatch(memory, correctedResponse.memoryPatch);
 
@@ -5580,6 +5918,9 @@ async function askGutoModel({
         scheduleIntent: memory.trainingSchedule,
         focus: semanticFocus,
       });
+      const pv = validateWorkoutPlan(workoutPlan, memory.recentTrainingHistory || [], getLocationMode(memory.trainingLocation));
+      if (!pv.valid) console.warn("[GUTO] validateWorkoutPlan errors:", pv.errors);
+      if (pv.warnings.length > 0) console.info("[GUTO] validateWorkoutPlan warnings:", pv.warnings);
     }
 
     if (workoutPlan) {
@@ -5609,6 +5950,9 @@ app.get("/guto/memory", (req, res) => {
   const userId = String(req.query.userId || DEFAULT_USER_ID);
   const memory = applyPendingMissPenalties(grantInitialXp(getMemory(userId)));
   memory.lastActiveAt = new Date().toISOString();
+  if (memory.lastWorkoutPlan) {
+    memory.lastWorkoutPlan = stripExercisesWithoutVideo(memory.lastWorkoutPlan);
+  }
   saveMemory(memory);
   res.json(memory);
 });
