@@ -77,8 +77,11 @@ export async function readMemoryStoreAsync(): Promise<MemoryStore> {
   if (redis) {
     try {
       const raw = await redis.get(REDIS_KEY);
-      if (raw && typeof raw === "object") return raw as MemoryStore;
-      if (typeof raw === "string") return JSON.parse(raw) as MemoryStore;
+      if (raw) {
+        const store = typeof raw === "string" ? JSON.parse(raw) : raw;
+        Object.assign(globalMemoryStore, store);
+        return store as MemoryStore;
+      }
     } catch (err) {
       console.warn("[GUTO] Redis read failed, falling back to filesystem:", err);
     }
@@ -86,26 +89,25 @@ export async function readMemoryStoreAsync(): Promise<MemoryStore> {
 
   // Filesystem
   const fromFile = readFromFile();
-  if (Object.keys(fromFile).length > 0) return fromFile;
+  if (Object.keys(fromFile).length > 0) {
+    Object.assign(globalMemoryStore, fromFile);
+    return fromFile;
+  }
 
   // In-memory (last resort)
-  if (!globalMemoryLoaded) {
-    globalMemoryLoaded = true;
-  }
   return { ...globalMemoryStore };
 }
 
 /**
  * Write the full memory store.
- * Priority: Redis → filesystem → in-memory cache
  */
 export async function writeMemoryStoreAsync(store: MemoryStore): Promise<void> {
-  const redis = getRedisClient();
+  Object.assign(globalMemoryStore, store);
 
+  const redis = getRedisClient();
   if (redis) {
     try {
       await redis.set(REDIS_KEY, store);
-      // Also try filesystem (nice to have, not required)
       writeToFile(store);
       return;
     } catch (err) {
@@ -113,31 +115,25 @@ export async function writeMemoryStoreAsync(store: MemoryStore): Promise<void> {
     }
   }
 
-  // Filesystem
-  const wroteFile = writeToFile(store);
-  if (wroteFile) return;
-
-  // In-memory fallback (Vercel without Redis)
-  console.warn("[GUTO] Filesystem unavailable — using in-memory store (data lost on restart)");
-  Object.assign(globalMemoryStore, store);
+  writeToFile(store);
 }
 
 /**
  * Synchronous read — uses in-memory cache or filesystem only.
- * Kept for backward compat with sync code paths. Prefer async version.
  */
 export function readMemoryStoreSync(): MemoryStore {
-  // In-memory first (already populated by a previous async read)
-  if (Object.keys(globalMemoryStore).length > 0) return { ...globalMemoryStore };
-  return readFromFile();
+  const fromFile = readFromFile();
+  if (Object.keys(fromFile).length > 0) {
+    Object.assign(globalMemoryStore, fromFile);
+    return fromFile;
+  }
+  return { ...globalMemoryStore };
 }
 
 /**
  * Synchronous write — filesystem or in-memory only.
  */
 export function writeMemoryStoreSync(store: MemoryStore): void {
-  const wroteFile = writeToFile(store);
-  if (!wroteFile) {
-    Object.assign(globalMemoryStore, store);
-  }
+  Object.assign(globalMemoryStore, store);
+  writeToFile(store);
 }

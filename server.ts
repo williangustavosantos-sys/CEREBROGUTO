@@ -658,6 +658,7 @@ function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
         existing.nextWorkoutFocus === "full_body"
           ? existing.nextWorkoutFocus
           : undefined,
+      lastSuggestedFocus: isWorkoutFocus(existing.lastSuggestedFocus) ? existing.lastSuggestedFocus : undefined,
       proactiveSent: existing.proactiveSent || {},
     });
   }
@@ -1459,6 +1460,7 @@ function parseGutoResponse(raw: string | undefined, language = "pt-BR"): GutoMod
           : undefined,
       workoutPlan: enrichWorkoutPlanAnimations(parsed.workoutPlan || null),
       memoryPatch: parsed.memoryPatch,
+      trainedReference: parsed.trainedReference,
     };
   } catch {
     const fala = raw.replace(/^```json|```$/g, "").trim() || fallbackLine(language, "parse");
@@ -1809,15 +1811,22 @@ ${JSON.stringify({
   })}
 
 REGRAS DO JSON:
-- trainedReference: Use isso QUANDO o usuário se referir ao treino sugerido ou visível sem nomear o músculo (ex: "treinei isso", "esse fiz ontem", "já fiz esse"). O backend resolverá qual músculo era. 
+- trainedReference: Use isso QUANDO o usuário se referir ao treino sugerido ou visível sem nomear o músculo (ex: "treinei isso", "esse fiz ontem", "já fiz esse"). O backend resolverá qual músculo era com base no que estava na tela.
 - dateLabel em trainedReference deve ser "today", "yesterday" ou "day_before_yesterday".
-- Se o usuário nomear o músculo ("treinei peito ontem"), você pode preencher explicitMuscleGroup: "chest_triceps" ou usar o memoryPatch.recentTrainingHistory diretamente.
+- memoryPatch.recentTrainingHistory: Use isso APENAS se o usuário nomear explicitamente o grupo muscular (ex: "treinei peito ontem", "fiz perna hoje"). 
+- NUNCA preencha os dois ao mesmo tempo para a mesma frase. Priorize trainedReference para referências ambíguas.
 - expectedResponse pode ser null quando não há próxima pergunta esperada.
-- workoutPlan pode ser null quando você não está gerando treino agora. O backend gerará os exercícios se você retornar acao: "updateWorkout".
-- memoryPatch pode objeto vazio {} quando você não está atualizando memória.
-- IMPORTANTÍSSIMO: Sempre que o usuário mencionar que treinou no passado (ontem, anteontem, semana passada), você DEVE preencher o memoryPatch.recentTrainingHistory com o dateLabel correto e o grupo muscular que você identificou.
+- workoutPlan deve ser null na maioria das respostas de chat (o backend gerará os exercícios se você retornar acao: "updateWorkout"). Só preencha workoutPlan se quiser customizar exercícios específicos (raro).
+- memoryPatch pode ser objeto vazio {} quando você não está atualizando memória.
 - avatarEmotion default na maior parte do tempo. "alert" quando cobra. "critical" quando o usuário some / falha. "reward" quando ele entrega.
 - Não inclua campos que você não está usando. Não invente novos campos.
+`.trim();
+
+  const contextoAtual = `
+ESTADO ATUAL DO GUTO (REFERÊNCIA PARA "ISSO" / "ESSE"):
+- Último foco sugerido/visível para o usuário: ${memory.lastSuggestedFocus || memory.nextWorkoutFocus || "desconhecido"}
+- Local planejado: ${memory.trainingLocation || memory.preferredTrainingLocation || "não definido"}
+- Objetivo: ${memory.trainingGoal || "evolução"}
 `.trim();
 
   const exemplos = `
@@ -1850,6 +1859,8 @@ Usuário entrega contexto fora de ordem:
     acoesRegra,
     "",
     formatoSaida,
+    "",
+    contextoAtual,
     "",
     "─── DADOS DO TURNO ATUAL ───",
     `Contexto operacional: ${JSON.stringify(operationalContext)}`,
@@ -1971,8 +1982,10 @@ function resolveTrainedReference(
 function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryPatch"], trainedRef?: GutoModelResponse["trainedReference"]): GutoMemory {
   if (trainedRef) {
     const resolved = resolveTrainedReference(memory, trainedRef);
+    console.log(`[DEBUG] Resolved Reference: ${JSON.stringify(resolved)}`);
     if (resolved) {
       memory.recentTrainingHistory = normalizeRecentTrainingHistory([resolved], memory.recentTrainingHistory || []);
+      console.log(`[DEBUG] History after resolve: ${JSON.stringify(memory.recentTrainingHistory)}`);
       // When a training is registered, we MUST recalculate the next focus to avoid repetition
       memory.nextWorkoutFocus = chooseNextWorkoutFocus(memory);
     }
@@ -2008,7 +2021,7 @@ function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryP
       memory.trainedToday = false;
     }
   }
-  if (isWorkoutFocus(patch.nextWorkoutFocus)) {
+  if (isWorkoutFocus(patch.nextWorkoutFocus) && !trainedRef) {
     memory.nextWorkoutFocus = patch.nextWorkoutFocus;
   }
   memory.recentTrainingHistory = normalizeRecentTrainingHistory(patch.recentTrainingHistory, memory.recentTrainingHistory || []);
@@ -2474,206 +2487,108 @@ function buildWorkoutPlan({
       : "execução limpa e ritmo progressivo"
     : `prestando atenção em ${limitationFocus}`;
 
+  const repsMain = level === "beginner" ? "12" : "10";
+  const repsAccessory = level === "beginner" ? "12" : "12-15";
+
   if (mode === "gym") {
-    if (hasAnyTerm(normalize(status), ["trocar foco", "nao repetir peito", "não repetir peito", "costas e biceps", "costas e bíceps"])) {
+    if (focusKey === "back_biceps" || hasAnyTerm(normalize(status), ["trocar foco", "costas e biceps", "costas e bíceps"])) {
       return localizeWorkoutPlan({
         focus: "Costas e bíceps",
         focusKey: "back_biceps",
         dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
         scheduledFor: scheduledFor.toISOString(),
-        summary: `Costas e bíceps com ${careLine}, sem repetir peito e tríceps.`,
+        summary: `Costas e bíceps na academia com ${careLine}.`,
         exercises: [
           ...buildWarmupExercises("gym"),
-          makeWorkoutExercise("puxada-frente", "Puxada frente", 4, level === "beginner" ? "10-12" : "8-10", "75s", "Peito alto, puxa a barra até a linha do queixo e controla a volta.", "Abre costas sem roubar."),
-          makeWorkoutExercise("remada-baixa", "Remada baixa", 4, "10-12", "75s", "Coluna firme e cotovelo indo para trás.", "Costas trabalham, braço só acompanha."),
-          makeWorkoutExercise("remada-curvada", "Remada curvada", 3, "8-10", "90s", "Tronco firme, barra perto do corpo e cotovelo indo para trás.", hasNoLimitation ? "Densidade de costas sem pressa." : `Sem irritar ${limitationFocus}.`),
-          makeWorkoutExercise("remada-neutra-maquina", "Remada neutra máquina", 3, "10-12", "75s", "Peito firme no apoio, cotovelo indo para trás e nada de tranco.", "Mais densidade sem roubar."),
-          makeWorkoutExercise("rosca-direta", "Rosca direta", 4, "8-10", "60s", "Cotovelo parado e subida sem jogar o tronco.", "Bíceps entra limpo."),
-          makeWorkoutExercise("rosca-inclinada", "Rosca inclinada com halteres", 3, "10-12", "60s", "Braço alonga embaixo e sobe sem roubar.", "Fecha bíceps com amplitude."),
+          makeWorkoutExercise("puxada-frente", "Puxada frente", 4, repsMain, "75s", "Peito alto, puxa a barra até a linha do queixo.", "Abre dorsais."),
+          makeWorkoutExercise("remada-baixa", "Remada baixa", 4, repsAccessory, "75s", "Coluna firme e cotovelo indo para trás.", "Espessura de costas."),
+          makeWorkoutExercise("remada-curvada", "Remada curvada", 3, repsMain, "90s", "Tronco firme, barra perto do corpo.", "Densidade de costas."),
+          makeWorkoutExercise("rosca-direta", "Rosca direta", 4, repsMain, "60s", "Cotovelo parado e subida sem jogar o tronco.", "Bíceps entra limpo."),
+          makeWorkoutExercise("rosca-inclinada", "Rosca inclinada com halteres", 3, repsAccessory, "60s", "Braço alonga embaixo e sobe sem roubar.", "Pico de bíceps."),
         ],
       }, selectedLanguage);
     }
 
-    const beginner = level === "beginner";
-    const returning = level === "returning";
-    const repsMain = beginner ? "10" : returning ? "8-10" : "8";
-    const repsAccessory = beginner ? "12" : "10-12";
+    // Default Focus: Peito e Tríceps (Gym)
     return localizeWorkoutPlan({
       focus: "Peito e tríceps",
       focusKey: "chest_triceps",
       dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
       scheduledFor: scheduledFor.toISOString(),
-      summary: `Peito e tríceps com ${careLine}.`,
+      summary: `Peito e tríceps na academia com ${careLine}.`,
       exercises: [
         ...buildWarmupExercises("gym"),
-        makeWorkoutExercise(
-          "supino-reto",
-          "Supino reto",
-          4,
-          repsMain,
-          "90s",
-          "Escápula travada, pé firme e barra descendo controlada até o peito.",
-          hasNoLimitation ? "Primeiro bloco pesado e limpo." : `Sem irritar ${limitationFocus}.`
-        ),
-        makeWorkoutExercise(
-          "supino-inclinado-halteres",
-          "Supino inclinado com halteres",
-          3,
-          repsAccessory,
-          "75s",
-          "Banco inclinado e cotovelo descendo alinhado com o peito.",
-          "Amplitude boa antes de pensar em carga."
-        ),
-        makeWorkoutExercise(
-          "crossover",
-          "Crucifixo no cabo",
-          3,
-          "12-15",
-          "60s",
-          "Braço semi-flexionado e fechamento sem bater as mãos.",
-          "Aqui é controle, não ego."
-        ),
-        makeWorkoutExercise(
-          "supino-reto-maquina",
-          "Supino reto máquina",
-          3,
-          "10-12",
-          "75s",
-          "Costas coladas e ombro quieto.",
-          hasNoLimitation ? "Fecha o peito com volume." : `Controle total para proteger ${limitationFocus}.`
-        ),
-        makeWorkoutExercise(
-          "triceps-corda",
-          "Tríceps corda",
-          4,
-          "12",
-          "60s",
-          "Cotovelo preso e extensão completa.",
-          "Tríceps fecha a missão."
-        ),
-        makeWorkoutExercise(
-          "triceps-frances",
-          "Tríceps francês no cabo",
-          3,
-          "10-12",
-          "60s",
-          "Alongamento controlado atrás da cabeça.",
-          hasNoLimitation ? "Sem pressa no alongamento." : `Se ${limitationFocus} reclamar, reduz amplitude.`
-        ),
-        makeWorkoutExercise(
-          "paralela-assistida",
-          "Paralela assistida",
-          3,
-          "8-10",
-          "75s",
-          "Desce sob controle e sobe sem jogar o corpo.",
-          "Mantém o peito aberto."
-        ),
-        makeWorkoutExercise(
-          "flexao",
-          "Flexão",
-          2,
-          beginner ? "8-10" : "12-15",
-          "45s",
-          "Corpo inteiro em linha, peito desce controlado e sobe sem quebrar quadril.",
-          "Simples, direto e sem inventar variação."
-        ),
+        makeWorkoutExercise("supino-reto", "Supino reto", 4, repsMain, "90s", "Escápula travada, barra descendo controlada.", "Base do peito."),
+        makeWorkoutExercise("supino-inclinado-halteres", "Supino inclinado com halteres", 3, repsAccessory, "75s", "Banco inclinado, cotovelo alinhado com o peito.", "Parte superior do peito."),
+        makeWorkoutExercise("crossover", "Crucifixo no cabo", 3, "12-15", "60s", "Controle total no fechamento.", "Finaliza peitoral."),
+        makeWorkoutExercise("triceps-corda", "Tríceps corda", 4, repsAccessory, "60s", "Cotovelo preso e extensão completa.", "Isolamento de tríceps."),
+        makeWorkoutExercise("triceps-frances", "Tríceps francês no cabo", 3, repsAccessory, "60s", "Alongamento controlado atrás da cabeça.", "Tríceps cabeça longa."),
       ],
     }, selectedLanguage);
   }
 
-  const beginner = level === "beginner";
-  const returning = level === "returning";
-  const repsMain = beginner ? "10" : returning ? "8-10" : "12";
-  const repsAccessory = beginner ? "12" : "15";
-
   if (mode === "park") {
-    // Focus: Peito e Tríceps no Parque
-    if (focusKey === "chest_triceps") {
+    if (focusKey === "back_biceps") {
       return localizeWorkoutPlan({
-        focus: "Peito e tríceps no parque",
-        focusKey: "chest_triceps",
+        focus: "Costas e bíceps no parque",
+        focusKey: "back_biceps",
         dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
         scheduledFor: scheduledFor.toISOString(),
-        summary: `Foco em empurrar com ${careLine}.`,
+        summary: `Foco em puxar no parque com ${careLine}.`,
         exercises: [
           ...buildWarmupExercises("park"),
-          makeWorkoutExercise("flexao", "Flexão", 4, repsMain, "45s", "Corpo inteiro alinhado, peito desce e sobe sem quebrar quadril.", "Peito e tríceps."),
-          makeWorkoutExercise("paralela-assistida", "Paralelas (banco ou barra)", 3, "8-12", "60s", "Desce sob controle e sobe sem jogar o corpo.", "Tríceps e peito inferior."),
-          makeWorkoutExercise("polichinelo", "Polichinelo", 3, "40s", "30s", "Abre e fecha sem perder ritmo.", "Mantém o sistema ativo."),
-          makeWorkoutExercise("burpee", "Burpee", 3, "8-10", "60s", "Desce, volta compacto e sobe.", "Fecha o bloco."),
+          makeWorkoutExercise("barra-fixa-assistida", "Barra fixa (ou apoio)", 4, "Falha ou 6-10", "90s", "Puxa o corpo para cima com força nas costas.", "Base de puxada."),
+          makeWorkoutExercise("remada-australiana", "Remada australiana", 4, "10-12", "60s", "Usa uma barra baixa, mantém corpo reto.", "Espessura de costas."),
+          makeWorkoutExercise("perdigueiro", "Perdigueiro", 3, "10 por lado", "45s", "Equilíbrio e ativação de core.", "Estabiliza lombar."),
+          makeWorkoutExercise("burpee", "Burpee", 3, "8-10", "60s", "Ritmo constante.", "Fecha o cardio."),
         ],
       }, selectedLanguage);
     }
-
-    // Default Full Body for Park
+    // Default Focus: Peito e Tríceps (Park)
     return localizeWorkoutPlan({
-      focus: "Cardio e corpo livre",
-      focusKey: "full_body",
-      dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
-      scheduledFor: scheduledFor.toISOString(),
-      summary: `Corpo livre no parque com ${careLine}.`,
-      exercises: [
-        ...buildWarmupExercises("park"),
-        makeWorkoutExercise("burpee", "Burpee", 4, level === "beginner" ? "6-8" : "8-10", "60s", "Desce, joga os pés para trás, volta compacto e sobe com controle.", "Liga o sistema sem depender de máquina."),
-        makeWorkoutExercise("agachamento-livre", "Agachamento livre", 4, level === "beginner" ? "12" : "15", "45s", "Quadril desce limpo e joelho acompanha o pé.", hasNoLimitation ? "Ritmo constante." : `Sem irritar ${limitationFocus}.`),
-        makeWorkoutExercise("flexao", "Flexão", 4, level === "beginner" ? "8-10" : "12", "45s", "Corpo inteiro alinhado, peito desce e sobe sem quebrar quadril.", "Peito e tríceps acordados."),
-        makeWorkoutExercise("afundo-caminhando", "Afundo caminhando", 3, "10 por perna", "45s", "Passo longo e tronco alto.", "Sem colapsar para dentro."),
-        makeWorkoutExercise("polichinelo", "Polichinelo", 3, level === "beginner" ? "30s" : "40s", "30s", "Abre e fecha sem perder ritmo.", "Fecha o cardio sem bagunça."),
-      ],
-    }, selectedLanguage);
-  }
-
-  // MODE HOME (DEFAULT)
-  // Focus: Peito e Tríceps em Casa
-  if (focusKey === "chest_triceps") {
-    return localizeWorkoutPlan({
-      focus: "Peito e tríceps em casa",
+      focus: "Peito e tríceps no parque",
       focusKey: "chest_triceps",
       dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
       scheduledFor: scheduledFor.toISOString(),
-      summary: `Foco em empurrar com ${careLine}.`,
+      summary: `Foco em empurrar no parque com ${careLine}.`,
       exercises: [
-        ...buildWarmupExercises("home"),
-        makeWorkoutExercise("flexao", "Flexão", 4, repsMain, "45s", "Peito desce controlado e volta sem quebrar quadril.", hasNoLimitation ? "Peito e tríceps sem inventar." : `Controla para não irritar ${limitationFocus}.`),
-        makeWorkoutExercise("triceps_coice_halter_banco", "Tríceps coice com halter", 3, repsAccessory, "45s", "Apoio no banco, cotovelo fixo, estende o braço até travar.", "Tríceps isolado sem precisar de máquina."),
-        makeWorkoutExercise("prancha-isometrica", "Prancha isométrica", 3, "30-45s", "30s", "Abdômen firme e quadril travado.", "Core sustenta o final."),
-        makeWorkoutExercise("burpee", "Burpee", 3, level === "beginner" ? "6-8" : "8-10", "60s", "Ritmo limpo sem desmontar.", "Fecha o condicionamento."),
+        ...buildWarmupExercises("park"),
+        makeWorkoutExercise("flexao", "Flexão", 4, repsMain, "45s", "Corpo em linha, peito desce controlado.", "Empurre básico."),
+        makeWorkoutExercise("paralela-assistida", "Paralelas (banco ou barra)", 3, "8-12", "60s", "Desce sob controle e sobe sem jogar o corpo.", "Tríceps e peito."),
+        makeWorkoutExercise("polichinelo", "Polichinelo", 3, "40s", "30s", "Abre e fecha sem perder ritmo.", "Cardio final."),
       ],
     }, selectedLanguage);
   }
 
-  // Focus: Costas e Bíceps em Casa
+  // Default: HOME
   if (focusKey === "back_biceps") {
     return localizeWorkoutPlan({
       focus: "Costas e bíceps em casa",
       focusKey: "back_biceps",
       dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
       scheduledFor: scheduledFor.toISOString(),
-      summary: `Foco em puxar com ${careLine}.`,
+      summary: `Foco em puxar em casa com ${careLine}.`,
       exercises: [
         ...buildWarmupExercises("home"),
-        makeWorkoutExercise("serrote", "Serrote", 4, "12 por lado", "45s", "Usa um peso (garrafa/mochila), apoia e puxa com o cotovelo.", "Remada firme."),
-        makeWorkoutExercise("perdigueiro", "Perdigueiro", 3, "10 por lado", "35s", "Estende braço e perna opostos, mantém coluna reta.", "Estabiliza core e costas."),
-        makeWorkoutExercise("agachamento-livre", "Agachamento livre", 3, "15", "45s", "Base firme e descida controlada.", "Mantém o corpo ativo."),
-        makeWorkoutExercise("burpee", "Burpee", 3, "8-10", "60s", "Ritmo sem perder postura.", "Fecha o bloco."),
+        makeWorkoutExercise("serrote", "Serrote (mochila/garrafa)", 4, "12 por lado", "45s", "Remada unilateral com carga caseira.", "Costas em foco."),
+        makeWorkoutExercise("perdigueiro", "Perdigueiro", 3, "10 por lado", "45s", "Equilíbrio e ativação de core.", "Lombar protegida."),
+        makeWorkoutExercise("burpee", "Burpee", 3, "8-10", "60s", "Ritmo sem desmontar.", "Condicionamento."),
       ],
     }, selectedLanguage);
   }
 
-  // Default Full Body for Home
+  // Default Focus: Peito e Tríceps (Home)
   return localizeWorkoutPlan({
-    focus: "Condicionamento em casa",
-    focusKey: "full_body",
+    focus: "Peito e tríceps em casa",
+    focusKey: "chest_triceps",
     dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
     scheduledFor: scheduledFor.toISOString(),
-    summary: `Corpo livre em casa com ${careLine}.`,
+    summary: `Foco em empurrar em casa com ${careLine}.`,
     exercises: [
       ...buildWarmupExercises("home"),
-      makeWorkoutExercise("agachamento-livre", "Agachamento livre", 4, level === "beginner" ? "12" : "15", "40s", "Quadril desce limpo e joelho acompanha o pé.", hasNoLimitation ? "Base firme." : `Controle total para respeitar ${limitationFocus}.`),
-      makeWorkoutExercise("flexao", "Flexão", 4, level === "beginner" ? "8-10" : "12", "45s", "Corpo inteiro alinhado, peito desce e sobe sem quebrar quadril.", "Peito e tríceps sem inventar variação."),
-      makeWorkoutExercise("serrote", "Serrote", 4, "10-12 por lado", "45s", "Apoio firme, cotovelo vai para trás e coluna fica parada.", "Remada simples e forte."),
-      makeWorkoutExercise("burpee", "Burpee", 3, level === "beginner" ? "6-8" : "8-10", "60s", "Desce, joga os pés para trás, volta compacto e sobe com controle.", "Fecha o condicionamento sem sumir."),
+      makeWorkoutExercise("flexao", "Flexão", 4, repsMain, "45s", "Peito desce controlado e volta sem quebrar quadril.", "Peito forte."),
+      makeWorkoutExercise("triceps_coice_halter_banco", "Tríceps coice (cadeira/banco)", 3, repsAccessory, "45s", "Cotovelo fixo e extensão de braço.", "Tríceps isolado."),
+      makeWorkoutExercise("prancha-isometrica", "Prancha isométrica", 3, "30-45s", "30s", "Abdômen firme.", "Core sustenta."),
     ],
   }, selectedLanguage);
 }
@@ -2705,6 +2620,7 @@ function buildWorkoutPlanFromSemanticFocus({
       limitation,
       age,
       scheduleIntent,
+      focusKey: focus,
     });
   }
 
@@ -3024,7 +2940,9 @@ async function askGutoModel({
       throw new Error(data?.error?.message || "Gemini retornou erro.");
     }
 
-    const parsedResponse = parseGutoResponse(data?.candidates?.[0]?.content?.parts?.[0]?.text, language);
+    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    require('fs').appendFileSync('gemini.log', `\n--- INPUT: ${input} ---\n${rawText}\n`);
+    const parsedResponse = parseGutoResponse(rawText, language);
 
     applyMemoryPatch(memory, parsedResponse.memoryPatch, parsedResponse.trainedReference);
 
@@ -3042,7 +2960,7 @@ async function askGutoModel({
       const semanticFocus = parsedResponse.memoryPatch?.nextWorkoutFocus || memory.nextWorkoutFocus;
       workoutPlan = buildWorkoutPlanFromSemanticFocus({
         language: selectedLanguage,
-        location: memory.trainingLocation || memory.preferredTrainingLocation || "casa",
+        location: memory.preferredTrainingLocation || memory.trainingLocation || "casa",
         status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
         limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
         age: memory.userAge ?? memory.trainingAge,
@@ -3050,7 +2968,7 @@ async function askGutoModel({
         focus: semanticFocus,
         trainingGoal: memory.trainingGoal,
       });
-      const pv = validateWorkoutPlan(workoutPlan, memory.recentTrainingHistory || [], getLocationMode(memory.trainingLocation || memory.preferredTrainingLocation));
+      const pv = validateWorkoutPlan(workoutPlan, memory.recentTrainingHistory || [], getLocationMode(memory.preferredTrainingLocation || memory.trainingLocation || "casa"));
       if (!pv.valid) console.warn("[GUTO] validateWorkoutPlan errors:", pv.errors);
       if (pv.warnings.length > 0) console.info("[GUTO] validateWorkoutPlan warnings:", pv.warnings);
     }
@@ -3066,11 +2984,20 @@ async function askGutoModel({
     }
 
     return finalize({
-      ...parsedResponse,
+      fala: parsedResponse.fala,
+      acao: parsedResponse.acao || "none",
+      expectedResponse: parsedResponse.expectedResponse,
+      avatarEmotion: parsedResponse.avatarEmotion,
+      trainedReference: parsedResponse.trainedReference,
+      memoryPatch: {
+        ...parsedResponse.memoryPatch,
+        nextWorkoutFocus: memory.nextWorkoutFocus,
+        recentTrainingHistory: memory.recentTrainingHistory,
+      },
       workoutPlan,
     });
   } catch (error) {
-    console.error('Fluxo IA do GUTO falhou:', error);
+    console.error(`[GUTO] Fluxo IA falhou para o input: "${input.substring(0, 100)}..."`, error);
     return finalize(buildTechnicalFallback(selectedLanguage));
   }
 }
@@ -3247,6 +3174,9 @@ app.get("/guto/proactive", async (req, res) => {
     }
     if (result.workoutPlan) {
       freshMemory.lastWorkoutPlan = result.workoutPlan;
+      if (result.workoutPlan.focusKey) {
+        freshMemory.lastSuggestedFocus = result.workoutPlan.focusKey;
+      }
     }
     freshMemory.lastActiveAt = new Date().toISOString();
     saveMemory(freshMemory);
