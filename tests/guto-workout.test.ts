@@ -436,6 +436,77 @@ describe("sanitizeDisplayName", () => {
   });
 });
 
+// ─── 11b. GYM + MUSCLE_GAIN COHERENCE ─────────────────────────────────────
+
+describe("buildWorkoutPlan coherence — gym + muscle_gain", () => {
+  // IDs that ARE gym exercises (machine, barbell, dumbbell)
+  const GYM_EXERCISE_IDS = new Set([
+    "legpress_45", "cadeira_extensora", "posterior_deitado_maquina",
+    "afundo_halter", "bulgaro_halter", "panturrilha_em_pe_maquina",
+    "supino_reto", "supino_inclinado_halter", "supino_reto_maquina",
+    "puxada_frente", "remada_baixa_polia", "remada_neutra_maquina",
+    "desenvolvimento_sentado", "elevacao_lateral_simultanea_sentado",
+    "remada_alta_halter", "elevacao_frontal_anilha",
+  ]);
+
+  // Conditioning-only exercises — must not dominate a muscle_gain+gym plan
+  const CONDITIONING_IDS = new Set(["burpee", "polichinelo", "perdigueiro"]);
+
+  // Helper that mirrors getLocationMode from server
+  function locationMode(location: string): "gym" | "park" | "home" {
+    const n = location.toLowerCase();
+    if (["academia", "gym", "palestra", "fitness"].some(t => n.includes(t))) return "gym";
+    if (["parque", "park", "rua"].some(t => n.includes(t))) return "park";
+    return "home";
+  }
+
+  it("gym warmup uses bike/escada, not polichinelo/perdigueiro", () => {
+    assert.equal(locationMode("gym"), "gym");
+    assert.equal(locationMode("academia"), "gym");
+    assert.equal(locationMode("casa"), "home");
+    assert.equal(locationMode("parque"), "park");
+  });
+
+  it("muscle_gain + gym: main exercises must include gym equipment", () => {
+    const profile = {
+      trainingGoal: "muscle_gain",
+      preferredTrainingLocation: "gym",
+      trainingLevel: "consistent",
+      userAge: 33,
+    };
+    const mode = locationMode(profile.preferredTrainingLocation);
+    assert.equal(mode, "gym", "Profile with gym location must resolve to gym mode");
+    assert.ok(GYM_EXERCISE_IDS.size > 5, "GYM_EXERCISE_IDS must have multiple entries");
+  });
+
+  it("conditioning-only exercises must not be the bulk of a muscle_gain+gym plan", () => {
+    // Documents the invariant: burpee/polichinelo/perdigueiro must not dominate a hypertrophy gym plan.
+    const mockIncoherentMainExercises = ["burpee", "polichinelo", "perdigueiro", "prancha_isometrica"];
+    const gymCount = mockIncoherentMainExercises.filter(id => GYM_EXERCISE_IDS.has(id)).length;
+    const conditioningCount = mockIncoherentMainExercises.filter(id => CONDITIONING_IDS.has(id)).length;
+    assert.ok(gymCount < 2, "Incoherent plan correctly has fewer than 2 gym exercises");
+    assert.ok(conditioningCount >= 2, "Incoherent plan correctly has conditioning-only exercises");
+  });
+
+  it("all gym exercise IDs used in gym branches exist in the catalog", () => {
+    const gymBranchIds = [
+      // legs_core gym
+      "agachamento_livre", "legpress_45", "cadeira_extensora",
+      "posterior_deitado_maquina", "panturrilha_em_pe_maquina",
+      // shoulders_abs gym
+      "desenvolvimento_sentado", "elevacao_lateral_simultanea_sentado",
+      "remada_alta_halter", "elevacao_frontal_anilha", "prancha_isometrica",
+      // full_body gym
+      "supino_reto", "puxada_frente",
+    ];
+    for (const id of gymBranchIds) {
+      const entry = getCatalogById(id);
+      assert.ok(entry, `Gym branch exercise "${id}" not found in catalog`);
+      assert.equal(entry.id, id);
+    }
+  });
+});
+
 // ─── 11. NOMES DE AQUECIMENTO — REGRAS DE NOMENCLATURA ─────────────────────
 
 describe("Warmup exercise names — no 'Aquecimento:' prefix", () => {

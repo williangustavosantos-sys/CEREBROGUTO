@@ -2625,6 +2625,7 @@ function buildWorkoutPlanFromSemanticFocus({
   age,
   scheduleIntent,
   focus,
+  trainingGoal,
 }: {
   language: string;
   location: string;
@@ -2633,6 +2634,7 @@ function buildWorkoutPlanFromSemanticFocus({
   age?: number;
   scheduleIntent?: TrainingScheduleIntent;
   focus?: WorkoutFocus;
+  trainingGoal?: string;
 }): WorkoutPlan {
   if (!focus || focus === "chest_triceps" || focus === "back_biceps") {
     return buildWorkoutPlan({
@@ -2679,6 +2681,41 @@ function buildWorkoutPlanFromSemanticFocus({
   const commonSummary = `${focusLabel} com ${careLine}.`;
 
   if (focus === "legs_core") {
+    if (mode === "gym") {
+      const isStrength = trainingGoal === "muscle_gain" || trainingGoal === "hypertrophy";
+      const setsMain = isStrength ? 4 : 3;
+      const repsLeg = isStrength
+        ? (level === "beginner" ? "10-12" : "8-10")
+        : (level === "beginner" ? "12" : "15");
+      const restLeg = isStrength ? "90s" : "75s";
+
+      return localizeWorkoutPlan({
+        focus: focusLabel,
+        focusKey: "legs_core",
+        dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
+        scheduledFor: scheduledFor.toISOString(),
+        summary: commonSummary,
+        exercises: [
+          ...buildWarmupExercises("gym"),
+          makeWorkoutExercise("agachamento_livre", "Agachamento livre", setsMain, repsLeg, restLeg,
+            "Descida controlada, joelho acompanha o pé, core travado.",
+            hasNoLimitation ? "Base do treino de perna." : `Controle total para proteger ${limitationFocus}.`),
+          makeWorkoutExercise("legpress_45", "Leg press 45°", setsMain, "10-12", "75s",
+            "Pés na largura do quadril, descida até 90° e empurra sem travar o joelho.",
+            isStrength ? "Volume de quadríceps sem agredir lombar." : "Complementa o agachamento."),
+          makeWorkoutExercise("cadeira_extensora", "Cadeira extensora", 3, "12-15", "60s",
+            "Extensão completa no topo, descida controlada.",
+            "Finaliza quadríceps com isolamento."),
+          makeWorkoutExercise("posterior_deitado_maquina", "Posterior deitado na máquina", 3, "10-12", "60s",
+            "Quadril firme no banco, flexão completa e descida controlada.",
+            hasNoLimitation ? "Isquiotibial em foco." : `Sem irritar ${limitationFocus}.`),
+          makeWorkoutExercise("panturrilha_em_pe_maquina", "Panturrilha em pé na máquina", 3, "15-20", "45s",
+            "Subida completa, pausa de 1s no topo e descida até o alongamento.",
+            "Panturrilha fecha o treino."),
+        ],
+      }, selectedLanguage);
+    }
+
     return localizeWorkoutPlan({
       focus: focusLabel,
       focusKey: "legs_core",
@@ -2686,7 +2723,7 @@ function buildWorkoutPlanFromSemanticFocus({
       scheduledFor: scheduledFor.toISOString(),
       summary: commonSummary,
       exercises: [
-        ...buildWarmupExercises(mode === "gym" ? "gym" : mode === "park" ? "park" : "home"),
+        ...buildWarmupExercises(mode === "park" ? "park" : "home"),
         makeWorkoutExercise("agachamento-livre", "Agachamento livre", 4, level === "beginner" ? "12" : "15", "60s", "Quadril desce limpo e joelho acompanha o pé.", hasNoLimitation ? "Base forte e ritmo estável." : `Sem irritar ${limitationFocus}.`),
         makeWorkoutExercise("afundo-caminhando", "Afundo caminhando", 3, "10 por perna", "60s", "Passo longo, tronco alto e controle total na descida.", "Perna e glúteo acordados sem bagunça."),
         makeWorkoutExercise("prancha-isometrica", "Prancha isométrica", 3, level === "beginner" ? "25-30s" : "35-45s", "40s", "Cotovelo embaixo do ombro, abdômen duro e quadril parado.", "Core fechando a estrutura."),
@@ -2699,10 +2736,26 @@ function buildWorkoutPlanFromSemanticFocus({
     // Park/home: no dumbbell — replace serrote with bodyweight core work
     const shouldersMainExercises = mode === "gym"
       ? [
-          makeWorkoutExercise("flexao", "Flexão", 4, level === "beginner" ? "8-10" : "12-15", "50s", "Corpo em linha, peito desce controlado e volta sem quebrar quadril.", "Empurra tronco e cintura escapular sem ego."),
-          makeWorkoutExercise("serrote", "Serrote", 4, "10-12 por lado", "50s", "Apoio firme, cotovelo atrás e tronco parado.", "Estabiliza dorsal e ombro."),
-          makeWorkoutExercise("prancha-isometrica", "Prancha isométrica", 4, level === "beginner" ? "25-30s" : "40s", "35s", "Abdômen firme e quadril travado.", "Abdome fecha o bloco."),
-          makeWorkoutExercise("burpee", "Burpee", 2, level === "beginner" ? "6" : "8", "60s", "Ritmo limpo, sem desmontar a postura.", "Só para manter pressão no sistema."),
+          makeWorkoutExercise("desenvolvimento_sentado", "Desenvolvimento com halteres sentado", 4,
+            level === "beginner" ? "10-12" : "8-10", "90s",
+            "Cotovelo alinhado com o ombro, sobe sem bater os halteres.",
+            hasNoLimitation ? "Composto de ombro. Principal do bloco." : `Sem irritar ${limitationFocus}.`),
+          makeWorkoutExercise("elevacao_lateral_simultanea_sentado", "Elevação lateral simultânea sentado", 4,
+            "12-15", "60s",
+            "Cotovelo levemente flexionado, sobe até a altura do ombro.",
+            "Medial entra sem compensação."),
+          makeWorkoutExercise("remada_alta_halter", "Remada alta com halteres", 3,
+            "10-12", "60s",
+            "Cotovelo vai acima do ombro, puxada limpa.",
+            "Trapézio e deltóide trabalham juntos."),
+          makeWorkoutExercise("elevacao_frontal_anilha", "Elevação frontal com anilha", 3,
+            "12", "60s",
+            "Braço semi-estendido, sobe até a linha dos ombros.",
+            "Fecha deltóide anterior."),
+          makeWorkoutExercise("prancha_isometrica", "Prancha isométrica", 3,
+            level === "beginner" ? "30-40s" : "45-60s", "40s",
+            "Abdômen firme e quadril parado.",
+            "Core fecha o bloco."),
         ]
       : [
           makeWorkoutExercise("flexao", "Flexão", 4, level === "beginner" ? "8-10" : "12-15", "50s", "Corpo em linha, peito desce controlado e volta sem quebrar quadril.", "Empurra sem inventar variação."),
@@ -2724,13 +2777,29 @@ function buildWorkoutPlanFromSemanticFocus({
     }, selectedLanguage);
   }
 
-  // full_body: park/home replaces serrote (halter) with perdigueiro (bodyweight)
+  // full_body: park/home replaces gym equipment with bodyweight
   const fullBodyMainExercises = mode === "gym"
     ? [
-        makeWorkoutExercise("agachamento-livre", "Agachamento livre", 4, level === "beginner" ? "12" : "15", "45s", "Desce com controle e sobe inteiro.", "Parte inferior acordada."),
-        makeWorkoutExercise("flexao", "Flexão", 4, level === "beginner" ? "8-10" : "12", "45s", "Corpo alinhado e peito desce limpo.", "Empurra sem improviso."),
-        makeWorkoutExercise("serrote", "Serrote", 4, "10-12 por lado", "45s", "Puxa com cotovelo, não com pressa.", "Costas entram sem roubar."),
-        makeWorkoutExercise("prancha-isometrica", "Prancha isométrica", 3, level === "beginner" ? "25-30s" : "35-45s", "35s", "Centro travado até o fim.", "Fecha o corpo todo sem dispersão."),
+        makeWorkoutExercise("agachamento_livre", "Agachamento livre", 4,
+          level === "beginner" ? "12" : "10", "75s",
+          "Base sólida, descida limpa, empurra o chão.",
+          hasNoLimitation ? "Quadríceps, glúteo e core." : `Sem irritar ${limitationFocus}.`),
+        makeWorkoutExercise("supino_reto", "Supino reto", 4,
+          level === "beginner" ? "10" : "8-10", "90s",
+          "Escápula travada, barra desce controlada até o peito.",
+          "Peito e tríceps em foco."),
+        makeWorkoutExercise("puxada_frente", "Puxada frente", 4,
+          level === "beginner" ? "10-12" : "8-10", "75s",
+          "Peito alto, puxa a barra até a linha do queixo.",
+          "Costas entram limpo no full body."),
+        makeWorkoutExercise("desenvolvimento_sentado", "Desenvolvimento com halteres sentado", 3,
+          "10-12", "75s",
+          "Cotovelo alinhado com o ombro, sobe sem bater os halteres.",
+          "Ombro fecha o bloco."),
+        makeWorkoutExercise("prancha_isometrica", "Prancha isométrica", 3,
+          level === "beginner" ? "25-30s" : "40-50s", "35s",
+          "Centro travado até o fim.",
+          "Core fecha o corpo todo."),
       ]
     : [
         makeWorkoutExercise("agachamento-livre", "Agachamento livre", 4, level === "beginner" ? "12" : "15", "45s", "Desce com controle e sobe inteiro.", "Parte inferior acordada."),
@@ -2904,11 +2973,12 @@ async function askGutoModel({
       workoutPlan = buildWorkoutPlanFromSemanticFocus({
         language: selectedLanguage,
         location: memory.trainingLocation || memory.preferredTrainingLocation || "casa",
-        status: memory.trainingStatus || focusToStatusHint(semanticFocus),
-        limitation: memory.trainingLimitations || "sem dor",
-        age: memory.trainingAge,
+        status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
+        limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
+        age: memory.trainingAge ?? memory.userAge,
         scheduleIntent: memory.trainingSchedule,
         focus: semanticFocus,
+        trainingGoal: memory.trainingGoal,
       });
       const pv = validateWorkoutPlan(workoutPlan, memory.recentTrainingHistory || [], getLocationMode(memory.trainingLocation || memory.preferredTrainingLocation));
       if (!pv.valid) console.warn("[GUTO] validateWorkoutPlan errors:", pv.errors);
@@ -3082,11 +3152,12 @@ app.get("/guto/proactive", async (req, res) => {
         result.workoutPlan = buildWorkoutPlanFromSemanticFocus({
           language: selectedLang,
           location: memory.trainingLocation || memory.preferredTrainingLocation || "casa",
-          status: memory.trainingStatus || "iniciante",
-          limitation: memory.trainingLimitations || "sem dor",
-          age: memory.userAge || 30,
+          status: memory.trainingStatus || memory.trainingLevel || "iniciante",
+          limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
+          age: memory.userAge ?? memory.trainingAge,
           scheduleIntent: "today",
           focus: memory.nextWorkoutFocus,
+          trainingGoal: memory.trainingGoal,
         });
       }
     }
