@@ -2,6 +2,8 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import multer from "multer";
+import { existsSync, mkdirSync } from "fs";
+import path from "path";
 
 import { config } from "./src/config";
 import { createRateLimit } from "./src/http/rate-limit";
@@ -14,6 +16,8 @@ import {
   type CatalogLanguage,
 } from "./exercise-catalog";
 import { sanitizeDisplayName } from "./server-utils";
+import { generateWorkoutPoster } from "./src/poster";
+import { initStorage, uploadImage, deleteImage } from "./src/storage";
 
 type Acao = "none" | "updateWorkout" | "lock";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
@@ -26,6 +30,25 @@ type WorkoutFocus =
   | "legs_core"
   | "shoulders_abs"
   | "full_body";
+
+type LocationMode = "gym" | "home" | "park";
+
+type WorkoutValidationRecord = {
+  id: string;
+  userId: string;
+  createdAt: string;
+  dateLabel: string;
+  workoutFocus: string;
+  workoutLabel: string;
+  locationMode: LocationMode;
+  language: GutoLanguage;
+  photoUrl: string;
+  posterUrl: string;
+  thumbUrl: string;
+  xp: number;
+  status: "validated";
+  gutoMessage: string;
+};
 
 type GutoTelemetryEvent =
   | "user_created"
@@ -154,6 +177,7 @@ interface GutoMemory {
   lastSuggestedFocus?: WorkoutFocus;
   proactiveSent: Record<string, string[]>;
   initialXpRewardSeen: boolean;
+  validationHistory?: WorkoutValidationRecord[];
 }
 
 type XpEventType =
@@ -265,6 +289,11 @@ app.use(createRateLimit({
   maxRequests: config.rateLimitMaxRequests,
 }));
 app.use(requestLog);
+
+// Serve validation images as static files
+const uploadsDir = path.join(process.cwd(), "tmp", "validation-images");
+if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
+app.use("/uploads/validation-images", express.static(uploadsDir));
 
 app.get("/health", (_req, res) => {
   res.json({
@@ -661,6 +690,7 @@ function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
           : undefined,
       lastSuggestedFocus: isWorkoutFocus(existing.lastSuggestedFocus) ? existing.lastSuggestedFocus : undefined,
       proactiveSent: existing.proactiveSent || {},
+      initialXpRewardSeen: Boolean(existing.initialXpRewardSeen),
     });
   }
 
@@ -669,6 +699,7 @@ function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
     name: "Operador",
     language: "pt-BR",
     initialXpGranted: false,
+    initialXpRewardSeen: false,
     totalXp: 0,
     streak: 0,
     trainedToday: false,
@@ -683,7 +714,6 @@ function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
     recentTrainingHistory: [],
     nextWorkoutFocus: undefined,
     proactiveSent: {},
-    initialXpRewardSeen: false,
   };
 }
 
@@ -3369,6 +3399,115 @@ app.post("/guto-audio", upload.single("audio"), async (req, res) => {
   } catch (error) {
     console.warn("Erro no Guto Audio:", error);
     res.status(500).json({ error: fallbackLine(language, "internal_error") });
+  }
+});
+
+// Helper: keep only the last 5 validation records, deleting images of removed ones
+async function keepLastFiveValidations(memory: GutoMemory): Promise<void> {
+  const history = memory.validationHistory;
+  if (!history || history.length <= 5) return;
+  const toRemove = history.splice(0, history.length - 5);
+  for (const record of toRemove) {
+    await deleteImage(record.photoUrl).catch(() => undefined);
+    await deleteImage(record.posterUrl).catch(() => undefined);
+    await deleteImage(record.thumbUrl).catch(() => undefined);
+  }
+}
+
+app.post("/guto/validate-workout", async (req, res) => {
+  const body = req.body as {
+    userId?: string;
+    imageBase64?: string;
+    workoutFocus?: string;
+    workoutLabel?: string;
+    locationMode?: string;
+    language?: string;
+  };
+
+  const { userId, imageBase64, workoutFocus, workoutLabel, locationMode, language } = body;
+
+  if (!userId || !imageBase64 || !workoutFocus || !workoutLabel || !locationMode) {
+    return res.status(400).json({ error: "Missing required fields: userId, imageBase64, workoutFocus, workoutLabel, locationMode" });
+  }
+
+  const validLocationModes: LocationMode[] = ["gym", "home", "park"];
+  if (!validLocationModes.includes(locationMode as LocationMode)) {
+    return res.status(400).json({ error: "Invalid locationMode. Must be gym, home, or park." });
+  }
+
+  const selectedLanguage = normalizeLanguage(language);
+  const now = new Date();
+  const dateLabel = new Intl.DateTimeFormat(selectedLanguage, {
+    timeZone: GUTO_TIME_ZONE,
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(now);
+
+  const XP_AMOUNT = 100;
+
+  try {
+    // Generate poster
+    const { posterBuffer, thumbBuffer } = await generateWorkoutPoster({
+      imageBase64,
+      workoutFocus,
+      workoutLabel,
+      dateLabel,
+      xp: XP_AMOUNT,
+    });
+
+    // Compress selfie photo
+    const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, "");
+    const photoBuffer = Buffer.from(base64Data, "base64");
+
+    // Save images
+    initStorage();
+    const id = crypto.randomUUID();
+    const photoUrl = await uploadImage(photoBuffer, `${id}-photo.jpg`);
+    const posterUrl = await uploadImage(posterBuffer, `${id}-poster.jpg`);
+    const thumbUrl = await uploadImage(thumbBuffer, `${id}-thumb.jpg`);
+
+    // Build record
+    const record: WorkoutValidationRecord = {
+      id,
+      userId,
+      createdAt: now.toISOString(),
+      dateLabel,
+      workoutFocus,
+      workoutLabel,
+      locationMode: locationMode as LocationMode,
+      language: selectedLanguage,
+      photoUrl,
+      posterUrl,
+      thumbUrl,
+      xp: XP_AMOUNT,
+      status: "validated",
+      gutoMessage: "Treino validado! Continue assim.",
+    };
+
+    // Read store directly to preserve validationHistory (getMemory strips it)
+    const store = readMemoryStore();
+    const memory: GutoMemory = store[userId] ?? getMemory(userId);
+
+    if (!Array.isArray(memory.validationHistory)) {
+      memory.validationHistory = [];
+    }
+    memory.validationHistory.push(record);
+    await keepLastFiveValidations(memory);
+
+    store[userId] = memory;
+    writeMemoryStore(store);
+
+    return res.json({
+      success: true,
+      validation: record,
+      validationHistory: memory.validationHistory,
+    });
+  } catch (error) {
+    console.error("[GUTO] validate-workout error:", error);
+    return res.status(500).json({ error: "Erro ao validar treino." });
   }
 });
 
