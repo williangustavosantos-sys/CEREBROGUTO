@@ -1,0 +1,20 @@
+{
+  "language-history-es-ES": {
+    "userId": "language-history-es-ES",
+    "name": "Will",
+    "language": "es-ES",
+    "initialXpGranted": false,
+    "totalXp": 0,
+    "streak": 0,
+    "trainedToday": false,
+    "adaptedMissionToday": false,
+    "lastActiveAt": "2026-05-02T08:56:15.046Z",
+    "completedWorkoutDates": [],
+    "adaptedMissionDates": [],
+    "missedMissionDates": [],
+    "xpEvents": [],
+    "lastWorkoutPlan": null,
+    "recentTrainingHistory": [],
+    "proactiveSent": {}
+  }
+}

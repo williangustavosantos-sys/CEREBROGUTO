@@ -110,6 +110,10 @@ interface GutoModelResponse {
   avatarEmotion?: GutoAvatarEmotion;
   workoutPlan?: WorkoutPlan | null;
   memoryPatch?: GutoMemoryPatch;
+  trainedReference?: {
+    dateLabel: "today" | "yesterday" | "day_before_yesterday";
+    explicitMuscleGroup?: WorkoutFocus | null;
+  } | null;
 }
 interface GutoVoiceProfile {
   languageCode: GutoLanguage;
@@ -147,6 +151,7 @@ interface GutoMemory {
   lastWorkoutPlan?: WorkoutPlan | null;
   recentTrainingHistory?: RecentTrainingHistoryItem[];
   nextWorkoutFocus?: WorkoutFocus;
+  lastSuggestedFocus?: WorkoutFocus;
   proactiveSent: Record<string, string[]>;
 }
 
@@ -425,6 +430,11 @@ function expectedInstruction(context: NonNullable<ExpectedResponse["context"]>, 
 function isOperationalNoise(value?: string) {
   const normalized = normalize((value || "").trim());
   if (!normalized) return true;
+  
+  // Whitelist terms that are valid even if short
+  const validShortTerms = new Set(["gym", "rua", "park", "home", "casa", "box"]);
+  if (validShortTerms.has(normalized)) return false;
+
   if (normalized.length < 4) return true;
 
   const suspicious = new Set([
@@ -1703,7 +1713,8 @@ ANTI-PADRÕES (NUNCA FAZER):
 - Nunca repita pergunta já respondida na memória. Use o contexto.
 - Nunca dê várias opções abertas. Decida a direção, ofereça no máximo um sim/não ou uma escolha binária prática.
 - Nunca caia em modo "assistente educado". Você não é Siri.
-- Nunca repita grupo muscular treinado hoje ou ontem se houver alternativa coerente.
+- Nunca repita grupo muscular treinado hoje ou ontem. Se o usuário diz que treinou "ontem" ou "anteontem", você DEVE recalcular o foco imediatamente e atualizar o memoryPatch.nextWorkoutFocus.
+- ROTAÇÃO PADRÃO: Peito/Tríceps -> Costas/Bíceps -> Pernas/Core -> Ombros/Abdômen -> Recomeça. Se o usuário treinou Peito ontem e Costas anteontem, HOJE É PERNA.
 - Nunca empurre treino para amanhã se o usuário escolheu hoje.
 - Nunca aja como chatbot médico. Se o usuário estiver doente, reduza intensidade e mantenha presença.
 `.trim();
@@ -1762,7 +1773,7 @@ REGRAS DE CONDUÇÃO (MANIFESTO GUTO):
 - LIDERANÇA TOTAL: Você decide o próximo passo. Não espere o usuário. Não peça permissão.
 - MEMÓRIA É DECISÃO: Se "preferredTrainingLocation" é Academia, você NÃO pergunta o local. Você assume: "O treino na academia já está pronto".
 - PROATIVIDADE OPERACIONAL: Sempre que houver contexto, chegue com a ação. Retorne "updateWorkout" e o treino montado sem esperar o "bora".
-- Use "nós" na execução ("A gente começa agora"), mas nunca para julgar.
+- MUDANÇA DE ROTA: Se o usuário disser que já treinou o grupo sugerido ou quiser trocar, você DEVE trocar o foco, atualizar o memoryPatch.nextWorkoutFocus e SEMPRE retornar acao: "updateWorkout" para que o novo plano seja gerado imediatamente.
 - Fale curto: 1 a 3 frases. Impacto e direção.
 
 PROIBIÇÃO MÉDICA E TERAPÊUTICA (CRÍTICO):
@@ -1771,7 +1782,7 @@ PROIBIÇÃO MÉDICA E TERAPÊUTICA (CRÍTICO):
 
 memoryPatch:
 - Atualize APENAS os campos que o usuário acabou de revelar nesta mensagem ou os que você decidiu proativamente.
-- recentTrainingHistory: adicione apenas se ele relatar treino concluído.
+- recentTrainingHistory: adicione apenas se ele relatar treino concluído de forma explícita (ex: "terminei perna"). Se ele usar referências como "treinei isso ontem", NÃO use memoryPatch para isso, use o campo "trainedReference" na raiz do JSON.
 - trainedToday=true: SÓ E SOMENTE SÓ se o usuário disser explicitamente "terminei", "treino feito", "finalizado". JAMAIS assuma que ele treinou só por um "oi" ou "academia".
 `.trim();
 
@@ -1788,23 +1799,23 @@ ${JSON.stringify({
     avatarEmotion: "default | alert | critical | reward",
     workoutPlan: null,
     memoryPatch: {
-      trainingSchedule: "today | tomorrow",
-      trainingLocation: "academia | casa | parque",
-      trainingStatus: "string livre",
-      trainingLimitations: "string livre",
-      trainingAge: 30,
-      recentTrainingHistory: [
-        { dateLabel: "yesterday", muscleGroup: "chest_triceps", raw: "treinei isso ontem" },
-      ],
-      nextWorkoutFocus: "chest_triceps | back_biceps | legs_core | full_body",
+      nextWorkoutFocus: "chest_triceps | back_biceps | legs_core | shoulders_abs | full_body",
       trainedToday: false,
+    },
+    trainedReference: {
+      dateLabel: "yesterday",
+      explicitMuscleGroup: null
     },
   })}
 
 REGRAS DO JSON:
+- trainedReference: Use isso QUANDO o usuário se referir ao treino sugerido ou visível sem nomear o músculo (ex: "treinei isso", "esse fiz ontem", "já fiz esse"). O backend resolverá qual músculo era. 
+- dateLabel em trainedReference deve ser "today", "yesterday" ou "day_before_yesterday".
+- Se o usuário nomear o músculo ("treinei peito ontem"), você pode preencher explicitMuscleGroup: "chest_triceps" ou usar o memoryPatch.recentTrainingHistory diretamente.
 - expectedResponse pode ser null quando não há próxima pergunta esperada.
-- workoutPlan pode ser null quando você não está gerando treino agora.
-- memoryPatch pode ser objeto vazio {} quando você não está atualizando memória.
+- workoutPlan pode ser null quando você não está gerando treino agora. O backend gerará os exercícios se você retornar acao: "updateWorkout".
+- memoryPatch pode objeto vazio {} quando você não está atualizando memória.
+- IMPORTANTÍSSIMO: Sempre que o usuário mencionar que treinou no passado (ontem, anteontem, semana passada), você DEVE preencher o memoryPatch.recentTrainingHistory com o dateLabel correto e o grupo muscular que você identificou.
 - avatarEmotion default na maior parte do tempo. "alert" quando cobra. "critical" quando o usuário some / falha. "reward" quando ele entrega.
 - Não inclua campos que você não está usando. Não invente novos campos.
 `.trim();
@@ -1862,8 +1873,7 @@ Usuário entrega contexto fora de ordem:
       trainingGoal: memory.trainingGoal,
       preferredTrainingLocation: memory.preferredTrainingLocation,
       trainingPathology: memory.trainingPathology,
-      lastWorkoutCompletedAt: memory.lastWorkoutCompletedAt,
-      lastLimitationCheckAt: memory.lastLimitationCheckAt,
+      lastSuggestedFocus: memory.lastSuggestedFocus,
       lastWorkoutFocus: (memory.lastWorkoutPlan as { focusKey?: string } | null)?.focusKey ?? null,
       recentTrainingHistory: memory.recentTrainingHistory,
       completedWorkoutCount: memory.completedWorkoutDates?.length ?? 0,
@@ -1919,8 +1929,59 @@ function normalizeRecentTrainingHistory(
   return merged.slice(0, 12);
 }
 
-function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryPatch"]): GutoMemory {
-  if (!patch || typeof patch !== "object") return memory;
+function chooseNextWorkoutFocus(memory: GutoMemory): WorkoutFocus {
+  const recent = memory.recentTrainingHistory || [];
+
+  // Consider anything trained today, yesterday or day before yesterday as blocked
+  const blocked = new Set(
+    recent
+      .filter((item) => ["today", "yesterday", "day_before_yesterday"].includes(item.dateLabel || ""))
+      .map((item) => item.muscleGroup)
+      .filter(isWorkoutFocus)
+  );
+
+  const rotation: WorkoutFocus[] = [
+    "chest_triceps",
+    "back_biceps",
+    "legs_core",
+    "shoulders_abs",
+  ];
+
+  // Find the first one in rotation that is not blocked
+  const next = rotation.find((focus) => !blocked.has(focus));
+  return next || "full_body";
+}
+
+function resolveTrainedReference(
+  memory: GutoMemory,
+  ref: GutoModelResponse["trainedReference"]
+): RecentTrainingHistoryItem | null {
+  if (!ref) return null;
+
+  const muscleGroup = ref.explicitMuscleGroup || memory.lastSuggestedFocus || memory.nextWorkoutFocus || "full_body";
+
+  return {
+    dateLabel: ref.dateLabel,
+    muscleGroup: isWorkoutFocus(muscleGroup) ? muscleGroup : "full_body",
+    raw: `Referência: treinei ${muscleGroup} em ${ref.dateLabel}`,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryPatch"], trainedRef?: GutoModelResponse["trainedReference"]): GutoMemory {
+  if (trainedRef) {
+    const resolved = resolveTrainedReference(memory, trainedRef);
+    if (resolved) {
+      memory.recentTrainingHistory = normalizeRecentTrainingHistory([resolved], memory.recentTrainingHistory || []);
+      // When a training is registered, we MUST recalculate the next focus to avoid repetition
+      memory.nextWorkoutFocus = chooseNextWorkoutFocus(memory);
+    }
+  }
+
+  if (!patch || typeof patch !== "object") {
+    saveMemory(memory);
+    return memory;
+  }
 
   if (patch.trainingSchedule === "today" || patch.trainingSchedule === "tomorrow") {
     memory.trainingSchedule = patch.trainingSchedule;
@@ -2304,7 +2365,7 @@ const FOCUS_NAME_BY_LANG: Record<GutoLanguage, Record<string, string>> = {
 
 function stripExercisesWithoutVideo(plan: WorkoutPlan): WorkoutPlan {
   const valid = plan.exercises.filter(
-    (e) => e.videoUrl && e.videoProvider === "local"
+    (e) => (e.videoUrl && e.videoProvider === "local") || (e.animationUrl && e.animationProvider === "workoutx")
   );
   if (valid.length < plan.exercises.length) {
     const removed = plan.exercises
@@ -2965,12 +3026,19 @@ async function askGutoModel({
 
     const parsedResponse = parseGutoResponse(data?.candidates?.[0]?.content?.parts?.[0]?.text, language);
 
-    applyMemoryPatch(memory, parsedResponse.memoryPatch);
+    applyMemoryPatch(memory, parsedResponse.memoryPatch, parsedResponse.trainedReference);
 
     let workoutPlan = parsedResponse.workoutPlan
       ? localizeWorkoutPlan(enrichWorkoutPlanAnimations(parsedResponse.workoutPlan) as WorkoutPlan, selectedLanguage)
       : null;
-    if (parsedResponse.acao === "updateWorkout" && !workoutPlan) {
+
+    if (workoutPlan && workoutPlan.exercises.length === 0) {
+      workoutPlan = null;
+    }
+
+    const hasIncompletePlan = parsedResponse.workoutPlan && (!parsedResponse.workoutPlan.exercises || parsedResponse.workoutPlan.exercises.length === 0);
+    
+    if ((parsedResponse.acao === "updateWorkout" || hasIncompletePlan) && !workoutPlan) {
       const semanticFocus = parsedResponse.memoryPatch?.nextWorkoutFocus || memory.nextWorkoutFocus;
       workoutPlan = buildWorkoutPlanFromSemanticFocus({
         language: selectedLanguage,
@@ -2989,6 +3057,9 @@ async function askGutoModel({
 
     if (workoutPlan) {
       memory.lastWorkoutPlan = workoutPlan;
+      if (workoutPlan.focusKey) {
+        memory.lastSuggestedFocus = workoutPlan.focusKey as WorkoutFocus;
+      }
       if (parsedResponse.memoryPatch?.lastWorkoutPlan === undefined) {
         saveMemory(memory);
       }
@@ -3016,7 +3087,11 @@ app.get("/guto/memory", (req, res) => {
   const memory = applyPendingMissPenalties(grantInitialXp(getMemory(userId)));
   memory.lastActiveAt = new Date().toISOString();
   if (memory.lastWorkoutPlan) {
-    memory.lastWorkoutPlan = stripExercisesWithoutVideo(memory.lastWorkoutPlan);
+    res.json({
+      ...memory,
+      lastWorkoutPlan: stripExercisesWithoutVideo(memory.lastWorkoutPlan)
+    });
+    return;
   }
   saveMemory(memory);
   res.json(memory);
@@ -3149,8 +3224,8 @@ app.get("/guto/proactive", async (req, res) => {
       result.fala = greeting[selectedLang] || greeting["pt-BR"];
       result.acao = "updateWorkout";
       
-      // Ensure a plan is generated if not present
-      if (!result.workoutPlan) {
+      // Ensure a plan is generated if not present or incomplete (missing exercises)
+      if (!result.workoutPlan || !result.workoutPlan.exercises || result.workoutPlan.exercises.length === 0) {
         result.workoutPlan = buildWorkoutPlanFromSemanticFocus({
           language: selectedLang,
           location: memory.trainingLocation || memory.preferredTrainingLocation || "casa",
