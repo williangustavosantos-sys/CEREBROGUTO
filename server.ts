@@ -2,12 +2,11 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import multer from "multer";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname } from "path";
 
 import { config } from "./src/config";
 import { createRateLimit } from "./src/http/rate-limit";
 import { requestLog } from "./src/http/request-log";
+import { readMemoryStoreSync, writeMemoryStoreSync, readMemoryStoreAsync, writeMemoryStoreAsync } from "./src/memory-store";
 import {
   getCatalogById,
   getExerciseName,
@@ -186,7 +185,7 @@ const GUTO_MODEL_TEMPERATURE = config.modelTemperature;
 const VOICE_API_KEY = config.voiceApiKey;
 const OPENAI_API_KEY = config.openaiApiKey;
 const WORKOUTX_API_KEY = config.workoutxApiKey;
-const MEMORY_FILE = config.memoryFile;
+
 const DEFAULT_USER_ID = config.defaultUserId;
 const GUTO_TIME_ZONE = config.timeZone;
 const DEFAULT_VOICE_STYLE = {
@@ -583,17 +582,15 @@ function validateName(value: string) {
 }
 
 function readMemoryStore(): Record<string, GutoMemory> {
-  try {
-    if (!existsSync(MEMORY_FILE)) return {};
-    return JSON.parse(readFileSync(MEMORY_FILE, "utf8")) as Record<string, GutoMemory>;
-  } catch {
-    return {};
-  }
+  return readMemoryStoreSync() as Record<string, GutoMemory>;
 }
 
 function writeMemoryStore(store: Record<string, GutoMemory>) {
-  mkdirSync(dirname(MEMORY_FILE), { recursive: true });
-  writeFileSync(MEMORY_FILE, JSON.stringify(store, null, 2));
+  // Sync write to in-memory cache immediately; async persist to Redis/disk in background
+  writeMemoryStoreSync(store);
+  void writeMemoryStoreAsync(store).catch((err) =>
+    console.warn("[GUTO] Async memory write failed:", err)
+  );
 }
 
 function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
@@ -628,6 +625,12 @@ function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
       trainingStatus: existing.trainingStatus,
       trainingLimitations: existing.trainingLimitations,
       trainingAge: typeof existing.trainingAge === "number" ? existing.trainingAge : undefined,
+      userAge: typeof existing.userAge === "number" ? existing.userAge : undefined,
+      biologicalSex: existing.biologicalSex,
+      trainingLevel: existing.trainingLevel,
+      trainingGoal: existing.trainingGoal,
+      preferredTrainingLocation: existing.preferredTrainingLocation,
+      trainingPathology: existing.trainingPathology,
       lastWorkoutCompletedAt: existing.lastWorkoutCompletedAt,
       completedWorkoutDates: completedWorkoutDates.sort(),
       adaptedMissionDates: adaptedMissionDates.sort(),
@@ -836,10 +839,13 @@ function buildProactiveInput(memory: GutoMemory, slot: string, context: Operatio
     limitation_check: "fazer check-in de pós-treino sobre a limitação registrada e ajustar o próximo treino",
   };
 
+  const PLACEHOLDER_NAMES_SET = new Set(["Operador", "operador", "operator", "Operator"]);
+  const displayName = memory.name && !PLACEHOLDER_NAMES_SET.has(memory.name.trim()) ? memory.name.trim() : "";
+
   return [
     "GUTO deve puxar ação sozinho. O usuário não pediu nada agora.",
     `Objetivo da mensagem: ${slotGoal[slot] || "cobrar ação imediata"}.`,
-    `Memória: nome=${memory.name}, streak=${memory.streak}, treinou_hoje=${memory.trainedToday}, energia=${memory.energyLast || "desconhecida"}, local=${memory.trainingLocation || memory.preferredTrainingLocation || "desconhecido"}, nível=${memory.trainingLevel || "médio"}, objetivo=${memory.trainingGoal || "evolução"}, estado=${memory.trainingStatus || "desconhecido"}, atenção=${memory.trainingLimitations || "nenhuma registrada"}.`,
+    `Memória: nome=${displayName || "(sem nome)"}, streak=${memory.streak}, treinou_hoje=${memory.trainedToday}, energia=${memory.energyLast || "desconhecida"}, local=${memory.trainingLocation || memory.preferredTrainingLocation || "desconhecido"}, nível=${memory.trainingLevel || "médio"}, objetivo=${memory.trainingGoal || "evolução"}, estado=${memory.trainingStatus || "desconhecido"}, atenção=${memory.trainingLimitations || "nenhuma registrada"}.`,
     `Contexto temporal: ${JSON.stringify(context)}.`,
     "Gere uma mensagem curta, proativa e acionável.",
     slot === "force"
@@ -1836,7 +1842,32 @@ Usuário entrega contexto fora de ordem:
     "",
     "─── DADOS DO TURNO ATUAL ───",
     `Contexto operacional: ${JSON.stringify(operationalContext)}`,
-    `Memória do usuário: ${JSON.stringify(memory)}`,
+    `Memória do usuário: ${JSON.stringify({
+      userId: memory.userId,
+      name: memory.name,
+      language: memory.language,
+      streak: memory.streak,
+      totalXp: memory.totalXp,
+      trainedToday: memory.trainedToday,
+      adaptedMissionToday: memory.adaptedMissionToday,
+      lastActiveAt: memory.lastActiveAt,
+      energyLast: memory.energyLast,
+      trainingLocation: memory.trainingLocation,
+      trainingStatus: memory.trainingStatus,
+      trainingLimitations: memory.trainingLimitations,
+      trainingAge: memory.trainingAge,
+      userAge: memory.userAge,
+      biologicalSex: memory.biologicalSex,
+      trainingLevel: memory.trainingLevel,
+      trainingGoal: memory.trainingGoal,
+      preferredTrainingLocation: memory.preferredTrainingLocation,
+      trainingPathology: memory.trainingPathology,
+      lastWorkoutCompletedAt: memory.lastWorkoutCompletedAt,
+      lastLimitationCheckAt: memory.lastLimitationCheckAt,
+      lastWorkoutFocus: (memory.lastWorkoutPlan as { focusKey?: string } | null)?.focusKey ?? null,
+      recentTrainingHistory: memory.recentTrainingHistory,
+      completedWorkoutCount: memory.completedWorkoutDates?.length ?? 0,
+    })}`,
     `expectedResponse atual da UI (sugestão, não trava): ${JSON.stringify(normalizeExpectedResponse(expectedResponse))}`,
     `Histórico recente:\n${formatHistoryForPrompt(history) || "sem histórico recente"}`,
     `Mensagem atual do usuário: ${input || ""}`,
@@ -2872,14 +2903,14 @@ async function askGutoModel({
       const semanticFocus = parsedResponse.memoryPatch?.nextWorkoutFocus || memory.nextWorkoutFocus;
       workoutPlan = buildWorkoutPlanFromSemanticFocus({
         language: selectedLanguage,
-        location: memory.trainingLocation || "casa",
+        location: memory.trainingLocation || memory.preferredTrainingLocation || "casa",
         status: memory.trainingStatus || focusToStatusHint(semanticFocus),
         limitation: memory.trainingLimitations || "sem dor",
         age: memory.trainingAge,
         scheduleIntent: memory.trainingSchedule,
         focus: semanticFocus,
       });
-      const pv = validateWorkoutPlan(workoutPlan, memory.recentTrainingHistory || [], getLocationMode(memory.trainingLocation));
+      const pv = validateWorkoutPlan(workoutPlan, memory.recentTrainingHistory || [], getLocationMode(memory.trainingLocation || memory.preferredTrainingLocation));
       if (!pv.valid) console.warn("[GUTO] validateWorkoutPlan errors:", pv.errors);
       if (pv.warnings.length > 0) console.info("[GUTO] validateWorkoutPlan warnings:", pv.warnings);
     }
@@ -3007,6 +3038,14 @@ app.get("/guto/proactive", async (req, res) => {
     return res.json({ due: false });
   }
 
+  // Anti-spam: Do not send time-based slots if user was active in the last 120 minutes
+  if (!force && memory.lastActiveAt) {
+    const minutesSinceLastActive = (new Date().getTime() - new Date(memory.lastActiveAt).getTime()) / 60000;
+    if (minutesSinceLastActive < 120) {
+      return res.json({ due: false });
+    }
+  }
+
   try {
     let result = await askGutoModel({
       input: buildProactiveInput(memory, slot, operationalContext),
@@ -3019,13 +3058,23 @@ app.get("/guto/proactive", async (req, res) => {
 
     // FORCE COHERENCE FOR THE FIRST MESSAGE
     if (slot === "force") {
-      const greeting = {
-        "pt-BR": `${memory.name}, finalmente chegou, estava te esperando, enquanto isso já analisei tudo e já montei um treino para a gente evoluir junto. Bora?`,
-        "en-US": `${memory.name}, you finally arrived, I was waiting for you. Meanwhile I analyzed everything and put together a workout so we can evolve together. Let's go?`,
-        "es-ES": `${memory.name}, finalmente llegaste, te estaba esperando, mientras tanto ya analicé todo y armé un entrenamiento para que evolucionemos juntos. ¿Vamos?`,
-        "it-IT": `${memory.name}, finalmente sei arrivato, ti stavo aspettando, nel frattempo ho analizzato tutto e ho preparato un allenamento per farci evolvere insieme. Andiamo?`,
-      };
+      const PLACEHOLDER_NAMES = new Set(["Operador", "operador", "operator", "Operator"]);
+      const safeName = memory.name && !PLACEHOLDER_NAMES.has(memory.name.trim()) ? memory.name.trim() : "";
       const selectedLang = normalizeLanguage(language);
+      const greeting: Record<GutoLanguage, string> = {
+        "pt-BR": safeName
+          ? `${safeName}, finalmente chegou, estava te esperando, enquanto isso já analisei tudo e já montei um treino para a gente evoluir junto. Bora?`
+          : `Chegou. Estava te esperando. Treino já montado. Bora?`,
+        "en-US": safeName
+          ? `${safeName}, you finally arrived, I was waiting for you. Meanwhile I analyzed everything and put together a workout so we can evolve together. Let's go?`
+          : `You finally arrived. Workout is ready. Let's go?`,
+        "es-ES": safeName
+          ? `${safeName}, finalmente llegaste, te estaba esperando, mientras tanto ya analicé todo y armé un entrenamiento para que evolucionemos juntos. ¿Vamos?`
+          : `Llegaste. Te estaba esperando. Entrenamiento listo. ¿Vamos?`,
+        "it-IT": safeName
+          ? `${safeName}, finalmente sei arrivato, ti stavo aspettando, nel frattempo ho analizzato tutto e ho preparato un allenamento per farci evolvere insieme. Andiamo?`
+          : `Sei arrivato. Ti stavo aspettando. Allenamento pronto. Andiamo?`,
+      };
       result.fala = greeting[selectedLang] || greeting["pt-BR"];
       result.acao = "updateWorkout";
       
@@ -3035,7 +3084,7 @@ app.get("/guto/proactive", async (req, res) => {
           language: selectedLang,
           location: memory.trainingLocation || memory.preferredTrainingLocation || "casa",
           status: memory.trainingStatus || "iniciante",
-          limitation: memory.trainingLimitations || "nenhuma",
+          limitation: memory.trainingLimitations || "sem dor",
           age: memory.userAge || 30,
           scheduleIntent: "today",
           focus: memory.nextWorkoutFocus,
@@ -3043,44 +3092,41 @@ app.get("/guto/proactive", async (req, res) => {
       }
     }
 
-    memory.proactiveSent[day] = [...sentToday, slot];
+    // Re-read memory to get the version already saved by askGutoModel (applyMemoryPatch ran inside it)
+    const freshMemory = getMemory(userId);
+    freshMemory.proactiveSent[day] = [...(freshMemory.proactiveSent[day] || []), slot];
     if (slot === "limitation_check") {
-      memory.lastLimitationCheckAt = new Date().toISOString();
-    }
-
-    // UPDATE MEMORY FROM RESULT (MAJOR FIX)
-    if (result.memoryPatch) {
-      Object.assign(memory, result.memoryPatch);
+      freshMemory.lastLimitationCheckAt = new Date().toISOString();
     }
     if (result.workoutPlan) {
-      memory.lastWorkoutPlan = result.workoutPlan;
+      freshMemory.lastWorkoutPlan = result.workoutPlan;
     }
-
-    memory.lastActiveAt = new Date().toISOString();
-    saveMemory(memory);
+    freshMemory.lastActiveAt = new Date().toISOString();
+    saveMemory(freshMemory);
     res.json({
       due: true,
       slot,
       ...attachAvatarEmotion({
         response: result,
-        memory,
+        memory: freshMemory,
         context: operationalContext,
         slot,
       }),
     });
   } catch {
-    const fallbackResponse = buildTechnicalFallback(normalizeLanguage(language || memory.language));
-    memory.proactiveSent[day] = [...sentToday, slot];
+    const freshMemoryOnError = getMemory(userId);
+    const fallbackResponse = buildTechnicalFallback(normalizeLanguage(language || freshMemoryOnError.language));
+    freshMemoryOnError.proactiveSent[day] = [...(freshMemoryOnError.proactiveSent[day] || []), slot];
     if (slot === "limitation_check") {
-      memory.lastLimitationCheckAt = new Date().toISOString();
+      freshMemoryOnError.lastLimitationCheckAt = new Date().toISOString();
     }
-    saveMemory(memory);
+    saveMemory(freshMemoryOnError);
     res.json({
       due: true,
       slot,
       ...attachAvatarEmotion({
         response: assertAndRepairVisibleLanguage({ ...fallbackResponse, acao: "none" }, language),
-        memory,
+        memory: freshMemoryOnError,
         context: operationalContext,
         slot,
       }),

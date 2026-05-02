@@ -18,4 +18,8 @@ export const config = {
     .filter(Boolean),
   rateLimitWindowMs: Number(process.env.GUTO_RATE_LIMIT_WINDOW_MS || 60_000),
   rateLimitMaxRequests: Number(process.env.GUTO_RATE_LIMIT_MAX_REQUESTS || 120),
+  // Upstash Redis — set in production for persistent memory across serverless instances
+  upstashRedisUrl: process.env.UPSTASH_REDIS_REST_URL || "",
+  upstashRedisToken: process.env.UPSTASH_REDIS_REST_TOKEN || "",
 };
+
