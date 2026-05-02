@@ -13,15 +13,17 @@ const BANNER_HEIGHT = POSTER_HEIGHT - SELFIE_AREA_HEIGHT;
 
 export async function generateWorkoutPoster(params: {
   imageBase64: string;
-  workoutFocus: string;
   workoutLabel: string;
   dateLabel: string;
   xp: number;
 }): Promise<{ posterBuffer: Buffer; thumbBuffer: Buffer }> {
   const { imageBase64, workoutLabel, dateLabel, xp } = params;
 
+  if (!imageBase64) throw new Error("imageBase64 is required");
+
   // Strip data URL prefix if present
   const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, "");
+  if (!base64Data) throw new Error("Invalid imageBase64: empty after stripping prefix");
   const photoBuffer = Buffer.from(base64Data, "base64");
 
   // Resize and center-crop the selfie to fit the selfie area

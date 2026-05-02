@@ -11,7 +11,6 @@ export function initStorage(): void {
 }
 
 export async function uploadImage(buffer: Buffer, filename: string): Promise<string> {
-  initStorage();
   const filePath = path.join(UPLOADS_DIR, filename);
   writeFileSync(filePath, buffer);
   return `${URL_PREFIX}/${filename}`;
@@ -19,8 +18,10 @@ export async function uploadImage(buffer: Buffer, filename: string): Promise<str
 
 export async function deleteImage(url: string): Promise<void> {
   const filename = url.replace(`${URL_PREFIX}/`, "");
-  const filePath = path.join(UPLOADS_DIR, filename);
-  if (existsSync(filePath)) {
-    unlinkSync(filePath);
+  const resolved = path.resolve(UPLOADS_DIR, filename);
+  // Guard against path traversal
+  if (!resolved.startsWith(UPLOADS_DIR + path.sep)) return;
+  if (existsSync(resolved)) {
+    unlinkSync(resolved);
   }
 }

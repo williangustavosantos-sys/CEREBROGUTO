@@ -3414,7 +3414,7 @@ async function keepLastFiveValidations(memory: GutoMemory): Promise<void> {
   }
 }
 
-app.post("/guto/validate-workout", async (req, res) => {
+app.post("/guto/validate-workout", express.json({ limit: "15mb" }), async (req, res) => {
   const body = req.body as {
     userId?: string;
     imageBase64?: string;
@@ -3435,8 +3435,13 @@ app.post("/guto/validate-workout", async (req, res) => {
     return res.status(400).json({ error: "Invalid locationMode. Must be gym, home, or park." });
   }
 
+  if (!isWorkoutFocus(workoutFocus)) {
+    return res.status(400).json({ error: "Invalid workoutFocus. Must be one of: chest_triceps, back_biceps, legs_core, shoulders_abs, full_body." });
+  }
+
   const selectedLanguage = normalizeLanguage(language);
   const now = new Date();
+  const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
   const dateLabel = new Intl.DateTimeFormat(selectedLanguage, {
     timeZone: GUTO_TIME_ZONE,
     day: "2-digit",
@@ -3448,28 +3453,42 @@ app.post("/guto/validate-workout", async (req, res) => {
 
   const XP_AMOUNT = 100;
 
-  try {
-    // Generate poster
-    const { posterBuffer, thumbBuffer } = await generateWorkoutPoster({
-      imageBase64,
-      workoutFocus,
-      workoutLabel,
-      dateLabel,
-      xp: XP_AMOUNT,
-    });
+  let photoUrl = "";
+  let posterUrl = "";
+  let thumbUrl = "";
 
-    // Compress selfie photo
+  try {
+    // Check daily dedup: only one validation per user per day
+    const storeCheck = readMemoryStore();
+    const existingMemory = storeCheck[userId] as GutoMemory | undefined;
+    if (existingMemory?.validationHistory?.some((r) => r.createdAt.startsWith(todayKey))) {
+      return res.status(409).json({ error: "Treino já validado hoje." });
+    }
+
+    let posterBuffer: Buffer;
+    let thumbBuffer: Buffer;
+    try {
+      ({ posterBuffer, thumbBuffer } = await generateWorkoutPoster({
+        imageBase64,
+        workoutLabel,
+        dateLabel,
+        xp: XP_AMOUNT,
+      }));
+    } catch (imgError) {
+      console.warn("[GUTO] validate-workout: invalid image data", imgError);
+      return res.status(400).json({ error: "Imagem inválida ou corrompida." });
+    }
+
+    // Save raw selfie
     const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, "");
     const photoBuffer = Buffer.from(base64Data, "base64");
 
-    // Save images
     initStorage();
     const id = crypto.randomUUID();
-    const photoUrl = await uploadImage(photoBuffer, `${id}-photo.jpg`);
-    const posterUrl = await uploadImage(posterBuffer, `${id}-poster.jpg`);
-    const thumbUrl = await uploadImage(thumbBuffer, `${id}-thumb.jpg`);
+    photoUrl = await uploadImage(photoBuffer, `${id}-photo.jpg`);
+    posterUrl = await uploadImage(posterBuffer, `${id}-poster.jpg`);
+    thumbUrl = await uploadImage(thumbBuffer, `${id}-thumb.jpg`);
 
-    // Build record
     const record: WorkoutValidationRecord = {
       id,
       userId,
@@ -3494,7 +3513,7 @@ app.post("/guto/validate-workout", async (req, res) => {
 
     // Read store directly to preserve validationHistory (getMemory strips it)
     const store = readMemoryStore();
-    const memory: GutoMemory = store[userId] ?? getMemory(userId);
+    const memory: GutoMemory = (store[userId] as GutoMemory) ?? getMemory(userId);
 
     if (!Array.isArray(memory.validationHistory)) {
       memory.validationHistory = [];
@@ -3511,6 +3530,10 @@ app.post("/guto/validate-workout", async (req, res) => {
       validationHistory: memory.validationHistory,
     });
   } catch (error) {
+    // Rollback uploaded files to avoid orphaned storage
+    if (photoUrl) await deleteImage(photoUrl).catch(() => undefined);
+    if (posterUrl) await deleteImage(posterUrl).catch(() => undefined);
+    if (thumbUrl) await deleteImage(thumbUrl).catch(() => undefined);
     console.error("[GUTO] validate-workout error:", error);
     return res.status(500).json({ error: "Erro ao validar treino." });
   }
