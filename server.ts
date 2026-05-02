@@ -2677,6 +2677,8 @@ function buildWorkoutPlanFromSemanticFocus({
     ? (level === "beginner" ? "10-12" : "8-10")
     : (level === "beginner" ? "12" : "15");
   const restStrength = isStrength ? "90s" : "75s";
+  // Park/home branches use fixed reps — equipment availability overrides goal-based periodization.
+  // isStrength/setsStrength apply only within gym sub-branches.
 
   const focusLabel =
     focus === "legs_core"
@@ -2700,7 +2702,7 @@ function buildWorkoutPlanFromSemanticFocus({
           makeWorkoutExercise("agachamento_livre", "Agachamento livre", setsStrength, repsStrengthCompound, restStrength,
             "Descida controlada, joelho acompanha o pé, core travado.",
             hasNoLimitation ? "Base do treino de perna." : `Controle total para proteger ${limitationFocus}.`),
-          makeWorkoutExercise("legpress_45", "Leg press 45°", setsStrength, "10-12", "75s",
+          makeWorkoutExercise("legpress_45", "Leg press 45°", setsStrength, "10-12", "75s", // reps/rest fixed — secondary compound, protect joints
             "Pés na largura do quadril, descida até 90° e empurra sem travar o joelho.",
             isStrength ? "Volume de quadríceps sem agredir lombar." : "Complementa o agachamento."),
           makeWorkoutExercise("cadeira_extensora", "Cadeira extensora", 3, "12-15", "60s",
@@ -2792,7 +2794,7 @@ function buildWorkoutPlanFromSemanticFocus({
           repsStrengthCompound, restStrength,
           "Peito alto, puxa a barra até a linha do queixo.",
           "Costas entram limpo no full body."),
-        makeWorkoutExercise("desenvolvimento_sentado", "Desenvolvimento com halteres sentado", 3,
+        makeWorkoutExercise("desenvolvimento_sentado", "Desenvolvimento com halteres sentado", 3, // accessory in full_body (not primary focus)
           "10-12", "75s",
           "Cotovelo alinhado com o ombro, sobe sem bater os halteres.",
           "Ombro fecha o bloco."),

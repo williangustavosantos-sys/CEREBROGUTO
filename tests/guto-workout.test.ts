@@ -455,12 +455,12 @@ describe("buildWorkoutPlan coherence — gym + muscle_gain", () => {
   // Helper that mirrors getLocationMode from server
   function locationMode(location: string): "gym" | "park" | "home" {
     const n = location.toLowerCase();
-    if (["academia", "gym", "palestra", "fitness"].some(t => n.includes(t))) return "gym";
-    if (["parque", "park", "rua"].some(t => n.includes(t))) return "park";
+    if (["academia", "gym", "palestra", "fitness", "gimnasio", "box"].some(t => n.includes(t))) return "gym";
+    if (["parque", "park", "rua", "calle", "street", "pista", "quadra"].some(t => n.includes(t))) return "park";
     return "home";
   }
 
-  it("gym warmup uses bike/escada, not polichinelo/perdigueiro", () => {
+  it("locationMode correctly resolves gym, park, and home location strings", () => {
     assert.equal(locationMode("gym"), "gym");
     assert.equal(locationMode("academia"), "gym");
     assert.equal(locationMode("casa"), "home");
