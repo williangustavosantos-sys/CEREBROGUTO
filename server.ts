@@ -3484,7 +3484,12 @@ app.post("/guto/validate-workout", async (req, res) => {
       thumbUrl,
       xp: XP_AMOUNT,
       status: "validated",
-      gutoMessage: "Treino validado! Continue assim.",
+      gutoMessage: ({
+        "pt-BR": "Missão fechada. O que foi feito conta. O que não foi, você sabe.",
+        "en-US": "Mission closed. What was done counts. What wasn't, you know.",
+        "it-IT": "Missione chiusa. Quello che è stato fatto conta. Quello che non è stato fatto, lo sai.",
+        "es-ES": "Misión cerrada. Lo que se hizo cuenta. Lo que no, tú lo sabes.",
+      } as const)[selectedLanguage],
     };
 
     // Read store directly to preserve validationHistory (getMemory strips it)
