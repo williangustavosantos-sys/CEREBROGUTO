@@ -9,6 +9,7 @@ import {
   getExercisesForFocus,
   type CatalogLanguage,
 } from "../exercise-catalog";
+import { sanitizeDisplayName } from "../server-utils";
 
 // ─── 1. CATALOG INTEGRITY ──────────────────────────────────────────────────
 
@@ -401,54 +402,37 @@ describe("Gender-neutral confrontation — catalog/prompt invariants", () => {
 
 // ─── 12. PROACTIVE GREETING — NAME HANDLING ────────────────────────────────
 
-describe("Proactive greeting - name handling", () => {
-  const DEFAULT_NAMES = new Set(["Operador", "operador", "operator", "Operator", ""]);
-
-  function buildSafeGreeting(name: string, lang: "pt-BR" | "en-US" | "es-ES" | "it-IT" = "pt-BR"): string {
-    const safeName = DEFAULT_NAMES.has(name.trim()) ? "" : name.trim();
-    const greetings: Record<string, (n: string) => string> = {
-      "pt-BR": (n) => n
-        ? `${n}, finalmente chegou, estava te esperando, enquanto isso já analisei tudo e já montei um treino para a gente evoluir junto. Bora?`
-        : `Chegou. Estava te esperando. Treino já montado. Bora?`,
-      "en-US": (n) => n
-        ? `${n}, you finally arrived, I was waiting for you. Meanwhile I analyzed everything and put together a workout so we can evolve together. Let's go?`
-        : `You finally arrived. Workout is ready. Let's go?`,
-      "es-ES": (n) => n
-        ? `${n}, finalmente llegaste, te estaba esperando, mientras tanto ya analicé todo y armé un entrenamiento para que evolucionemos juntos. ¿Vamos?`
-        : `Llegaste. Te estaba esperando. Entrenamiento listo. ¿Vamos?`,
-      "it-IT": (n) => n
-        ? `${n}, finalmente sei arrivato, ti stavo aspettando, nel frattempo ho analizzato tutto e ho preparato un allenamento per farci evolvere insieme. Andiamo?`
-        : `Sei arrivato. Ti stavo aspettando. Allenamento pronto. Andiamo?`,
-    };
-    return (greetings[lang] ?? greetings["pt-BR"])(safeName);
-  }
-
-  it("does not include 'Operador' when name is the default placeholder", () => {
-    const msg = buildSafeGreeting("Operador", "pt-BR");
-    assert.ok(!msg.toLowerCase().includes("operador"), `Must not contain 'operador': ${msg}`);
-    assert.ok(msg.length > 10, "Must not be empty");
+describe("sanitizeDisplayName", () => {
+  it("returns empty string for 'Operador'", () => {
+    assert.equal(sanitizeDisplayName("Operador"), "");
   });
 
-  it("does not include 'Operator' (English variant) as name", () => {
-    const msg = buildSafeGreeting("Operator", "en-US");
-    assert.ok(!msg.toLowerCase().includes("operator"), `Must not contain 'operator': ${msg}`);
+  it("returns empty string for 'operador'", () => {
+    assert.equal(sanitizeDisplayName("operador"), "");
   });
 
-  it("includes the real name when name is set", () => {
-    const msg = buildSafeGreeting("Will", "pt-BR");
-    assert.ok(msg.startsWith("Will,"), `Must start with 'Will,': ${msg}`);
+  it("returns empty string for 'operator'", () => {
+    assert.equal(sanitizeDisplayName("operator"), "");
   });
 
-  it("uses nameless form for empty string", () => {
-    const msg = buildSafeGreeting("", "pt-BR");
-    assert.ok(!msg.startsWith(","), `Nameless form must not start with comma: ${msg}`);
-    assert.ok(msg.length > 10, "Nameless form must have content");
+  it("returns empty string for 'Operator'", () => {
+    assert.equal(sanitizeDisplayName("Operator"), "");
   });
 
-  it("uses nameless form for empty string in en-US", () => {
-    const msg = buildSafeGreeting("", "en-US");
-    assert.ok(!msg.startsWith(","), `Must not start with comma: ${msg}`);
-    assert.ok(msg.length > 10);
+  it("returns empty string for empty string", () => {
+    assert.equal(sanitizeDisplayName(""), "");
+  });
+
+  it("returns the real name unchanged for 'Will'", () => {
+    assert.equal(sanitizeDisplayName("Will"), "Will");
+  });
+
+  it("returns the real name trimmed for ' Will '", () => {
+    assert.equal(sanitizeDisplayName(" Will "), "Will");
+  });
+
+  it("returns name for non-placeholder value 'João'", () => {
+    assert.equal(sanitizeDisplayName("João"), "João");
   });
 });
 

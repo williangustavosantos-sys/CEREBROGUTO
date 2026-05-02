@@ -13,6 +13,7 @@ import {
   ValidatedExerciseCatalog,
   type CatalogLanguage,
 } from "./exercise-catalog";
+import { sanitizeDisplayName } from "./server-utils";
 
 type Acao = "none" | "updateWorkout" | "lock";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
@@ -839,8 +840,7 @@ function buildProactiveInput(memory: GutoMemory, slot: string, context: Operatio
     limitation_check: "fazer check-in de pós-treino sobre a limitação registrada e ajustar o próximo treino",
   };
 
-  const PLACEHOLDER_NAMES_SET = new Set(["Operador", "operador", "operator", "Operator"]);
-  const displayName = memory.name && !PLACEHOLDER_NAMES_SET.has(memory.name.trim()) ? memory.name.trim() : "";
+  const displayName = sanitizeDisplayName(memory.name ?? "");
 
   return [
     "GUTO deve puxar ação sozinho. O usuário não pediu nada agora.",
@@ -3058,8 +3058,7 @@ app.get("/guto/proactive", async (req, res) => {
 
     // FORCE COHERENCE FOR THE FIRST MESSAGE
     if (slot === "force") {
-      const PLACEHOLDER_NAMES = new Set(["Operador", "operador", "operator", "Operator"]);
-      const safeName = memory.name && !PLACEHOLDER_NAMES.has(memory.name.trim()) ? memory.name.trim() : "";
+      const safeName = sanitizeDisplayName(memory.name ?? "");
       const selectedLang = normalizeLanguage(language);
       const greeting: Record<GutoLanguage, string> = {
         "pt-BR": safeName
