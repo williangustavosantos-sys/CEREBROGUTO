@@ -2671,6 +2671,13 @@ function buildWorkoutPlanFromSemanticFocus({
       : "execução limpa e ritmo progressivo"
     : `prestando atenção em ${limitationFocus}`;
 
+  const isStrength = trainingGoal === "muscle_gain" || trainingGoal === "hypertrophy";
+  const setsStrength = isStrength ? 4 : 3;
+  const repsStrengthCompound = isStrength
+    ? (level === "beginner" ? "10-12" : "8-10")
+    : (level === "beginner" ? "12" : "15");
+  const restStrength = isStrength ? "90s" : "75s";
+
   const focusLabel =
     focus === "legs_core"
       ? "Pernas e core"
@@ -2682,13 +2689,6 @@ function buildWorkoutPlanFromSemanticFocus({
 
   if (focus === "legs_core") {
     if (mode === "gym") {
-      const isStrength = trainingGoal === "muscle_gain" || trainingGoal === "hypertrophy";
-      const setsMain = isStrength ? 4 : 3;
-      const repsLeg = isStrength
-        ? (level === "beginner" ? "10-12" : "8-10")
-        : (level === "beginner" ? "12" : "15");
-      const restLeg = isStrength ? "90s" : "75s";
-
       return localizeWorkoutPlan({
         focus: focusLabel,
         focusKey: "legs_core",
@@ -2697,10 +2697,10 @@ function buildWorkoutPlanFromSemanticFocus({
         summary: commonSummary,
         exercises: [
           ...buildWarmupExercises("gym"),
-          makeWorkoutExercise("agachamento_livre", "Agachamento livre", setsMain, repsLeg, restLeg,
+          makeWorkoutExercise("agachamento_livre", "Agachamento livre", setsStrength, repsStrengthCompound, restStrength,
             "Descida controlada, joelho acompanha o pé, core travado.",
             hasNoLimitation ? "Base do treino de perna." : `Controle total para proteger ${limitationFocus}.`),
-          makeWorkoutExercise("legpress_45", "Leg press 45°", setsMain, "10-12", "75s",
+          makeWorkoutExercise("legpress_45", "Leg press 45°", setsStrength, "10-12", "75s",
             "Pés na largura do quadril, descida até 90° e empurra sem travar o joelho.",
             isStrength ? "Volume de quadríceps sem agredir lombar." : "Complementa o agachamento."),
           makeWorkoutExercise("cadeira_extensora", "Cadeira extensora", 3, "12-15", "60s",
@@ -2736,11 +2736,11 @@ function buildWorkoutPlanFromSemanticFocus({
     // Park/home: no dumbbell — replace serrote with bodyweight core work
     const shouldersMainExercises = mode === "gym"
       ? [
-          makeWorkoutExercise("desenvolvimento_sentado", "Desenvolvimento com halteres sentado", 4,
-            level === "beginner" ? "10-12" : "8-10", "90s",
+          makeWorkoutExercise("desenvolvimento_sentado", "Desenvolvimento com halteres sentado", setsStrength,
+            repsStrengthCompound, restStrength,
             "Cotovelo alinhado com o ombro, sobe sem bater os halteres.",
             hasNoLimitation ? "Composto de ombro. Principal do bloco." : `Sem irritar ${limitationFocus}.`),
-          makeWorkoutExercise("elevacao_lateral_simultanea_sentado", "Elevação lateral simultânea sentado", 4,
+          makeWorkoutExercise("elevacao_lateral_simultanea_sentado", "Elevação lateral simultânea sentado", setsStrength,
             "12-15", "60s",
             "Cotovelo levemente flexionado, sobe até a altura do ombro.",
             "Medial entra sem compensação."),
@@ -2780,16 +2780,16 @@ function buildWorkoutPlanFromSemanticFocus({
   // full_body: park/home replaces gym equipment with bodyweight
   const fullBodyMainExercises = mode === "gym"
     ? [
-        makeWorkoutExercise("agachamento_livre", "Agachamento livre", 4,
-          level === "beginner" ? "12" : "10", "75s",
+        makeWorkoutExercise("agachamento_livre", "Agachamento livre", setsStrength,
+          repsStrengthCompound, restStrength,
           "Base sólida, descida limpa, empurra o chão.",
           hasNoLimitation ? "Quadríceps, glúteo e core." : `Sem irritar ${limitationFocus}.`),
-        makeWorkoutExercise("supino_reto", "Supino reto", 4,
-          level === "beginner" ? "10" : "8-10", "90s",
+        makeWorkoutExercise("supino_reto", "Supino reto", setsStrength,
+          repsStrengthCompound, restStrength,
           "Escápula travada, barra desce controlada até o peito.",
           "Peito e tríceps em foco."),
-        makeWorkoutExercise("puxada_frente", "Puxada frente", 4,
-          level === "beginner" ? "10-12" : "8-10", "75s",
+        makeWorkoutExercise("puxada_frente", "Puxada frente", setsStrength,
+          repsStrengthCompound, restStrength,
           "Peito alto, puxa a barra até a linha do queixo.",
           "Costas entram limpo no full body."),
         makeWorkoutExercise("desenvolvimento_sentado", "Desenvolvimento com halteres sentado", 3,
@@ -2975,7 +2975,7 @@ async function askGutoModel({
         location: memory.trainingLocation || memory.preferredTrainingLocation || "casa",
         status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
         limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
-        age: memory.trainingAge ?? memory.userAge,
+        age: memory.userAge ?? memory.trainingAge,
         scheduleIntent: memory.trainingSchedule,
         focus: semanticFocus,
         trainingGoal: memory.trainingGoal,

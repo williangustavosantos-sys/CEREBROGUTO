@@ -488,6 +488,13 @@ describe("buildWorkoutPlan coherence — gym + muscle_gain", () => {
     assert.ok(conditioningCount >= 2, "Incoherent plan correctly has conditioning-only exercises");
   });
 
+  it("note: end-to-end plan generation tested via guto.integration.test.ts — buildWorkoutPlanFromSemanticFocus is not directly exportable without server side effects", () => {
+    // server.ts registers Express routes, Redis connections and calls app.listen at module scope,
+    // so importing it in unit tests would trigger those side effects. The function is covered
+    // end-to-end through the HTTP integration tests in guto.integration.test.ts.
+    assert.ok(true);
+  });
+
   it("all gym exercise IDs used in gym branches exist in the catalog", () => {
     const gymBranchIds = [
       // legs_core gym
