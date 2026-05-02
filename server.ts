@@ -153,6 +153,7 @@ interface GutoMemory {
   nextWorkoutFocus?: WorkoutFocus;
   lastSuggestedFocus?: WorkoutFocus;
   proactiveSent: Record<string, string[]>;
+  initialXpRewardSeen: boolean;
 }
 
 type XpEventType =
@@ -682,6 +683,7 @@ function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
     recentTrainingHistory: [],
     nextWorkoutFocus: undefined,
     proactiveSent: {},
+    initialXpRewardSeen: false,
   };
 }
 
@@ -3086,6 +3088,9 @@ app.post("/guto/memory", (req, res) => {
   if (trainingGoal) memory.trainingGoal = trainingGoal;
   if (preferredTrainingLocation) memory.preferredTrainingLocation = preferredTrainingLocation;
   if (trainingPathology) memory.trainingPathology = trainingPathology;
+  if (typeof req.body.initialXpRewardSeen === "boolean") {
+    memory.initialXpRewardSeen = req.body.initialXpRewardSeen;
+  }
   saveMemory(memory);
   res.json(memory);
 });
