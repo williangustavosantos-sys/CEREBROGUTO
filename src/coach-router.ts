@@ -14,7 +14,7 @@ import {
   readArenaStore,
   writeArenaStore,
 } from "./arena-store.js";
-import { getAvatarStage } from "./arena.js";
+import { getAvatarStage, getWeeklyRanking, getMonthlyRanking, getIndividualRanking, DEFAULT_ARENA_GROUP } from "./arena.js";
 import {
   readMemoryStoreAsync,
   writeMemoryStoreAsync,
@@ -343,6 +343,18 @@ coachRouter.post("/student/:userId/hard-delete", async (req: Request, res: Respo
   } catch (err) {
     res.status(500).json({ error: "delete_failed", message: String(err) });
   }
+});
+
+// GET /guto/coach/rankings
+coachRouter.get("/rankings", (req: Request, res: Response) => {
+  // Use current default group for now, or expand to use coach's specific group in future
+  const arenaGroupId = DEFAULT_ARENA_GROUP;
+  
+  const weekly = getWeeklyRanking(arenaGroupId);
+  const monthly = getMonthlyRanking(arenaGroupId);
+  const individual = getIndividualRanking(arenaGroupId);
+  
+  res.json({ weekly, monthly, individual });
 });
 
 // POST /guto/coach/nuke-all — apaga TODOS os dados de TODOS os usuários
