@@ -18,6 +18,15 @@ import {
 import { sanitizeDisplayName } from "./server-utils";
 import { generateWorkoutPoster } from "./src/poster";
 import { initStorage, uploadImage, deleteImage } from "./src/storage";
+import {
+  awardArenaXp,
+  createArenaProfileIfNeeded,
+  getWeeklyRanking,
+  getMonthlyRanking,
+  getIndividualRanking,
+  getMyArenaProfile,
+  DEFAULT_ARENA_GROUP,
+} from "./src/arena";
 
 type Acao = "none" | "updateWorkout" | "lock";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
@@ -3524,10 +3533,22 @@ app.post("/guto/validate-workout", express.json({ limit: "15mb" }), async (req, 
     store[userId] = memory;
     writeMemoryStore(store);
 
+    // Award Arena XP
+    const arenaResult = awardArenaXp({
+      userId,
+      displayName: (memory as { name?: string }).name || userId,
+      arenaGroupId: DEFAULT_ARENA_GROUP,
+      type: "workout_validated",
+      xp: XP_AMOUNT,
+      workoutFocus,
+      sourceValidationId: id,
+    });
+
     return res.json({
       success: true,
       validation: record,
       validationHistory: memory.validationHistory,
+      arena: arenaResult,
     });
   } catch (error) {
     // Rollback uploaded files to avoid orphaned storage
@@ -3537,6 +3558,37 @@ app.post("/guto/validate-workout", express.json({ limit: "15mb" }), async (req, 
     console.error("[GUTO] validate-workout error:", error);
     return res.status(500).json({ error: "Erro ao validar treino." });
   }
+});
+
+// ── Arena endpoints ──────────────────────────────────────────────────────────
+
+app.get("/guto/arena/weekly", (req, res) => {
+  const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
+  res.json(getWeeklyRanking(arenaGroupId));
+});
+
+app.get("/guto/arena/monthly", (req, res) => {
+  const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
+  res.json(getMonthlyRanking(arenaGroupId));
+});
+
+app.get("/guto/arena/individual", (req, res) => {
+  const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
+  res.json(getIndividualRanking(arenaGroupId));
+});
+
+app.get("/guto/arena/me", (req, res) => {
+  const userId = req.query.userId as string;
+  const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
+  if (!userId) {
+    return res.status(400).json({ error: "Missing userId" });
+  }
+  createArenaProfileIfNeeded(userId, userId, arenaGroupId);
+  const profile = getMyArenaProfile(userId, arenaGroupId);
+  if (!profile) {
+    return res.status(404).json({ error: "Arena profile not found for this group" });
+  }
+  return res.json(profile);
 });
 
 // Middleware global para capturar erros não tratados e evitar crash do Node
