@@ -6,6 +6,17 @@ import {
   appendArenaEvent,
   getProfilesByGroup,
 } from "./arena-store.js";
+import { getEffectiveUserAccess } from "./user-access-store.js";
+
+function isVisibleInRanking(userId: string): boolean {
+  const access = getEffectiveUserAccess(userId);
+  return (
+    access.active &&
+    access.visibleInArena &&
+    !access.archived &&
+    access.role === "student"
+  );
+}
 
 export const DEFAULT_ARENA_GROUP = "will-personal-alpha";
 
@@ -185,7 +196,7 @@ function deriveStatus(xp: number, workouts: number): string {
 }
 
 export function getWeeklyRanking(arenaGroupId: string) {
-  const profiles = getProfilesByGroup(arenaGroupId);
+  const profiles = getProfilesByGroup(arenaGroupId).filter((p) => isVisibleInRanking(p.userId));
   const sorted = [...profiles].sort((a, b) => b.weeklyXp - a.weeklyXp);
   return {
     rankingType: "weekly",
@@ -204,7 +215,7 @@ export function getWeeklyRanking(arenaGroupId: string) {
 }
 
 export function getMonthlyRanking(arenaGroupId: string) {
-  const profiles = getProfilesByGroup(arenaGroupId);
+  const profiles = getProfilesByGroup(arenaGroupId).filter((p) => isVisibleInRanking(p.userId));
   const sorted = [...profiles].sort((a, b) => b.monthlyXp - a.monthlyXp);
   return {
     rankingType: "monthly",
@@ -223,7 +234,7 @@ export function getMonthlyRanking(arenaGroupId: string) {
 }
 
 export function getIndividualRanking(arenaGroupId: string) {
-  const profiles = getProfilesByGroup(arenaGroupId);
+  const profiles = getProfilesByGroup(arenaGroupId).filter((p) => isVisibleInRanking(p.userId));
   const sorted = [...profiles].sort((a, b) => b.totalXp - a.totalXp);
   return {
     rankingType: "individual",
