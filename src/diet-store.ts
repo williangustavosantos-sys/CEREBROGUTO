@@ -109,5 +109,15 @@ export async function deleteDietPlan(userId: string): Promise<void> {
   delete inMemoryStore[userId];
   const store = readFromFile();
   delete store[userId];
+
+  const redis = getRedisClient();
+  if (redis) {
+    try {
+      await redis.set(REDIS_KEY, store);
+    } catch {
+      // fall through to filesystem
+    }
+  }
+
   writeToFile(store);
 }

@@ -15,13 +15,16 @@ import {
 } from "./arena-store.js";
 import { getAvatarStage } from "./arena.js";
 import {
+  readMemoryStoreAsync,
+  writeMemoryStoreAsync,
   readMemoryStoreSync,
   writeMemoryStoreSync,
 } from "./memory-store.js";
+import { deleteDietPlan } from "./diet-store.js";
 
 export const coachRouter = express.Router();
 
-// ─── Auth middleware ───────────────────────────────────────────────────────
+// ─── Auth middleware ───────────────────────────────────────────────────────────
 
 coachRouter.use((req: Request, res: Response, next: NextFunction) => {
   const incoming = (req.headers["x-coach-id"] as string) || (req.query.coachId as string);
@@ -33,7 +36,7 @@ coachRouter.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-// ─── Helpers ──────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 type StoredMemory = {
   userId?: string;
@@ -47,6 +50,8 @@ type StoredMemory = {
   adaptedMissionDates?: string[];
   missedMissionDates?: string[];
 };
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function buildStudentView(userId: string) {
   const store = readMemoryStoreSync() as Record<string, StoredMemory>;
@@ -80,7 +85,33 @@ function buildStudentView(userId: string) {
   };
 }
 
-// ─── Routes ───────────────────────────────────────────────────────────────
+/**
+ * Remove o userId de todos os stores. Após isso, o mesmo userId começa do zero
+ * na próxima vez que abrir o app.
+ *
+ * Note: imagens em tmp/validation-images/ não são indexadas por userId.
+ * Futuramente, nomear imagens como {userId}-{timestamp}.jpg para limpeza total.
+ */
+async function deleteUserEverywhere(userId: string): Promise<void> {
+  // 1. Memory store — async para garantir limpeza no Redis em produção
+  const memStore = await readMemoryStoreAsync();
+  delete memStore[userId];
+  await writeMemoryStoreAsync(memStore);
+
+  // 2. Arena store (filesystem)
+  const arenaStore = readArenaStore();
+  delete arenaStore.profiles[userId];
+  arenaStore.events = arenaStore.events.filter((e) => e.userId !== userId);
+  writeArenaStore(arenaStore);
+
+  // 3. User access record
+  deleteUserAccessHard(userId);
+
+  // 4. Diet plan (async — também limpa Redis)
+  await deleteDietPlan(userId);
+}
+
+// ─── Routes ───────────────────────────────────────────────────────────────────
 
 // GET /guto/coach/students
 coachRouter.get("/students", (req: Request, res: Response) => {
@@ -155,6 +186,17 @@ coachRouter.patch("/student/:userId/access", express.json(), (req: Request, res:
   res.json(buildStudentView(userId));
 });
 
+// PATCH /guto/coach/student/:userId/archive — soft archive (preserva dados, apenas bloqueia)
+coachRouter.patch("/student/:userId/archive", (req: Request, res: Response) => {
+  const userId = req.params["userId"] as string;
+  upsertUserAccess(userId, {
+    active: false,
+    visibleInArena: false,
+    archived: true,
+  });
+  res.json({ success: true, archived: true, userId });
+});
+
 // POST /guto/coach/student/:userId/reset
 coachRouter.post("/student/:userId/reset", express.json(), (req: Request, res: Response) => {
   const userId = req.params["userId"] as string;
@@ -210,19 +252,89 @@ coachRouter.post("/student/:userId/reset", express.json(), (req: Request, res: R
   res.json({ success: true, scope, userId });
 });
 
-// DELETE /guto/coach/student/:userId  — soft archive
-coachRouter.delete("/student/:userId", (req: Request, res: Response) => {
-  const userId = req.params["userId"] as string;
+// POST /guto/coach/student/create
+coachRouter.post("/student/create", express.json(), (req: Request, res: Response) => {
+  const { name } = req.body as { name?: string };
+  if (!name || !name.trim()) {
+    res.status(400).json({ error: "Name is required" });
+    return;
+  }
+
+  const coachId = (req.headers["x-coach-id"] as string) || (req.query.coachId as string) || "will-coach";
+  const userId = `student-${Date.now()}`;
+  const cleanName = name.trim();
+
   upsertUserAccess(userId, {
-    active: false,
-    visibleInArena: false,
-    archived: true,
+    role: "student",
+    coachId: coachId,
+    active: true,
+    visibleInArena: true,
+    archived: false,
   });
-  res.json({ success: true, archived: true, userId });
+
+  saveArenaProfile({
+    userId,
+    displayName: cleanName,
+    pairName: "",
+    arenaGroupId: "default",
+    avatarStage: "baby",
+    totalXp: 0,
+    weeklyXp: 0,
+    monthlyXp: 0,
+    validatedWorkoutsTotal: 0,
+    validatedWorkoutsWeek: 0,
+    validatedWorkoutsMonth: 0,
+    currentStreak: 0,
+    lastWorkoutValidatedAt: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  const store = readMemoryStoreSync() as Record<string, StoredMemory>;
+  store[userId] = {
+    userId,
+    name: cleanName,
+    totalXp: 0,
+    streak: 0,
+    lastActiveAt: new Date().toISOString(),
+    validationHistory: [],
+  };
+  writeMemoryStoreSync(store);
+
+  // Generate conceptual link (could be relative depending on frontend domain)
+  // But we send it as requested, or the frontend can build it locally.
+  const inviteLink = `https://corpoguto.vercel.app/?inviteUserId=${userId}&presetName=${encodeURIComponent(cleanName)}&forceReset=1`;
+
+  res.json({
+    userId,
+    name: cleanName,
+    inviteLink,
+    student: buildStudentView(userId)
+  });
 });
 
-// POST /guto/coach/student/:userId/hard-delete  — full removal (dev/admin only)
-coachRouter.post("/student/:userId/hard-delete", (req: Request, res: Response) => {
+// DELETE /guto/coach/student/:userId — soft archive (arquivar aluno)
+coachRouter.delete("/student/:userId", (req: Request, res: Response) => {
+  const userId = req.params["userId"] as string;
+  try {
+    upsertUserAccess(userId, {
+      active: false,
+      visibleInArena: false,
+      archived: true,
+    });
+    res.json({
+      ok: true,
+      archived: true,
+      userId,
+      message: "Aluno arquivado.",
+    });
+  } catch (err) {
+    res.status(500).json({ error: "archive_failed", message: String(err) });
+  }
+});
+
+// POST /guto/coach/student/:userId/hard-delete  — mantido para compatibilidade (dev/admin)
+coachRouter.post("/student/:userId/hard-delete", async (req: Request, res: Response) => {
   const adminKey = req.headers["x-admin-key"] as string;
   const expectedKey = process.env.ADMIN_KEY;
 
@@ -236,17 +348,10 @@ coachRouter.post("/student/:userId/hard-delete", (req: Request, res: Response) =
   }
 
   const userId = req.params["userId"] as string;
-
-  const store = readMemoryStoreSync() as Record<string, unknown>;
-  delete store[userId];
-  writeMemoryStoreSync(store);
-
-  const arenaStore = readArenaStore();
-  delete arenaStore.profiles[userId];
-  arenaStore.events = arenaStore.events.filter((e) => e.userId !== userId);
-  writeArenaStore(arenaStore);
-
-  deleteUserAccessHard(userId);
-
-  res.status(204).send();
+  try {
+    await deleteUserEverywhere(userId);
+    res.status(204).send();
+  } catch (err) {
+    res.status(500).json({ error: "delete_failed", message: String(err) });
+  }
 });
