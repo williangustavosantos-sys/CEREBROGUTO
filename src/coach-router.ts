@@ -5,6 +5,7 @@ import {
   upsertUserAccess,
   deleteUserAccessHard,
   getAllUserAccess,
+  writeUserAccessStoreRaw,
   type UserAccess,
 } from "./user-access-store.js";
 import {
@@ -341,5 +342,17 @@ coachRouter.post("/student/:userId/hard-delete", async (req: Request, res: Respo
     res.status(204).send();
   } catch (err) {
     res.status(500).json({ error: "delete_failed", message: String(err) });
+  }
+});
+
+// POST /guto/coach/nuke-all — apaga TODOS os dados de TODOS os usuários
+coachRouter.post("/nuke-all", async (_req: Request, res: Response) => {
+  try {
+    await writeMemoryStoreAsync({});
+    writeArenaStore({ profiles: {}, events: [] });
+    writeUserAccessStoreRaw({ users: {} });
+    res.json({ ok: true, message: "Todos os dados foram apagados." });
+  } catch (err) {
+    res.status(500).json({ error: "nuke_failed", message: String(err) });
   }
 });

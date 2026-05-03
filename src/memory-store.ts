@@ -102,6 +102,10 @@ export async function readMemoryStoreAsync(): Promise<MemoryStore> {
  * Write the full memory store.
  */
 export async function writeMemoryStoreAsync(store: MemoryStore): Promise<void> {
+  // Clear the in-memory cache to ensure a full replacement (especially for nuke/reset)
+  for (const key in globalMemoryStore) {
+    delete globalMemoryStore[key];
+  }
   Object.assign(globalMemoryStore, store);
 
   const redis = getRedisClient();
@@ -134,6 +138,10 @@ export function readMemoryStoreSync(): MemoryStore {
  * Synchronous write — filesystem or in-memory only.
  */
 export function writeMemoryStoreSync(store: MemoryStore): void {
+  // Clear the in-memory cache to ensure a full replacement
+  for (const key in globalMemoryStore) {
+    delete globalMemoryStore[key];
+  }
   Object.assign(globalMemoryStore, store);
   writeToFile(store);
 }

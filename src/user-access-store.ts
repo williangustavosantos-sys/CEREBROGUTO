@@ -102,3 +102,7 @@ export function deleteUserAccessHard(userId: string): void {
 export function getAllUserAccess(): UserAccess[] {
   return Object.values(readStore().users);
 }
+
+export function writeUserAccessStoreRaw(store: { users: Record<string, UserAccess> }): void {
+  writeStore(store);
+}
