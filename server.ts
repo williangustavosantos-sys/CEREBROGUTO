@@ -29,6 +29,15 @@ import {
 } from "./src/arena";
 import { coachRouter } from "./src/coach-router.js";
 import { getEffectiveUserAccess } from "./src/user-access-store.js";
+import {
+  calculateMacros,
+  validateAndCorrectPortions,
+  buildDietPrompt,
+  type NutritionProfile,
+  type DietMeal,
+  type DietPlan,
+} from "./src/nutrition.js";
+import { getDietPlan, saveDietPlan } from "./src/diet-store.js";
 
 type Acao = "none" | "updateWorkout" | "lock";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
@@ -86,6 +95,10 @@ interface Profile {
   trainingGoal?: string;
   preferredTrainingLocation?: string;
   trainingPathology?: string;
+  country?: string;
+  heightCm?: number;
+  weightKg?: number;
+  foodRestrictions?: string;
 }
 interface GutoHistoryItem { role: "user" | "model"; parts: { text: string }[]; }
 interface ExpectedResponse {
@@ -176,6 +189,10 @@ interface GutoMemory {
   trainingGoal?: string;
   preferredTrainingLocation?: string;
   trainingPathology?: string;
+  country?: string;
+  heightCm?: number;
+  weightKg?: number;
+  foodRestrictions?: string;
   lastWorkoutCompletedAt?: string;
   completedWorkoutDates: string[];
   adaptedMissionDates: string[];
@@ -3121,6 +3138,10 @@ app.post("/guto/memory", (req, res) => {
     trainingGoal,
     preferredTrainingLocation,
     trainingPathology,
+    country,
+    heightCm,
+    weightKg,
+    foodRestrictions,
   } = req.body as Partial<GutoMemory> & { confirmedName?: boolean; xpEvent?: XpEventType };
   const memory = applyPendingMissPenalties(grantInitialXp(getMemory(userId)));
 
@@ -3164,6 +3185,10 @@ app.post("/guto/memory", (req, res) => {
   if (trainingGoal) memory.trainingGoal = trainingGoal;
   if (preferredTrainingLocation) memory.preferredTrainingLocation = preferredTrainingLocation;
   if (trainingPathology) memory.trainingPathology = trainingPathology;
+  if (country) memory.country = country;
+  if (typeof heightCm === "number" && heightCm > 0) memory.heightCm = heightCm;
+  if (typeof weightKg === "number" && weightKg > 0) memory.weightKg = weightKg;
+  if (typeof foodRestrictions === "string") memory.foodRestrictions = foodRestrictions;
   if (typeof req.body.initialXpRewardSeen === "boolean") {
     memory.initialXpRewardSeen = req.body.initialXpRewardSeen;
   }
@@ -3646,6 +3671,134 @@ app.get("/guto/arena/me", (req, res) => {
     return res.status(404).json({ error: "Arena profile not found for this group" });
   }
   return res.json(profile);
+});
+
+// ── Diet endpoints ────────────────────────────────────────────────────────────
+
+// GET /guto/diet?userId=
+app.get("/guto/diet", async (req, res) => {
+  const userId = (req.query.userId as string) || DEFAULT_USER_ID;
+  try {
+    const plan = await getDietPlan(userId);
+    if (!plan) {
+      return res.status(404).json({ error: "diet_not_found", message: "Nenhuma dieta gerada ainda." });
+    }
+    return res.json(plan);
+  } catch (error) {
+    console.error("[GUTO] diet GET error:", error);
+    return res.status(500).json({ error: "Erro ao buscar dieta." });
+  }
+});
+
+// POST /guto/diet/generate
+app.post("/guto/diet/generate", async (req, res) => {
+  const body = req.body as { userId?: string; language?: string };
+  const userId = body.userId || DEFAULT_USER_ID;
+  const language = normalizeLanguage(body.language);
+
+  // Load memory to get profile
+  const memory = getMemory(userId);
+
+  // Validate required fields
+  const missing: string[] = [];
+  if (!memory.biologicalSex) missing.push("biologicalSex");
+  if (!memory.userAge) missing.push("userAge");
+  if (!memory.heightCm) missing.push("heightCm");
+  if (!memory.weightKg) missing.push("weightKg");
+  if (!memory.trainingLevel) missing.push("trainingLevel");
+  if (!memory.trainingGoal) missing.push("trainingGoal");
+
+  if (missing.length > 0) {
+    return res.status(422).json({
+      error: "missing_profile_fields",
+      missing,
+      message: `Perfil incompleto para gerar dieta. Campos faltando: ${missing.join(", ")}`,
+    });
+  }
+
+  const nutritionProfile: NutritionProfile = {
+    biologicalSex: (memory.biologicalSex as NutritionProfile["biologicalSex"]) || "male",
+    userAge: memory.userAge!,
+    heightCm: memory.heightCm!,
+    weightKg: memory.weightKg!,
+    trainingLevel: (memory.trainingLevel as NutritionProfile["trainingLevel"]) || "beginner",
+    trainingGoal: (memory.trainingGoal as NutritionProfile["trainingGoal"]) || "consistency",
+    country: memory.country || "Brasil",
+    foodRestrictions: memory.foodRestrictions,
+  };
+
+  const macros = calculateMacros(nutritionProfile);
+  const prompt = buildDietPrompt(nutritionProfile, macros, language);
+
+  // Call Gemini
+  let meals: DietMeal[] = [];
+  const maxRetries = 2;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const geminiRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.3, maxOutputTokens: 2048 },
+          }),
+          signal: AbortSignal.timeout(GUTO_MODEL_TIMEOUT_MS),
+        }
+      );
+
+      if (!geminiRes.ok) {
+        console.error("[GUTO] diet Gemini error:", geminiRes.status);
+        continue;
+      }
+
+      const geminiData = (await geminiRes.json()) as {
+        candidates?: { content?: { parts?: { text?: string }[] } }[];
+      };
+
+      const rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        console.warn("[GUTO] diet: no JSON in Gemini response, attempt", attempt);
+        continue;
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]) as { meals?: DietMeal[] };
+      if (!Array.isArray(parsed.meals) || parsed.meals.length === 0) {
+        console.warn("[GUTO] diet: empty meals array, attempt", attempt);
+        continue;
+      }
+
+      // Validate and correct portions
+      const { correctedMeals, issues } = validateAndCorrectPortions(parsed.meals);
+      if (issues.length > 0) {
+        console.log("[GUTO] diet portion corrections:", issues);
+      }
+
+      meals = correctedMeals;
+      break;
+    } catch (err) {
+      console.error(`[GUTO] diet Gemini attempt ${attempt} error:`, err);
+    }
+  }
+
+  if (!meals.length) {
+    return res.status(500).json({ error: "Não foi possível gerar a dieta. Tente novamente." });
+  }
+
+  const plan: DietPlan = {
+    userId,
+    generatedAt: new Date().toISOString(),
+    country: nutritionProfile.country || "Brasil",
+    macros,
+    meals,
+    foodRestrictions: nutritionProfile.foodRestrictions,
+  };
+
+  await saveDietPlan(plan);
+  return res.json(plan);
 });
 
 // Middleware global para capturar erros não tratados e evitar crash do Node
