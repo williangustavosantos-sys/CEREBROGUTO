@@ -1,4 +1,60 @@
 {
-  "profiles": {},
-  "events": []
+  "profiles": {
+    "anon-e1649622-de2b-4319-b726-948bd3e00991": {
+      "userId": "anon-e1649622-de2b-4319-b726-948bd3e00991",
+      "displayName": "WILL",
+      "pairName": "GUTO & WILL",
+      "arenaGroupId": "will-personal-alpha",
+      "avatarStage": "baby",
+      "totalXp": 100,
+      "weeklyXp": 100,
+      "monthlyXp": 100,
+      "validatedWorkoutsTotal": 1,
+      "validatedWorkoutsWeek": 1,
+      "validatedWorkoutsMonth": 1,
+      "currentStreak": 1,
+      "lastWorkoutValidatedAt": "2026-05-03T12:05:39.825Z",
+      "createdAt": "2026-05-03T12:05:39.825Z",
+      "updatedAt": "2026-05-03T12:05:39.825Z"
+    },
+    "anon-f0a7937d-3101-4a54-9283-e2abe0656a59": {
+      "userId": "anon-f0a7937d-3101-4a54-9283-e2abe0656a59",
+      "displayName": "WILL",
+      "pairName": "GUTO & WILL",
+      "arenaGroupId": "will-personal-alpha",
+      "avatarStage": "baby",
+      "totalXp": 100,
+      "weeklyXp": 100,
+      "monthlyXp": 100,
+      "validatedWorkoutsTotal": 1,
+      "validatedWorkoutsWeek": 1,
+      "validatedWorkoutsMonth": 1,
+      "currentStreak": 1,
+      "lastWorkoutValidatedAt": "2026-05-03T12:13:25.483Z",
+      "createdAt": "2026-05-03T12:13:25.483Z",
+      "updatedAt": "2026-05-03T12:13:25.483Z"
+    }
+  },
+  "events": [
+    {
+      "id": "21816f8b-ee65-4dc9-8877-84e24e0efe2b",
+      "userId": "anon-e1649622-de2b-4319-b726-948bd3e00991",
+      "arenaGroupId": "will-personal-alpha",
+      "type": "workout_validated",
+      "xp": 100,
+      "workoutFocus": "legs_core",
+      "sourceValidationId": "1312b216-1cb5-4f04-b028-3a49eb6f312b",
+      "createdAt": "2026-05-03T12:05:39.825Z"
+    },
+    {
+      "id": "11dfc021-5ac7-4900-a1ea-2a0b433a9026",
+      "userId": "anon-f0a7937d-3101-4a54-9283-e2abe0656a59",
+      "arenaGroupId": "will-personal-alpha",
+      "type": "workout_validated",
+      "xp": 100,
+      "workoutFocus": "chest_triceps",
+      "sourceValidationId": "8a64a890-7b55-4a7f-8154-9d04796387a0",
+      "createdAt": "2026-05-03T12:13:25.483Z"
+    }
+  ]
 }
