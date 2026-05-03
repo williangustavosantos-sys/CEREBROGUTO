@@ -27,6 +27,8 @@ import {
   getMyArenaProfile,
   DEFAULT_ARENA_GROUP,
 } from "./src/arena";
+import { coachRouter } from "./src/coach-router.js";
+import { getEffectiveUserAccess } from "./src/user-access-store.js";
 
 type Acao = "none" | "updateWorkout" | "lock";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
@@ -339,6 +341,8 @@ app.get("/exercise-animations/workoutx/:animationId.gif", async (req, res) => {
     res.status(502).json({ message: "Falha ao carregar animação do exercício." });
   }
 });
+
+app.use("/guto/coach", coachRouter);
 
 app.post("/guto/events", (req, res) => {
   const body = req.body as {
@@ -3297,6 +3301,15 @@ app.post("/guto", async (req, res) => {
     expectedResponse?: ExpectedResponse | null;
   };
 
+  const userId = profile?.userId || DEFAULT_USER_ID;
+  const chatAccess = getEffectiveUserAccess(userId);
+  if (!chatAccess.active || chatAccess.archived) {
+    return res.status(403).json({
+      error: "access_blocked",
+      message: "Seu acesso ao GUTO está pausado. Fale com seu coach para reativar.",
+    });
+  }
+
   try {
     const result = await askGutoModel({
       input: input || "",
@@ -3470,6 +3483,14 @@ app.post("/guto/validate-workout", express.json({ limit: "15mb" }), async (req, 
 
   if (!userId || !imageBase64 || !workoutFocus || !workoutLabel || !locationMode) {
     return res.status(400).json({ error: "Missing required fields: userId, imageBase64, workoutFocus, workoutLabel, locationMode" });
+  }
+
+  const validationAccess = getEffectiveUserAccess(userId);
+  if (!validationAccess.active || validationAccess.archived) {
+    return res.status(403).json({
+      error: "access_blocked",
+      message: "Seu acesso ao GUTO está pausado. Fale com seu coach para reativar.",
+    });
   }
 
   const validLocationModes: LocationMode[] = ["gym", "home", "park"];
