@@ -333,20 +333,8 @@ coachRouter.delete("/student/:userId", (req: Request, res: Response) => {
   }
 });
 
-// POST /guto/coach/student/:userId/hard-delete  — mantido para compatibilidade (dev/admin)
+// POST /guto/coach/student/:userId/hard-delete
 coachRouter.post("/student/:userId/hard-delete", async (req: Request, res: Response) => {
-  const adminKey = req.headers["x-admin-key"] as string;
-  const expectedKey = process.env.ADMIN_KEY;
-
-  if (!expectedKey) {
-    res.status(403).json({ error: "hard_delete_not_configured", message: "ADMIN_KEY not set on server." });
-    return;
-  }
-  if (adminKey !== expectedKey) {
-    res.status(403).json({ error: "forbidden" });
-    return;
-  }
-
   const userId = req.params["userId"] as string;
   try {
     await deleteUserEverywhere(userId);
