@@ -3070,8 +3070,23 @@ app.post("/guto/validate-name", (req, res) => {
 
 app.get("/guto/memory", (req, res) => {
   const userId = String(req.query.userId || DEFAULT_USER_ID);
-  const memory = applyPendingMissPenalties(grantInitialXp(getMemory(userId)));
+  const rawMemory = getMemory(userId);
+  const wasAlreadyGranted = rawMemory.initialXpGranted;
+  const memory = applyPendingMissPenalties(grantInitialXp(rawMemory));
   memory.lastActiveAt = new Date().toISOString();
+
+  // First time a user loads: seed their Arena profile with the initial 100 XP bonus
+  if (!wasAlreadyGranted) {
+    const displayName = memory.name || userId;
+    awardArenaXp({
+      userId,
+      displayName,
+      arenaGroupId: DEFAULT_ARENA_GROUP,
+      type: "bonus",
+      xp: 100,
+      sourceValidationId: "grant_initial_xp",
+    });
+  }
   if (memory.lastWorkoutPlan) {
     res.json({
       ...memory,
@@ -3548,8 +3563,8 @@ app.post("/guto/validate-workout", express.json({ limit: "15mb" }), async (req, 
     memory.validationHistory.push(record);
     await keepLastFiveValidations(memory);
 
-    // Sync XP to main memory so Path/Evolution tabs reflect the validated workout
-    appendXpEvent(memory, "complete_daily_mission", XP_AMOUNT);
+    // Mark workout complete in memory (sets trainedToday, streak, completedWorkoutDates, +XP)
+    completeWorkout(memory);
 
     store[userId] = memory;
     writeMemoryStore(store);
