@@ -3046,8 +3046,26 @@ async function askGutoModel({
 
 // --- ROTAS ---
 app.post("/guto/validate-name", (req, res) => {
-  const { name } = req.body as { name?: string };
-  res.json(validateName(name || ""));
+  const { name, userId } = req.body as { name?: string; userId?: string };
+  const result = validateName(name || "");
+  if (result.status === "valid") {
+    // Check if another user already holds this name
+    const store = readMemoryStore();
+    const lower = result.normalized.toLocaleLowerCase("pt-BR");
+    const takenBy = Object.values(store).find(
+      (m) =>
+        (m as GutoMemory).name?.toLocaleLowerCase("pt-BR") === lower &&
+        (m as GutoMemory).userId !== (userId || DEFAULT_USER_ID)
+    ) as GutoMemory | undefined;
+    if (takenBy) {
+      return res.json({
+        status: "confirm" as const,
+        normalized: result.normalized,
+        message: `"${result.normalized}" já está em uso. Confirma assim mesmo, ou tenta um nome diferente?`,
+      });
+    }
+  }
+  res.json(result);
 });
 
 app.get("/guto/memory", (req, res) => {
@@ -3529,6 +3547,9 @@ app.post("/guto/validate-workout", express.json({ limit: "15mb" }), async (req, 
     }
     memory.validationHistory.push(record);
     await keepLastFiveValidations(memory);
+
+    // Sync XP to main memory so Path/Evolution tabs reflect the validated workout
+    appendXpEvent(memory, "complete_daily_mission", XP_AMOUNT);
 
     store[userId] = memory;
     writeMemoryStore(store);

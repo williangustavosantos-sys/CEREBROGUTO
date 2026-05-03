@@ -44,6 +44,17 @@ function isSameMonth(dateA: Date, dateB: Date): boolean {
   return dateA.getFullYear() === dateB.getFullYear() && dateA.getMonth() === dateB.getMonth();
 }
 
+function buildUniquePairName(displayName: string, arenaGroupId: string, ownUserId: string): string {
+  const base = `GUTO & ${displayName.toUpperCase()}`;
+  const existing = getProfilesByGroup(arenaGroupId).filter((p) => p.userId !== ownUserId);
+  if (!existing.some((p) => p.pairName === base)) return base;
+  for (let n = 2; n <= 99; n++) {
+    const candidate = `${base} #${n}`;
+    if (!existing.some((p) => p.pairName === candidate)) return candidate;
+  }
+  return base;
+}
+
 export function createArenaProfileIfNeeded(
   userId: string,
   displayName: string,
@@ -56,7 +67,7 @@ export function createArenaProfileIfNeeded(
   const profile: ArenaProfile = {
     userId,
     displayName,
-    pairName: `GUTO & ${displayName.toUpperCase()}`,
+    pairName: buildUniquePairName(displayName, arenaGroupId, userId),
     arenaGroupId,
     avatarStage: "baby",
     totalXp: 0,
