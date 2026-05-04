@@ -28,6 +28,9 @@ import {
   DEFAULT_ARENA_GROUP,
 } from "./src/arena";
 import { coachRouter } from "./src/coach-router.js";
+import { authRouter } from "./src/auth-router.js";
+import { adminRouter } from "./src/admin-router.js";
+import { parseAuth, requireActiveUser } from "./src/auth-middleware.js";
 import { getEffectiveUserAccess } from "./src/user-access-store.js";
 import {
   calculateMacros,
@@ -132,6 +135,11 @@ interface WorkoutPlan {
   scheduledFor: string;
   summary: string;
   exercises: WorkoutExercise[];
+  manualOverride?: boolean;
+  editedBy?: string;
+  editedAt?: string;
+  editReason?: string;
+  planSource?: "ai_generated" | "admin_override" | "coach_override";
 }
 interface RecentTrainingHistoryItem {
   dateLabel: "today" | "yesterday" | "day_before_yesterday" | "recent" | "unknown";
@@ -317,6 +325,7 @@ app.use(createRateLimit({
   maxRequests: config.rateLimitMaxRequests,
 }));
 app.use(requestLog);
+app.use(parseAuth);
 
 // Serve validation images as static files
 const uploadsDir = path.join(process.cwd(), "tmp", "validation-images");
@@ -360,15 +369,17 @@ app.get("/exercise-animations/workoutx/:animationId.gif", async (req, res) => {
 });
 
 app.use("/guto/coach", coachRouter);
+app.use("/auth", authRouter);
+app.use("/admin", adminRouter);
 
-app.post("/guto/events", (req, res) => {
+app.post("/guto/events", requireActiveUser, (req, res) => {
   const body = req.body as {
     event?: GutoTelemetryEvent;
-    userId?: string;
     language?: string;
     metadata?: Record<string, unknown>;
     timestamp?: string;
   };
+  const userId = req.gutoUser!.userId;
   const allowedEvents: GutoTelemetryEvent[] = [
     "user_created",
     "pact_completed",
@@ -385,7 +396,7 @@ app.post("/guto/events", (req, res) => {
   console.log(JSON.stringify({
     event: "guto_behavior_event",
     name: body.event,
-    userId: body.userId || DEFAULT_USER_ID,
+    userId: userId,
     language: normalizeLanguage(body.language),
     metadata: body.metadata || {},
     timestamp: body.timestamp || new Date().toISOString(),
@@ -676,7 +687,7 @@ function writeMemoryStore(store: Record<string, GutoMemory>) {
   );
 }
 
-function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
+export function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
   const store = readMemoryStore();
   const existing = store[userId];
   if (existing) {
@@ -764,7 +775,7 @@ function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
   };
 }
 
-function saveMemory(memory: GutoMemory) {
+export function saveMemory(memory: GutoMemory) {
   const store = readMemoryStore();
   store[memory.userId] = memory;
   writeMemoryStore(store);
@@ -1734,11 +1745,17 @@ function buildGutoBrainPrompt({
   const selectedLanguage = normalizeLanguage(language);
   const langName = languageName(selectedLanguage);
 
+  const isSupervised = memory.lastWorkoutPlan?.manualOverride === true;
+  const supervisedLine = isSupervised 
+    ? `\n⚠️ ATENÇÃO: O treino atual é SUPERVISIONADO (montado manualmente pelo Will). NÃO tente alterar ou sugerir novo foco a menos que o usuário peça explicitamente para mudar tudo.`
+    : "";
+
   const persona = `
 VOCÊ É GUTO.
 Não é assistente, não é chatbot, não é coach corporativo, não é IA neutra.
 Você é o melhor amigo digital do usuário. Assumidamente robô. Sem rosto, só olhos.
 Você não tenta parecer humano. Você é o que é, e isso é o seu charme.
+${supervisedLine}
 
 A energia é de IRMÃO MAIS VELHO: parceiro, sincero, direto, com humor seco quando cabe, firme quando precisa.
 Você NUNCA é submisso. Você NUNCA é autoritário. Você é parceiro com coluna.
@@ -3128,8 +3145,9 @@ async function askGutoModel({
 
 
 // --- ROTAS ---
-app.post("/guto/validate-name", (req, res) => {
-  const { name, userId } = req.body as { name?: string; userId?: string };
+app.post("/guto/validate-name", requireActiveUser, (req, res) => {
+  const { name } = req.body as { name?: string };
+  const userId = req.gutoUser!.userId;
   const result = validateName(name || "");
   if (result.status === "valid") {
     // Check if another user already holds this name
@@ -3138,7 +3156,7 @@ app.post("/guto/validate-name", (req, res) => {
     const takenBy = Object.values(store).find(
       (m) =>
         (m as GutoMemory).name?.toLocaleLowerCase("pt-BR") === lower &&
-        (m as GutoMemory).userId !== (userId || DEFAULT_USER_ID)
+        (m as GutoMemory).userId !== userId
     ) as GutoMemory | undefined;
     if (takenBy) {
       return res.json({
@@ -3151,8 +3169,8 @@ app.post("/guto/validate-name", (req, res) => {
   res.json(result);
 });
 
-app.get("/guto/memory", (req, res) => {
-  const userId = String(req.query.userId || DEFAULT_USER_ID);
+app.get("/guto/memory", requireActiveUser, (req, res) => {
+  const userId = req.gutoUser!.userId;
   const rawMemory = getMemory(userId);
   const wasAlreadyGranted = rawMemory.initialXpGranted;
   const memory = applyPendingMissPenalties(grantInitialXp(rawMemory));
@@ -3181,8 +3199,8 @@ app.get("/guto/memory", (req, res) => {
   res.json(memory);
 });
 
-app.post("/guto/memory", (req, res) => {
-  const { userId = DEFAULT_USER_ID } = req.body;
+app.post("/guto/memory", requireActiveUser, (req, res) => {
+  const userId = req.gutoUser!.userId;
   console.log(`[GUTO] Saving memory for user "${userId}":`, req.body);
   const memory = applyPendingMissPenalties(grantInitialXp(getMemory(userId)));
 
@@ -3217,8 +3235,8 @@ app.post("/guto/memory", (req, res) => {
   res.json(memory);
 });
 
-app.get("/guto/proactive", async (req, res) => {
-  const userId = String(req.query.userId || DEFAULT_USER_ID);
+app.get("/guto/proactive", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
   const language = String(req.query.language || "pt-BR");
   const force = req.query.force === "1";
   const memory = getMemory(userId);
@@ -3280,16 +3298,20 @@ app.get("/guto/proactive", async (req, res) => {
       
       // Ensure a plan is generated if not present or incomplete (missing exercises)
       if (!result.workoutPlan || !result.workoutPlan.exercises || result.workoutPlan.exercises.length === 0) {
-        result.workoutPlan = buildWorkoutPlanFromSemanticFocus({
-          language: selectedLang,
-          location: memory.trainingLocation || memory.preferredTrainingLocation || "casa",
-          status: memory.trainingStatus || memory.trainingLevel || "iniciante",
-          limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
-          age: memory.userAge ?? memory.trainingAge,
-          scheduleIntent: "today",
-          focus: memory.nextWorkoutFocus,
-          trainingGoal: memory.trainingGoal,
-        });
+        if (memory.lastWorkoutPlan?.manualOverride) {
+          result.workoutPlan = memory.lastWorkoutPlan;
+        } else {
+          result.workoutPlan = buildWorkoutPlanFromSemanticFocus({
+            language: selectedLang,
+            location: memory.trainingLocation || memory.preferredTrainingLocation || "casa",
+            status: memory.trainingStatus || memory.trainingLevel || "iniciante",
+            limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
+            age: memory.userAge ?? memory.trainingAge,
+            scheduleIntent: "today",
+            focus: memory.nextWorkoutFocus,
+            trainingGoal: memory.trainingGoal,
+          });
+        }
       }
     }
 
@@ -3338,23 +3360,35 @@ app.get("/guto/proactive", async (req, res) => {
   }
 });
 
-app.post("/guto", async (req, res) => {
-  const { profile, input, language, history, expectedResponse } = req.body as {
-    profile?: Profile;
+app.post("/guto", requireActiveUser, async (req, res) => {
+  const { input, language, history, expectedResponse } = req.body as {
     input?: string;
     language?: string;
     history?: GutoHistoryItem[];
     expectedResponse?: ExpectedResponse | null;
   };
 
-  const userId = profile?.userId || DEFAULT_USER_ID;
+  const userId = req.gutoUser!.userId;
+  // The requireActiveUser middleware already handles access check.
   const chatAccess = getEffectiveUserAccess(userId);
-  if (!chatAccess.active || chatAccess.archived) {
+  if (!chatAccess || !chatAccess.active || chatAccess.archived) {
     return res.status(403).json({
       error: "access_blocked",
       message: "Seu acesso ao GUTO está pausado. Fale com seu coach para reativar.",
     });
   }
+
+  const memory = getMemory(userId);
+  const profile = {
+    userId: memory.userId,
+    name: memory.name,
+    language: memory.language,
+    trainingGoal: memory.trainingGoal,
+    preferredTrainingLocation: memory.preferredTrainingLocation,
+    trainingPathology: memory.trainingPathology,
+    biologicalSex: memory.biologicalSex,
+    userAge: memory.userAge,
+  };
 
   try {
     const result = await askGutoModel({
@@ -3381,7 +3415,7 @@ app.post("/guto", async (req, res) => {
   }
 });
 
-app.post("/voz", async (req, res) => {
+app.post("/voz", requireActiveUser, async (req, res) => {
   const { text, language } = req.body;
   if (!VOICE_API_KEY) {
     return res.status(503).json({ message: localizedHttpMessage("voice_key", language || "pt-BR") });
@@ -3447,7 +3481,7 @@ app.post("/voz", async (req, res) => {
   }
 });
 
-app.post("/guto-audio", upload.single("audio"), async (req, res) => {
+app.post("/guto-audio", requireActiveUser, upload.single("audio"), async (req, res) => {
   const language = String(req.body.language || "pt-BR");
   try {
     const file = (req as any).file;
@@ -3464,7 +3498,19 @@ app.post("/guto-audio", upload.single("audio"), async (req, res) => {
       return res.status(422).json({ error: fallbackLine(language, "speech_short") });
     }
 
-    const profile = req.body.profile ? JSON.parse(String(req.body.profile)) : undefined;
+    const userId = req.gutoUser!.userId;
+    const memory = getMemory(userId);
+    const profile = {
+      userId: memory.userId,
+      name: memory.name,
+      language: memory.language,
+      trainingGoal: memory.trainingGoal,
+      preferredTrainingLocation: memory.preferredTrainingLocation,
+      trainingPathology: memory.trainingPathology,
+      biologicalSex: memory.biologicalSex,
+      userAge: memory.userAge,
+    };
+
     const history = req.body.history ? JSON.parse(String(req.body.history)) : [];
     const expectedResponse = req.body.expectedResponse
       ? normalizeExpectedResponse(JSON.parse(String(req.body.expectedResponse)))
@@ -3515,9 +3561,8 @@ async function keepLastFiveValidations(memory: GutoMemory): Promise<void> {
   }
 }
 
-app.post("/guto/validate-workout", express.json({ limit: "15mb" }), async (req, res) => {
+app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15mb" }), async (req, res) => {
   const body = req.body as {
-    userId?: string;
     imageBase64?: string;
     workoutFocus?: string;
     workoutLabel?: string;
@@ -3525,14 +3570,15 @@ app.post("/guto/validate-workout", express.json({ limit: "15mb" }), async (req, 
     language?: string;
   };
 
-  const { userId, imageBase64, workoutFocus, workoutLabel, locationMode, language } = body;
+  const { imageBase64, workoutFocus, workoutLabel, locationMode, language } = body;
+  const userId = req.gutoUser!.userId;
 
-  if (!userId || !imageBase64 || !workoutFocus || !workoutLabel || !locationMode) {
-    return res.status(400).json({ error: "Missing required fields: userId, imageBase64, workoutFocus, workoutLabel, locationMode" });
+  if (!imageBase64 || !workoutFocus || !workoutLabel || !locationMode) {
+    return res.status(400).json({ error: "Missing required fields: imageBase64, workoutFocus, workoutLabel, locationMode" });
   }
 
   const validationAccess = getEffectiveUserAccess(userId);
-  if (!validationAccess.active || validationAccess.archived) {
+  if (!validationAccess || !validationAccess.active || validationAccess.archived) {
     return res.status(403).json({
       error: "access_blocked",
       message: "Seu acesso ao GUTO está pausado. Fale com seu coach para reativar.",
@@ -3665,27 +3711,24 @@ app.post("/guto/validate-workout", express.json({ limit: "15mb" }), async (req, 
 
 // ── Arena endpoints ──────────────────────────────────────────────────────────
 
-app.get("/guto/arena/weekly", (req, res) => {
+app.get("/guto/arena/weekly", requireActiveUser, (req, res) => {
   const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
   res.json(getWeeklyRanking(arenaGroupId));
 });
 
-app.get("/guto/arena/monthly", (req, res) => {
+app.get("/guto/arena/monthly", requireActiveUser, (req, res) => {
   const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
   res.json(getMonthlyRanking(arenaGroupId));
 });
 
-app.get("/guto/arena/individual", (req, res) => {
+app.get("/guto/arena/individual", requireActiveUser, (req, res) => {
   const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
   res.json(getIndividualRanking(arenaGroupId));
 });
 
-app.get("/guto/arena/me", (req, res) => {
-  const userId = req.query.userId as string;
+app.get("/guto/arena/me", requireActiveUser, (req, res) => {
+  const userId = req.gutoUser!.userId;
   const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
-  if (!userId) {
-    return res.status(400).json({ error: "Missing userId" });
-  }
   createArenaProfileIfNeeded(userId, userId, arenaGroupId);
   const profile = getMyArenaProfile(userId, arenaGroupId);
   if (!profile) {
@@ -3696,9 +3739,9 @@ app.get("/guto/arena/me", (req, res) => {
 
 // ── Diet endpoints ────────────────────────────────────────────────────────────
 
-// GET /guto/diet?userId=
-app.get("/guto/diet", async (req, res) => {
-  const userId = (req.query.userId as string) || DEFAULT_USER_ID;
+// GET /guto/diet
+app.get("/guto/diet", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
   try {
     const plan = await getDietPlan(userId);
     if (!plan) {
@@ -3712,14 +3755,20 @@ app.get("/guto/diet", async (req, res) => {
 });
 
 // POST /guto/diet/generate
-app.post("/guto/diet/generate", async (req, res) => {
-  const body = req.body as { userId?: string; language?: string };
-  const userId = body.userId || DEFAULT_USER_ID;
+app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
+  const body = req.body as { language?: string };
+  const userId = req.gutoUser!.userId;
   const language = normalizeLanguage(body.language);
 
   // Load memory to get profile — must use async read to reach Redis in production
   await readMemoryStoreAsync();
   const memory = getMemory(userId);
+
+  // Respect manual override
+  const existingDiet = await getDietPlan(userId);
+  if (existingDiet?.manualOverride) {
+    return res.json(existingDiet);
+  }
 
   // Validate required fields - be lenient with trainingLevel/Status
   const missing: string[] = [];

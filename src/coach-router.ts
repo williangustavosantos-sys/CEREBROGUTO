@@ -22,20 +22,15 @@ import {
   writeMemoryStoreSync,
 } from "./memory-store.js";
 import { deleteDietPlan } from "./diet-store.js";
+import { createInvite } from "./invite-store.js";
+import { config } from "./config.js";
+import { requireCoachOrAdmin } from "./auth-middleware.js";
 
 export const coachRouter = express.Router();
 
 // ─── Auth middleware ───────────────────────────────────────────────────────────
 
-coachRouter.use((req: Request, res: Response, next: NextFunction) => {
-  const incoming = (req.headers["x-coach-id"] as string) || (req.query.coachId as string);
-  const DEV_COACH_ID = process.env.DEV_COACH_ID ?? "will-coach";
-  if (incoming !== DEV_COACH_ID) {
-    res.status(401).json({ error: "unauthorized" });
-    return;
-  }
-  next();
-});
+coachRouter.use(requireCoachOrAdmin);
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -54,8 +49,8 @@ type StoredMemory = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function buildStudentView(userId: string) {
-  const store = readMemoryStoreSync() as Record<string, StoredMemory>;
+function buildStudentView(userId: string, preloadedStore?: Record<string, StoredMemory>) {
+  const store = preloadedStore ?? (readMemoryStoreSync() as Record<string, StoredMemory>);
   const memory: StoredMemory = store[userId] ?? {};
   const access = getEffectiveUserAccess(userId);
   const arena = getArenaProfile(userId);
@@ -69,11 +64,13 @@ function buildStudentView(userId: string) {
   return {
     userId,
     name: memory.name || userId,
-    role: access.role,
-    coachId: access.coachId,
-    active: access.active,
-    visibleInArena: access.visibleInArena,
-    archived: access.archived,
+    role: access?.role ?? "student",
+    coachId: access?.coachId ?? "unknown",
+    active: access?.active ?? false,
+    visibleInArena: access?.visibleInArena ?? false,
+    archived: access?.archived ?? false,
+    subscriptionStatus: access?.subscriptionStatus ?? "pending_payment",
+    subscriptionEndsAt: access?.subscriptionEndsAt ?? null,
     weeklyXp: arena?.weeklyXp ?? 0,
     monthlyXp: arena?.monthlyXp ?? 0,
     totalXp: arena?.totalXp ?? memory.totalXp ?? 0,
@@ -82,7 +79,7 @@ function buildStudentView(userId: string) {
     validationsTotal: arena?.validatedWorkoutsTotal ?? (memory.validationHistory?.length ?? 0),
     lastValidationAt: lastValidation,
     lastActiveAt: memory.lastActiveAt ?? null,
-    createdAt: access.createdAt,
+    createdAt: access?.createdAt ?? new Date().toISOString(),
   };
 }
 
@@ -117,15 +114,18 @@ async function deleteUserEverywhere(userId: string): Promise<void> {
 // GET /guto/coach/students
 coachRouter.get("/students", (req: Request, res: Response) => {
   const includeArchived = req.query.includeArchived === "true";
-  const store = readMemoryStoreSync() as Record<string, unknown>;
+  const caller = req.gutoUser!;
+  
+  const allAccess = getAllUserAccess();
+  const studentsAccess = allAccess.filter(u => {
+    const isStudent = u.role === "student";
+    const matchesCoach = caller.role === "admin" || caller.role === "super_admin" || u.coachId === (caller.coachId || caller.userId);
+    const matchesArchived = includeArchived || !u.archived;
+    return isStudent && matchesCoach && matchesArchived;
+  });
 
-  const memoryIds = new Set(Object.keys(store));
-  const accessIds = new Set(getAllUserAccess().map((u) => u.userId));
-  const allIds = [...new Set([...memoryIds, ...accessIds])];
-
-  const students = allIds
-    .map((userId) => buildStudentView(userId))
-    .filter((s) => includeArchived || !s.archived);
+  const memoryStore = readMemoryStoreSync() as Record<string, StoredMemory>;
+  const students = studentsAccess.map((s) => buildStudentView(s.userId, memoryStore));
 
   res.json({ students });
 });
@@ -254,62 +254,42 @@ coachRouter.post("/student/:userId/reset", express.json(), (req: Request, res: R
 });
 
 // POST /guto/coach/student/create
-coachRouter.post("/student/create", express.json(), (req: Request, res: Response) => {
+coachRouter.post("/student/create", express.json(), async (req: Request, res: Response) => {
   const { name } = req.body as { name?: string };
   if (!name || !name.trim()) {
     res.status(400).json({ error: "Name is required" });
     return;
   }
 
-  const coachId = (req.headers["x-coach-id"] as string) || (req.query.coachId as string) || "will-coach";
+  const caller = req.gutoUser!;
+  const coachId = caller.coachId || caller.userId;
   const userId = `student-${Date.now()}`;
   const cleanName = name.trim();
 
+  // 1. Criar registro de acesso (pausado até claim)
   upsertUserAccess(userId, {
     role: "student",
     coachId: coachId,
-    active: true,
+    active: false, // Inativo até aceitar o convite
     visibleInArena: true,
     archived: false,
+    subscriptionStatus: "pending_payment",
   });
 
-  saveArenaProfile({
-    userId,
-    displayName: cleanName,
-    pairName: "",
-    arenaGroupId: "default",
-    avatarStage: "baby",
-    totalXp: 0,
-    weeklyXp: 0,
-    monthlyXp: 0,
-    validatedWorkoutsTotal: 0,
-    validatedWorkoutsWeek: 0,
-    validatedWorkoutsMonth: 0,
-    currentStreak: 0,
-    lastWorkoutValidatedAt: null,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  });
-
-  const store = readMemoryStoreSync() as Record<string, StoredMemory>;
-  store[userId] = {
+  // 2. Criar convite
+  const { invite, rawToken } = await createInvite({
     userId,
     name: cleanName,
-    totalXp: 0,
-    streak: 0,
-    lastActiveAt: new Date().toISOString(),
-    validationHistory: [],
-  };
-  writeMemoryStoreSync(store);
+    coachId,
+  });
 
-  // Generate conceptual link (could be relative depending on frontend domain)
-  // But we send it as requested, or the frontend can build it locally.
-  const inviteLink = `https://corpoguto.vercel.app/?inviteUserId=${userId}&presetName=${encodeURIComponent(cleanName)}&forceReset=1`;
+  const inviteLink = `${config.frontendPublicUrl}/convite/${rawToken}`;
 
   res.json({
     userId,
     name: cleanName,
     inviteLink,
+    inviteToken: rawToken,
     student: buildStudentView(userId)
   });
 });

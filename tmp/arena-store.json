@@ -577,6 +577,23 @@
       "lastWorkoutValidatedAt": "2026-05-04T11:29:00.385Z",
       "createdAt": "2026-05-04T11:29:00.385Z",
       "updatedAt": "2026-05-04T11:29:00.385Z"
+    },
+    "guest": {
+      "userId": "guest",
+      "displayName": "Operador",
+      "pairName": "GUTO & OPERADOR #35",
+      "arenaGroupId": "will-personal-alpha",
+      "avatarStage": "baby",
+      "totalXp": 100,
+      "weeklyXp": 100,
+      "monthlyXp": 100,
+      "validatedWorkoutsTotal": 0,
+      "validatedWorkoutsWeek": 0,
+      "validatedWorkoutsMonth": 0,
+      "currentStreak": 1,
+      "lastWorkoutValidatedAt": "2026-05-04T19:30:10.295Z",
+      "createdAt": "2026-05-04T19:30:10.293Z",
+      "updatedAt": "2026-05-04T19:30:10.295Z"
     }
   },
   "events": [
@@ -885,6 +902,15 @@
       "xp": 100,
       "sourceValidationId": "grant_initial_xp",
       "createdAt": "2026-05-04T11:29:00.385Z"
+    },
+    {
+      "id": "e8c8606b-f9f9-41ed-ba78-8f44dde5a770",
+      "userId": "guest",
+      "arenaGroupId": "will-personal-alpha",
+      "type": "bonus",
+      "xp": 100,
+      "sourceValidationId": "grant_initial_xp",
+      "createdAt": "2026-05-04T19:30:10.295Z"
     }
   ]
 }

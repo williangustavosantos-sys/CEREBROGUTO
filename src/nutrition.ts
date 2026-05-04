@@ -221,6 +221,11 @@ export interface DietPlan {
   macros: DietMacros;
   meals: DietMeal[];
   foodRestrictions?: string;
+  manualOverride?: boolean;
+  editedBy?: string;
+  editedAt?: string;
+  editReason?: string;
+  planSource?: "ai_generated" | "admin_override" | "coach_override";
 }
 
 /**

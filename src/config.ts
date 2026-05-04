@@ -21,5 +21,13 @@ export const config = {
   // Upstash Redis — set in production for persistent memory across serverless instances
   upstashRedisUrl: process.env.UPSTASH_REDIS_REST_URL || "",
   upstashRedisToken: process.env.UPSTASH_REDIS_REST_TOKEN || "",
+  // Auth
+  jwtSecret: process.env.JWT_SECRET || "dev-secret-change-in-production",
+  jwtExpiresIn: process.env.JWT_EXPIRES_IN || "7d",
+  adminEmail: process.env.ADMIN_EMAIL || "",
+  adminPasswordHash: process.env.ADMIN_PASSWORD_HASH || "",
+  frontendPublicUrl: process.env.FRONTEND_PUBLIC_URL || "http://localhost:3000",
+  // Dev access bypass — never true in production
+  allowDevAccess: process.env.GUTO_ALLOW_DEV_ACCESS === "true",
 };
 

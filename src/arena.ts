@@ -11,6 +11,7 @@ import { getEffectiveUserAccess } from "./user-access-store.js";
 function isVisibleInRanking(userId: string): boolean {
   const access = getEffectiveUserAccess(userId);
   return (
+    !!access &&
     access.active &&
     access.visibleInArena &&
     !access.archived &&
