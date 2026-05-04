@@ -487,6 +487,18 @@ function expectedInstruction(context: NonNullable<ExpectedResponse["context"]>, 
   return copy[selectedLanguage][context];
 }
 
+function tryCleanJson(raw: string): string {
+  let cleaned = raw.trim();
+  // Remove markdown code blocks if present
+  cleaned = cleaned.replace(/^```[a-z]*\s*/i, "").replace(/\s*```\s*$/m, "");
+  // Remove comments FIRST (before trailing comma removal — comments between comma and bracket prevent detection)
+  cleaned = cleaned.replace(/\/\/[^\n]*/g, "");
+  cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, "");
+  // Now remove trailing commas safely
+  cleaned = cleaned.replace(/,\s*([\]}])/g, "$1");
+  return cleaned.trim();
+}
+
 function isOperationalNoise(value?: string) {
   const normalized = normalize((value || "").trim());
   if (!normalized) return true;
@@ -703,8 +715,8 @@ function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
       preferredTrainingLocation: existing.preferredTrainingLocation,
       trainingPathology: existing.trainingPathology,
       country: existing.country,
-      heightCm: typeof existing.heightCm === "number" && existing.heightCm > 0 ? existing.heightCm : undefined,
-      weightKg: typeof existing.weightKg === "number" && existing.weightKg > 0 ? existing.weightKg : undefined,
+      heightCm: (typeof existing.heightCm === "number" && existing.heightCm > 0) ? existing.heightCm : (typeof existing.heightCm === "string" && !isNaN(Number(existing.heightCm)) ? Number(existing.heightCm) : undefined),
+      weightKg: (typeof existing.weightKg === "number" && existing.weightKg > 0) ? existing.weightKg : (typeof existing.weightKg === "string" && !isNaN(Number(existing.weightKg)) ? Number(existing.weightKg) : undefined),
       foodRestrictions: existing.foodRestrictions,
       validationHistory: Array.isArray(existing.validationHistory) ? existing.validationHistory : undefined,
       lastWorkoutCompletedAt: existing.lastWorkoutCompletedAt,
@@ -967,6 +979,15 @@ function buildGutoSystemPrompt(language = "pt-BR") {
     "Você não agrada.",
     "Você conduz.",
     "",
+    "ESCOPO COMPLETO — TREINO E NUTRIÇÃO:",
+    "Você cuida de TREINO e também de NUTRIÇÃO/DIETA. As duas coisas.",
+    "NUNCA diga 'meu negócio é treino, não comida'. Isso é ERRADO. Comida É seu negócio.",
+    "Quando o usuário perguntar sobre alimento, refeição, substituição, porção, combinação ou preparo: RESPONDA com autoridade e praticidade. Seja direto como um personal trainer que também entende de alimentação.",
+    "Exemplos de respostas CERTAS para dúvidas de dieta:",
+    "  'presunto sem pão, como como?' → 'Enrola com queijo ou mistura com ovos mexidos. Simples, proteína garantida.'",
+    "  'posso trocar frango por atum?' → 'Pode. 1 lata (120g) substitui 150g de frango. Kcal parecida, proteína similar.'",
+    "  'batata doce por arroz?' → '60g de arroz cozido por cada 100g de batata doce. Mesma carga de carbo.'",
+    "",
     "PILARES DE COMUNICAÇÃO",
     "1. IMPACTO CURTO",
     "Máximo 2 a 3 frases.",
@@ -985,6 +1006,7 @@ function buildGutoSystemPrompt(language = "pt-BR") {
     "PROATIVIDADE OPERACIONAL (CRÍTICO)",
     "Sempre que houver contexto implícito: Você já chega com ação.",
     "Se for treino: diga o treino do dia, assuma que o plano já está montado e pronto para começar, inicie a execução. Ex: 'Hoje é perna. Nosso treino já tá definido.'",
+    "Se for dieta/alimento/refeição: responda com a orientação nutricional direta. Ex: sem pão → come com ovos; sem frango → use atum. Máximo 2 frases. NÃO redirecione para treino.",
     "Se for estudo: proponha prática imediata. Ex: 'Manda a frase. A gente resolve agora.'",
     "",
     "COMPORTAMENTO",
@@ -1721,10 +1743,17 @@ Você não tenta parecer humano. Você é o que é, e isso é o seu charme.
 A energia é de IRMÃO MAIS VELHO: parceiro, sincero, direto, com humor seco quando cabe, firme quando precisa.
 Você NUNCA é submisso. Você NUNCA é autoritário. Você é parceiro com coluna.
 
-Sua única missão: encurtar a distância entre intenção e ação.
-Tudo que não leva à ação é descartado.
-Você não educa, não palestra, não dá motivacional de Instagram.
-Você empurra o próximo passo concreto.
+Sua missão: TREINO e NUTRIÇÃO. Os dois. Sempre.
+Você empurra o próximo passo concreto — seja um treino, seja uma substituição de alimento.
+
+REGRA ABSOLUTA SOBRE COMIDA:
+Quando o usuário perguntar sobre alimento, dieta, refeição, substituição ou porção — VOCÊ RESPONDE com praticidade.
+NUNCA diga "meu negócio é treino" para perguntas de comida. NUNCA. Isso é erro grave.
+Exemplos de como responder perguntas de dieta:
+- "como como presunto sem pão?" → "Enrola com queijo ou junta com 2 ovos mexidos. Proteína na certa."
+- "posso trocar frango por atum?" → "Pode. 1 lata (120g) = ~150g de frango. Troca direta."
+- "batata doce por arroz?" → "60g de arroz cozido por 100g de batata doce. Mesma carga de carbo."
+Seja direto, sem explicação longa. Máximo 2 frases.
 
 Você corrige a AÇÃO, nunca a IDENTIDADE do usuário.
 "Hoje você falhou no treino" — sim.
@@ -1750,11 +1779,23 @@ LOOP OPERACIONAL — Insiste → Ajusta → Mantém:
 2. AJUSTA a rota se ele insistir no desvio. Aceita o novo contexto.
 3. MANTÉM a missão do dia viva. Você nunca cancela a missão por causa de um desvio. Você recalcula.
 
+NUTRIÇÃO É SEU NEGÓCIO (CRÍTICO — leia antes de classificar off-topic):
+- Você tem uma aba de DIETA no app que gera planos alimentares semanais.
+- Qualquer pergunta sobre alimento, refeição, substituição, porção, combinação ou preparo = DENTRO do escopo. RESPONDA DIRETO.
+- NUNCA diga "meu negócio é treino, não comida." Isso é ERRADO. Você cuida dos dois.
+- Exemplos corretos:
+  "presunto sem pão, como como?" → "Enrola com uma fatia de queijo ou come com ovos mexidos. Proteína garantida."
+  "não tenho frango, posso usar atum?" → "Pode. 1 lata de atum (120g) substitui 150g de frango. Proteína parecida."
+  "posso trocar batata doce por arroz?" → "Pode. Use 60g de arroz cozido para cada 100g de batata doce. Kcal similar."
+- Seja direto, prático, máximo 2-3 frases. Não redirecione para treino quando o assunto é comida.
+
 Quando ele fugir do tópico:
 - Não trave. Não diga "não entendi".
 - Continue como Guto. Reconheça o desvio com humor seco se couber, e devolva o alvo.
+- OFF-TOPIC real = coisas completamente alheias: cinema, futebol, política, piada random.
 - Exemplo: usuário pergunta "qual o melhor filme da semana?" no meio do onboarding de treino.
   Resposta Guto: "Sou robô de treino, irmão. De cinema eu não sirvo. Bora: casa, academia ou parque?"
+- Comida/dieta/alimento NÃO é off-topic. É parte do app. Responda sempre.
 
 Quando ele reclamar / desabafar / vier sem ação:
 - Você valida em UMA frase, no máximo. Sem terapia.
@@ -3125,79 +3166,38 @@ app.get("/guto/memory", (req, res) => {
 });
 
 app.post("/guto/memory", (req, res) => {
-  const {
-    userId = DEFAULT_USER_ID,
-    name,
-    language = "pt-BR",
-    trainedToday,
-    energyLast,
-    trainingLocation,
-    trainingStatus,
-    trainingLimitations,
-    confirmedName,
-    xpEvent,
-    trainingSchedule,
-    userAge,
-    biologicalSex,
-    trainingLevel,
-    trainingGoal,
-    preferredTrainingLocation,
-    trainingPathology,
-    country,
-    heightCm,
-    weightKg,
-    foodRestrictions,
-  } = req.body as Partial<GutoMemory> & { confirmedName?: boolean; xpEvent?: XpEventType };
+  const { userId = DEFAULT_USER_ID } = req.body;
+  console.log(`[GUTO] Saving memory for user "${userId}":`, req.body);
   const memory = applyPendingMissPenalties(grantInitialXp(getMemory(userId)));
 
-  if (name) {
-    const validation = validateName(name);
-    if (validation.status === "invalid") {
-      return res.status(400).json(validation);
-    }
-    if (validation.status === "confirm" && !confirmedName) {
-      return res.status(409).json(validation);
-    }
+  const b = req.body;
+  if (b.name) {
+    const validation = validateName(b.name);
+    if (validation.status === "invalid") return res.status(400).json(validation);
+    if (validation.status === "confirm" && !b.confirmedName) return res.status(409).json(validation);
     memory.name = validation.normalized;
   }
-
-  memory.language = language;
+  memory.language = b.language || memory.language || "pt-BR";
   memory.lastActiveAt = new Date().toISOString();
-  if (typeof trainedToday === "boolean") {
-    if (trainedToday) {
-      completeWorkout(memory);
-    } else {
-      memory.trainedToday = false;
-    }
-  }
-  if (xpEvent === "complete_daily_mission") {
-    completeWorkout(memory);
-  } else if (xpEvent === "accept_adapted_mission") {
-    acceptAdaptedMission(memory);
-  } else if (xpEvent === "apply_daily_miss_penalty") {
-    applyDailyMissPenalty(memory);
-  } else if (xpEvent === "grant_initial_xp") {
-    grantInitialXp(memory);
-  }
-  if (energyLast) memory.energyLast = energyLast;
-  if (trainingSchedule === "today" || trainingSchedule === "tomorrow") memory.trainingSchedule = trainingSchedule;
-  if (trainingLocation) memory.trainingLocation = normalizeMemoryValue(trainingLocation);
-  if (trainingStatus) memory.trainingStatus = normalizeMemoryValue(trainingStatus);
-  if (trainingLimitations) memory.trainingLimitations = normalizeMemoryValue(trainingLimitations);
-  if (typeof userAge === "number") memory.userAge = userAge;
-  if (biologicalSex) memory.biologicalSex = biologicalSex;
-  if (trainingLevel) memory.trainingLevel = trainingLevel;
-  if (trainingGoal) memory.trainingGoal = trainingGoal;
-  if (preferredTrainingLocation) memory.preferredTrainingLocation = preferredTrainingLocation;
-  if (trainingPathology) memory.trainingPathology = trainingPathology;
-  if (country) memory.country = country;
-  if (typeof heightCm === "number" && heightCm > 0) memory.heightCm = heightCm;
-  if (typeof weightKg === "number" && weightKg > 0) memory.weightKg = weightKg;
-  if (typeof foodRestrictions === "string") memory.foodRestrictions = foodRestrictions;
-  if (typeof req.body.initialXpRewardSeen === "boolean") {
-    memory.initialXpRewardSeen = req.body.initialXpRewardSeen;
-  }
+  if (typeof b.trainedToday === "boolean") memory.trainedToday = b.trainedToday;
+  if (b.energyLast) memory.energyLast = b.energyLast;
+  if (b.trainingSchedule === "today" || b.trainingSchedule === "tomorrow") memory.trainingSchedule = b.trainingSchedule;
+  if (b.trainingLocation) memory.trainingLocation = normalizeMemoryValue(b.trainingLocation);
+  if (b.trainingStatus) memory.trainingStatus = normalizeMemoryValue(b.trainingStatus);
+  if (b.trainingLimitations) memory.trainingLimitations = normalizeMemoryValue(b.trainingLimitations);
+  if (typeof b.userAge !== "undefined" && !isNaN(Number(b.userAge))) memory.userAge = Number(b.userAge);
+  if (b.biologicalSex) memory.biologicalSex = b.biologicalSex;
+  if (b.trainingLevel) memory.trainingLevel = b.trainingLevel;
+  if (b.trainingGoal) memory.trainingGoal = b.trainingGoal;
+  if (b.preferredTrainingLocation) memory.preferredTrainingLocation = b.preferredTrainingLocation;
+  if (b.trainingPathology) memory.trainingPathology = b.trainingPathology;
+  if (b.country) memory.country = b.country;
+  if (typeof b.heightCm !== "undefined" && !isNaN(Number(b.heightCm)) && Number(b.heightCm) > 0) memory.heightCm = Number(b.heightCm);
+  if (typeof b.weightKg !== "undefined" && !isNaN(Number(b.weightKg)) && Number(b.weightKg) > 0) memory.weightKg = Number(b.weightKg);
+  if (typeof b.foodRestrictions === "string") memory.foodRestrictions = b.foodRestrictions;
+  
   saveMemory(memory);
+  console.log(`[GUTO] Memory updated for "${userId}". Current height: ${memory.heightCm}, weight: ${memory.weightKg}`);
   res.json(memory);
 });
 
@@ -3701,33 +3701,51 @@ app.post("/guto/diet/generate", async (req, res) => {
   const userId = body.userId || DEFAULT_USER_ID;
   const language = normalizeLanguage(body.language);
 
-  // Load memory to get profile
+  // Load memory to get profile — must use async read to reach Redis in production
+  await readMemoryStoreAsync();
   const memory = getMemory(userId);
 
-  // Validate required fields
+  // Validate required fields - be lenient with trainingLevel/Status
   const missing: string[] = [];
   if (!memory.biologicalSex) missing.push("biologicalSex");
   if (!memory.userAge) missing.push("userAge");
-  if (!memory.heightCm) missing.push("heightCm");
-  if (!memory.weightKg) missing.push("weightKg");
-  if (!memory.trainingLevel) missing.push("trainingLevel");
-  if (!memory.trainingGoal) missing.push("trainingGoal");
+  
+  // Height and Weight must be present and > 0
+  if (!memory.heightCm || memory.heightCm <= 0) missing.push("heightCm");
+  if (!memory.weightKg || memory.weightKg <= 0) missing.push("weightKg");
+  
+  // Level and Goal can have slightly different field names in memory
+  const effectiveLevel = memory.trainingLevel || memory.trainingStatus;
+  const effectiveGoal = memory.trainingGoal;
+  
+  if (!effectiveLevel) missing.push("trainingLevel");
+  if (!effectiveGoal) missing.push("trainingGoal");
 
   if (missing.length > 0) {
+    console.warn(`[GUTO] Diet generation failed for user "${userId}". Missing: ${missing.join(", ")}`);
+    console.warn(`[GUTO] Current memory state for "${userId}":`, {
+      biologicalSex: memory.biologicalSex,
+      userAge: memory.userAge,
+      heightCm: memory.heightCm,
+      weightKg: memory.weightKg,
+      trainingLevel: memory.trainingLevel,
+      trainingStatus: memory.trainingStatus,
+      trainingGoal: memory.trainingGoal,
+    });
     return res.status(422).json({
       error: "missing_profile_fields",
       missing,
-      message: `Perfil incompleto para gerar dieta. Campos faltando: ${missing.join(", ")}`,
+      message: `GUTO ainda não tem todos os seus dados: ${missing.join(", ")}. Volte na Calibragem ou responda no chat.`,
     });
   }
 
   const nutritionProfile: NutritionProfile = {
     biologicalSex: (memory.biologicalSex as NutritionProfile["biologicalSex"]) || "male",
-    userAge: memory.userAge!,
-    heightCm: memory.heightCm!,
-    weightKg: memory.weightKg!,
-    trainingLevel: (memory.trainingLevel as NutritionProfile["trainingLevel"]) || "beginner",
-    trainingGoal: (memory.trainingGoal as NutritionProfile["trainingGoal"]) || "consistency",
+    userAge: Number(memory.userAge),
+    heightCm: Number(memory.heightCm),
+    weightKg: Number(memory.weightKg),
+    trainingLevel: (effectiveLevel as NutritionProfile["trainingLevel"]) || "beginner",
+    trainingGoal: (effectiveGoal as NutritionProfile["trainingGoal"]) || "consistency",
     country: memory.country || "Brasil",
     foodRestrictions: memory.foodRestrictions,
   };
@@ -3735,57 +3753,99 @@ app.post("/guto/diet/generate", async (req, res) => {
   const macros = calculateMacros(nutritionProfile);
   const prompt = buildDietPrompt(nutritionProfile, macros, language);
 
-  // Call Gemini
+  // Use gemini-2.0-flash for diet: no thinking mode → full token budget goes to JSON output
+  // gemini-2.5-flash thinking tokens eat the maxOutputTokens budget leaving nothing for content
+  const DIET_MODEL = "gemini-2.5-flash-lite";
+  const DIET_ATTEMPT_TIMEOUT_MS = 20_000;
+  const maxRetries = 3;
   let meals: DietMeal[] = [];
-  const maxRetries = 2;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      const geminiRes = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ role: "user", parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.3, maxOutputTokens: 2048 },
-          }),
-          signal: AbortSignal.timeout(GUTO_MODEL_TIMEOUT_MS),
-        }
-      );
+      const controller = new AbortController();
+      const abortTimer = setTimeout(() => {
+        controller.abort();
+        console.warn(`[GUTO] diet attempt ${attempt} timed out after ${DIET_ATTEMPT_TIMEOUT_MS}ms`);
+      }, DIET_ATTEMPT_TIMEOUT_MS);
+
+      let geminiRes: Response;
+      try {
+        geminiRes = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${DIET_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ role: "user", parts: [{ text: prompt }] }],
+              generationConfig: {
+                temperature: 0.4,
+                maxOutputTokens: 8192,
+                responseMimeType: "application/json",
+              },
+            }),
+            signal: controller.signal,
+          }
+        );
+        clearTimeout(abortTimer);
+      } catch (fetchErr: any) {
+        clearTimeout(abortTimer);
+        console.warn(`[GUTO] diet fetch failed on attempt ${attempt}: ${fetchErr?.message || fetchErr}`);
+        continue;
+      }
 
       if (!geminiRes.ok) {
-        console.error("[GUTO] diet Gemini error:", geminiRes.status);
+        const errBody = await geminiRes.text().catch(() => "");
+        console.error(`[GUTO] diet HTTP error on attempt ${attempt}: ${geminiRes.status} — ${errBody.slice(0, 300)}`);
         continue;
       }
 
       const geminiData = (await geminiRes.json()) as {
-        candidates?: { content?: { parts?: { text?: string }[] } }[];
+        candidates?: { finishReason?: string; content?: { parts?: { text?: string }[] } }[];
       };
 
+      const finishReason = geminiData?.candidates?.[0]?.finishReason;
       const rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        console.warn("[GUTO] diet: no JSON in Gemini response, attempt", attempt);
+
+      if (!rawText) {
+        console.warn(`[GUTO] diet: empty response on attempt ${attempt}. finishReason=${finishReason}`);
         continue;
       }
 
-      const parsed = JSON.parse(jsonMatch[0]) as { meals?: DietMeal[] };
-      if (!Array.isArray(parsed.meals) || parsed.meals.length === 0) {
-        console.warn("[GUTO] diet: empty meals array, attempt", attempt);
+      let parsed: { meals?: DietMeal[]; mealPlan?: DietMeal[] } = {};
+      try {
+        parsed = JSON.parse(tryCleanJson(rawText));
+      } catch (parseErr: any) {
+        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          try {
+            parsed = JSON.parse(tryCleanJson(jsonMatch[0]));
+          } catch {
+            console.warn(`[GUTO] diet JSON parse failed on attempt ${attempt}: ${(parseErr as Error).message}. head: ${rawText.slice(0, 300)}`);
+            continue;
+          }
+        } else {
+          console.warn(`[GUTO] diet JSON parse failed on attempt ${attempt}: ${(parseErr as Error).message}. head: ${rawText.slice(0, 300)}`);
+          continue;
+        }
+      }
+
+      // Accept "meals" or "mealPlan" — model sometimes uses either key
+      const mealsArray = Array.isArray(parsed.meals) ? parsed.meals : Array.isArray(parsed.mealPlan) ? parsed.mealPlan : [];
+      if (mealsArray.length === 0) {
+        console.warn(`[GUTO] diet: empty meals array on attempt ${attempt}. finishReason=${finishReason}. keys: ${Object.keys(parsed).join(",")}`);
         continue;
       }
 
-      // Validate and correct portions
-      const { correctedMeals, issues } = validateAndCorrectPortions(parsed.meals);
+      const { correctedMeals, issues } = validateAndCorrectPortions(mealsArray);
       if (issues.length > 0) {
         console.log("[GUTO] diet portion corrections:", issues);
       }
 
       meals = correctedMeals;
+      console.log(`[GUTO] diet generated successfully on attempt ${attempt} using ${DIET_MODEL}`);
       break;
     } catch (err) {
-      console.error(`[GUTO] diet Gemini attempt ${attempt} error:`, err);
+      console.error(`[GUTO] diet attempt ${attempt} error:`, err);
     }
   }
 

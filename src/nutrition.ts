@@ -270,79 +270,100 @@ export function buildDietPrompt(
   macros: DietMacros,
   language: string
 ): string {
+  // App language — all text output must be in this language
   const langLabel =
     language === "pt-BR"
       ? "Português do Brasil"
       : language === "en-US"
-      ? "English"
+      ? "English (US)"
       : language === "it-IT"
       ? "Italiano"
       : "Español";
 
-  const goalLabel =
-    profile.trainingGoal === "fat_loss"
-      ? "Perda de gordura"
-      : profile.trainingGoal === "muscle_gain"
-      ? "Hipertrofia"
-      : profile.trainingGoal === "conditioning"
-      ? "Condicionamento"
-      : profile.trainingGoal === "mobility_health"
-      ? "Saúde e mobilidade"
-      : "Consistência";
+  // Goal label in the app language
+  const goalLabels: Record<string, Record<string, string>> = {
+    "pt-BR": {
+      fat_loss: "Perda de gordura",
+      muscle_gain: "Hipertrofia",
+      conditioning: "Condicionamento",
+      mobility_health: "Saúde e mobilidade",
+      consistency: "Consistência",
+    },
+    "en-US": {
+      fat_loss: "Fat loss",
+      muscle_gain: "Muscle gain",
+      conditioning: "Conditioning",
+      mobility_health: "Health and mobility",
+      consistency: "Consistency",
+    },
+    "it-IT": {
+      fat_loss: "Dimagrimento",
+      muscle_gain: "Ipertrofia",
+      conditioning: "Condizionamento",
+      mobility_health: "Salute e mobilità",
+      consistency: "Costanza",
+    },
+    "es-ES": {
+      fat_loss: "Pérdida de grasa",
+      muscle_gain: "Hipertrofia",
+      conditioning: "Acondicionamiento",
+      mobility_health: "Salud y movilidad",
+      consistency: "Consistencia",
+    },
+  };
+  const goalLabel = goalLabels[language]?.[profile.trainingGoal] ?? profile.trainingGoal;
 
+  const country = profile.country || "Brasil";
   const restrictions = profile.foodRestrictions
-    ? `\n- Restrições alimentares: ${profile.foodRestrictions}`
-    : "";
+    ? profile.foodRestrictions.trim()
+    : "none";
 
-  return `Você é o motor nutricional do GUTO, um assistente de evolução humana. Sua função é gerar um plano diário de refeições representativo da semana inteira.
+  // Country-specific food notes to guide local availability
+  const countryFoodHints: Record<string, string> = {
+    italia: "Use Italian supermarket staples: pasta, risotto rice, mozzarella, prosciutto, bresaola, eggs, seasonal vegetables, legumes, olive oil, tuna in oil, yogurt, bread. Avoid: tapioca, açaí, cuscuz nordestino, feijão preto, queijo coalho, farinha de mandioca.",
+    italy: "Use Italian supermarket staples: pasta, risotto rice, mozzarella, prosciutto, bresaola, eggs, seasonal vegetables, legumes, olive oil, tuna in oil, yogurt, bread. Avoid: tapioca, açaí, feijão preto, queijo coalho.",
+    brasil: "Use Brazilian supermarket staples: arroz, feijão, frango, carne bovina, ovo, aveia, batata-doce, banana, mandioca, legumes, azeite. Typical Brazilian diet.",
+    brazil: "Use Brazilian supermarket staples: rice, beans, chicken, beef, eggs, oats, sweet potato, banana, cassava, vegetables, olive oil.",
+    eua: "Use US supermarket staples: chicken breast, eggs, oats, Greek yogurt, brown rice, whole wheat bread, broccoli, spinach, sweet potato, tuna, cottage cheese, peanut butter.",
+    usa: "Use US supermarket staples: chicken breast, eggs, oats, Greek yogurt, brown rice, whole wheat bread, broccoli, spinach, sweet potato, tuna, cottage cheese.",
+    espanha: "Use Spanish supermarket staples: pollo, huevos, arroz, legumbres, pescado, aceite de oliva, verduras frescas, pan integral, jamón serrano, yogur.",
+    spain: "Use Spanish supermarket staples: chicken, eggs, rice, legumes, fish, olive oil, fresh vegetables, whole bread, serrano ham, yogurt.",
+    portugal: "Use Portuguese supermarket staples: bacalhau, frango, arroz, leguminosas, azeite, ovos, pão, legumes, frutas da época.",
+    alemanha: "Use German supermarket staples: Hühnchen, Eier, Haferflocken, Vollkornbrot, Kartoffeln, Hüttenkäse, Quark, Gemüse, Lachs, Linsen.",
+    germany: "Use German supermarket staples: chicken, eggs, oats, whole grain bread, potatoes, quark, cottage cheese, vegetables, salmon, lentils.",
+    franca: "Use French supermarket staples: poulet, œufs, riz, légumes, fromage blanc, yaourt, pain complet, légumineuses, poisson, huile d'olive.",
+    france: "Use French supermarket staples: chicken, eggs, rice, vegetables, fromage blanc, yogurt, whole bread, legumes, fish, olive oil.",
+  };
 
-PERFIL DO USUÁRIO:
-- Sexo biológico: ${profile.biologicalSex}
-- Idade: ${profile.userAge} anos
-- Altura: ${profile.heightCm} cm
-- Peso: ${profile.weightKg} kg
-- País / culinária base: ${profile.country || "Brasil"}
-- Objetivo: ${goalLabel}${restrictions}
+  const countryKey = country.toLowerCase().replace(/[^a-záéíóúàèìòùãõâêîôûäëïöüç]/g, "");
+  const foodHint = countryFoodHints[countryKey] || `Use foods that are easy to find in local supermarkets in ${country}.`;
 
-CÁLCULOS JÁ REALIZADOS — USE EXATAMENTE ESTES VALORES, NÃO RECALCULE:
-- Alvo calórico diário: ${macros.targetKcal} kcal
-- Proteína: ${macros.proteinG}g/dia
-- Carboidratos: ${macros.carbsG}g/dia
-- Gordura: ${macros.fatG}g/dia
+  return `You are the nutrition engine of GUTO. Generate a weekly meal plan (representative daily plan).
 
-REGRAS ABSOLUTAS:
-1. Escreva TODO o conteúdo no idioma: ${langLabel}
-2. Use alimentos reais, acessíveis e típicos do país do usuário
-3. Respeite TODAS as restrições alimentares mencionadas
-4. NÃO invente quantidades — use apenas os limites abaixo:
-   - Frango / carne / peixe: 100–220g por refeição
-   - Ovos: 2–4 unidades
-   - Arroz cozido: 80–180g
-   - Massa cozida: 80–180g
-   - Batata: 150–300g
-   - Feijão / lentilha: 80–160g
-   - Aveia: 30–80g
-   - Iogurte: 150–250g
-   - Fruta: 1–2 unidades
-   - Azeite: 5–15g
-5. A soma total de calorias dos alimentos deve aproximar-se de ${macros.targetKcal} kcal (±100 kcal)
-6. O campo "gutoNote" deve ser curto (máx 15 palavras), no estilo de melhor amigo direto — sem julgamento, sem militar
+USER:
+- Sex: ${profile.biologicalSex}, Age: ${profile.userAge}, Height: ${profile.heightCm}cm, Weight: ${profile.weightKg}kg
+- Country of residence: ${country}
+- Goal: ${goalLabel}
+- Food restrictions/allergies: ${restrictions}
 
-RESPONDA APENAS COM JSON PURO (sem markdown, sem código, sem explicação):
-{
-  "meals": [
-    {
-      "id": "cafe",
-      "name": "...",
-      "time": "07:00",
-      "foods": [
-        { "name": "...", "quantity": "...g", "kcal": 000 }
-      ],
-      "totalKcal": 000,
-      "gutoNote": "..."
-    }
-  ]
-}
+MACROS (pre-calculated — use exactly):
+- Target: ${macros.targetKcal} kcal/day (±80 kcal)
+- Protein: ${macros.proteinG}g | Carbs: ${macros.carbsG}g | Fat: ${macros.fatG}g
 
-Gere 5 refeições: café da manhã, lanche da manhã, almoço, lanche da tarde, jantar.`;
+FOOD SELECTION — CRITICAL:
+${foodHint}
+Food restrictions must be strictly respected: ${restrictions}.
+
+OUTPUT LANGUAGE — CRITICAL:
+Write ALL text (meal names, food names, notes) in ${langLabel}.
+The country determines WHICH foods, not the language. Translate food names into ${langLabel}.
+Examples: [Italy + Portuguese] "macarrão" not "pasta"; "manteiga" not "burro"; "atum em conserva" not "tonno".
+Examples: [USA + Spanish] "pollo" not "chicken"; "avena" not "oats"; "batata dulce" not "sweet potato".
+
+STRUCTURE:
+Return a JSON object with a root key named exactly "meals" (NOT "mealPlan") containing an array of exactly 5 meal objects.
+IDs must be exactly: "cafe", "lanche1", "almoco", "lanche2", "jantar".
+Each meal: id (string), name (string), time (string), foods (array of 2-4 objects with name/quantity/kcal), totalKcal (number), gutoNote (string).
+gutoNote: max 12 words, direct friend tone, in ${langLabel}.
+Example structure: {"meals": [{"id":"cafe","name":"...","time":"08:00","foods":[{"name":"...","quantity":"...","kcal":0}],"totalKcal":0,"gutoNote":"..."}]}`;
 }
