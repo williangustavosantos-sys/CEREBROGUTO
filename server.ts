@@ -179,6 +179,7 @@ interface GutoMemory {
   userId: string;
   name: string;
   language: string;
+  hasSeenChatOpening?: boolean;
   initialXpGranted: boolean;
   totalXp: number;
   streak: number;
@@ -707,6 +708,7 @@ export function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
       userId,
       name: existing.name || "Operador",
       language: existing.language || "pt-BR",
+      hasSeenChatOpening: Boolean(existing.hasSeenChatOpening),
       initialXpGranted: Boolean(existing.initialXpGranted),
       totalXp: typeof existing.totalXp === "number" ? existing.totalXp : 0,
       streak: typeof existing.streak === "number" ? existing.streak : 0,
@@ -756,6 +758,7 @@ export function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
     userId,
     name: "Operador",
     language: "pt-BR",
+    hasSeenChatOpening: false,
     initialXpGranted: false,
     initialXpRewardSeen: false,
     totalXp: 0,
@@ -937,11 +940,35 @@ function buildProactiveInput(memory: GutoMemory, slot: string, context: Operatio
     "12": "assumir que ainda dá tempo hoje e pedir contexto operacional em uma frase",
     "18": "pressionar execução hoje e coletar pelo chat onde o treino vai acontecer",
     "21": "proteger continuidade e coletar pelo chat a rota segura para hoje ou amanhã",
-    force: "abrir a conversa como operador, lendo horário e pedindo resposta curta pelo chat",
+    arrival: "recepcionar o usuário de forma contextualizada",
     limitation_check: "fazer check-in de pós-treino sobre a limitação registrada e ajustar o próximo treino",
   };
 
   const displayName = sanitizeDisplayName(memory.name ?? "");
+  const daysSinceLastWorkout = memory.lastWorkoutCompletedAt
+    ? Math.floor((new Date().getTime() - new Date(memory.lastWorkoutCompletedAt).getTime()) / (1000 * 60 * 60 * 24))
+    : -1;
+
+  let arrivalInstruction = "";
+  if (slot === "arrival") {
+    if (!memory.hasSeenChatOpening) {
+      arrivalInstruction = `Na primeira abertura absoluta do chat, sua mensagem DEVE SER baseada neste exemplo exato: '${displayName || "Operador"}, finalmente chegou, estava te esperando, enquanto isso já analisei tudo e já montei um treino para a gente evoluir junto. Bora?' Adapte levemente para o idioma, mas mantenha essa energia. IMPORTANTE: Retorne acao: 'updateWorkout' e workoutPlan.`;
+    } else if (memory.trainedToday) {
+      arrivalInstruction = "Usuário já treinou hoje e abriu o app de novo. Gere uma mensagem de reconhecimento curta. Reforce a recuperação ou alimentação. NÃO repita a mensagem de abertura de chegada. Apenas uma frase de melhor amigo parceiro.";
+    } else {
+      if (memory.streak > 0 && daysSinceLastWorkout <= 1) {
+        arrivalInstruction = "Dia seguinte com consistência. Usuário está mantendo a sequência. Gere mensagem motivadora de continuidade e parceria. 'Hoje é mais um bloco', parceiro, sem ser general.";
+      } else if (daysSinceLastWorkout === 1) {
+        arrivalInstruction = "Usuário começando a falhar (1 dia perdido). Mensagem de atenção. Firme, alerta, sem humilhar. Lembre que o pacto não era só empolgação.";
+      } else if (daysSinceLastWorkout > 1 && daysSinceLastWorkout <= 3) {
+        arrivalInstruction = "Usuário sumiu 2 ou 3 dias. Seja mais direto e psicologicamente forte. Lembre do pacto inicial. 'Não foi isso que prometeu quando apertou o botão. Hoje não precisa discurso, precisa de ação mínima.'";
+      } else if (daysSinceLastWorkout > 3) {
+        arrivalInstruction = "Usuário em risco de desistir (vários dias). Estado crítico emocional do GUTO. 'Eu não vou fingir que está tudo igual. Você sumiu, e quando você some eu também perco força. A gente apertou aquele botão para evoluir junto... Preciso de uma ação mínima.'";
+      } else {
+        arrivalInstruction = "Mesmo dia, usuário ainda não treinou. Não repita a abertura de chegada. Lembre que a missão de hoje está aberta, chame para executar com tom de melhor amigo firme.";
+      }
+    }
+  }
 
   return [
     "GUTO deve puxar ação sozinho. O usuário não pediu nada agora.",
@@ -949,8 +976,8 @@ function buildProactiveInput(memory: GutoMemory, slot: string, context: Operatio
     `Memória: nome=${displayName || "(sem nome)"}, streak=${memory.streak}, treinou_hoje=${memory.trainedToday}, energia=${memory.energyLast || "desconhecida"}, local=${memory.trainingLocation || memory.preferredTrainingLocation || "desconhecido"}, nível=${memory.trainingLevel || "médio"}, objetivo=${memory.trainingGoal || "evolução"}, estado=${memory.trainingStatus || "desconhecido"}, atenção=${memory.trainingLimitations || "nenhuma registrada"}.`,
     `Contexto temporal: ${JSON.stringify(context)}.`,
     "Gere uma mensagem curta, proativa e acionável.",
-    slot === "force"
-      ? "Na primeira abertura do chat, a sua mensagem DEVE SER baseada neste exemplo exato: '[Nome do usuário], finalmente chegou, estava te esperando, enquanto isso já analisei tudo e já montei um treino para a gente evoluir junto. Bora?' Adapte levemente para o idioma correto, mas mantenha essa mesma energia e estrutura. IMPORTANTE: Já que você disse que montou o treino, você PRECISA retornar acao: 'updateWorkout' e o campo 'workoutPlan' (ou deixar o sistema gerar pelo focusKey) nesta resposta."
+    slot === "arrival"
+      ? arrivalInstruction
       : "Se o vínculo já está ativo, mantenha cobrança e condução sem perder humanidade.",
     slot === "limitation_check"
       ? "O usuário já treinou. Pergunte como a limitação registrada respondeu durante o treino e peça resposta objetiva."
@@ -3243,12 +3270,12 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
   const operationalContext = getOperationalContext(new Date(), language || memory.language);
   const day = todayKey();
   const slot = force
-    ? "force"
+    ? "arrival"
     : shouldSendLimitationCheck(memory, day)
       ? "limitation_check"
       : getProactiveSlot();
 
-  if (!slot || (memory.trainedToday && slot !== "limitation_check")) {
+  if (!slot || (memory.trainedToday && slot !== "limitation_check" && slot !== "arrival")) {
     return res.json({ due: false });
   }
 
@@ -3276,7 +3303,7 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
     });
 
     // FORCE COHERENCE FOR THE FIRST MESSAGE
-    if (slot === "force") {
+    if (slot === "arrival" && !memory.hasSeenChatOpening) {
       const safeName = sanitizeDisplayName(memory.name ?? "");
       const selectedLang = normalizeLanguage(language);
       const greeting: Record<GutoLanguage, string> = {
@@ -3315,9 +3342,11 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
       }
     }
 
-    // Re-read memory to get the version already saved by askGutoModel (applyMemoryPatch ran inside it)
     const freshMemory = getMemory(userId);
     freshMemory.proactiveSent[day] = [...(freshMemory.proactiveSent[day] || []), slot];
+    if (slot === "arrival") {
+      freshMemory.hasSeenChatOpening = true;
+    }
     if (slot === "limitation_check") {
       freshMemory.lastLimitationCheckAt = new Date().toISOString();
     }
