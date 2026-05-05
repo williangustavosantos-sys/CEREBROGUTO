@@ -3,7 +3,7 @@ services:
     name: guto-cerebro
     env: node
     plan: free
-    branch: feat/round2-hardening
+    branch: main
     buildCommand: npm ci
     startCommand: npm run start
     healthCheckPath: /health
