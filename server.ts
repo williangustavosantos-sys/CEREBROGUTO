@@ -83,6 +83,7 @@ type GutoTelemetryEvent =
 interface Profile {
   name?: string;
   userId?: string;
+  language?: string;
   lastInteraction?: string;
   streak?: number;
   trainedToday?: boolean;
@@ -707,7 +708,7 @@ export function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
     return sanitizeOperationalMemory({
       userId,
       name: existing.name || "Operador",
-      language: existing.language || "pt-BR",
+      language: normalizeLanguage(existing.language),
       hasSeenChatOpening: Boolean(existing.hasSeenChatOpening),
       initialXpGranted: Boolean(existing.initialXpGranted),
       totalXp: typeof existing.totalXp === "number" ? existing.totalXp : 0,
@@ -879,12 +880,13 @@ function applyPendingMissPenalties(memory: GutoMemory) {
   return memory;
 }
 
-function mergeMemory(profile?: Profile, language = "pt-BR") {
+function mergeMemory(profile?: Profile, language?: string) {
   const userId = profile?.userId || DEFAULT_USER_ID;
   const memory = getMemory(userId);
+  const selectedLanguage = normalizeLanguage(language || profile?.language || memory.language);
   const next: GutoMemory = {
     ...memory,
-    language,
+    language: selectedLanguage,
     lastActiveAt: new Date().toISOString(),
     totalXp: memory.totalXp,
     streak: typeof profile?.streak === "number" ? profile.streak : memory.streak,
@@ -2544,6 +2546,39 @@ const FOCUS_NAME_BY_LANG: Record<GutoLanguage, Record<string, string>> = {
   },
 };
 
+const WORKOUT_TITLE_BY_LANG: Record<WorkoutFocus, Record<GutoLanguage, string>> = {
+  full_body: {
+    "pt-BR": "Força total",
+    "it-IT": "Forza totale",
+    "en-US": "Full-body strength",
+    "es-ES": "Fuerza total",
+  },
+  legs_core: {
+    "pt-BR": "Inferiores e core",
+    "it-IT": "Gambe e core",
+    "en-US": "Legs and core",
+    "es-ES": "Piernas y core",
+  },
+  chest_triceps: {
+    "pt-BR": "Peito, ombro e tríceps",
+    "it-IT": "Petto, spalle e tricipiti",
+    "en-US": "Chest, shoulders and triceps",
+    "es-ES": "Pecho, hombros y tríceps",
+  },
+  back_biceps: {
+    "pt-BR": "Costas e bíceps",
+    "it-IT": "Schiena e bicipiti",
+    "en-US": "Back and biceps",
+    "es-ES": "Espalda y bíceps",
+  },
+  shoulders_abs: {
+    "pt-BR": "Ombros e abdômen",
+    "it-IT": "Spalle e addome",
+    "en-US": "Shoulders and abs",
+    "es-ES": "Hombros y abdomen",
+  },
+};
+
 function stripExercisesWithoutVideo(plan: WorkoutPlan): WorkoutPlan {
   const valid = plan.exercises.filter(
     (e) => (e.videoUrl && e.videoProvider === "local") || (e.animationUrl && e.animationProvider === "workoutx")
@@ -2566,7 +2601,10 @@ function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
 
   const focusMap = FOCUS_NAME_BY_LANG[selectedLanguage];
   const localizedFocus = focusMap[plan.focusKey ?? ""] || focusMap[plan.focus] || plan.focus;
-  const localizedFocusLabel = localizeWorkoutFocus(localizedFocus, selectedLanguage);
+  const focusKey = plan.focusKey || inferWorkoutFocusKey(localizedFocus);
+  const localizedFocusLabel = focusKey
+    ? WORKOUT_TITLE_BY_LANG[focusKey][selectedLanguage]
+    : localizeWorkoutFocus(localizedFocus, selectedLanguage);
 
   const cueCopyForLang = selectedLanguage !== "pt-BR" ? CUE_COPY_BY_LANG[selectedLanguage] : {};
 
@@ -3058,9 +3096,9 @@ async function askGutoModel({
   history?: GutoHistoryItem[];
   expectedResponse?: ExpectedResponse | null;
 }) {
-  const memory = mergeMemory(profile, language || "pt-BR");
-  const operationalContext = getOperationalContext(new Date(), language || memory.language);
-  const selectedLanguage = normalizeLanguage(language || memory.language);
+  const memory = mergeMemory(profile, language || profile?.language);
+  const selectedLanguage = normalizeLanguage(language || profile?.language || memory.language);
+  const operationalContext = getOperationalContext(new Date(), selectedLanguage);
   const normalizedExpectedResponse = normalizeExpectedResponse(expectedResponse);
 
   const finalize = (response: GutoModelResponse) => {
@@ -3081,7 +3119,7 @@ async function askGutoModel({
     input: input || "",
     memory,
     history,
-    language: language || memory.language,
+    language: selectedLanguage,
     operationalContext,
     expectedResponse: normalizedExpectedResponse,
   });
@@ -3221,7 +3259,7 @@ app.get("/guto/memory", requireActiveUser, (req, res) => {
   if (memory.lastWorkoutPlan) {
     res.json({
       ...memory,
-      lastWorkoutPlan: stripExercisesWithoutVideo(memory.lastWorkoutPlan)
+      lastWorkoutPlan: localizeWorkoutPlan(stripExercisesWithoutVideo(memory.lastWorkoutPlan), memory.language)
     });
     return;
   }
@@ -3240,7 +3278,10 @@ app.post("/guto/memory", requireActiveUser, (req, res) => {
     if (validation.status === "confirm" && !b.confirmedName) return res.status(409).json(validation);
     memory.name = validation.normalized;
   }
-  memory.language = b.language || memory.language || "pt-BR";
+  memory.language = normalizeLanguage(b.language || memory.language || "pt-BR");
+  if (process.env.NODE_ENV === "development") {
+    console.info("[GUTO_BACKEND_PROFILE] language synced", { userId, language: memory.language });
+  }
   memory.lastActiveAt = new Date().toISOString();
   if (typeof b.trainedToday === "boolean") memory.trainedToday = b.trainedToday;
   if (b.energyLast) memory.energyLast = b.energyLast;
@@ -3259,12 +3300,23 @@ app.post("/guto/memory", requireActiveUser, (req, res) => {
   if (typeof b.weightKg !== "undefined" && !isNaN(Number(b.weightKg)) && Number(b.weightKg) > 0) memory.weightKg = Number(b.weightKg);
   if (typeof b.foodRestrictions === "string") memory.foodRestrictions = b.foodRestrictions;
   if (typeof b.initialXpRewardSeen === "boolean") memory.initialXpRewardSeen = b.initialXpRewardSeen;
-  
+  if (b.lastWorkoutPlan && Array.isArray(b.lastWorkoutPlan.exercises)) {
+    const enrichedPlan = enrichWorkoutPlanAnimations(b.lastWorkoutPlan);
+    memory.lastWorkoutPlan = enrichedPlan ? localizeWorkoutPlan(enrichedPlan, memory.language) : null;
+  }
+
   saveMemory(memory);
   if (memory.name) {
     syncArenaDisplayName(userId, memory.name, DEFAULT_ARENA_GROUP);
   }
-  console.log(`[GUTO] Memory updated for "${userId}". Current height: ${memory.heightCm}, weight: ${memory.weightKg}`);
+
+  if (memory.lastWorkoutPlan) {
+    return res.json({
+      ...memory,
+      lastWorkoutPlan: localizeWorkoutPlan(stripExercisesWithoutVideo(memory.lastWorkoutPlan), memory.language)
+    });
+  }
+
   res.json(memory);
 });
 
@@ -3414,6 +3466,7 @@ app.post("/guto", requireActiveUser, async (req, res) => {
   }
 
   const memory = getMemory(userId);
+  const selectedLanguage = normalizeLanguage(language || memory.language || "pt-BR");
   const profile = {
     userId: memory.userId,
     name: memory.name,
@@ -3428,7 +3481,7 @@ app.post("/guto", requireActiveUser, async (req, res) => {
   try {
     const result = await askGutoModel({
       input: input || "",
-      language: language || "pt-BR",
+      language: selectedLanguage,
       profile,
       history: history || [],
       expectedResponse: normalizeExpectedResponse(expectedResponse),
@@ -3436,12 +3489,12 @@ app.post("/guto", requireActiveUser, async (req, res) => {
     res.json(result);
   } catch (e) {
     console.error('Erro na rota /guto:', e);
-    const fallbackMemory = mergeMemory(profile, language || "pt-BR");
-    const fallbackContext = getOperationalContext(new Date(), language || fallbackMemory.language);
+    const fallbackMemory = mergeMemory(profile, selectedLanguage);
+    const fallbackContext = getOperationalContext(new Date(), selectedLanguage || fallbackMemory.language);
     res.json({
-      message: localizedHttpMessage("model_error", language || fallbackMemory.language),
+      message: localizedHttpMessage("model_error", selectedLanguage || fallbackMemory.language),
       ...attachAvatarEmotion({
-        response: assertAndRepairVisibleLanguage(buildTechnicalFallback(language || fallbackMemory.language), language || fallbackMemory.language),
+        response: assertAndRepairVisibleLanguage(buildTechnicalFallback(selectedLanguage || fallbackMemory.language), selectedLanguage || fallbackMemory.language),
         memory: fallbackMemory,
         context: fallbackContext,
         input: input || "",
