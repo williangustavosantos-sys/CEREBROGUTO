@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Server } from "node:http";
+import jwt from "jsonwebtoken";
 
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
 
@@ -47,19 +48,148 @@ function resetTestMemory() {
   writeFileSync(testMemoryFile, JSON.stringify({}, null, 2));
 }
 
+function readMemoryStore() {
+  if (!existsSync(testMemoryFile)) return {} as Record<string, any>;
+  return JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, any>;
+}
+
 function readUserMemory(userId: string) {
-  if (!existsSync(testMemoryFile)) return undefined;
-  return JSON.parse(readFileSync(testMemoryFile, "utf8"))[userId];
+  return readMemoryStore()[userId];
+}
+
+function writeUserMemory(userId: string, data: Record<string, any>) {
+  const store = readMemoryStore();
+  store[userId] = { ...store[userId], ...data };
+  writeFileSync(testMemoryFile, JSON.stringify(store, null, 2));
 }
 
 function buildGeminiResponse(text: string) {
   return { candidates: [{ content: { parts: [{ text }] } }] };
 }
 
+function extractPrompt(init?: RequestInit) {
+  const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+  return String(body?.contents?.[0]?.parts?.[0]?.text || "");
+}
+
+function extractFirstJsonObjectAfterMarker(text: string, markers: string[]) {
+  const startSearch = markers
+    .map((marker) => text.indexOf(marker))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+
+  const from = startSearch ?? 0;
+  const openIndex = text.indexOf("{", from);
+  if (openIndex < 0) return {};
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = openIndex; i < text.length; i++) {
+    const ch = text[i];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (ch === "{") depth++;
+    if (ch === "}") depth--;
+
+    if (depth === 0) {
+      const candidate = text.slice(openIndex, i + 1);
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        return {};
+      }
+    }
+  }
+
+  return {};
+}
+
 function installGeminiMock() {
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     if (!url.includes("generativelanguage.googleapis.com")) return originalFetch(input as any, init);
+
+    const prompt = extractPrompt(init);
+
+    const memory = extractFirstJsonObjectAfterMarker(prompt, ["Memória do usuário", "Memoria do usuario", "User memory", "MEMÓRIA"]);
+
+    const inputMatch = prompt.match(/Mensagem atual do usuário: (.*)/);
+    const inputMsg = inputMatch ? inputMatch[1].trim().toLowerCase() : "";
+
+    if (inputMsg.includes("treinei isso ontem") || inputMsg.includes("treinei isso anteontem") || inputMsg.includes("ayer") || inputMsg.includes("ieri") || inputMsg.includes("yesterday")) {
+      if (memory.lastSuggestedFocus || memory.lastWorkoutFocus) {
+        const isPt = inputMsg.includes("treinei");
+        const isEn = inputMsg.includes("trained");
+        const isIt = inputMsg.includes("allenato");
+        const isEs = inputMsg.includes("entren");
+        const fala = isPt
+          ? "Boa. Não repito pernas e core."
+          : isEn
+            ? "Good. Not repeating legs and core."
+            : isIt
+              ? "Bene. Non ripeto gambe e core."
+              : isEs
+                ? "Bien. No repito piernas y core."
+                : "Good. Not repeating that focus.";
+        return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
+          fala,
+          acao: "none",
+          expectedResponse: null,
+          trainedReference: {
+            dateLabel: inputMsg.includes("anteontem") || inputMsg.includes("before") || inputMsg.includes("antes") || inputMsg.includes("avantieri") ? "day_before_yesterday" : "yesterday",
+          }
+        }))), { status: 200, headers: { "Content-Type": "application/json" } });
+      } else {
+        return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
+          fala: "Treinou o que ontem?",
+          acao: "none",
+          expectedResponse: null
+        }))), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+    }
+
+    if (inputMsg.includes("os últimos dois dias") || inputMsg.includes("last two days") || inputMsg.includes("ultimi due giorni") || inputMsg.includes("últimos dos días")) {
+      const isPt = inputMsg.includes("dois dias");
+      const isEn = inputMsg.includes("two days");
+      const isIt = inputMsg.includes("due giorni");
+      const isEs = inputMsg.includes("dos días");
+
+      let fala = "";
+      if (isPt) fala = "não repito pernas/core nem peito/tríceps. Vamos focar em costas e bíceps.";
+      if (isEn) fala = "not repeating legs/core or chest/triceps. Let's do back and biceps.";
+      if (isIt) fala = "non ripeto gambe/core né petto/tricipiti. Facciamo schiena e bicipiti.";
+      if (isEs) fala = "no repito piernas/core ni pecho/tríceps. Vamos con espalda y bíceps.";
+
+      return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
+        fala,
+        acao: "none",
+        expectedResponse: null,
+        memoryPatch: {
+          recentTrainingHistory: [
+            { dateLabel: "recent", muscleGroup: "legs_core", raw: inputMsg },
+            { dateLabel: "recent", muscleGroup: "chest_triceps", raw: inputMsg }
+          ]
+        }
+      }))), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
 
     return new Response(
       JSON.stringify(
@@ -77,9 +207,16 @@ function installGeminiMock() {
 }
 
 async function postGuto(body: Record<string, unknown>) {
+  const token = jwt.sign(
+    { userId: (body.profile as any)?.userId || "test-user", role: "student" },
+    process.env.JWT_SECRET || "dev-secret-change-in-production"
+  );
   const response = await originalFetch(`${baseUrl}/guto`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`
+    },
     body: JSON.stringify(body),
   });
 
@@ -91,6 +228,7 @@ before(async () => {
   process.env.GUTO_MEMORY_FILE = testMemoryFile;
   process.env.GUTO_DISABLE_LISTEN = "1";
   process.env.GEMINI_API_KEY = "test-gemini-key";
+  process.env.GUTO_ALLOW_DEV_ACCESS = "true";
 
   resetTestMemory();
   installGeminiMock();
@@ -124,6 +262,7 @@ beforeEach(() => {
 describe("GUTO contextual muscle history", () => {
   it("resolves 'treinei isso ontem' to the last suggested legs_core focus", async () => {
     const userId = "history-context-pt-yesterday";
+    writeUserMemory(userId, { lastSuggestedFocus: "legs_core" });
     const response = await postGuto({
       language: "pt-BR",
       profile: { userId, name: "Will" },
@@ -141,6 +280,7 @@ describe("GUTO contextual muscle history", () => {
 
   it("resolves 'treinei isso anteontem' without saving it as limitation", async () => {
     const userId = "history-context-pt-day-before";
+    writeUserMemory(userId, { lastSuggestedFocus: "legs_core" });
     await postGuto({
       language: "pt-BR",
       profile: { userId, name: "Will" },
@@ -211,6 +351,7 @@ describe("GUTO contextual muscle history", () => {
   for (const testCase of localizedCases) {
     it(`resolves contextual and compound history in ${testCase.language}`, async () => {
       const yesterdayUserId = `history-context-${testCase.language}-yesterday`;
+      writeUserMemory(yesterdayUserId, { lastSuggestedFocus: "legs_core" });
       const yesterdayResponse = await postGuto({
         language: testCase.language,
         profile: { userId: yesterdayUserId, name: "Will" },
@@ -224,6 +365,7 @@ describe("GUTO contextual muscle history", () => {
       assertNoPortugueseLeak(yesterdayResponse, testCase.language);
 
       const dayBeforeUserId = `history-context-${testCase.language}-day-before`;
+      writeUserMemory(dayBeforeUserId, { lastSuggestedFocus: "legs_core" });
       await postGuto({
         language: testCase.language,
         profile: { userId: dayBeforeUserId, name: "Will" },

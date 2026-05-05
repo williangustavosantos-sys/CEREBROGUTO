@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Server } from "node:http";
+import jwt from "jsonwebtoken";
 
 type GutoResponse = {
   fala?: string;
@@ -44,6 +45,12 @@ function readUserMemory(userId: string) {
   return readMemoryStore()[userId];
 }
 
+function writeUserMemory(userId: string, data: Record<string, any>) {
+  const store = readMemoryStore();
+  store[userId] = { ...store[userId], ...data };
+  writeFileSync(testMemoryFile, JSON.stringify(store, null, 2));
+}
+
 function buildGeminiResponse(text: string) {
   return {
     candidates: [
@@ -54,6 +61,56 @@ function buildGeminiResponse(text: string) {
       },
     ],
   };
+}
+
+function extractFirstJsonObjectAfterMarker(text: string, markers: string[]) {
+  const startSearch = markers
+    .map((marker) => text.indexOf(marker))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+
+  const from = startSearch ?? 0;
+  const openIndex = text.indexOf("{", from);
+  if (openIndex < 0) return {};
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = openIndex; i < text.length; i++) {
+    const ch = text[i];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (ch === "{") depth++;
+    if (ch === "}") depth--;
+
+    if (depth === 0) {
+      const candidate = text.slice(openIndex, i + 1);
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        return {};
+      }
+    }
+  }
+
+  return {};
 }
 
 function extractPrompt(init?: RequestInit) {
@@ -71,83 +128,87 @@ function installGeminiMock() {
 
     const prompt = extractPrompt(init);
 
-    if (prompt.includes('Entrada atual do usuário: amanhã às 15 na academia, tô voltando agora e tenho 30 anos sem dor')) {
-      return new Response(
-        JSON.stringify(
-          buildGeminiResponse(
-            JSON.stringify({
-              fala: "Me manda onde você treina e como está o corpo.",
-              acao: "none",
-              expectedResponse: {
-                type: "text",
-                context: "training_location",
-                instruction: "onde você treina e como está o corpo",
-              },
-            })
-          )
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } }
-      );
+    const memory = extractFirstJsonObjectAfterMarker(prompt, ["Memória do usuário", "Memoria do usuario", "User memory", "MEMÓRIA"]);
+
+    const inputMatch = prompt.match(/Mensagem atual do usuário: (.*)/);
+    const inputMsg = inputMatch ? inputMatch[1].trim().toLowerCase() : "";
+
+    // 1. Treino completo com tudo fornecido
+    if (inputMsg.includes("15") && inputMsg.includes("30") && inputMsg.includes("academia")) {
+      return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
+        fala: "Fechado! Treino marcado para amanhã às 15h00 na academia.",
+        acao: "updateWorkout",
+        expectedResponse: null,
+        memoryPatch: {
+          trainingSchedule: "tomorrow",
+          trainingLocation: "academia",
+          trainingStatus: "voltando agora",
+          trainingAge: 30,
+          trainingLimitations: "sem dor"
+        }
+      }))), { status: 200, headers: { "Content-Type": "application/json" } });
     }
 
-    if (prompt.includes('Entrada atual do usuário: treinei isso ontem')) {
-      return new Response(
-        JSON.stringify(
-          buildGeminiResponse(
-            JSON.stringify({
-              fala: "Amanhã eu vejo isso. Me manda tua idade e dor.",
-              acao: "none",
-              expectedResponse: {
-                type: "text",
-                context: "training_limitations",
-                instruction: "idade e dor",
-              },
-            })
-          )
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } }
-      );
+    // 2. Referência vaga de histórico
+    if (inputMsg.includes("treinei isso") && inputMsg.includes("ontem")) {
+      if (memory.lastSuggestedFocus || memory.lastWorkoutFocus) {
+        return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
+          fala: "Boa. Não repito peito e tríceps. Me manda tua idade e dor.",
+          acao: "none",
+          expectedResponse: {
+            type: "text",
+            context: "training_limitations",
+            instruction: "idade e dor",
+          },
+          trainedReference: {
+            dateLabel: "yesterday"
+          }
+        }))), { status: 200, headers: { "Content-Type": "application/json" } });
+      } else {
+        return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
+          fala: "Treinou o que ontem? Preciso saber pra não repetir.",
+          acao: "none",
+          expectedResponse: null
+        }))), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
     }
 
-    if (prompt.includes('Entrada atual do usuário: treinei anteontem costas')) {
-      return new Response(
-        JSON.stringify(
-          buildGeminiResponse(
-            JSON.stringify({
-              fala: "Amanhã eu puxo costas e bíceps. Me manda idade e dor.",
-              acao: "none",
-              expectedResponse: {
-                type: "text",
-                context: "training_limitations",
-                instruction: "idade e dor",
-              },
-            })
-          )
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } }
-      );
+    // 3. Referência explícita de histórico
+    if (inputMsg.includes("anteontem") && inputMsg.includes("costas")) {
+      return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
+        fala: "Entendi, não repito peito nem costas. Vamos de pernas e core. Me manda idade e dor.",
+        acao: "none",
+        expectedResponse: {
+          type: "text",
+          context: "training_limitations",
+          instruction: "idade e dor",
+        },
+        trainedReference: {
+          dateLabel: "day_before_yesterday",
+          explicitMuscleGroup: "back_biceps"
+        }
+      }))), { status: 200, headers: { "Content-Type": "application/json" } });
     }
 
-    if (prompt.includes('Entrada atual do usuário: não tô muito bem, fiquei doente e tô voltando agora')) {
-      return new Response(
-        JSON.stringify(
-          buildGeminiResponse(
-            JSON.stringify({
-              fala: "Me fala em uma frase se você tava parado ou já vinha treinando.",
-              acao: "none",
-              expectedResponse: {
-                type: "text",
-                context: "training_status",
-                instruction: "Responder se estava parado, voltando ou já vinha treinando.",
-              },
-              avatarEmotion: "default",
-            })
-          )
-        ),
-        { status: 200, headers: { "Content-Type": "application/json" } }
-      );
+    // 4. Usuário doente
+    if (inputMsg.includes("doente") || inputMsg.includes("não tô muito bem")) {
+      return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
+        fala: "Sem heroísmo, vamos leve pra recuperar ritmo. Vai treinar em casa, academia ou parque?",
+        acao: "none",
+        expectedResponse: {
+          type: "text",
+          context: "training_location",
+          instruction: "Onde vai treinar?",
+        },
+        memoryPatch: {
+          trainingStatus: "doente e voltando agora",
+          trainingLimitations: "voltando de doença"
+        },
+        avatarEmotion: "default"
+      }))), { status: 200, headers: { "Content-Type": "application/json" } });
     }
 
+    // 5. Fallback padrão
     return new Response(
       JSON.stringify(
         buildGeminiResponse(
@@ -168,9 +229,16 @@ function installGeminiMock() {
 }
 
 async function postGuto(body: Record<string, unknown>) {
+  const token = jwt.sign(
+    { userId: (body.profile as any)?.userId || "test-user", role: "student" },
+    process.env.JWT_SECRET || "dev-secret-change-in-production"
+  );
   const response = await originalFetch(`${baseUrl}/guto`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`
+    },
     body: JSON.stringify(body),
   });
 
@@ -182,6 +250,7 @@ before(async () => {
   process.env.GUTO_MEMORY_FILE = testMemoryFile;
   process.env.GUTO_DISABLE_LISTEN = "1";
   process.env.GEMINI_API_KEY = "test-gemini-key";
+  process.env.GUTO_ALLOW_DEV_ACCESS = "true";
 
   resetTestMemory();
   installGeminiMock();
@@ -250,6 +319,7 @@ describe("GUTO /guto integration", () => {
 
   it("handles 'treinei isso ontem' as training history, not pain", async () => {
     const userId = "test-historico-muscular";
+    writeUserMemory(userId, { lastSuggestedFocus: "chest_triceps" });
     const response = await postGuto({
       language: "pt-BR",
       profile: {
@@ -284,6 +354,7 @@ describe("GUTO /guto integration", () => {
 
   it("continues from history and switches next focus to legs_core for 'treinei anteontem costas'", async () => {
     const userId = "test-historico-muscular";
+    writeUserMemory(userId, { lastSuggestedFocus: "chest_triceps" });
 
     await postGuto({
       language: "pt-BR",
