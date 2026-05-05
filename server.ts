@@ -20,11 +20,11 @@ import { generateWorkoutPoster } from "./src/poster";
 import { initStorage, uploadImage, deleteImage } from "./src/storage";
 import {
   awardArenaXp,
-  createArenaProfileIfNeeded,
   getWeeklyRanking,
   getMonthlyRanking,
   getIndividualRanking,
   getMyArenaProfile,
+  syncArenaDisplayName,
   DEFAULT_ARENA_GROUP,
 } from "./src/arena";
 import { coachRouter } from "./src/coach-router.js";
@@ -3214,7 +3214,10 @@ app.get("/guto/memory", requireActiveUser, (req, res) => {
       xp: 100,
       sourceValidationId: "grant_initial_xp",
     });
+  } else if (memory.name) {
+    syncArenaDisplayName(userId, memory.name, DEFAULT_ARENA_GROUP);
   }
+  saveMemory(memory);
   if (memory.lastWorkoutPlan) {
     res.json({
       ...memory,
@@ -3222,7 +3225,6 @@ app.get("/guto/memory", requireActiveUser, (req, res) => {
     });
     return;
   }
-  saveMemory(memory);
   res.json(memory);
 });
 
@@ -3256,8 +3258,12 @@ app.post("/guto/memory", requireActiveUser, (req, res) => {
   if (typeof b.heightCm !== "undefined" && !isNaN(Number(b.heightCm)) && Number(b.heightCm) > 0) memory.heightCm = Number(b.heightCm);
   if (typeof b.weightKg !== "undefined" && !isNaN(Number(b.weightKg)) && Number(b.weightKg) > 0) memory.weightKg = Number(b.weightKg);
   if (typeof b.foodRestrictions === "string") memory.foodRestrictions = b.foodRestrictions;
+  if (typeof b.initialXpRewardSeen === "boolean") memory.initialXpRewardSeen = b.initialXpRewardSeen;
   
   saveMemory(memory);
+  if (memory.name) {
+    syncArenaDisplayName(userId, memory.name, DEFAULT_ARENA_GROUP);
+  }
   console.log(`[GUTO] Memory updated for "${userId}". Current height: ${memory.heightCm}, weight: ${memory.weightKg}`);
   res.json(memory);
 });
@@ -3446,16 +3452,26 @@ app.post("/guto", requireActiveUser, async (req, res) => {
 
 app.post("/voz", requireActiveUser, async (req, res) => {
   const { text, language } = req.body;
+  const userId = req.gutoUser!.userId;
   if (!VOICE_API_KEY) {
+    console.error("[GUTO_VOICE] missing_voice_api_key", { userId, language: language || "pt-BR" });
     return res.status(503).json({ message: localizedHttpMessage("voice_key", language || "pt-BR") });
   }
 
   if (!text || typeof text !== "string") {
+    console.warn("[GUTO_VOICE] missing_text", { userId, language: language || "pt-BR" });
     return res.status(400).json({ message: localizedHttpMessage("voice_text", language || "pt-BR") });
   }
 
   const selectedLanguage = normalizeLanguage(language);
   const voice = GUTO_VOICES[selectedLanguage];
+  console.info("[GUTO_VOICE] synth_request", {
+    userId,
+    language: selectedLanguage,
+    textLength: text.length,
+    primaryName: voice.primaryName,
+    fallbackName: voice.fallbackName,
+  });
 
   try {
     const primary = await synthesizeGutoVoice({
@@ -3466,6 +3482,12 @@ app.post("/voz", requireActiveUser, async (req, res) => {
     });
 
     if (primary.ok) {
+      console.info("[GUTO_VOICE] synth_ok", {
+        userId,
+        language: selectedLanguage,
+        voiceUsed: primary.voiceUsed,
+        status: primary.status,
+      });
       return res.json({
         audioContent: primary.data.audioContent,
         voiceUsed: primary.voiceUsed,
@@ -3480,6 +3502,12 @@ app.post("/voz", requireActiveUser, async (req, res) => {
     });
 
     if (fallback.ok) {
+      console.info("[GUTO_VOICE] synth_ok", {
+        userId,
+        language: selectedLanguage,
+        voiceUsed: fallback.voiceUsed,
+        status: fallback.status,
+      });
       return res.json({
         audioContent: fallback.data.audioContent,
         voiceUsed: fallback.voiceUsed,
@@ -3494,6 +3522,12 @@ app.post("/voz", requireActiveUser, async (req, res) => {
     });
 
     if (nativeMale.ok) {
+      console.info("[GUTO_VOICE] synth_ok", {
+        userId,
+        language: selectedLanguage,
+        voiceUsed: nativeMale.voiceUsed,
+        status: nativeMale.status,
+      });
       return res.json({
         audioContent: nativeMale.data.audioContent,
         voiceUsed: nativeMale.voiceUsed,
@@ -3501,11 +3535,20 @@ app.post("/voz", requireActiveUser, async (req, res) => {
       });
     }
 
+    console.error("[GUTO_VOICE] synth_failed", {
+      userId,
+      language: selectedLanguage,
+      primaryStatus: primary.status,
+      fallbackStatus: fallback.status,
+      nativeMaleStatus: nativeMale.status,
+      detail: nativeMale.data?.error?.message || fallback.data?.error?.message || primary.data?.error?.message,
+    });
     return res.status(nativeMale.status || 502).json({
       message: localizedHttpMessage("voice_error", selectedLanguage),
       detail: nativeMale.data?.error?.message || fallback.data?.error?.message || primary.data?.error?.message,
     });
   } catch (error) {
+    console.error("[GUTO_VOICE] synth_connect_failed", { userId, language: selectedLanguage, error });
     res.status(502).json({ message: localizedHttpMessage("voice_connect", selectedLanguage) });
   }
 });
@@ -3741,24 +3784,34 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
 // ── Arena endpoints ──────────────────────────────────────────────────────────
 
 app.get("/guto/arena/weekly", requireActiveUser, (req, res) => {
+  const userId = req.gutoUser!.userId;
   const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
+  const memory = getMemory(userId);
+  syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
   res.json(getWeeklyRanking(arenaGroupId));
 });
 
 app.get("/guto/arena/monthly", requireActiveUser, (req, res) => {
+  const userId = req.gutoUser!.userId;
   const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
+  const memory = getMemory(userId);
+  syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
   res.json(getMonthlyRanking(arenaGroupId));
 });
 
 app.get("/guto/arena/individual", requireActiveUser, (req, res) => {
+  const userId = req.gutoUser!.userId;
   const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
+  const memory = getMemory(userId);
+  syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
   res.json(getIndividualRanking(arenaGroupId));
 });
 
 app.get("/guto/arena/me", requireActiveUser, (req, res) => {
   const userId = req.gutoUser!.userId;
   const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
-  createArenaProfileIfNeeded(userId, userId, arenaGroupId);
+  const memory = getMemory(userId);
+  syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
   const profile = getMyArenaProfile(userId, arenaGroupId);
   if (!profile) {
     return res.status(404).json({ error: "Arena profile not found for this group" });

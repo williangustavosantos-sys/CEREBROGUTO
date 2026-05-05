@@ -67,6 +67,12 @@ function buildUniquePairName(displayName: string, arenaGroupId: string, ownUserI
   return base;
 }
 
+function normalizeArenaDisplayName(displayName: string, userId: string): string {
+  const cleaned = displayName.replace(/\s+/g, " ").trim();
+  if (!cleaned || cleaned.toLocaleLowerCase("pt-BR") === "operador") return userId;
+  return cleaned;
+}
+
 export function createArenaProfileIfNeeded(
   userId: string,
   displayName: string,
@@ -76,10 +82,11 @@ export function createArenaProfileIfNeeded(
   if (existing) return existing;
 
   const now = new Date().toISOString();
+  const safeDisplayName = normalizeArenaDisplayName(displayName, userId);
   const profile: ArenaProfile = {
     userId,
-    displayName,
-    pairName: buildUniquePairName(displayName, arenaGroupId, userId),
+    displayName: safeDisplayName,
+    pairName: buildUniquePairName(safeDisplayName, arenaGroupId, userId),
     arenaGroupId,
     avatarStage: "baby",
     totalXp: 0,
@@ -93,6 +100,25 @@ export function createArenaProfileIfNeeded(
     createdAt: now,
     updatedAt: now,
   };
+  saveArenaProfile(profile);
+  return profile;
+}
+
+export function syncArenaDisplayName(
+  userId: string,
+  displayName: string,
+  arenaGroupId: string = DEFAULT_ARENA_GROUP
+): ArenaProfile {
+  const safeDisplayName = normalizeArenaDisplayName(displayName, userId);
+  const profile = createArenaProfileIfNeeded(userId, safeDisplayName, arenaGroupId);
+
+  if (profile.displayName === safeDisplayName && profile.pairName.includes(safeDisplayName.toUpperCase())) {
+    return profile;
+  }
+
+  profile.displayName = safeDisplayName;
+  profile.pairName = buildUniquePairName(safeDisplayName, arenaGroupId, userId);
+  profile.updatedAt = new Date().toISOString();
   saveArenaProfile(profile);
   return profile;
 }
@@ -144,9 +170,9 @@ export function awardArenaXp(options: AwardXpOptions): AwardXpResult {
     }
   }
 
-  profile.totalXp += xp;
-  profile.weeklyXp += xp;
-  profile.monthlyXp += xp;
+  profile.totalXp = Math.max(0, profile.totalXp + xp);
+  profile.weeklyXp = Math.max(0, profile.weeklyXp + xp);
+  profile.monthlyXp = Math.max(0, profile.monthlyXp + xp);
 
   if (type === "workout_validated" || type === "reduced_mission_validated") {
     profile.validatedWorkoutsTotal += 1;
