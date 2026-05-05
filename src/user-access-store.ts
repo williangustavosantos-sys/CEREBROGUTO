@@ -68,9 +68,8 @@ async function redisSet(key: string, value: string): Promise<void> {
       method: "POST",
       headers: {
         Authorization: `Bearer ${config.upstashRedisToken}`,
-        "Content-Type": "application/json",
       },
-      body: JSON.stringify(value),
+      body: value,
     });
   } catch {
     // ignore
@@ -110,7 +109,14 @@ async function readStoreAsync(): Promise<UserAccessStore> {
     try {
       const raw = await redisGet(REDIS_KEY);
       if (raw) {
-        memCache = JSON.parse(raw) as UserAccessStore;
+        let parsed = JSON.parse(raw);
+        if (typeof parsed === "string") {
+          parsed = JSON.parse(parsed);
+        }
+        if (!parsed || typeof parsed !== "object" || !("users" in parsed)) {
+          parsed = { users: {} };
+        }
+        memCache = parsed as UserAccessStore;
         return memCache;
       }
     } catch {

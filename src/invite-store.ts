@@ -61,9 +61,8 @@ async function redisSet(key: string, value: string): Promise<void> {
     method: "POST",
     headers: {
       Authorization: `Bearer ${config.upstashRedisToken}`,
-      "Content-Type": "application/json",
     },
-    body: JSON.stringify(value),
+    body: value,
   });
 }
 
@@ -74,7 +73,14 @@ async function readStore(): Promise<InviteStore> {
     try {
       const raw = await redisGet(REDIS_INVITE_KEY);
       if (raw) {
-        memCache = JSON.parse(raw) as InviteStore;
+        let parsed = JSON.parse(raw);
+        if (typeof parsed === "string") {
+          parsed = JSON.parse(parsed);
+        }
+        if (!parsed || typeof parsed !== "object" || !("invites" in parsed)) {
+          parsed = { invites: {} };
+        }
+        memCache = parsed as InviteStore;
         return memCache;
       }
     } catch {

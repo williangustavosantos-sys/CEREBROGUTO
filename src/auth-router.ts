@@ -174,24 +174,36 @@ authRouter.post("/logout", (_req: Request, res: Response) => {
 
 authRouter.get("/invite/:token", async (req: Request, res: Response) => {
   const token = String(req.params.token);
-  const invite = await findInviteByToken(token);
-  if (!invite) {
-    res.status(404).json({ message: "Convite não encontrado." });
-    return;
+  const tokenLen = token.length;
+  const safeToken = tokenLen > 8 ? `${token.slice(0, 4)}...${token.slice(-4)}` : "too-short";
+  
+  console.log(`[GET /auth/invite/:token] token length: ${tokenLen}, partial: ${safeToken}`);
+
+  try {
+    const invite = await findInviteByToken(token);
+    console.log(`[GET /auth/invite/:token] findInviteByToken returned:`, invite ? `Invite(id: ${invite.id})` : "null");
+
+    if (!invite) {
+      res.status(404).json({ message: "Convite não encontrado." });
+      return;
+    }
+    if (invite.status === "revoked") {
+      res.status(410).json({ message: "Este convite foi revogado." });
+      return;
+    }
+    if (invite.status === "active" || invite.status === "expired") {
+      res.status(410).json({ message: "Este convite já foi utilizado." });
+      return;
+    }
+    if (new Date(invite.expiresAt) < new Date()) {
+      res.status(410).json({ message: "Este convite expirou." });
+      return;
+    }
+    res.json({ name: invite.name, userId: invite.userId, coachId: invite.coachId });
+  } catch (error: any) {
+    console.error(`[GET /auth/invite/:token] Error:`, error.message, error.stack);
+    res.status(500).json({ message: "Erro interno ao validar convite. Tente novamente em alguns segundos." });
   }
-  if (invite.status === "revoked") {
-    res.status(410).json({ message: "Este convite foi revogado." });
-    return;
-  }
-  if (invite.status === "active" || invite.status === "expired") {
-    res.status(410).json({ message: "Este convite já foi utilizado." });
-    return;
-  }
-  if (new Date(invite.expiresAt) < new Date()) {
-    res.status(410).json({ message: "Este convite expirou." });
-    return;
-  }
-  res.json({ name: invite.name, userId: invite.userId, coachId: invite.coachId });
 });
 
 // ─── POST /guto/invite/:token/claim ──────────────────────────────────────────
