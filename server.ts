@@ -118,9 +118,13 @@ interface WorkoutExercise {
   muscleGroup: string;
   sets: number;
   reps: string;
+  load?: string | null;
   rest: string;
+  restSeconds?: number;
   cue: string;
   note: string;
+  alternatives?: string[];
+  order?: number;
   videoUrl: string;
   videoProvider: "local";
   sourceFileName: string;
@@ -130,17 +134,39 @@ interface WorkoutExercise {
   animationProvider?: "workoutx";
 }
 interface WorkoutPlan {
+  studentId?: string;
+  title?: string;
   focus: string;
   focusKey?: WorkoutFocus;
+  weekDay?: string;
+  goal?: string;
+  location?: string;
   dateLabel: string;
   scheduledFor: string;
   summary: string;
   exercises: WorkoutExercise[];
+  blocks?: Array<{
+    name: string;
+    exercises: Array<Partial<WorkoutExercise> & {
+      name: string;
+      load?: string | null;
+      restSeconds?: number;
+      notes?: string;
+      alternatives?: string[];
+    }>;
+  }>;
+  estimatedDurationMinutes?: number;
+  difficulty?: string;
+  coachNotes?: string;
   manualOverride?: boolean;
   editedBy?: string;
   editedAt?: string;
   editReason?: string;
   planSource?: "ai_generated" | "admin_override" | "coach_override";
+  source?: "guto_generated" | "coach_manual" | "mixed";
+  lockedByCoach?: boolean;
+  updatedBy?: string;
+  updatedAt?: string;
 }
 interface RecentTrainingHistoryItem {
   dateLabel: "today" | "yesterday" | "day_before_yesterday" | "recent" | "unknown";
@@ -2799,7 +2825,7 @@ function buildWorkoutPlan({
   }, selectedLanguage);
 }
 
-function buildWorkoutPlanFromSemanticFocus({
+export function buildWorkoutPlanFromSemanticFocus({
   language,
   location,
   status,
@@ -3083,6 +3109,19 @@ function buildTechnicalFallback(language: string): GutoModelResponse {
   return { fala: copy[selectedLanguage], acao: "none", expectedResponse: null };
 }
 
+function isCoachLockedWorkout(plan?: WorkoutPlan | null): boolean {
+  return Boolean(plan?.lockedByCoach);
+}
+
+function markGutoGeneratedWorkout(plan: WorkoutPlan): WorkoutPlan {
+  return {
+    ...plan,
+    source: plan.source || "guto_generated",
+    lockedByCoach: Boolean(plan.lockedByCoach),
+    planSource: plan.planSource || "ai_generated",
+  };
+}
+
 async function askGutoModel({
   input,
   language,
@@ -3180,9 +3219,12 @@ async function askGutoModel({
     }
 
     if (workoutPlan) {
-      memory.lastWorkoutPlan = workoutPlan;
-      if (workoutPlan.focusKey) {
-        memory.lastSuggestedFocus = workoutPlan.focusKey as WorkoutFocus;
+      const lockedOfficialPlan = isCoachLockedWorkout(memory.lastWorkoutPlan) ? memory.lastWorkoutPlan : null;
+      const officialPlan = lockedOfficialPlan || markGutoGeneratedWorkout(workoutPlan);
+      memory.lastWorkoutPlan = officialPlan;
+      workoutPlan = officialPlan;
+      if (officialPlan.focusKey) {
+        memory.lastSuggestedFocus = officialPlan.focusKey as WorkoutFocus;
       }
       if (parsedResponse.memoryPatch?.lastWorkoutPlan === undefined) {
         saveMemory(memory);
@@ -3301,8 +3343,10 @@ app.post("/guto/memory", requireActiveUser, (req, res) => {
   if (typeof b.foodRestrictions === "string") memory.foodRestrictions = b.foodRestrictions;
   if (typeof b.initialXpRewardSeen === "boolean") memory.initialXpRewardSeen = b.initialXpRewardSeen;
   if (b.lastWorkoutPlan && Array.isArray(b.lastWorkoutPlan.exercises)) {
-    const enrichedPlan = enrichWorkoutPlanAnimations(b.lastWorkoutPlan);
-    memory.lastWorkoutPlan = enrichedPlan ? localizeWorkoutPlan(enrichedPlan, memory.language) : null;
+    if (!isCoachLockedWorkout(memory.lastWorkoutPlan)) {
+      const enrichedPlan = enrichWorkoutPlanAnimations(b.lastWorkoutPlan);
+      memory.lastWorkoutPlan = enrichedPlan ? markGutoGeneratedWorkout(localizeWorkoutPlan(enrichedPlan, memory.language)) : null;
+    }
   }
 
   saveMemory(memory);
@@ -3383,10 +3427,10 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
       
       // Ensure a plan is generated if not present or incomplete (missing exercises)
       if (!result.workoutPlan || !result.workoutPlan.exercises || result.workoutPlan.exercises.length === 0) {
-        if (memory.lastWorkoutPlan?.manualOverride) {
+        if (memory.lastWorkoutPlan?.manualOverride || isCoachLockedWorkout(memory.lastWorkoutPlan)) {
           result.workoutPlan = memory.lastWorkoutPlan;
         } else {
-          result.workoutPlan = buildWorkoutPlanFromSemanticFocus({
+          result.workoutPlan = markGutoGeneratedWorkout(buildWorkoutPlanFromSemanticFocus({
             language: selectedLang,
             location: memory.trainingLocation || memory.preferredTrainingLocation || "casa",
             status: memory.trainingStatus || memory.trainingLevel || "iniciante",
@@ -3395,7 +3439,7 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
             scheduleIntent: "today",
             focus: memory.nextWorkoutFocus,
             trainingGoal: memory.trainingGoal,
-          });
+          }));
         }
       }
     }
@@ -3409,9 +3453,13 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
       freshMemory.lastLimitationCheckAt = new Date().toISOString();
     }
     if (result.workoutPlan) {
-      freshMemory.lastWorkoutPlan = result.workoutPlan;
-      if (result.workoutPlan.focusKey) {
-        freshMemory.lastSuggestedFocus = result.workoutPlan.focusKey;
+      const officialPlan = isCoachLockedWorkout(freshMemory.lastWorkoutPlan)
+        ? freshMemory.lastWorkoutPlan!
+        : markGutoGeneratedWorkout(result.workoutPlan);
+      freshMemory.lastWorkoutPlan = officialPlan;
+      result.workoutPlan = officialPlan;
+      if (officialPlan.focusKey) {
+        freshMemory.lastSuggestedFocus = officialPlan.focusKey;
       }
     }
     freshMemory.lastActiveAt = new Date().toISOString();
@@ -3891,7 +3939,7 @@ app.get("/guto/diet", requireActiveUser, async (req, res) => {
 
 // POST /guto/diet/generate
 app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
-  const body = req.body as { language?: string };
+  const body = req.body as { language?: string; force?: boolean };
   const userId = req.gutoUser!.userId;
   const language = normalizeLanguage(body.language);
 
@@ -3901,6 +3949,13 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
 
   // Respect manual override
   const existingDiet = await getDietPlan(userId);
+  if (existingDiet?.lockedByCoach) {
+    return res.status(409).json({
+      error: "coach_locked_plan",
+      code: "COACH_LOCKED_PLAN",
+      message: "Plano bloqueado pelo coach. O GUTO não pode sobrescrever sem liberação do supervisor.",
+    });
+  }
   if (existingDiet?.manualOverride) {
     return res.json(existingDiet);
   }
@@ -4055,6 +4110,9 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
 
   const plan: DietPlan = {
     userId,
+    source: "guto_generated",
+    lockedByCoach: false,
+    planSource: "ai_generated",
     generatedAt: new Date().toISOString(),
     country: nutritionProfile.country || "Brasil",
     macros,

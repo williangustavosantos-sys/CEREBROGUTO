@@ -11,6 +11,7 @@ import {
 } from "./invite-store.js";
 import {
   getUserAccessAsync,
+  requireActiveUserAccessAsync,
   upsertUserAccessAsync,
   getUserAccess,
   getAllUserAccess,
@@ -111,7 +112,8 @@ authRouter.post("/user/login", async (req: Request, res: Response) => {
     return;
   }
 
-  if (!user.active) {
+  const activeAccess = await requireActiveUserAccessAsync(user.userId);
+  if (!activeAccess) {
     res.status(403).json({ message: "Acesso pausado ou expirado.", code: "ACCESS_PAUSED" });
     return;
   }
@@ -270,7 +272,7 @@ authRouter.post("/invite/:token/claim", async (req: Request, res: Response) => {
 
 authRouter.post("/admin/invites", requireAuth, async (req: Request, res: Response) => {
   const caller = req.gutoUser!;
-  if (caller.role !== "admin" && caller.role !== "coach") {
+  if (caller.role !== "admin" && caller.role !== "coach" && caller.role !== "super_admin") {
     res.status(403).json({ message: "Apenas admin ou coach pode criar convites." });
     return;
   }
@@ -287,7 +289,7 @@ authRouter.post("/admin/invites", requireAuth, async (req: Request, res: Respons
   }
 
   const resolvedCoachId =
-    caller.role === "admin" ? (coachId ?? caller.coachId ?? "admin") : (caller.coachId ?? caller.userId);
+    caller.role === "admin" || caller.role === "super_admin" ? (coachId ?? caller.coachId ?? "admin") : (caller.coachId ?? caller.userId);
 
   const userId = `u-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
 
@@ -313,7 +315,7 @@ authRouter.post("/admin/invites", requireAuth, async (req: Request, res: Respons
 // ─── Admin: update user access ────────────────────────────────────────────────
 
 authRouter.patch("/admin/users/:userId/access", requireAuth, async (req: Request, res: Response) => {
-  if (req.gutoUser!.role !== "admin" && req.gutoUser!.role !== "coach") {
+  if (req.gutoUser!.role !== "admin" && req.gutoUser!.role !== "coach" && req.gutoUser!.role !== "super_admin") {
     res.status(403).json({ message: "Acesso negado." });
     return;
   }
@@ -333,7 +335,7 @@ authRouter.patch("/admin/users/:userId/access", requireAuth, async (req: Request
 // ─── Admin: update subscription ───────────────────────────────────────────────
 
 authRouter.patch("/admin/users/:userId/subscription", requireAuth, async (req: Request, res: Response) => {
-  if (req.gutoUser!.role !== "admin" && req.gutoUser!.role !== "coach") {
+  if (req.gutoUser!.role !== "admin" && req.gutoUser!.role !== "coach" && req.gutoUser!.role !== "super_admin") {
     res.status(403).json({ message: "Acesso negado." });
     return;
   }

@@ -86,9 +86,16 @@ function ensureStoreFile(): void {
 }
 
 function readStoreSync(): UserAccessStore {
+  if (useRedis() && Object.keys(memCache.users).length > 0) {
+    return memCache;
+  }
   try {
     ensureStoreFile();
-    return JSON.parse(fs.readFileSync(USER_ACCESS_STORE_PATH, "utf-8")) as UserAccessStore;
+    const parsed = JSON.parse(fs.readFileSync(USER_ACCESS_STORE_PATH, "utf-8")) as UserAccessStore;
+    if (Object.keys(parsed.users || {}).length === 0 && Object.keys(memCache.users).length > 0) {
+      return memCache;
+    }
+    return parsed;
   } catch {
     return { users: {} };
   }
@@ -220,6 +227,54 @@ export function writeUserAccessStoreRaw(store: { users: Record<string, UserAcces
 export async function getUserAccessAsync(userId: string): Promise<UserAccess | undefined> {
   const store = await readStoreAsync();
   return store.users[userId];
+}
+
+export async function getEffectiveUserAccessAsync(userId: string): Promise<UserAccess | null> {
+  const existing = await getUserAccessAsync(userId);
+  if (existing) return existing;
+
+  if (config.allowDevAccess) {
+    const now = new Date().toISOString();
+    return {
+      userId,
+      role: "student",
+      coachId: DEV_COACH_ID,
+      active: true,
+      visibleInArena: true,
+      archived: false,
+      createdAt: now,
+      updatedAt: now,
+      subscriptionStatus: "active",
+      subscriptionEndsAt: null,
+    };
+  }
+
+  return null;
+}
+
+export async function requireActiveUserAccessAsync(userId: string): Promise<UserAccess | null> {
+  const access = await getEffectiveUserAccessAsync(userId);
+  if (!access) return null;
+  if (!access.active) return null;
+  if (access.archived) return null;
+  if (access.subscriptionStatus === "expired" || access.subscriptionStatus === "cancelled") return null;
+  if (access.subscriptionEndsAt && new Date(access.subscriptionEndsAt) < new Date()) return null;
+  return access;
+}
+
+export async function getAllUserAccessAsync(): Promise<UserAccess[]> {
+  const store = await readStoreAsync();
+  return Object.values(store.users);
+}
+
+export async function deleteUserAccessHardAsync(userId: string): Promise<void> {
+  const store = await readStoreAsync();
+  delete store.users[userId];
+  await writeStoreAsync(store);
+}
+
+export async function writeUserAccessStoreRawAsync(store: { users: Record<string, UserAccess> }): Promise<void> {
+  await writeStoreAsync(store);
 }
 
 export async function upsertUserAccessAsync(

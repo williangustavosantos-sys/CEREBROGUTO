@@ -26,8 +26,8 @@ export const config = {
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || "7d",
   adminEmail: process.env.ADMIN_EMAIL || "",
   adminPasswordHash: process.env.ADMIN_PASSWORD_HASH || "",
+  adminKey: process.env.ADMIN_KEY || "",
   frontendPublicUrl: process.env.FRONTEND_PUBLIC_URL || "http://localhost:3000",
   // Dev access bypass — never true in production
   allowDevAccess: process.env.GUTO_ALLOW_DEV_ACCESS === "true",
 };
-

@@ -203,6 +203,10 @@ export interface DietFood {
   name: string;
   quantity: string;
   kcal: number;
+  proteinG?: number;
+  carbsG?: number;
+  fatG?: number;
+  notes?: string;
 }
 
 export interface DietMeal {
@@ -212,20 +216,29 @@ export interface DietMeal {
   foods: DietFood[];
   totalKcal: number;
   gutoNote: string;
+  alternatives?: string[];
 }
 
 export interface DietPlan {
   userId: string;
+  title?: string;
   generatedAt: string;
   country: string;
   macros: DietMacros;
   meals: DietMeal[];
+  goal?: string;
+  coachNotes?: string;
+  restrictions?: string;
   foodRestrictions?: string;
   manualOverride?: boolean;
   editedBy?: string;
   editedAt?: string;
   editReason?: string;
   planSource?: "ai_generated" | "admin_override" | "coach_override";
+  source?: "guto_generated" | "coach_manual" | "mixed";
+  lockedByCoach?: boolean;
+  updatedBy?: string;
+  updatedAt?: string;
 }
 
 /**
