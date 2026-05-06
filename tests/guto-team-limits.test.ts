@@ -51,7 +51,15 @@ function seedTeams(): void {
   createTeam({ id: "TEAM_START_LIMIT", name: "Start Limit", plan: "start", status: "active", createdAt: now, updatedAt: now });
   createTeam({ id: "TEAM_PRO_LIMIT", name: "Pro Limit", plan: "pro", status: "active", createdAt: now, updatedAt: now });
   createTeam({ id: "TEAM_ELITE_LIMIT", name: "Elite Limit", plan: "elite", status: "active", createdAt: now, updatedAt: now });
-  createTeam({ id: "TEAM_CUSTOM_LIMIT", name: "Custom Limit", plan: "custom", status: "active", createdAt: now, updatedAt: now });
+  createTeam({
+    id: "TEAM_CUSTOM_LIMIT",
+    name: "Custom Limit",
+    plan: "custom",
+    customLimits: { maxCoaches: 8, maxStudents: 120 },
+    status: "active",
+    createdAt: now,
+    updatedAt: now,
+  });
 }
 
 function seedFullStartTeam(): void {
@@ -133,7 +141,7 @@ describe("GUTO Time plan capacity helpers", () => {
         getTeamPlanUsage("TEAM_CUSTOM_LIMIT", users).maxCoaches,
         getTeamPlanUsage("TEAM_CUSTOM_LIMIT", users).maxStudents,
       ],
-      [2, 20, 4, 50, 6, 70, null, null]
+      [2, 20, 4, 50, 6, 70, 8, 120]
     );
   });
 

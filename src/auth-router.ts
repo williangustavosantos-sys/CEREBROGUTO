@@ -72,7 +72,7 @@ authRouter.post("/admin/login", async (req: Request, res: Response) => {
   }
 
   const token = signToken({ userId: "admin", role: "super_admin" });
-  res.json({ token, role: "super_admin", userId: "admin" });
+  res.json({ token, role: "super_admin", userId: "admin", teamId: GUTO_CORE_TEAM_ID });
 });
 
 // ─── POST /auth/coach/login ───────────────────────────────────────────────────
@@ -88,7 +88,7 @@ authRouter.post("/coach/login", async (req: Request, res: Response) => {
   if (config.allowDevAccess) {
     const devCoachId = process.env.DEV_COACH_ID ?? "will-coach";
     const token = signToken({ userId: devCoachId, role: "coach", coachId: devCoachId });
-    res.json({ token, role: "coach", userId: devCoachId, coachId: devCoachId });
+    res.json({ token, role: "coach", userId: devCoachId, coachId: devCoachId, teamId: GUTO_CORE_TEAM_ID });
     return;
   }
 
@@ -114,7 +114,7 @@ authRouter.post("/coach/login", async (req: Request, res: Response) => {
     role: "coach",
     coachId: coachUser.coachId,
   });
-  res.json({ token, role: "coach", userId: coachUser.userId, coachId: coachUser.coachId });
+  res.json({ token, role: "coach", userId: coachUser.userId, coachId: coachUser.coachId, teamId: normalizeAccessTeamId(coachUser.teamId) });
 });
 
 // ─── POST /auth/user/login ────────────────────────────────────────────────────
@@ -158,6 +158,7 @@ authRouter.post("/user/login", async (req: Request, res: Response) => {
     coachId: user.coachId,
     name: user.name,
     email: user.email,
+    teamId: normalizeAccessTeamId(user.teamId),
     subscriptionStatus: user.subscriptionStatus,
     subscriptionEndsAt: user.subscriptionEndsAt,
   });
@@ -169,7 +170,8 @@ authRouter.get("/me", requireAuth, async (req: Request, res: Response) => {
   const { userId, role, coachId } = req.gutoUser!;
 
   if (role === "super_admin" || role === "admin") {
-    res.json({ userId, role, email: config.adminEmail });
+    const actor = getRequestActorAccess(req);
+    res.json({ userId, role, email: config.adminEmail, teamId: normalizeAccessTeamId(actor?.teamId) });
     return;
   }
 
@@ -186,6 +188,7 @@ authRouter.get("/me", requireAuth, async (req: Request, res: Response) => {
     active: access.active,
     name: access.name,
     email: access.email,
+    teamId: normalizeAccessTeamId(access.teamId),
     subscriptionStatus: access.subscriptionStatus,
     subscriptionEndsAt: access.subscriptionEndsAt,
   });

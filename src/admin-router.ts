@@ -25,6 +25,8 @@ import {
 } from "./user-access-store.js";
 import {
   assertTeamPlanCapacity,
+  getTeam,
+  getTeamPlanUsage,
   GUTO_CORE_TEAM_ID,
   GutoTeamNotFoundError,
   GutoTeamPlanLimitError,
@@ -276,6 +278,7 @@ function getManagedCoach(req: Request, res: Response, coachId: string): UserAcce
 function buildStudentView(access: UserAccess) {
   const memory = getMemory(access.userId);
   const arena = getArenaProfile(access.userId);
+  const coach = access.coachId ? getUserAccess(access.coachId) : undefined;
   const totalXp = arena?.totalXp ?? memory.totalXp ?? 0;
   const lastValidation =
     arena?.lastWorkoutValidatedAt ??
@@ -286,6 +289,10 @@ function buildStudentView(access: UserAccess) {
   return {
     ...access,
     name: access.name || memory.name || access.userId,
+    coachName: coach?.name || coach?.email || access.coachId || null,
+    age: memory.userAge ?? null,
+    gender: memory.biologicalSex ?? null,
+    biologicalSex: memory.biologicalSex ?? null,
     weeklyXp: arena?.weeklyXp ?? 0,
     monthlyXp: arena?.monthlyXp ?? 0,
     totalXp,
@@ -297,12 +304,54 @@ function buildStudentView(access: UserAccess) {
   };
 }
 
+function queryText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function queryNumber(value: unknown): number | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function matchesStudentFilters(student: ReturnType<typeof buildStudentView>, req: Request): boolean {
+  const search = queryText(req.query.search).toLowerCase();
+  const coachId = queryText(req.query.coachId);
+  const gender = queryText(req.query.gender).toLowerCase();
+  const status = queryText(req.query.status);
+  const subscriptionStatus = queryText(req.query.subscriptionStatus);
+  const minAge = queryNumber(req.query.minAge);
+  const maxAge = queryNumber(req.query.maxAge);
+  const studentAge = typeof student.age === "number" ? student.age : null;
+
+  if (search) {
+    const haystack = [
+      student.name,
+      student.email,
+      student.phone,
+      student.userId,
+      student.coachName,
+    ].filter(Boolean).join(" ").toLowerCase();
+    if (!haystack.includes(search)) return false;
+  }
+  if (coachId && student.coachId !== coachId) return false;
+  if (gender && String(student.gender || student.biologicalSex || "").toLowerCase() !== gender) return false;
+  if (minAge !== null && (studentAge === null || studentAge < minAge)) return false;
+  if (maxAge !== null && (studentAge === null || studentAge > maxAge)) return false;
+  if (subscriptionStatus && student.subscriptionStatus !== subscriptionStatus) return false;
+  if (status === "active" && (!student.active || student.archived)) return false;
+  if ((status === "paused" || status === "inactive") && (student.active || student.archived)) return false;
+  if (status === "archived" && !student.archived) return false;
+  return true;
+}
+
 async function listManagedStudents(req: Request) {
   const actor = getRequestActorAccess(req)!;
   const allUsers = await getAllUserAccessAsync();
   return getScopedUserAccessList(actor, allUsers)
     .filter((user) => user.role === "student")
-    .map(buildStudentView);
+    .map(buildStudentView)
+    .filter((student) => matchesStudentFilters(student, req));
 }
 
 function setDaysFromNow(days: number): string {
@@ -327,6 +376,7 @@ function publicUserPatch(body: Partial<UserAccess>): Partial<Omit<UserAccess, "u
   const patch: Partial<Omit<UserAccess, "userId" | "createdAt">> = {};
   if (typeof body.name === "string") patch.name = body.name.trim();
   if (typeof body.email === "string") patch.email = body.email.trim();
+  if (typeof body.phone === "string") patch.phone = body.phone.trim();
   if (typeof body.whatsapp === "string") patch.whatsapp = body.whatsapp.trim();
   if (typeof body.instagram === "string") patch.instagram = body.instagram.trim();
   if (typeof body.country === "string") patch.country = body.country.trim();
@@ -717,6 +767,45 @@ adminRouter.post("/exercises/custom/:exerciseId/reject", requireAdmin, asyncHand
 }));
 
 // ─── Students ────────────────────────────────────────────────────────────────
+
+adminRouter.get("/team/summary", asyncHandler(async (req, res) => {
+  const actor = requireActor(req, res);
+  if (!actor) return;
+  const requestedTeamId = queryText(req.query.teamId);
+  const teamId = actor.role === "super_admin"
+    ? requestedTeamId || normalizeAccessTeamId(actor.teamId) || GUTO_CORE_TEAM_ID
+    : normalizeAccessTeamId(actor.teamId);
+  if (actor.role !== "super_admin" && requestedTeamId && requestedTeamId !== teamId) {
+    res.status(403).json({ message: "Time sem permissão para acessar este resumo.", code: "TEAM_ACCESS_FORBIDDEN" });
+    return;
+  }
+
+  try {
+    const team = getTeam(teamId);
+    if (!team) throw new GutoTeamNotFoundError(teamId);
+    const usage = getTeamPlanUsage(teamId, await getAllUserAccessAsync());
+    res.json({
+      team: {
+        id: team.id,
+        name: team.name,
+        plan: team.plan,
+        planLabel: usage.label,
+        status: team.status,
+      },
+      limits: {
+        maxStudents: usage.maxStudents,
+        maxCoaches: usage.maxCoaches,
+      },
+      usage: {
+        students: usage.students,
+        coaches: usage.coaches,
+      },
+    });
+  } catch (error) {
+    if (sendTeamPlanError(res, error)) return;
+    throw error;
+  }
+}));
 
 adminRouter.get(["/students", "/users"], asyncHandler(async (req, res) => {
   const actor = requireActor(req, res);

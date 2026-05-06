@@ -42,10 +42,11 @@ const coachB = access("coach-team-b", "coach", "coach-team-b", "TEAM_B");
 const studentA = access("student-team-a", "student", coachA.userId, "TEAM_A");
 const studentOtherCoachA = access("student-other-coach-a", "student", coachOtherA.userId, "TEAM_A");
 const studentB = access("student-team-b", "student", coachB.userId, "TEAM_B");
+const archivedStudentA = access("student-archived-team-a", "student", coachA.userId, "TEAM_A", { archived: true });
 const legacyCoreStudent = access("legacy-core-student", "student", "legacy-coach", undefined);
 const coreAdmin = access("core-admin", "admin", "core-admin", undefined);
 
-function access(userId: string, role: UserAccess["role"], coachId: string, teamId?: string): UserAccess {
+function access(userId: string, role: UserAccess["role"], coachId: string, teamId?: string, patch: Partial<UserAccess> = {}): UserAccess {
   const now = new Date().toISOString();
   return {
     userId,
@@ -59,6 +60,7 @@ function access(userId: string, role: UserAccess["role"], coachId: string, teamI
     updatedAt: now,
     subscriptionStatus: "active",
     subscriptionEndsAt: null,
+    ...patch,
   };
 }
 
@@ -79,6 +81,7 @@ function seedAccessStore(): void {
       [studentA.userId]: studentA,
       [studentOtherCoachA.userId]: studentOtherCoachA,
       [studentB.userId]: studentB,
+      [archivedStudentA.userId]: archivedStudentA,
       [legacyCoreStudent.userId]: legacyCoreStudent,
       [coreAdmin.userId]: coreAdmin,
     },
@@ -193,6 +196,54 @@ describe("GUTO Time isolation helpers", () => {
 });
 
 describe("GUTO Time isolation HTTP routes", () => {
+  it("returns team summary for admin with official plan limits and ignores archived users", async () => {
+    const response = await request("/admin/team/summary", {
+      headers: { Authorization: `Bearer ${token(adminA)}` },
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      team: { id: string; name: string; planLabel: string };
+      limits: { maxStudents: number; maxCoaches: number };
+      usage: { students: number; coaches: number };
+    };
+    assert.equal(body.team.id, "TEAM_A");
+    assert.equal(body.team.name, "Time A");
+    assert.equal(body.team.planLabel, "GUTO Time Pro");
+    assert.equal(body.limits.maxStudents, 50);
+    assert.equal(body.limits.maxCoaches, 4);
+    assert.equal(body.usage.students, 2);
+    assert.equal(body.usage.coaches, 2);
+  });
+
+  it("returns team summary for coach scoped to the coach Time", async () => {
+    const response = await request("/admin/team/summary", {
+      headers: { Authorization: `Bearer ${token(coachA)}` },
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { team: { id: string }; usage: { students: number; coaches: number } };
+    assert.equal(body.team.id, "TEAM_A");
+    assert.equal(body.usage.students, 2);
+    assert.equal(body.usage.coaches, 2);
+  });
+
+  it("blocks student tokens from team summary", async () => {
+    const response = await request("/admin/team/summary", {
+      headers: { Authorization: `Bearer ${token(studentA)}` },
+    });
+
+    assert.equal(response.status, 403);
+  });
+
+  it("blocks admin from requesting another Time summary", async () => {
+    const response = await request("/admin/team/summary?teamId=TEAM_B", {
+      headers: { Authorization: `Bearer ${token(adminA)}` },
+    });
+
+    assert.equal(response.status, 403);
+  });
+
   it("returns only same-team users for admin listing", async () => {
     const response = await request("/admin/students", {
       headers: { Authorization: `Bearer ${token(adminA)}` },
@@ -200,8 +251,28 @@ describe("GUTO Time isolation HTTP routes", () => {
 
     assert.equal(response.status, 200);
     const body = (await response.json()) as { students: UserAccess[]; users: UserAccess[] };
-    assert.deepEqual(body.students.map((user) => user.userId).sort(), [studentA.userId, studentOtherCoachA.userId].sort());
+    assert.deepEqual(body.students.map((user) => user.userId).sort(), [studentA.userId, studentOtherCoachA.userId, archivedStudentA.userId].sort());
     assert.equal(body.users.some((user) => user.userId === studentB.userId), false);
+  });
+
+  it("filters students without leaking another Time", async () => {
+    const response = await request(`/admin/students?search=${studentB.userId}`, {
+      headers: { Authorization: `Bearer ${token(adminA)}` },
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { students: UserAccess[] };
+    assert.equal(body.students.length, 0);
+  });
+
+  it("keeps coach filters scoped to the coach's own students", async () => {
+    const response = await request(`/admin/students?coachId=${coachOtherA.userId}`, {
+      headers: { Authorization: `Bearer ${token(coachA)}` },
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { students: UserAccess[] };
+    assert.equal(body.students.length, 0);
   });
 
   it("blocks admin from reading a student in another Time", async () => {

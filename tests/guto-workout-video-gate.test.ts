@@ -24,6 +24,7 @@ import {
 const testMemoryFile = join(process.cwd(), "tmp", "guto-memory.video-gate-test.json");
 const userAccessFile = join(process.cwd(), "tmp", "user-access.json");
 const customExerciseFile = join(process.cwd(), "tmp", "custom-exercises.video-gate-test.json");
+const validImageBase64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 
 let app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
 let server: Server;
@@ -512,11 +513,12 @@ describe("workout catalog video gate", () => {
         Authorization: `Bearer ${signToken("student", "student-video-gate")}`,
       },
       body: JSON.stringify({
-        imageBase64: "data:image/jpeg;base64,not-a-real-image",
+        imageBase64: validImageBase64,
         workoutFocus: "chest_triceps",
         workoutLabel: "Peito e tríceps",
         locationMode: "gym",
         language: "pt-BR",
+        workoutPlan: workoutPlan({ ...catalogExercise(), id: "manual-ghost", videoUrl: "" }),
       }),
     });
 
