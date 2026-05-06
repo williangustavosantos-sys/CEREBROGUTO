@@ -1,11 +1,12 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import type { GutoEvolutionStage } from "./guto-evolution.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ARENA_STORE_PATH = path.join(__dirname, "../tmp/arena-store.json");
 
-export type AvatarStage = "baby" | "teen" | "adult" | "elite";
+export type AvatarStage = GutoEvolutionStage;
 
 export interface ArenaProfile {
   userId: string;

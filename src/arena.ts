@@ -7,6 +7,10 @@ import {
   getProfilesByGroup,
 } from "./arena-store.js";
 import { getEffectiveUserAccess } from "./user-access-store.js";
+import {
+  getGutoEvolutionStage,
+  getNextGutoEvolutionXp,
+} from "./guto-evolution.js";
 
 function isVisibleInRanking(userId: string): boolean {
   const access = getEffectiveUserAccess(userId);
@@ -21,26 +25,12 @@ function isVisibleInRanking(userId: string): boolean {
 
 export const DEFAULT_ARENA_GROUP = "will-personal-alpha";
 
-const EVOLUTION_THRESHOLDS: { stage: AvatarStage; minXp: number }[] = [
-  { stage: "elite", minXp: 12000 },
-  { stage: "adult", minXp: 5000 },
-  { stage: "teen", minXp: 1500 },
-  { stage: "baby", minXp: 0 },
-];
-
 export function getAvatarStage(totalXp: number): AvatarStage {
-  for (const { stage, minXp } of EVOLUTION_THRESHOLDS) {
-    if (totalXp >= minXp) return stage;
-  }
-  return "baby";
+  return getGutoEvolutionStage(totalXp);
 }
 
 export function getNextEvolutionXp(totalXp: number): number | null {
-  const order: number[] = [1500, 5000, 12000];
-  for (const threshold of order) {
-    if (totalXp < threshold) return threshold;
-  }
-  return null; // already elite
+  return getNextGutoEvolutionXp(totalXp);
 }
 
 function isSameWeek(dateA: Date, dateB: Date): boolean {
@@ -233,7 +223,7 @@ export function getWeeklyRanking(arenaGroupId: string) {
       position: i + 1,
       userId: p.userId,
       pairName: p.pairName,
-      avatarStage: p.avatarStage,
+      avatarStage: getAvatarStage(p.totalXp),
       xp: p.weeklyXp,
       validatedWorkouts: p.validatedWorkoutsWeek,
       status: deriveStatus(p.weeklyXp, p.validatedWorkoutsWeek),
@@ -252,7 +242,7 @@ export function getMonthlyRanking(arenaGroupId: string) {
       position: i + 1,
       userId: p.userId,
       pairName: p.pairName,
-      avatarStage: p.avatarStage,
+      avatarStage: getAvatarStage(p.totalXp),
       xp: p.monthlyXp,
       validatedWorkouts: p.validatedWorkoutsMonth,
       status: deriveStatus(p.monthlyXp, p.validatedWorkoutsMonth),
@@ -272,7 +262,7 @@ export function getIndividualRanking(arenaGroupId: string) {
         position: i + 1,
         userId: p.userId,
         pairName: p.pairName,
-        avatarStage: p.avatarStage,
+        avatarStage: getAvatarStage(p.totalXp),
         xp: p.totalXp,
         validatedWorkouts: p.validatedWorkoutsTotal,
         currentStreak: p.currentStreak,
@@ -287,10 +277,11 @@ export function getMyArenaProfile(userId: string, arenaGroupId: string) {
   const profile = getArenaProfile(userId);
   if (!profile || profile.arenaGroupId !== arenaGroupId) return null;
   const nextEvolutionXp = getNextEvolutionXp(profile.totalXp);
+  const avatarStage = getAvatarStage(profile.totalXp);
   return {
     userId: profile.userId,
     pairName: profile.pairName,
-    avatarStage: profile.avatarStage,
+    avatarStage,
     totalXp: profile.totalXp,
     weeklyXp: profile.weeklyXp,
     monthlyXp: profile.monthlyXp,

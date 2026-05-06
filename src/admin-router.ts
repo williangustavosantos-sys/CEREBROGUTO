@@ -113,6 +113,7 @@ async function getManagedStudent(req: Request, res: Response, userId: string): P
 function buildStudentView(access: UserAccess) {
   const memory = getMemory(access.userId);
   const arena = getArenaProfile(access.userId);
+  const totalXp = arena?.totalXp ?? memory.totalXp ?? 0;
   const lastValidation =
     arena?.lastWorkoutValidatedAt ??
     (memory.validationHistory?.length
@@ -124,8 +125,8 @@ function buildStudentView(access: UserAccess) {
     name: access.name || memory.name || access.userId,
     weeklyXp: arena?.weeklyXp ?? 0,
     monthlyXp: arena?.monthlyXp ?? 0,
-    totalXp: arena?.totalXp ?? memory.totalXp ?? 0,
-    avatarStage: arena?.avatarStage ?? "baby",
+    totalXp,
+    avatarStage: getAvatarStage(totalXp),
     currentStreak: arena?.currentStreak ?? memory.streak ?? 0,
     validationsTotal: arena?.validatedWorkoutsTotal ?? (memory.validationHistory?.length ?? 0),
     lastValidationAt: lastValidation,

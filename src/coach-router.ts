@@ -61,6 +61,7 @@ function buildStudentView(userId: string, preloadedStore?: Record<string, Stored
     (memory.validationHistory?.length
       ? memory.validationHistory[memory.validationHistory.length - 1]?.createdAt ?? null
       : null);
+  const totalXp = arena?.totalXp ?? memory.totalXp ?? 0;
 
   return {
     userId,
@@ -74,8 +75,8 @@ function buildStudentView(userId: string, preloadedStore?: Record<string, Stored
     subscriptionEndsAt: access?.subscriptionEndsAt ?? null,
     weeklyXp: arena?.weeklyXp ?? 0,
     monthlyXp: arena?.monthlyXp ?? 0,
-    totalXp: arena?.totalXp ?? memory.totalXp ?? 0,
-    avatarStage: arena?.avatarStage ?? "baby",
+    totalXp,
+    avatarStage: getAvatarStage(totalXp),
     currentStreak: arena?.currentStreak ?? memory.streak ?? 0,
     validationsTotal: arena?.validatedWorkoutsTotal ?? (memory.validationHistory?.length ?? 0),
     lastValidationAt: lastValidation,
