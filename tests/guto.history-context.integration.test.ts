@@ -65,6 +65,13 @@ function writeUserMemory(userId: string, data: Record<string, any>) {
   writeFileSync(testMemoryFile, JSON.stringify(store, null, 2));
 }
 
+function seedVisibleWorkoutFocus(userId: string, focus = "legs_core") {
+  writeUserMemory(userId, {
+    lastSuggestedFocus: focus,
+    lastWorkoutPlan: { focusKey: focus },
+  });
+}
+
 function buildGeminiResponse(text: string) {
   return { candidates: [{ content: { parts: [{ text }] } }] };
 }
@@ -255,7 +262,7 @@ after(async () => {
   await new Promise<void>((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
   });
-  rmSync(testMemoryDir, { recursive: true, force: true });
+  rmSync(testMemoryFile, { force: true });
 });
 
 beforeEach(() => {
@@ -265,7 +272,7 @@ beforeEach(() => {
 describe("GUTO contextual muscle history", () => {
   it("resolves 'treinei isso ontem' to the last suggested legs_core focus", async () => {
     const userId = "history-context-pt-yesterday";
-    writeUserMemory(userId, { lastSuggestedFocus: "legs_core" });
+    seedVisibleWorkoutFocus(userId);
     const response = await postGuto({
       language: "pt-BR",
       profile: { userId, name: "Will" },
@@ -283,7 +290,7 @@ describe("GUTO contextual muscle history", () => {
 
   it("resolves 'treinei isso anteontem' without saving it as limitation", async () => {
     const userId = "history-context-pt-day-before";
-    writeUserMemory(userId, { lastSuggestedFocus: "legs_core" });
+    seedVisibleWorkoutFocus(userId);
     const response = await postGuto({
       language: "pt-BR",
       profile: { userId, name: "Will" },
@@ -354,7 +361,7 @@ describe("GUTO contextual muscle history", () => {
   for (const testCase of localizedCases) {
     it(`resolves contextual and compound history in ${testCase.language}`, async () => {
       const yesterdayUserId = `history-context-${testCase.language}-yesterday`;
-      writeUserMemory(yesterdayUserId, { lastSuggestedFocus: "legs_core" });
+      seedVisibleWorkoutFocus(yesterdayUserId);
       const yesterdayResponse = await postGuto({
         language: testCase.language,
         profile: { userId: yesterdayUserId, name: "Will" },
@@ -368,7 +375,7 @@ describe("GUTO contextual muscle history", () => {
       assertNoPortugueseLeak(yesterdayResponse, testCase.language);
 
       const dayBeforeUserId = `history-context-${testCase.language}-day-before`;
-      writeUserMemory(dayBeforeUserId, { lastSuggestedFocus: "legs_core" });
+      seedVisibleWorkoutFocus(dayBeforeUserId);
       const dayBeforeResponse = await postGuto({
         language: testCase.language,
         profile: { userId: dayBeforeUserId, name: "Will" },
