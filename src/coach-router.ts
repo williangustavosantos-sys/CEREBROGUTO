@@ -24,9 +24,10 @@ import {
 import { deleteDietPlan } from "./diet-store.js";
 import { createInvite } from "./invite-store.js";
 import { config } from "./config.js";
-import { requireCoachOrAdmin } from "./auth-middleware.js";
+import { requireCoachOrAdmin, requireSuperAdmin } from "./auth-middleware.js";
 
 export const coachRouter = express.Router();
+export const coachRankingsRouter = express.Router();
 
 // ─── Auth middleware ───────────────────────────────────────────────────────────
 
@@ -109,7 +110,19 @@ async function deleteUserEverywhere(userId: string): Promise<void> {
   await deleteDietPlan(userId);
 }
 
+function sendRankings(_req: Request, res: Response): void {
+  const arenaGroupId = DEFAULT_ARENA_GROUP;
+  const weekly = getWeeklyRanking(arenaGroupId);
+  const monthly = getMonthlyRanking(arenaGroupId);
+  const individual = getIndividualRanking(arenaGroupId);
+
+  res.json({ weekly, monthly, individual });
+}
+
 // ─── Routes ───────────────────────────────────────────────────────────────────
+
+coachRankingsRouter.use(requireCoachOrAdmin);
+coachRankingsRouter.get("/rankings", sendRankings);
 
 // GET /guto/coach/students
 coachRouter.get("/students", (req: Request, res: Response) => {
@@ -315,7 +328,7 @@ coachRouter.delete("/student/:userId", (req: Request, res: Response) => {
 });
 
 // POST /guto/coach/student/:userId/hard-delete
-coachRouter.post("/student/:userId/hard-delete", async (req: Request, res: Response) => {
+coachRouter.post("/student/:userId/hard-delete", requireSuperAdmin, async (req: Request, res: Response) => {
   const userId = req.params["userId"] as string;
   try {
     await deleteUserEverywhere(userId);
@@ -326,19 +339,10 @@ coachRouter.post("/student/:userId/hard-delete", async (req: Request, res: Respo
 });
 
 // GET /guto/coach/rankings
-coachRouter.get("/rankings", (req: Request, res: Response) => {
-  // Use current default group for now, or expand to use coach's specific group in future
-  const arenaGroupId = DEFAULT_ARENA_GROUP;
-  
-  const weekly = getWeeklyRanking(arenaGroupId);
-  const monthly = getMonthlyRanking(arenaGroupId);
-  const individual = getIndividualRanking(arenaGroupId);
-  
-  res.json({ weekly, monthly, individual });
-});
+coachRouter.get("/rankings", sendRankings);
 
 // POST /guto/coach/nuke-all — apaga TODOS os dados de TODOS os usuários
-coachRouter.post("/nuke-all", async (_req: Request, res: Response) => {
+coachRouter.post("/nuke-all", requireSuperAdmin, async (_req: Request, res: Response) => {
   try {
     await writeMemoryStoreAsync({});
     writeArenaStore({ profiles: {}, events: [] });

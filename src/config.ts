@@ -30,4 +30,5 @@ export const config = {
   frontendPublicUrl: process.env.FRONTEND_PUBLIC_URL || "http://localhost:3000",
   // Dev access bypass — never true in production
   allowDevAccess: process.env.GUTO_ALLOW_DEV_ACCESS === "true",
+  enableLegacyCoachRoutes: process.env.GUTO_ENABLE_LEGACY_COACH_ROUTES === "true",
 };

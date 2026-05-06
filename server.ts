@@ -27,7 +27,7 @@ import {
   syncArenaDisplayName,
   DEFAULT_ARENA_GROUP,
 } from "./src/arena";
-import { coachRouter } from "./src/coach-router.js";
+import { coachRankingsRouter, coachRouter } from "./src/coach-router.js";
 import { authRouter } from "./src/auth-router.js";
 import { adminRouter } from "./src/admin-router.js";
 import { parseAuth, requireActiveUser } from "./src/auth-middleware.js";
@@ -397,7 +397,17 @@ app.get("/exercise-animations/workoutx/:animationId.gif", async (req, res) => {
   }
 });
 
-app.use("/guto/coach", coachRouter);
+if (config.enableLegacyCoachRoutes) {
+  app.use("/guto/coach", coachRouter);
+} else {
+  app.use("/guto/coach", coachRankingsRouter);
+  app.use("/guto/coach", (_req, res) => {
+    res.status(410).json({
+      code: "LEGACY_COACH_ROUTES_DISABLED",
+      message: "Rotas legadas de coach foram desativadas. Use /admin.",
+    });
+  });
+}
 app.use("/auth", authRouter);
 app.use("/admin", adminRouter);
 
