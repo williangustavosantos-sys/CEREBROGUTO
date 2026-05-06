@@ -1,19 +1,48 @@
 import { test } from "node:test";
-import assert from "node:assert";
+import assert from "node:assert/strict";
 import { GUTO_TEAM_PLAN_LIMITS } from "../src/team-plans.js";
 import { getTeam, GUTO_CORE_TEAM_ID } from "../src/team-store.js";
-import { upsertUserAccess, getEffectiveUserAccess, deleteUserAccessHard, getAllUserAccess } from "../src/user-access-store.js";
+import {
+    deleteUserAccessHard,
+    getAllUserAccess,
+    getEffectiveUserAccess,
+    getUserAccess,
+    upsertUserAccess,
+    writeUserAccessStoreRaw,
+    type UserAccess,
+} from "../src/user-access-store.js";
+
+function accessFixture(userId: string, patch: Partial<UserAccess> = {}): UserAccess {
+    const now = new Date().toISOString();
+    return {
+        userId,
+        role: "student",
+        coachId: "coach-fixture",
+        active: true,
+        visibleInArena: true,
+        archived: false,
+        createdAt: now,
+        updatedAt: now,
+        subscriptionStatus: "active",
+        subscriptionEndsAt: null,
+        ...patch,
+    };
+}
 
 test("GUTO Time Plans exist and have correct limits", () => {
+    assert.strictEqual(GUTO_TEAM_PLAN_LIMITS.start.label, "GUTO Time Start");
     assert.strictEqual(GUTO_TEAM_PLAN_LIMITS.start.maxCoaches, 2);
     assert.strictEqual(GUTO_TEAM_PLAN_LIMITS.start.maxStudents, 20);
 
+    assert.strictEqual(GUTO_TEAM_PLAN_LIMITS.pro.label, "GUTO Time Pro");
     assert.strictEqual(GUTO_TEAM_PLAN_LIMITS.pro.maxCoaches, 4);
     assert.strictEqual(GUTO_TEAM_PLAN_LIMITS.pro.maxStudents, 50);
 
+    assert.strictEqual(GUTO_TEAM_PLAN_LIMITS.elite.label, "GUTO Time Elite");
     assert.strictEqual(GUTO_TEAM_PLAN_LIMITS.elite.maxCoaches, 6);
     assert.strictEqual(GUTO_TEAM_PLAN_LIMITS.elite.maxStudents, 70);
 
+    assert.strictEqual(GUTO_TEAM_PLAN_LIMITS.custom.label, "GUTO Time Custom");
     assert.strictEqual(GUTO_TEAM_PLAN_LIMITS.custom.maxCoaches, null);
     assert.strictEqual(GUTO_TEAM_PLAN_LIMITS.custom.maxStudents, null);
 });
@@ -61,4 +90,31 @@ test("UserAccess fallback to GUTO_CORE and keeps explicit teamId", () => {
 
     deleteUserAccessHard(userId);
     deleteUserAccessHard(userId2);
+});
+
+test("legacy UserAccess records without teamId are normalized to GUTO_CORE", () => {
+    const legacyUserId = "legacy-without-team";
+    const explicitUserId = "explicit-team-user";
+
+    writeUserAccessStoreRaw({
+        users: {
+            [legacyUserId]: accessFixture(legacyUserId),
+            [explicitUserId]: accessFixture(explicitUserId, { teamId: "TEAM_EXPLICIT" }),
+        },
+    });
+
+    assert.strictEqual(getUserAccess(legacyUserId)?.teamId, GUTO_CORE_TEAM_ID);
+    assert.strictEqual(getEffectiveUserAccess(legacyUserId)?.teamId, GUTO_CORE_TEAM_ID);
+    assert.strictEqual(getAllUserAccess().find((user) => user.userId === legacyUserId)?.teamId, GUTO_CORE_TEAM_ID);
+    assert.strictEqual(getAllUserAccess().find((user) => user.userId === explicitUserId)?.teamId, "TEAM_EXPLICIT");
+
+    const created = upsertUserAccess("new-user-without-team", { role: "student" });
+    assert.strictEqual(created.teamId, GUTO_CORE_TEAM_ID);
+
+    const updated = upsertUserAccess(explicitUserId, { active: false });
+    assert.strictEqual(updated.teamId, "TEAM_EXPLICIT");
+
+    deleteUserAccessHard(legacyUserId);
+    deleteUserAccessHard(explicitUserId);
+    deleteUserAccessHard("new-user-without-team");
 });

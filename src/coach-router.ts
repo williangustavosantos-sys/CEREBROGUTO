@@ -24,7 +24,22 @@ import {
 import { deleteDietPlan } from "./diet-store.js";
 import { createInvite } from "./invite-store.js";
 import { config } from "./config.js";
-import { requireCoachOrAdmin, requireSuperAdmin } from "./auth-middleware.js";
+import {
+  assertCanAccessUserAccess,
+  getRequestActorAccess,
+  getScopedUserAccessList,
+  normalizeAccessTeamId,
+  requireCoachOrAdmin,
+  requireSuperAdmin,
+  TeamAccessError,
+  type GutoAccessActor,
+} from "./auth-middleware.js";
+import {
+  assertTeamPlanCapacity,
+  GUTO_CORE_TEAM_ID,
+  GutoTeamNotFoundError,
+  GutoTeamPlanLimitError,
+} from "./team-store.js";
 
 export const coachRouter = express.Router();
 export const coachRankingsRouter = express.Router();
@@ -68,6 +83,7 @@ function buildStudentView(userId: string, preloadedStore?: Record<string, Stored
     name: memory.name || userId,
     role: access?.role ?? "student",
     coachId: access?.coachId ?? "unknown",
+    teamId: normalizeAccessTeamId(access?.teamId),
     active: access?.active ?? false,
     visibleInArena: access?.visibleInArena ?? false,
     archived: access?.archived ?? false,
@@ -83,6 +99,62 @@ function buildStudentView(userId: string, preloadedStore?: Record<string, Stored
     lastActiveAt: memory.lastActiveAt ?? null,
     createdAt: access?.createdAt ?? new Date().toISOString(),
   };
+}
+
+function sendTeamAccessError(res: Response, error: unknown): boolean {
+  if (!(error instanceof TeamAccessError)) return false;
+  res.status(error.status).json({ message: error.message, code: error.code });
+  return true;
+}
+
+function sendTeamPlanError(res: Response, error: unknown): boolean {
+  if (error instanceof GutoTeamPlanLimitError || error instanceof GutoTeamNotFoundError) {
+    res.status(error.status).json({
+      message: error.message,
+      code: error.code,
+      ...(error instanceof GutoTeamPlanLimitError
+        ? { subject: error.subject, usage: error.usage }
+        : { teamId: error.teamId }),
+    });
+    return true;
+  }
+  return false;
+}
+
+function ensureStudentCapacity(res: Response, teamId: string, excludeUserId?: string): boolean {
+  try {
+    assertTeamPlanCapacity(teamId, "student", getAllUserAccess(), { excludeUserId });
+    return true;
+  } catch (error) {
+    if (sendTeamPlanError(res, error)) return false;
+    throw error;
+  }
+}
+
+function requireActor(req: Request, res: Response): GutoAccessActor | null {
+  const actor = getRequestActorAccess(req);
+  if (!actor) {
+    res.status(401).json({ message: "Autenticação necessária." });
+    return null;
+  }
+  return actor;
+}
+
+function getManagedStudent(req: Request, res: Response, userId: string): UserAccess | null {
+  const actor = requireActor(req, res);
+  if (!actor) return null;
+  const access = getUserAccess(userId);
+  if (!access || access.role !== "student") {
+    res.status(404).json({ error: "student_not_found" });
+    return null;
+  }
+  try {
+    assertCanAccessUserAccess(actor, access);
+  } catch (error) {
+    if (sendTeamAccessError(res, error)) return null;
+    throw error;
+  }
+  return access;
 }
 
 /**
@@ -128,14 +200,13 @@ coachRankingsRouter.get("/rankings", sendRankings);
 // GET /guto/coach/students
 coachRouter.get("/students", (req: Request, res: Response) => {
   const includeArchived = req.query.includeArchived === "true";
-  const caller = req.gutoUser!;
+  const actor = requireActor(req, res);
+  if (!actor) return;
   
-  const allAccess = getAllUserAccess();
-  const studentsAccess = allAccess.filter(u => {
+  const studentsAccess = getScopedUserAccessList(actor).filter(u => {
     const isStudent = u.role === "student";
-    const matchesCoach = caller.role === "admin" || caller.role === "super_admin" || u.coachId === (caller.coachId || caller.userId);
     const matchesArchived = includeArchived || !u.archived;
-    return isStudent && matchesCoach && matchesArchived;
+    return isStudent && matchesArchived;
   });
 
   const memoryStore = readMemoryStoreSync() as Record<string, StoredMemory>;
@@ -148,7 +219,8 @@ coachRouter.get("/students", (req: Request, res: Response) => {
 coachRouter.get("/student/:userId", (req: Request, res: Response) => {
   const userId = req.params["userId"] as string;
   const store = readMemoryStoreSync() as Record<string, unknown>;
-  const access = getUserAccess(userId);
+  const access = getManagedStudent(req, res, userId);
+  if (!access) return;
 
   if (!store[userId] && !access) {
     res.status(404).json({ error: "student_not_found" });
@@ -161,7 +233,24 @@ coachRouter.get("/student/:userId", (req: Request, res: Response) => {
 // PATCH /guto/coach/student/:userId
 coachRouter.patch("/student/:userId", express.json(), (req: Request, res: Response) => {
   const userId = req.params["userId"] as string;
-  const { name, role, coachId, visibleInArena, active, archived } = req.body as Partial<UserAccess & { name: string }>;
+  const actor = requireActor(req, res);
+  if (!actor) return;
+  const existing = getManagedStudent(req, res, userId);
+  if (!existing) return;
+  const { name, role, coachId, visibleInArena, active, archived, teamId } = req.body as Partial<UserAccess & { name: string }>;
+
+  if (role && role !== "student") {
+    res.status(403).json({ error: "ADMIN_ACCESS_FORBIDDEN" });
+    return;
+  }
+  if (teamId && actor.role !== "super_admin" && teamId !== normalizeAccessTeamId(existing.teamId)) {
+    res.status(403).json({ error: "TEAM_ACCESS_FORBIDDEN" });
+    return;
+  }
+  if (actor.role === "coach" && coachId && coachId !== actor.userId) {
+    res.status(403).json({ error: "COACH_STUDENT_ACCESS_FORBIDDEN" });
+    return;
+  }
 
   if (typeof name === "string" && name.trim()) {
     const store = readMemoryStoreSync() as Record<string, StoredMemory>;
@@ -177,11 +266,17 @@ coachRouter.patch("/student/:userId", express.json(), (req: Request, res: Respon
   }
 
   const patch: Partial<Omit<UserAccess, "userId" | "createdAt">> = {};
-  if (role !== undefined) patch.role = role;
-  if (coachId !== undefined) patch.coachId = coachId;
+  if (role !== undefined) patch.role = "student";
+  if (coachId !== undefined) patch.coachId = actor.role === "coach" ? actor.userId : coachId;
+  if (actor.role === "super_admin" && teamId !== undefined) patch.teamId = teamId;
   if (visibleInArena !== undefined) patch.visibleInArena = visibleInArena;
   if (active !== undefined) patch.active = active;
   if (archived !== undefined) patch.archived = archived;
+  const targetTeamId = normalizeAccessTeamId(patch.teamId ?? existing.teamId);
+  const finalArchived = patch.archived ?? existing.archived;
+  if (!finalArchived && (targetTeamId !== normalizeAccessTeamId(existing.teamId) || existing.archived)) {
+    if (!ensureStudentCapacity(res, targetTeamId, existing.userId)) return;
+  }
 
   upsertUserAccess(userId, patch);
   res.json(buildStudentView(userId));
@@ -191,6 +286,8 @@ coachRouter.patch("/student/:userId", express.json(), (req: Request, res: Respon
 coachRouter.patch("/student/:userId/access", express.json(), (req: Request, res: Response) => {
   const userId = req.params["userId"] as string;
   const { active } = req.body as { active?: boolean };
+  const existing = getManagedStudent(req, res, userId);
+  if (!existing) return;
 
   if (typeof active !== "boolean") {
     res.status(400).json({ error: "active must be a boolean" });
@@ -204,6 +301,8 @@ coachRouter.patch("/student/:userId/access", express.json(), (req: Request, res:
 // PATCH /guto/coach/student/:userId/archive — soft archive (preserva dados, apenas bloqueia)
 coachRouter.patch("/student/:userId/archive", (req: Request, res: Response) => {
   const userId = req.params["userId"] as string;
+  const existing = getManagedStudent(req, res, userId);
+  if (!existing) return;
   upsertUserAccess(userId, {
     active: false,
     visibleInArena: false,
@@ -215,6 +314,8 @@ coachRouter.patch("/student/:userId/archive", (req: Request, res: Response) => {
 // POST /guto/coach/student/:userId/reset
 coachRouter.post("/student/:userId/reset", express.json(), (req: Request, res: Response) => {
   const userId = req.params["userId"] as string;
+  const existing = getManagedStudent(req, res, userId);
+  if (!existing) return;
   const { scope } = req.body as {
     scope?: "weekly" | "monthly" | "individual" | "validationHistory" | "all";
   };
@@ -275,15 +376,35 @@ coachRouter.post("/student/create", express.json(), async (req: Request, res: Re
     return;
   }
 
-  const caller = req.gutoUser!;
-  const coachId = caller.coachId || caller.userId;
+  const actor = requireActor(req, res);
+  if (!actor) return;
+  if (actor.role === "student") {
+    res.status(403).json({ error: "ADMIN_ACCESS_FORBIDDEN" });
+    return;
+  }
+  const body = req.body as Partial<UserAccess>;
+  const requestedTeamId = typeof body.teamId === "string" ? body.teamId : undefined;
+  const teamId = actor.role === "super_admin"
+    ? requestedTeamId || GUTO_CORE_TEAM_ID
+    : normalizeAccessTeamId(actor.teamId);
+  if (actor.role !== "super_admin" && requestedTeamId && requestedTeamId !== teamId) {
+    res.status(403).json({ error: "TEAM_ACCESS_FORBIDDEN" });
+    return;
+  }
+  if (actor.role === "coach" && body.coachId && body.coachId !== actor.userId) {
+    res.status(403).json({ error: "COACH_STUDENT_ACCESS_FORBIDDEN" });
+    return;
+  }
+  const coachId = actor.role === "coach" ? actor.userId : body.coachId || actor.userId;
   const userId = `student-${Date.now()}`;
+  if (!ensureStudentCapacity(res, teamId, userId)) return;
   const cleanName = name.trim();
 
   // 1. Criar registro de acesso (pausado até claim)
   upsertUserAccess(userId, {
     role: "student",
     coachId: coachId,
+    teamId,
     active: false, // Inativo até aceitar o convite
     visibleInArena: true,
     archived: false,
@@ -312,6 +433,8 @@ coachRouter.post("/student/create", express.json(), async (req: Request, res: Re
 coachRouter.delete("/student/:userId", (req: Request, res: Response) => {
   const userId = req.params["userId"] as string;
   try {
+    const existing = getManagedStudent(req, res, userId);
+    if (!existing) return;
     upsertUserAccess(userId, {
       active: false,
       visibleInArena: false,

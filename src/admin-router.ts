@@ -5,6 +5,13 @@ import { getAggregatedExerciseCatalog, getCatalogById, type CatalogMuscleGroup }
 import {
   requireCoachOrAdmin,
   requireAdmin,
+  assertCanAccessUserAccess,
+  canAccessUserAccess,
+  getRequestActorAccess,
+  getScopedUserAccessList,
+  normalizeAccessTeamId,
+  TeamAccessError,
+  type GutoAccessActor,
 } from "./auth-middleware.js";
 import {
   getUserAccess,
@@ -16,6 +23,13 @@ import {
   type SubscriptionStatus,
   type PaymentStatus,
 } from "./user-access-store.js";
+import {
+  assertTeamPlanCapacity,
+  GUTO_CORE_TEAM_ID,
+  GutoTeamNotFoundError,
+  GutoTeamPlanLimitError,
+  type TeamCapacitySubject,
+} from "./team-store.js";
 import {
   getArenaProfile,
   saveArenaProfile,
@@ -174,37 +188,89 @@ function customExerciseView(exercise: CustomExerciseRequest) {
   };
 }
 
-function resolveActorId(req: Request): string {
-  const caller = req.gutoUser!;
-  return caller.role === "coach" ? caller.coachId || caller.userId : caller.userId;
-}
-
-function ownsStudent(caller: NonNullable<Request["gutoUser"]>, student: UserAccess): boolean {
-  if (isAdminRole(caller.role)) return true;
-  if (!isCoachRole(caller.role)) return false;
-  return student.role === "student" && student.coachId === (caller.coachId || caller.userId);
-}
-
 function requireSuperAdminLike(req: Request, res: Response): boolean {
-  const caller = req.gutoUser!;
-  if (!isAdminRole(caller.role)) {
+  const actor = getRequestActorAccess(req);
+  if (!actor || !isAdminRole(actor.role)) {
     res.status(403).json({ message: "Sem permissão administrativa para esta ação." });
     return false;
   }
   return true;
 }
 
+function sendTeamAccessError(res: Response, error: unknown): boolean {
+  if (!(error instanceof TeamAccessError)) return false;
+  res.status(error.status).json({ message: error.message, code: error.code });
+  return true;
+}
+
+function sendTeamPlanError(res: Response, error: unknown): boolean {
+  if (error instanceof GutoTeamPlanLimitError || error instanceof GutoTeamNotFoundError) {
+    res.status(error.status).json({
+      message: error.message,
+      code: error.code,
+      ...(error instanceof GutoTeamPlanLimitError
+        ? { subject: error.subject, usage: error.usage }
+        : { teamId: error.teamId }),
+    });
+    return true;
+  }
+  return false;
+}
+
+function requireActor(req: Request, res: Response): GutoAccessActor | null {
+  const actor = getRequestActorAccess(req);
+  if (!actor) {
+    res.status(401).json({ message: "Autenticação necessária." });
+    return null;
+  }
+  return actor;
+}
+
 async function getManagedStudent(req: Request, res: Response, userId: string): Promise<UserAccess | null> {
+  const actor = requireActor(req, res);
+  if (!actor) return null;
   const student = getUserAccess(userId);
   if (!student || student.role !== "student") {
     res.status(404).json({ message: "Aluno não encontrado." });
     return null;
   }
-  if (!ownsStudent(req.gutoUser!, student)) {
-    res.status(403).json({ message: "Sem permissão para alterar este aluno." });
-    return null;
+  try {
+    assertCanAccessUserAccess(actor, student);
+  } catch (error) {
+    if (sendTeamAccessError(res, error)) return null;
+    throw error;
   }
   return student;
+}
+
+async function ensureTeamPlanCapacity(
+  res: Response,
+  teamId: string,
+  subject: TeamCapacitySubject,
+  excludeUserId?: string
+): Promise<boolean> {
+  try {
+    assertTeamPlanCapacity(teamId, subject, await getAllUserAccessAsync(), { excludeUserId });
+    return true;
+  } catch (error) {
+    if (sendTeamPlanError(res, error)) return false;
+    throw error;
+  }
+}
+
+function getManagedCoach(req: Request, res: Response, coachId: string): UserAccess | null {
+  const actor = requireActor(req, res);
+  if (!actor) return null;
+  const coach = getUserAccess(coachId);
+  if (!coach || coach.role !== "coach") {
+    res.status(404).json({ message: "Coach não encontrado." });
+    return null;
+  }
+  if (actor.role !== "super_admin" && normalizeAccessTeamId(actor.teamId) !== normalizeAccessTeamId(coach.teamId)) {
+    res.status(403).json({ message: "Time sem permissão para acessar este coach.", code: "TEAM_ACCESS_FORBIDDEN" });
+    return null;
+  }
+  return coach;
 }
 
 function buildStudentView(access: UserAccess) {
@@ -232,11 +298,10 @@ function buildStudentView(access: UserAccess) {
 }
 
 async function listManagedStudents(req: Request) {
-  const caller = req.gutoUser!;
+  const actor = getRequestActorAccess(req)!;
   const allUsers = await getAllUserAccessAsync();
-  return allUsers
+  return getScopedUserAccessList(actor, allUsers)
     .filter((user) => user.role === "student")
-    .filter((student) => ownsStudent(caller, student))
     .map(buildStudentView);
 }
 
@@ -654,28 +719,62 @@ adminRouter.post("/exercises/custom/:exerciseId/reject", requireAdmin, asyncHand
 // ─── Students ────────────────────────────────────────────────────────────────
 
 adminRouter.get(["/students", "/users"], asyncHandler(async (req, res) => {
+  const actor = requireActor(req, res);
+  if (!actor) return;
   const students = await listManagedStudents(req);
-  const users = isAdminRole(req.gutoUser?.role)
-    ? await getAllUserAccessAsync()
+  const users = isAdminRole(actor.role)
+    ? getScopedUserAccessList(actor, await getAllUserAccessAsync())
     : students;
   res.json({ students, users });
 }));
 
 adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
   const caller = req.gutoUser!;
+  const actor = requireActor(req, res);
+  if (!actor) return;
   const body = req.body as Partial<UserAccess> & { password?: string };
   if (!body.name?.trim()) {
     res.status(400).json({ message: "Nome do aluno é obrigatório." });
     return;
   }
   if (body.role && body.role !== "student") {
-    if (!requireSuperAdminLike(req, res)) return;
+    res.status(403).json({ message: "Esta rota cria apenas alunos.", code: "ADMIN_ACCESS_FORBIDDEN" });
+    return;
+  }
+  if (actor.role === "student") {
+    res.status(403).json({ message: "Aluno não pode criar acesso administrativo.", code: "ADMIN_ACCESS_FORBIDDEN" });
+    return;
+  }
+
+  const requestedTeamId = typeof body.teamId === "string" ? body.teamId : undefined;
+  const teamId = actor.role === "super_admin"
+    ? requestedTeamId || GUTO_CORE_TEAM_ID
+    : normalizeAccessTeamId(actor.teamId);
+  if (actor.role !== "super_admin" && requestedTeamId && requestedTeamId !== teamId) {
+    res.status(403).json({ message: "Admin/coach não pode criar aluno em outro Time.", code: "TEAM_ACCESS_FORBIDDEN" });
+    return;
   }
 
   const userId = body.userId || `u-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
-  const coachId = isCoachRole(caller.role)
-    ? caller.coachId || caller.userId
-    : body.coachId || "admin";
+  let coachId = body.coachId || actor.userId;
+  if (actor.role === "coach") {
+    if (body.coachId && body.coachId !== actor.userId) {
+      res.status(403).json({ message: "Coach não pode criar aluno para outro coach.", code: "COACH_STUDENT_ACCESS_FORBIDDEN" });
+      return;
+    }
+    coachId = actor.userId;
+  } else if (body.coachId) {
+    const assignedCoach = getUserAccess(body.coachId);
+    if (!assignedCoach || assignedCoach.role !== "coach") {
+      res.status(404).json({ message: "Coach não encontrado." });
+      return;
+    }
+    if (normalizeAccessTeamId(assignedCoach.teamId) !== teamId) {
+      res.status(403).json({ message: "Coach pertence a outro Time.", code: "TEAM_ACCESS_FORBIDDEN" });
+      return;
+    }
+  }
+  if (!(await ensureTeamPlanCapacity(res, teamId, "student", userId))) return;
   const passwordHash = body.password ? await bcrypt.hash(body.password, 10) : undefined;
   const active = body.active ?? Boolean(passwordHash);
   const durationDays = body.accessDurationDays || 30;
@@ -685,6 +784,7 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
     ...publicUserPatch(body),
     role: "student",
     coachId,
+    teamId,
     active,
     archived: false,
     visibleInArena: body.visibleInArena ?? true,
@@ -722,20 +822,47 @@ adminRouter.get(["/students/:userId", "/users/:userId"], asyncHandler(async (req
 
 adminRouter.patch(["/students/:userId", "/users/:userId"], asyncHandler(async (req, res) => {
   const caller = req.gutoUser!;
+  const actor = requireActor(req, res);
+  if (!actor) return;
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
   const body = req.body as Partial<UserAccess> & LooseRecord;
 
-  if (isCoachRole(caller.role)) {
-    delete body.role;
-    delete body.passwordHash;
-    if (body.coachId && body.coachId !== student.coachId) {
-      res.status(403).json({ message: "Coach não pode transferir aluno para outro coach." });
+  if (body.role && body.role !== "student") {
+    res.status(403).json({ message: "Esta rota altera apenas alunos.", code: "ADMIN_ACCESS_FORBIDDEN" });
+    return;
+  }
+  if (body.teamId && actor.role !== "super_admin" && body.teamId !== normalizeAccessTeamId(student.teamId)) {
+    res.status(403).json({ message: "Admin/coach não pode mover aluno para outro Time.", code: "TEAM_ACCESS_FORBIDDEN" });
+    return;
+  }
+  if (isCoachRole(actor.role)) {
+    if (body.coachId && body.coachId !== actor.userId) {
+      res.status(403).json({ message: "Coach não pode transferir aluno para outro coach.", code: "COACH_STUDENT_ACCESS_FORBIDDEN" });
+      return;
+    }
+  }
+  if (body.coachId && body.coachId !== student.coachId && actor.role !== "coach") {
+    const assignedCoach = getUserAccess(body.coachId);
+    if (!assignedCoach || assignedCoach.role !== "coach") {
+      res.status(404).json({ message: "Coach não encontrado." });
+      return;
+    }
+    if (normalizeAccessTeamId(assignedCoach.teamId) !== normalizeAccessTeamId(student.teamId)) {
+      res.status(403).json({ message: "Coach pertence a outro Time.", code: "TEAM_ACCESS_FORBIDDEN" });
       return;
     }
   }
 
-  const updated = await upsertUserAccessAsync(student.userId, publicUserPatch(body));
+  const patch = publicUserPatch(body);
+  if (actor.role === "coach") patch.coachId = actor.userId;
+  if (actor.role === "super_admin" && typeof body.teamId === "string") patch.teamId = body.teamId;
+  const targetTeamId = normalizeAccessTeamId(patch.teamId ?? student.teamId);
+  const finalArchived = patch.archived ?? student.archived;
+  if (!finalArchived && (targetTeamId !== normalizeAccessTeamId(student.teamId) || student.archived)) {
+    if (!(await ensureTeamPlanCapacity(res, targetTeamId, "student", student.userId))) return;
+  }
+  const updated = await upsertUserAccessAsync(student.userId, patch);
   await updateMemoryFromStudentPatch(student.userId, body);
 
   addLog({
@@ -751,11 +878,8 @@ adminRouter.patch(["/students/:userId", "/users/:userId"], asyncHandler(async (r
 
 adminRouter.delete(["/students/:userId", "/users/:userId"], requireAdmin, asyncHandler(async (req, res) => {
   const caller = req.gutoUser!;
-  const student = getUserAccess(routeParam(req, "userId"));
-  if (!student || student.role !== "student") {
-    res.status(404).json({ message: "Aluno não encontrado." });
-    return;
-  }
+  const student = await getManagedStudent(req, res, routeParam(req, "userId"));
+  if (!student) return;
 
   await deleteStudentEverywhere(student.userId);
   addLog({
@@ -780,6 +904,7 @@ adminRouter.post("/students/:userId/reactivate", asyncHandler(async (req, res) =
       ? student.subscriptionEndsAt
       : setDaysFromNow(student.accessDurationDays || 30),
   };
+  if (student.archived && !(await ensureTeamPlanCapacity(res, normalizeAccessTeamId(student.teamId), "student", student.userId))) return;
   const updated = await upsertUserAccessAsync(student.userId, patch);
   await updateInviteByUserId(student.userId, { subscriptionStatus: "active", subscriptionEndsAt: updated.subscriptionEndsAt });
   addLog({ action: "access_reactivated", actorUserId: caller.userId, actorRole: caller.role, targetUserId: student.userId });
@@ -848,27 +973,40 @@ adminRouter.post("/students/:userId/reset", asyncHandler(async (req, res) => {
 // ─── Coaches ─────────────────────────────────────────────────────────────────
 
 adminRouter.get("/coaches", asyncHandler(async (req, res) => {
-  if (!requireSuperAdminLike(req, res)) return;
+  const actor = requireActor(req, res);
+  if (!actor || !requireSuperAdminLike(req, res)) return;
   const users = await getAllUserAccessAsync();
-  const coaches = users.filter((user) => user.role === "coach");
+  const coaches = (actor.role === "super_admin" ? users : getScopedUserAccessList(actor, users))
+    .filter((user) => user.role === "coach");
   res.json({ coaches });
 }));
 
 adminRouter.post("/coaches", asyncHandler(async (req, res) => {
   const caller = req.gutoUser!;
-  if (!requireSuperAdminLike(req, res)) return;
+  const actor = requireActor(req, res);
+  if (!actor || !requireSuperAdminLike(req, res)) return;
   const body = req.body as Partial<UserAccess> & { password?: string };
   if (!body.name?.trim() || !body.email?.trim()) {
     res.status(400).json({ message: "Nome e email do coach são obrigatórios." });
     return;
   }
+  const requestedTeamId = typeof body.teamId === "string" ? body.teamId : undefined;
+  const teamId = actor.role === "super_admin"
+    ? requestedTeamId || GUTO_CORE_TEAM_ID
+    : normalizeAccessTeamId(actor.teamId);
+  if (actor.role !== "super_admin" && requestedTeamId && requestedTeamId !== teamId) {
+    res.status(403).json({ message: "Admin não pode criar coach em outro Time.", code: "TEAM_ACCESS_FORBIDDEN" });
+    return;
+  }
   const userId = body.userId || `coach-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  if (!(await ensureTeamPlanCapacity(res, teamId, "coach", userId))) return;
   const temporaryPassword = body.password?.trim() || `GUTO-${crypto.randomBytes(4).toString("hex")}`;
   const passwordHash = await bcrypt.hash(temporaryPassword, 10);
   const coach = await upsertUserAccessAsync(userId, {
     ...publicUserPatch(body),
     role: "coach",
     coachId: userId,
+    teamId,
     active: body.active ?? true,
     archived: false,
     visibleInArena: false,
@@ -884,12 +1022,22 @@ adminRouter.post("/coaches", asyncHandler(async (req, res) => {
 adminRouter.patch("/coaches/:coachId", asyncHandler(async (req, res) => {
   const caller = req.gutoUser!;
   if (!requireSuperAdminLike(req, res)) return;
-  const coach = getUserAccess(routeParam(req, "coachId"));
-  if (!coach || coach.role !== "coach") {
-    res.status(404).json({ message: "Coach não encontrado." });
+  const coach = getManagedCoach(req, res, routeParam(req, "coachId"));
+  if (!coach) return;
+  const body = req.body as Partial<UserAccess>;
+  if (body.teamId && req.gutoUser!.role !== "super_admin" && body.teamId !== normalizeAccessTeamId(coach.teamId)) {
+    res.status(403).json({ message: "Admin não pode mover coach para outro Time.", code: "TEAM_ACCESS_FORBIDDEN" });
     return;
   }
-  const updated = await upsertUserAccessAsync(coach.userId, publicUserPatch(req.body as Partial<UserAccess>));
+  const patch = publicUserPatch(body);
+  patch.coachId = coach.userId;
+  if (req.gutoUser!.role === "super_admin" && typeof body.teamId === "string") patch.teamId = body.teamId;
+  const targetTeamId = normalizeAccessTeamId(patch.teamId ?? coach.teamId);
+  const finalArchived = patch.archived ?? coach.archived;
+  if (!finalArchived && (targetTeamId !== normalizeAccessTeamId(coach.teamId) || coach.archived)) {
+    if (!(await ensureTeamPlanCapacity(res, targetTeamId, "coach", coach.userId))) return;
+  }
+  const updated = await upsertUserAccessAsync(coach.userId, patch);
   addLog({ action: "coach_updated", actorUserId: caller.userId, actorRole: caller.role, targetUserId: coach.userId });
   res.json({ coach: updated });
 }));
@@ -897,13 +1045,15 @@ adminRouter.patch("/coaches/:coachId", asyncHandler(async (req, res) => {
 adminRouter.delete("/coaches/:coachId", asyncHandler(async (req, res) => {
   const caller = req.gutoUser!;
   if (!requireSuperAdminLike(req, res)) return;
-  const coach = getUserAccess(routeParam(req, "coachId"));
-  if (!coach || coach.role !== "coach") {
-    res.status(404).json({ message: "Coach não encontrado." });
-    return;
-  }
+  const coach = getManagedCoach(req, res, routeParam(req, "coachId"));
+  if (!coach) return;
   const users = await getAllUserAccessAsync();
-  const assigned = users.filter((user) => user.role === "student" && user.coachId === coach.userId);
+  const assigned = users.filter(
+    (user) =>
+      user.role === "student" &&
+      normalizeAccessTeamId(user.teamId) === normalizeAccessTeamId(coach.teamId) &&
+      user.coachId === coach.userId
+  );
   if (assigned.length) {
     res.status(409).json({ message: "Coach ainda possui alunos atribuídos. Reatribua antes de excluir.", assignedStudents: assigned.length });
     return;
@@ -916,14 +1066,12 @@ adminRouter.delete("/coaches/:coachId", asyncHandler(async (req, res) => {
 adminRouter.post("/coaches/:coachId/students/:studentId", asyncHandler(async (req, res) => {
   const caller = req.gutoUser!;
   if (!requireSuperAdminLike(req, res)) return;
-  const coach = getUserAccess(routeParam(req, "coachId"));
-  const student = getUserAccess(routeParam(req, "studentId"));
-  if (!coach || coach.role !== "coach") {
-    res.status(404).json({ message: "Coach não encontrado." });
-    return;
-  }
-  if (!student || student.role !== "student") {
-    res.status(404).json({ message: "Aluno não encontrado." });
+  const coach = getManagedCoach(req, res, routeParam(req, "coachId"));
+  if (!coach) return;
+  const student = await getManagedStudent(req, res, routeParam(req, "studentId"));
+  if (!student) return;
+  if (normalizeAccessTeamId(coach.teamId) !== normalizeAccessTeamId(student.teamId)) {
+    res.status(403).json({ message: "Coach e aluno precisam pertencer ao mesmo Time.", code: "TEAM_ACCESS_FORBIDDEN" });
     return;
   }
   const updated = await upsertUserAccessAsync(student.userId, { coachId: coach.userId });
@@ -934,13 +1082,16 @@ adminRouter.post("/coaches/:coachId/students/:studentId", asyncHandler(async (re
 adminRouter.delete("/coaches/:coachId/students/:studentId", asyncHandler(async (req, res) => {
   const caller = req.gutoUser!;
   if (!requireSuperAdminLike(req, res)) return;
-  const student = getUserAccess(routeParam(req, "studentId"));
-  if (!student || student.role !== "student") {
-    res.status(404).json({ message: "Aluno não encontrado." });
-    return;
-  }
+  const coach = getManagedCoach(req, res, routeParam(req, "coachId"));
+  if (!coach) return;
+  const student = await getManagedStudent(req, res, routeParam(req, "studentId"));
+  if (!student) return;
   if (student.coachId !== routeParam(req, "coachId")) {
     res.status(404).json({ message: "Aluno não está atribuído a este coach." });
+    return;
+  }
+  if (normalizeAccessTeamId(coach.teamId) !== normalizeAccessTeamId(student.teamId)) {
+    res.status(403).json({ message: "Coach e aluno precisam pertencer ao mesmo Time.", code: "TEAM_ACCESS_FORBIDDEN" });
     return;
   }
   const updated = await upsertUserAccessAsync(student.userId, { coachId: "admin" });
@@ -1191,21 +1342,33 @@ adminRouter.get("/students/:userId/diet/history", asyncHandler(async (req, res) 
 // ─── Logs ────────────────────────────────────────────────────────────────────
 
 adminRouter.get("/logs", asyncHandler(async (req, res) => {
+  const actor = requireActor(req, res);
+  if (!actor) return;
   const targetUserId = req.query.targetUserId ? String(req.query.targetUserId) : undefined;
   if (targetUserId) {
     const target = getUserAccess(targetUserId);
-    if (!target || (target.role === "student" && !ownsStudent(req.gutoUser!, target))) {
-      res.status(403).json({ message: "Sem permissão para ver histórico deste aluno." });
+    if (!target) {
+      res.status(404).json({ message: "Usuário não encontrado." });
+      return;
+    }
+    if (!canAccessUserAccess(actor, target)) {
+      res.status(403).json({ message: "Sem permissão para ver histórico deste usuário.", code: "TEAM_ACCESS_FORBIDDEN" });
       return;
     }
     res.json({ logs: getLogs({ targetUserId }) });
     return;
   }
 
-  if (!isAdminRole(req.gutoUser?.role)) {
+  if (!isAdminRole(actor.role)) {
     res.status(403).json({ message: "Apenas admin pode ver logs globais." });
     return;
   }
 
-  res.json({ logs: getLogs() });
+  if (actor.role === "super_admin") {
+    res.json({ logs: getLogs() });
+    return;
+  }
+
+  const scopedUserIds = new Set(getScopedUserAccessList(actor, await getAllUserAccessAsync()).map((user) => user.userId));
+  res.json({ logs: getLogs().filter((log) => !log.targetUserId || scopedUserIds.has(log.targetUserId)) });
 }));

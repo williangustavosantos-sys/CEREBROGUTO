@@ -1,7 +1,13 @@
 import express, { Request, Response } from "express";
 import bcrypt from "bcrypt";
 import { config } from "./config.js";
-import { signToken, verifyToken, requireAuth } from "./auth-middleware.js";
+import {
+  getRequestActorAccess,
+  normalizeAccessTeamId,
+  requireAuth,
+  signToken,
+  verifyToken,
+} from "./auth-middleware.js";
 import {
   findInviteByToken,
   claimInvite,
@@ -16,9 +22,29 @@ import {
   getUserAccess,
   getAllUserAccess,
 } from "./user-access-store.js";
+import {
+  assertTeamPlanCapacity,
+  GUTO_CORE_TEAM_ID,
+  GutoTeamNotFoundError,
+  GutoTeamPlanLimitError,
+} from "./team-store.js";
 import crypto from "crypto";
 
 export const authRouter = express.Router();
+
+function sendTeamPlanError(res: Response, error: unknown): boolean {
+  if (error instanceof GutoTeamPlanLimitError || error instanceof GutoTeamNotFoundError) {
+    res.status(error.status).json({
+      message: error.message,
+      code: error.code,
+      ...(error instanceof GutoTeamPlanLimitError
+        ? { subject: error.subject, usage: error.usage }
+        : { teamId: error.teamId }),
+    });
+    return true;
+  }
+  return false;
+}
 
 // ─── POST /auth/admin/login ───────────────────────────────────────────────────
 
@@ -277,10 +303,11 @@ authRouter.post("/admin/invites", requireAuth, async (req: Request, res: Respons
     return;
   }
 
-  const { name, coachId, expiresInDays } = req.body as {
+  const { name, coachId, expiresInDays, teamId: requestedTeamId } = req.body as {
     name?: string;
     coachId?: string;
     expiresInDays?: number;
+    teamId?: string;
   };
 
   if (!name?.trim()) {
@@ -288,14 +315,50 @@ authRouter.post("/admin/invites", requireAuth, async (req: Request, res: Respons
     return;
   }
 
-  const resolvedCoachId =
-    caller.role === "admin" || caller.role === "super_admin" ? (coachId ?? caller.coachId ?? "admin") : (caller.coachId ?? caller.userId);
+  const actor = getRequestActorAccess(req);
+  if (!actor) {
+    res.status(401).json({ message: "Autenticação necessária." });
+    return;
+  }
+  const teamId = actor.role === "super_admin"
+    ? requestedTeamId || GUTO_CORE_TEAM_ID
+    : normalizeAccessTeamId(actor.teamId);
+  if (actor.role !== "super_admin" && requestedTeamId && requestedTeamId !== teamId) {
+    res.status(403).json({ message: "Admin/coach não pode criar convite em outro Time.", code: "TEAM_ACCESS_FORBIDDEN" });
+    return;
+  }
+
+  let resolvedCoachId =
+    actor.role === "admin" || actor.role === "super_admin" ? (coachId ?? actor.coachId ?? actor.userId) : actor.userId;
+  if (actor.role === "coach" && coachId && coachId !== actor.userId) {
+    res.status(403).json({ message: "Coach não pode criar convite para outro coach.", code: "COACH_STUDENT_ACCESS_FORBIDDEN" });
+    return;
+  }
+  if (coachId && actor.role !== "coach") {
+    const assignedCoach = await getUserAccessAsync(coachId);
+    if (!assignedCoach || assignedCoach.role !== "coach") {
+      res.status(404).json({ message: "Coach não encontrado." });
+      return;
+    }
+    if (normalizeAccessTeamId(assignedCoach.teamId) !== teamId) {
+      res.status(403).json({ message: "Coach pertence a outro Time.", code: "TEAM_ACCESS_FORBIDDEN" });
+      return;
+    }
+    resolvedCoachId = assignedCoach.userId;
+  }
 
   const userId = `u-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  try {
+    assertTeamPlanCapacity(teamId, "student", getAllUserAccess(), { excludeUserId: userId });
+  } catch (error) {
+    if (sendTeamPlanError(res, error)) return;
+    throw error;
+  }
 
   await upsertUserAccessAsync(userId, {
     role: "student",
     coachId: resolvedCoachId,
+    teamId,
     active: false,
     subscriptionStatus: "pending_payment",
   });
