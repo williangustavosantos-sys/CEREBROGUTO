@@ -33,6 +33,8 @@ export interface UserAccess {
   paymentStatus?: PaymentStatus;
   internalNotes?: string;
   accessDurationDays?: number;
+  phone?: string;
+  teamId?: string;
 }
 
 interface UserAccessStore {
@@ -146,7 +148,11 @@ async function writeStoreAsync(store: UserAccessStore): Promise<void> {
 // ─── Sync API (used by coach-router and server.ts) ───────────────────────────
 
 export function getUserAccess(userId: string): UserAccess | undefined {
-  return readStoreSync().users[userId];
+  const existing = readStoreSync().users[userId];
+  if (existing) {
+    return { ...existing, teamId: existing.teamId || "GUTO_CORE" };
+  }
+  return undefined;
 }
 
 /**
@@ -170,6 +176,7 @@ export function getEffectiveUserAccess(userId: string): UserAccess | null {
       updatedAt: now,
       subscriptionStatus: "active",
       subscriptionEndsAt: null,
+      teamId: "GUTO_CORE",
     };
   }
 
@@ -195,15 +202,16 @@ export function upsertUserAccess(
   const existing = store.users[userId];
   const updated = Object.assign(
     {},
-    { role: "student" as UserRole, coachId: DEV_COACH_ID, active: false, visibleInArena: true, archived: false, subscriptionStatus: "pending_payment" as SubscriptionStatus, subscriptionEndsAt: null as string | null },
+    { role: "student" as UserRole, coachId: DEV_COACH_ID, active: false, visibleInArena: true, archived: false, subscriptionStatus: "pending_payment" as SubscriptionStatus, subscriptionEndsAt: null as string | null, teamId: "GUTO_CORE" },
     existing ?? {},
     patch,
     { userId, createdAt: existing?.createdAt ?? now, updatedAt: now }
   ) as UserAccess;
+  if (!updated.teamId) updated.teamId = "GUTO_CORE";
   store.users[userId] = updated;
   writeStoreSync(store);
   // persist async to Redis in background
-  void writeStoreAsync(store).catch(() => {});
+  void writeStoreAsync(store).catch(() => { });
   return updated;
 }
 
@@ -211,22 +219,29 @@ export function deleteUserAccessHard(userId: string): void {
   const store = readStoreSync();
   delete store.users[userId];
   writeStoreSync(store);
-  void writeStoreAsync(store).catch(() => {});
+  void writeStoreAsync(store).catch(() => { });
 }
 
 export function getAllUserAccess(): UserAccess[] {
-  return Object.values(readStoreSync().users);
+  return Object.values(readStoreSync().users).map((u) => ({
+    ...u,
+    teamId: u.teamId || "GUTO_CORE",
+  }));
 }
 
 export function writeUserAccessStoreRaw(store: { users: Record<string, UserAccess> }): void {
   writeStoreSync(store);
-  void writeStoreAsync(store).catch(() => {});
+  void writeStoreAsync(store).catch(() => { });
 }
 
 // Async versions for auth router
 export async function getUserAccessAsync(userId: string): Promise<UserAccess | undefined> {
   const store = await readStoreAsync();
-  return store.users[userId];
+  const existing = store.users[userId];
+  if (existing) {
+    return { ...existing, teamId: existing.teamId || "GUTO_CORE" };
+  }
+  return undefined;
 }
 
 export async function getEffectiveUserAccessAsync(userId: string): Promise<UserAccess | null> {
@@ -246,6 +261,7 @@ export async function getEffectiveUserAccessAsync(userId: string): Promise<UserA
       updatedAt: now,
       subscriptionStatus: "active",
       subscriptionEndsAt: null,
+      teamId: "GUTO_CORE",
     };
   }
 
@@ -264,7 +280,10 @@ export async function requireActiveUserAccessAsync(userId: string): Promise<User
 
 export async function getAllUserAccessAsync(): Promise<UserAccess[]> {
   const store = await readStoreAsync();
-  return Object.values(store.users);
+  return Object.values(store.users).map((u) => ({
+    ...u,
+    teamId: u.teamId || "GUTO_CORE",
+  }));
 }
 
 export async function deleteUserAccessHardAsync(userId: string): Promise<void> {
@@ -286,11 +305,12 @@ export async function upsertUserAccessAsync(
   const existing = store.users[userId];
   const updated = Object.assign(
     {},
-    { role: "student" as UserRole, coachId: DEV_COACH_ID, active: false, visibleInArena: true, archived: false, subscriptionStatus: "pending_payment" as SubscriptionStatus, subscriptionEndsAt: null as string | null },
+    { role: "student" as UserRole, coachId: DEV_COACH_ID, active: false, visibleInArena: true, archived: false, subscriptionStatus: "pending_payment" as SubscriptionStatus, subscriptionEndsAt: null as string | null, teamId: "GUTO_CORE" },
     existing ?? {},
     patch,
     { userId, createdAt: existing?.createdAt ?? now, updatedAt: now }
   ) as UserAccess;
+  if (!updated.teamId) updated.teamId = "GUTO_CORE";
   store.users[userId] = updated;
   await writeStoreAsync(store);
   return updated;
