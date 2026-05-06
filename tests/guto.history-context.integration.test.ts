@@ -14,6 +14,7 @@ type GutoResponse = {
     instruction?: string;
     context?: string;
   } | null;
+  memoryPatch?: Record<string, any>;
 };
 
 const testMemoryDir = join(process.cwd(), "tmp");
@@ -270,7 +271,7 @@ describe("GUTO contextual muscle history", () => {
       input: "treinei isso ontem",
     });
 
-    const memory = readUserMemory(userId);
+    const memory = { ...readUserMemory(userId), ...response.memoryPatch };
     assert.equal(memory.recentTrainingHistory?.[0]?.muscleGroup, "legs_core");
     assert.equal(memory.recentTrainingHistory?.[0]?.dateLabel, "yesterday");
     assert.notEqual(memory.nextWorkoutFocus, "legs_core");
@@ -281,14 +282,14 @@ describe("GUTO contextual muscle history", () => {
   it("resolves 'treinei isso anteontem' without saving it as limitation", async () => {
     const userId = "history-context-pt-day-before";
     writeUserMemory(userId, { lastSuggestedFocus: "legs_core" });
-    await postGuto({
+    const response = await postGuto({
       language: "pt-BR",
       profile: { userId, name: "Will" },
       history: [{ role: "model", parts: [{ text: "Hoje a base é pernas e core." }] }],
       input: "treinei isso anteontem",
     });
 
-    const memory = readUserMemory(userId);
+    const memory = { ...readUserMemory(userId), ...response.memoryPatch };
     assert.equal(memory.recentTrainingHistory?.[0]?.muscleGroup, "legs_core");
     assert.equal(memory.recentTrainingHistory?.[0]?.dateLabel, "day_before_yesterday");
     assert.equal(memory.trainingLimitations, undefined);
@@ -304,7 +305,7 @@ describe("GUTO contextual muscle history", () => {
       input: "treinei pernas e core e peito e tríceps os últimos dois dias",
     });
 
-    const memory = readUserMemory(userId);
+    const memory = { ...readUserMemory(userId), ...response.memoryPatch };
     const groups = new Set(memory.recentTrainingHistory?.map((item: any) => `${item.muscleGroup}:${item.dateLabel}`));
     assert.equal(groups.has("legs_core:recent"), true);
     assert.equal(groups.has("chest_triceps:recent"), true);
@@ -322,31 +323,31 @@ describe("GUTO contextual muscle history", () => {
     compound: string;
     expectedCompound: RegExp;
   }> = [
-    {
-      language: "en-US",
-      historyText: "Today we go legs and core.",
-      yesterday: "I trained that yesterday",
-      dayBefore: "I trained that the day before yesterday",
-      compound: "I trained legs and core and chest and triceps over the last two days",
-      expectedCompound: /not repeating legs\/core or chest\/triceps/i,
-    },
-    {
-      language: "it-IT",
-      historyText: "Oggi andiamo su gambe e core.",
-      yesterday: "l'ho allenato ieri",
-      dayBefore: "l'ho allenato avantieri",
-      compound: "ho allenato gambe e core e petto e tricipiti negli ultimi due giorni",
-      expectedCompound: /non ripeto gambe\/core né petto\/tricipiti/i,
-    },
-    {
-      language: "es-ES",
-      historyText: "Hoy vamos con piernas y core.",
-      yesterday: "lo entrené ayer",
-      dayBefore: "lo entrené antes de ayer",
-      compound: "entrené piernas y core y pecho y tríceps los últimos dos días",
-      expectedCompound: /no repito piernas\/core ni pecho\/tríceps/i,
-    },
-  ];
+      {
+        language: "en-US",
+        historyText: "Today we go legs and core.",
+        yesterday: "I trained that yesterday",
+        dayBefore: "I trained that the day before yesterday",
+        compound: "I trained legs and core and chest and triceps over the last two days",
+        expectedCompound: /not repeating legs\/core or chest\/triceps/i,
+      },
+      {
+        language: "it-IT",
+        historyText: "Oggi andiamo su gambe e core.",
+        yesterday: "l'ho allenato ieri",
+        dayBefore: "l'ho allenato avantieri",
+        compound: "ho allenato gambe e core e petto e tricipiti negli ultimi due giorni",
+        expectedCompound: /non ripeto gambe\/core né petto\/tricipiti/i,
+      },
+      {
+        language: "es-ES",
+        historyText: "Hoy vamos con piernas y core.",
+        yesterday: "lo entrené ayer",
+        dayBefore: "lo entrené antes de ayer",
+        compound: "entrené piernas y core y pecho y tríceps los últimos dos días",
+        expectedCompound: /no repito piernas\/core ni pecho\/tríceps/i,
+      },
+    ];
 
   for (const testCase of localizedCases) {
     it(`resolves contextual and compound history in ${testCase.language}`, async () => {
@@ -358,7 +359,7 @@ describe("GUTO contextual muscle history", () => {
         history: [{ role: "model", parts: [{ text: testCase.historyText }] }],
         input: testCase.yesterday,
       });
-      const yesterdayMemory = readUserMemory(yesterdayUserId);
+      const yesterdayMemory = { ...readUserMemory(yesterdayUserId), ...yesterdayResponse.memoryPatch };
       assert.equal(yesterdayMemory.recentTrainingHistory?.[0]?.muscleGroup, "legs_core");
       assert.equal(yesterdayMemory.recentTrainingHistory?.[0]?.dateLabel, "yesterday");
       assert.notEqual(yesterdayMemory.nextWorkoutFocus, "legs_core");
@@ -366,13 +367,13 @@ describe("GUTO contextual muscle history", () => {
 
       const dayBeforeUserId = `history-context-${testCase.language}-day-before`;
       writeUserMemory(dayBeforeUserId, { lastSuggestedFocus: "legs_core" });
-      await postGuto({
+      const dayBeforeResponse = await postGuto({
         language: testCase.language,
         profile: { userId: dayBeforeUserId, name: "Will" },
         history: [{ role: "model", parts: [{ text: testCase.historyText }] }],
         input: testCase.dayBefore,
       });
-      const dayBeforeMemory = readUserMemory(dayBeforeUserId);
+      const dayBeforeMemory = { ...readUserMemory(dayBeforeUserId), ...dayBeforeResponse.memoryPatch };
       assert.equal(dayBeforeMemory.recentTrainingHistory?.[0]?.muscleGroup, "legs_core");
       assert.equal(dayBeforeMemory.recentTrainingHistory?.[0]?.dateLabel, "day_before_yesterday");
       assert.equal(dayBeforeMemory.trainingLimitations, undefined);
@@ -384,7 +385,7 @@ describe("GUTO contextual muscle history", () => {
         history: [],
         input: testCase.compound,
       });
-      const compoundMemory = readUserMemory(compoundUserId);
+      const compoundMemory = { ...readUserMemory(compoundUserId), ...compoundResponse.memoryPatch };
       const groups = new Set(compoundMemory.recentTrainingHistory?.map((item: any) => `${item.muscleGroup}:${item.dateLabel}`));
       assert.equal(groups.has("legs_core:recent"), true);
       assert.equal(groups.has("chest_triceps:recent"), true);
