@@ -41,6 +41,11 @@ import {
   type DietPlan,
 } from "./src/nutrition.js";
 import { getDietPlan, saveDietPlan } from "./src/diet-store.js";
+import {
+  isWorkoutCatalogValidationError,
+  normalizeWorkoutPlanAgainstCatalog,
+  validateWorkoutExerciseAgainstCatalog,
+} from "./src/workout-catalog-validation";
 
 type Acao = "none" | "updateWorkout" | "lock";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
@@ -585,7 +590,7 @@ function sanitizeOperationalMemory(memory: GutoMemory): GutoMemory {
     trainingLocation: isOperationalNoise(memory.trainingLocation) ? undefined : memory.trainingLocation,
     trainingStatus: isOperationalNoise(memory.trainingStatus) ? undefined : memory.trainingStatus,
     trainingLimitations: isOperationalNoise(memory.trainingLimitations) ? undefined : memory.trainingLimitations,
-    lastWorkoutPlan: enrichWorkoutPlanAnimations(memory.lastWorkoutPlan || null),
+    lastWorkoutPlan: memory.lastWorkoutPlan || null,
     recentTrainingHistory: Array.isArray(memory.recentTrainingHistory) ? memory.recentTrainingHistory.slice(0, 12) : [],
   };
 }
@@ -2633,28 +2638,16 @@ const WORKOUT_TITLE_BY_LANG: Record<WorkoutFocus, Record<GutoLanguage, string>> 
   },
 };
 
-function stripExercisesWithoutVideo(plan: WorkoutPlan): WorkoutPlan {
-  const valid = plan.exercises.filter(
-    (e) => (e.videoUrl && e.videoProvider === "local") || (e.animationUrl && e.animationProvider === "workoutx")
-  );
-  if (valid.length < plan.exercises.length) {
-    const removed = plan.exercises
-      .filter((e) => !e.videoUrl || e.videoProvider !== "local")
-      .map((e) => e.id);
-    console.warn(`[GUTO] Stripped exercise(s) without valid local videoUrl: ${removed.join(", ")}`);
-  }
-  return { ...plan, exercises: valid };
-}
-
 function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
   const selectedLanguage = normalizeLanguage(language);
+  const catalogPlan = normalizeWorkoutPlanAgainstCatalog(plan as unknown as Record<string, unknown>, selectedLanguage as CatalogLanguage) as unknown as WorkoutPlan;
   const scheduledDate = new Date(plan.scheduledFor);
   const localizedDateLabel = Number.isNaN(scheduledDate.getTime())
-    ? plan.dateLabel
+    ? catalogPlan.dateLabel
     : getWorkoutDateLabel(selectedLanguage, scheduledDate);
 
   const focusMap = FOCUS_NAME_BY_LANG[selectedLanguage];
-  const localizedFocus = focusMap[plan.focusKey ?? ""] || focusMap[plan.focus] || plan.focus;
+  const localizedFocus = focusMap[catalogPlan.focusKey ?? ""] || focusMap[catalogPlan.focus] || catalogPlan.focus;
   const focusKey = plan.focusKey || inferWorkoutFocusKey(localizedFocus);
   const localizedFocusLabel = focusKey
     ? WORKOUT_TITLE_BY_LANG[focusKey][selectedLanguage]
@@ -2662,7 +2655,7 @@ function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
 
   const cueCopyForLang = selectedLanguage !== "pt-BR" ? CUE_COPY_BY_LANG[selectedLanguage] : {};
 
-  const localizedExercises = stripExercisesWithoutVideo(plan).exercises.map((exercise) => {
+  const localizedExercises = catalogPlan.exercises.map((exercise) => {
     // Name comes from catalog (single source of truth for translations)
     const localizedName = getExerciseName(exercise.id, selectedLanguage as CatalogLanguage);
     // Cue/note from translation table; fall back to original PT-BR text
@@ -2675,7 +2668,7 @@ function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
   });
 
   return {
-    ...plan,
+    ...catalogPlan,
     focus: localizedFocusLabel,
     dateLabel: localizedDateLabel,
     summary: `${localizedFocusLabel}.`,
@@ -3085,15 +3078,8 @@ function validateWorkoutPlan(
   const seenVideoUrls = new Set<string>();
   for (const exercise of plan.exercises) {
     const entry = getCatalogById(exercise.id);
-    if (!entry) {
-      errors.push(`Exercise "${exercise.id}" not found in ValidatedExerciseCatalog.`);
-    }
-    if (!exercise.videoUrl) {
-      errors.push(`Exercise "${exercise.id}" has no videoUrl.`);
-    }
-    if (exercise.videoProvider !== "local") {
-      errors.push(`Exercise "${exercise.id}" uses provider "${exercise.videoProvider}" — only "local" is allowed.`);
-    }
+    const catalogValidation = validateWorkoutExerciseAgainstCatalog(exercise, "pt-BR");
+    errors.push(...catalogValidation.errors.map((catalogError) => catalogError.message));
     // No duplicate id within same workout
     if (seenIds.has(exercise.id)) {
       errors.push(`Duplicate exercise id "${exercise.id}" in the same workout.`);
@@ -3142,11 +3128,12 @@ function isCoachLockedWorkout(plan?: WorkoutPlan | null): boolean {
 }
 
 function markGutoGeneratedWorkout(plan: WorkoutPlan): WorkoutPlan {
+  const catalogPlan = normalizeWorkoutPlanAgainstCatalog(plan as unknown as Record<string, unknown>, "pt-BR") as unknown as WorkoutPlan;
   return {
-    ...plan,
-    source: plan.source || "guto_generated",
-    lockedByCoach: Boolean(plan.lockedByCoach),
-    planSource: plan.planSource || "ai_generated",
+    ...catalogPlan,
+    source: catalogPlan.source || "guto_generated",
+    lockedByCoach: Boolean(catalogPlan.lockedByCoach),
+    planSource: catalogPlan.planSource || "ai_generated",
   };
 }
 
@@ -3219,9 +3206,15 @@ async function askGutoModel({
 
     applyMemoryPatch(memory, parsedResponse.memoryPatch, parsedResponse.trainedReference, input);
 
-    let workoutPlan = parsedResponse.workoutPlan
-      ? localizeWorkoutPlan(enrichWorkoutPlanAnimations(parsedResponse.workoutPlan) as WorkoutPlan, selectedLanguage)
-      : null;
+    let workoutPlan: WorkoutPlan | null = null;
+    if (parsedResponse.workoutPlan) {
+      try {
+        workoutPlan = localizeWorkoutPlan(parsedResponse.workoutPlan as WorkoutPlan, selectedLanguage);
+      } catch (catalogError) {
+        if (!isWorkoutCatalogValidationError(catalogError)) throw catalogError;
+        console.warn("[GUTO] Rejected model workoutPlan outside official catalog:", catalogError.issues);
+      }
+    }
 
     if (workoutPlan && workoutPlan.exercises.length === 0) {
       workoutPlan = null;
@@ -3327,10 +3320,20 @@ app.get("/guto/memory", requireActiveUser, (req, res) => {
   }
   saveMemory(memory);
   if (memory.lastWorkoutPlan) {
-    res.json({
-      ...memory,
-      lastWorkoutPlan: localizeWorkoutPlan(stripExercisesWithoutVideo(memory.lastWorkoutPlan), memory.language)
-    });
+    try {
+      res.json({
+        ...memory,
+        lastWorkoutPlan: localizeWorkoutPlan(memory.lastWorkoutPlan, memory.language)
+      });
+    } catch (error) {
+      if (!isWorkoutCatalogValidationError(error)) throw error;
+      res.status(409).json({
+        ...memory,
+        lastWorkoutPlan: null,
+        lastWorkoutPlanError: "WORKOUT_PLAN_REQUIRES_CATALOG_VIDEO",
+        issues: error.issues,
+      });
+    }
     return;
   }
   res.json(memory);
@@ -3372,8 +3375,16 @@ app.post("/guto/memory", requireActiveUser, (req, res) => {
   if (typeof b.initialXpRewardSeen === "boolean") memory.initialXpRewardSeen = b.initialXpRewardSeen;
   if (b.lastWorkoutPlan && Array.isArray(b.lastWorkoutPlan.exercises)) {
     if (!isCoachLockedWorkout(memory.lastWorkoutPlan)) {
-      const enrichedPlan = enrichWorkoutPlanAnimations(b.lastWorkoutPlan);
-      memory.lastWorkoutPlan = enrichedPlan ? markGutoGeneratedWorkout(localizeWorkoutPlan(enrichedPlan, memory.language)) : null;
+      try {
+        memory.lastWorkoutPlan = markGutoGeneratedWorkout(localizeWorkoutPlan(b.lastWorkoutPlan, memory.language));
+      } catch (error) {
+        if (!isWorkoutCatalogValidationError(error)) throw error;
+        return res.status(400).json({
+          error: error.code,
+          message: "Treino recusado: exercício sem vídeo local validado no catálogo oficial.",
+          issues: error.issues,
+        });
+      }
     }
   }
 
@@ -3383,10 +3394,20 @@ app.post("/guto/memory", requireActiveUser, (req, res) => {
   }
 
   if (memory.lastWorkoutPlan) {
-    return res.json({
-      ...memory,
-      lastWorkoutPlan: localizeWorkoutPlan(stripExercisesWithoutVideo(memory.lastWorkoutPlan), memory.language)
-    });
+    try {
+      return res.json({
+        ...memory,
+        lastWorkoutPlan: localizeWorkoutPlan(memory.lastWorkoutPlan, memory.language)
+      });
+    } catch (error) {
+      if (!isWorkoutCatalogValidationError(error)) throw error;
+      return res.status(409).json({
+        ...memory,
+        lastWorkoutPlan: null,
+        lastWorkoutPlanError: "WORKOUT_PLAN_REQUIRES_CATALOG_VIDEO",
+        issues: error.issues,
+      });
+    }
   }
 
   res.json(memory);
@@ -3751,9 +3772,10 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
     workoutLabel?: string;
     locationMode?: string;
     language?: string;
+    workoutPlan?: WorkoutPlan;
   };
 
-  const { imageBase64, workoutFocus, workoutLabel, locationMode, language } = body;
+  const { imageBase64, workoutFocus, workoutLabel, locationMode, language, workoutPlan } = body;
   const userId = req.gutoUser!.userId;
 
   if (!imageBase64 || !workoutFocus || !workoutLabel || !locationMode) {
@@ -3796,9 +3818,29 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
   let thumbUrl = "";
 
   try {
-    // Check daily dedup: only one validation per user per day
     const storeCheck = readMemoryStore();
     const existingMemory = storeCheck[userId] as GutoMemory | undefined;
+
+    const planToValidate = workoutPlan || existingMemory?.lastWorkoutPlan;
+    if (!planToValidate) {
+      return res.status(400).json({
+        error: "WORKOUT_PLAN_EXERCISES_REQUIRED",
+        message: "Treino recusado: não existe plano oficial com exercícios do catálogo para validar.",
+      });
+    }
+
+    try {
+      normalizeWorkoutPlanAgainstCatalog(planToValidate as unknown as Record<string, unknown>, selectedLanguage as CatalogLanguage);
+    } catch (catalogError) {
+      if (!isWorkoutCatalogValidationError(catalogError)) throw catalogError;
+      return res.status(400).json({
+        error: catalogError.code,
+        message: "Treino recusado: exercício sem vídeo local validado no catálogo oficial.",
+        issues: catalogError.issues,
+      });
+    }
+
+    // Check daily dedup: only one validation per user per day
     if (existingMemory?.validationHistory?.some((r) => r.createdAt.startsWith(todayKey))) {
       return res.status(409).json({ error: "Treino já validado hoje." });
     }

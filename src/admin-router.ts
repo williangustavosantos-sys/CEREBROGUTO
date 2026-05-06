@@ -31,6 +31,10 @@ import { getDietPlan, saveDietPlan, deleteDietPlan } from "./diet-store.js";
 import { addLog, getLogs } from "./log-store.js";
 import { config } from "./config.js";
 import { createInvite, revokeInviteByUserId, updateInviteByUserId } from "./invite-store.js";
+import {
+  isWorkoutCatalogValidationError,
+  normalizeWorkoutPlanAgainstCatalog,
+} from "./workout-catalog-validation.js";
 
 export const adminRouter = express.Router();
 
@@ -263,7 +267,7 @@ function normalizeWorkoutPlan(rawValue: unknown, existing: LooseRecord | null, r
       })
     : [{ name: "Principal", exercises }];
 
-  return {
+  const workout = {
     ...existing,
     ...raw,
     studentId: asString(raw.studentId, asString(raw.userId, asString(existing?.studentId, ""))),
@@ -291,6 +295,7 @@ function normalizeWorkoutPlan(rawValue: unknown, existing: LooseRecord | null, r
     updatedBy: caller.userId,
     updatedAt,
   };
+  return normalizeWorkoutPlanAgainstCatalog(workout);
 }
 
 function normalizeDietFood(rawValue: unknown, index: number): LooseRecord {
@@ -422,6 +427,14 @@ function asyncHandler(fn: (req: Request, res: Response) => Promise<void>) {
   return (req: Request, res: Response) => {
     void fn(req, res).catch((error) => {
       console.error("[GUTO_ADMIN] route error:", error);
+      if (isWorkoutCatalogValidationError(error)) {
+        res.status(error.status).json({
+          message: "Treino recusado: exercício sem vídeo local validado no catálogo oficial.",
+          code: error.code,
+          issues: error.issues,
+        });
+        return;
+      }
       res.status(500).json({ message: "Backend recusou a ação: erro interno.", detail: error instanceof Error ? error.message : String(error) });
     });
   };
