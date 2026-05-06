@@ -1,6 +1,7 @@
 import express, { Request, Response } from "express";
 import crypto from "crypto";
 import bcrypt from "bcrypt";
+import { ValidatedExerciseCatalog } from "../exercise-catalog";
 import {
   requireCoachOrAdmin,
   requireAdmin,
@@ -223,10 +224,13 @@ function normalizeWorkoutExercise(rawValue: unknown, index: number): LooseRecord
   const raw = asRecord(rawValue);
   const name = asString(raw.name, `Exercício ${index + 1}`).trim() || `Exercício ${index + 1}`;
   const restSeconds = raw.restSeconds !== undefined ? asNumber(raw.restSeconds, 0) : undefined;
+  const hasVideoUrl = Object.prototype.hasOwnProperty.call(raw, "videoUrl");
   const videoUrl = asString(raw.videoUrl, "");
+  const hasVideoProvider = Object.prototype.hasOwnProperty.call(raw, "videoProvider");
+  const hasSourceFileName = Object.prototype.hasOwnProperty.call(raw, "sourceFileName");
   const sourceFileName = asString(raw.sourceFileName, videoUrl.split("/").filter(Boolean).pop() || "");
   return {
-    id: asString(raw.id, `${name.toLowerCase().replace(/[^a-z0-9]+/gi, "-")}-${index + 1}`),
+    id: asString(raw.id, ""),
     name,
     canonicalNamePt: asString(raw.canonicalNamePt, name),
     muscleGroup: asString(raw.muscleGroup || raw.group || raw.groupName, "manual"),
@@ -239,9 +243,9 @@ function normalizeWorkoutExercise(rawValue: unknown, index: number): LooseRecord
     note: asString(raw.note || raw.notes, ""),
     alternatives: normalizeStringArray(raw.alternatives || raw.substitutions),
     order: asNumber(raw.order, index + 1),
-    videoUrl,
-    videoProvider: "local",
-    sourceFileName,
+    ...(hasVideoUrl ? { videoUrl } : {}),
+    ...(hasVideoProvider ? { videoProvider: asString(raw.videoProvider, "") } : {}),
+    ...(hasSourceFileName ? { sourceFileName } : {}),
   };
 }
 
@@ -429,7 +433,9 @@ function asyncHandler(fn: (req: Request, res: Response) => Promise<void>) {
       console.error("[GUTO_ADMIN] route error:", error);
       if (isWorkoutCatalogValidationError(error)) {
         res.status(error.status).json({
-          message: "Treino recusado: exercício sem vídeo local validado no catálogo oficial.",
+          message: error.code === "WORKOUT_EXERCISE_CATALOG_SELECTION_REQUIRED"
+            ? "Escolha um exercício do catálogo oficial antes de salvar."
+            : "Treino recusado: exercício sem vídeo local validado no catálogo oficial.",
           code: error.code,
           issues: error.issues,
         });
@@ -444,6 +450,29 @@ function routeParam(req: Request, name: string): string {
   const value = req.params[name];
   return Array.isArray(value) ? value[0] || "" : String(value || "");
 }
+
+adminRouter.get("/exercises/catalog", asyncHandler(async (_req, res) => {
+  const exercises = ValidatedExerciseCatalog
+    .map((entry) => ({
+      id: entry.id,
+      canonicalNamePt: entry.canonicalNamePt,
+      namesByLanguage: entry.namesByLanguage,
+      aliasesByLanguage: entry.aliasesByLanguage,
+      muscleGroup: entry.muscleGroup,
+      videoUrl: entry.videoUrl,
+      videoProvider: entry.videoProvider,
+      sourceFileName: entry.sourceFileName,
+      equipment: entry.equipment,
+      movementPattern: entry.movementPattern,
+      tags: entry.tags ?? [],
+    }))
+    .sort((a, b) => {
+      const group = a.muscleGroup.localeCompare(b.muscleGroup, "pt-BR");
+      return group || a.canonicalNamePt.localeCompare(b.canonicalNamePt, "pt-BR");
+    });
+
+  res.json({ exercises });
+}));
 
 // ─── Students ────────────────────────────────────────────────────────────────
 

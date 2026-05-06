@@ -40,7 +40,7 @@ function catalogExercise(id = "supino_reto") {
   };
 }
 
-function workoutPlan(exercise = catalogExercise()) {
+function workoutPlan(exercise: Record<string, unknown> = catalogExercise()) {
   return {
     focus: "Peito e tríceps",
     focusKey: "chest_triceps",
@@ -58,8 +58,11 @@ function assertCatalogError(fn: () => unknown, code: string) {
   );
 }
 
-function signToken(role: "student" | "admin", userId: string) {
-  return jwt.sign({ userId, role }, process.env.JWT_SECRET || "dev-secret-change-in-production");
+function signToken(role: "student" | "admin" | "coach", userId: string) {
+  return jwt.sign(
+    { userId, role, coachId: role === "coach" ? userId : undefined },
+    process.env.JWT_SECRET || "dev-secret-change-in-production"
+  );
 }
 
 async function request(path: string, options: RequestInit = {}) {
@@ -112,6 +115,35 @@ after(async () => {
 });
 
 describe("workout catalog video gate", () => {
+  it("lists the official exercise catalog for admin users", async () => {
+    const response = await request("/admin/exercises/catalog", {
+      headers: { Authorization: `Bearer ${signToken("admin", "admin-video-gate")}` },
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { exercises?: Array<Record<string, unknown>> };
+    assert.ok(Array.isArray(body.exercises));
+    assert.ok(body.exercises.length > 0);
+    assert.equal(body.exercises[0]?.videoProvider, "local");
+    assert.ok(String(body.exercises[0]?.videoUrl || "").startsWith("/exercise/visuals/"));
+  });
+
+  it("lists the official exercise catalog for coach users", async () => {
+    const response = await request("/admin/exercises/catalog", {
+      headers: { Authorization: `Bearer ${signToken("coach", "coach-video-gate")}` },
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { exercises?: Array<Record<string, unknown>> };
+    assert.ok(body.exercises?.some((exercise) => exercise.id === "supino_reto"));
+  });
+
+  it("blocks catalog listing without auth", async () => {
+    const response = await request("/admin/exercises/catalog");
+
+    assert.equal(response.status, 401);
+  });
+
   it("fails when a workout exercise uses an unknown id", () => {
     assertCatalogError(
       () => normalizeWorkoutPlanAgainstCatalog(workoutPlan({ ...catalogExercise(), id: "invented_exercise" })),
@@ -145,6 +177,58 @@ describe("workout catalog video gate", () => {
     assert.equal((normalized.exercises as any[])[0].name, "Supino reto");
     assert.equal((normalized.exercises as any[])[0].videoUrl, getCatalogById("supino_reto")?.videoUrl);
     assert.equal((normalized.exercises as any[])[0].videoProvider, "local");
+  });
+
+  it("accepts manual admin workout saves with a selected catalog id and normalizes media", async () => {
+    const response = await request("/admin/students/student-video-gate/workout", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${signToken("admin", "admin-video-gate")}`,
+      },
+      body: JSON.stringify({
+        workout: workoutPlan({
+          id: "supino_reto",
+          name: "Nome livre ignorado",
+          sets: 4,
+          reps: "8-10",
+          rest: "90s",
+          cue: "Controle.",
+          note: "Sem pressa.",
+        }),
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { workout?: { exercises?: Array<Record<string, unknown>> } };
+    assert.equal(body.workout?.exercises?.[0]?.id, "supino_reto");
+    assert.equal(body.workout?.exercises?.[0]?.name, "Supino reto");
+    assert.equal(body.workout?.exercises?.[0]?.videoUrl, getCatalogById("supino_reto")?.videoUrl);
+    assert.equal(body.workout?.exercises?.[0]?.videoProvider, "local");
+  });
+
+  it("rejects manual admin workout saves with free name and no catalog id", async () => {
+    const response = await request("/admin/students/student-video-gate/workout", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${signToken("admin", "admin-video-gate")}`,
+      },
+      body: JSON.stringify({
+        workout: workoutPlan({
+          name: "Supino inventado pelo texto",
+          sets: 3,
+          reps: "10",
+          rest: "60s",
+          cue: "",
+          note: "",
+        }),
+      }),
+    });
+
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { code?: string };
+    assert.equal(body.code, "WORKOUT_EXERCISE_CATALOG_SELECTION_REQUIRED");
   });
 
   it("rejects manual admin workout saves without catalog video", async () => {

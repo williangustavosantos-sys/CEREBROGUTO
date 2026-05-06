@@ -7,7 +7,8 @@ export type WorkoutCatalogValidationCode =
   | "WORKOUT_EXERCISE_VIDEO_REQUIRED"
   | "EXTERNAL_WORKOUT_VIDEO_NOT_ALLOWED"
   | "WORKOUT_EXERCISE_VIDEO_MISMATCH"
-  | "WORKOUT_PLAN_EXERCISES_REQUIRED";
+  | "WORKOUT_PLAN_EXERCISES_REQUIRED"
+  | "WORKOUT_EXERCISE_CATALOG_SELECTION_REQUIRED";
 
 export interface WorkoutCatalogValidationIssue {
   code: WorkoutCatalogValidationCode;
@@ -77,8 +78,8 @@ export function validateWorkoutExerciseAgainstCatalog(
       valid: false,
       errors: [
         issue(
-          "INVALID_WORKOUT_EXERCISE_CATALOG_ID",
-          "Todo exercício do treino precisa de id válido do catálogo oficial.",
+          "WORKOUT_EXERCISE_CATALOG_SELECTION_REQUIRED",
+          "Escolha um exercício do catálogo oficial antes de salvar.",
           id || undefined,
           index
         ),
@@ -102,7 +103,9 @@ export function validateWorkoutExerciseAgainstCatalog(
   }
 
   const errors: WorkoutCatalogValidationIssue[] = [];
+  const hasSubmittedVideoUrl = Object.prototype.hasOwnProperty.call(exercise, "videoUrl");
   const submittedVideoUrl = typeof exercise.videoUrl === "string" ? exercise.videoUrl.trim() : "";
+  const hasSubmittedProvider = Object.prototype.hasOwnProperty.call(exercise, "videoProvider");
   const submittedProvider = typeof exercise.videoProvider === "string" ? exercise.videoProvider.trim() : "";
 
   if (!isValidCatalogVideo(entry)) {
@@ -116,11 +119,11 @@ export function validateWorkoutExerciseAgainstCatalog(
     );
   }
 
-  if (!submittedVideoUrl) {
+  if (hasSubmittedVideoUrl && !submittedVideoUrl) {
     errors.push(
       issue("WORKOUT_EXERCISE_VIDEO_REQUIRED", `Exercise "${id}" has no submitted videoUrl.`, id, index)
     );
-  } else if (!submittedVideoUrl.startsWith(LOCAL_VIDEO_PREFIX)) {
+  } else if (hasSubmittedVideoUrl && !submittedVideoUrl.startsWith(LOCAL_VIDEO_PREFIX)) {
     errors.push(
       issue(
         "EXTERNAL_WORKOUT_VIDEO_NOT_ALLOWED",
@@ -129,7 +132,7 @@ export function validateWorkoutExerciseAgainstCatalog(
         index
       )
     );
-  } else if (submittedVideoUrl !== entry.videoUrl) {
+  } else if (hasSubmittedVideoUrl && submittedVideoUrl !== entry.videoUrl) {
     errors.push(
       issue(
         "WORKOUT_EXERCISE_VIDEO_MISMATCH",
@@ -140,7 +143,7 @@ export function validateWorkoutExerciseAgainstCatalog(
     );
   }
 
-  if (submittedProvider && submittedProvider !== "local") {
+  if (hasSubmittedProvider && submittedProvider !== "local") {
     errors.push(
       issue(
         "EXTERNAL_WORKOUT_VIDEO_NOT_ALLOWED",
