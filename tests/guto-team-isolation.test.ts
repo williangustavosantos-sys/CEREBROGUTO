@@ -1,3 +1,4 @@
+import "./test-env.js";
 import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import jwt from "jsonwebtoken";
@@ -17,7 +18,8 @@ import {
   writeUserAccessStoreRaw,
   type UserAccess,
 } from "../src/user-access-store.js";
-import { GUTO_CORE_TEAM_ID } from "../src/team-store.js";
+import { GUTO_CORE_TEAM_ID, createTeam } from "../src/team-store.js";
+import { config } from "../src/config.js";
 
 const tmpDir = join(process.cwd(), "tmp");
 const userAccessFile = join(tmpDir, "user-access.json");
@@ -25,7 +27,7 @@ const inviteFile = join(tmpDir, "invites.json");
 const auditLogFile = join(tmpDir, "audit-logs.json");
 const testMemoryFile = join(tmpDir, "guto-memory.team-isolation-test.json");
 
-let app: { listen: (port: number, callback?: () => void) => Server };
+let app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
 let server: Server;
 let baseUrl = "";
 let originalUserAccess: string | null = null;
@@ -58,6 +60,12 @@ function access(userId: string, role: UserAccess["role"], coachId: string, teamI
     subscriptionStatus: "active",
     subscriptionEndsAt: null,
   };
+}
+
+function seedTeams(): void {
+  const now = new Date().toISOString();
+  createTeam({ id: "TEAM_A", name: "Time A", plan: "pro", status: "active", createdAt: now, updatedAt: now });
+  createTeam({ id: "TEAM_B", name: "Time B", plan: "pro", status: "active", createdAt: now, updatedAt: now });
 }
 
 function seedAccessStore(): void {
@@ -98,18 +106,20 @@ async function request(path: string, options: RequestInit = {}) {
 before(async () => {
   process.env.GUTO_DISABLE_LISTEN = "1";
   process.env.GUTO_MEMORY_FILE = testMemoryFile;
+  config.memoryFile = testMemoryFile;
   mkdirSync(tmpDir, { recursive: true });
   originalUserAccess = existsSync(userAccessFile) ? readFileSync(userAccessFile, "utf8") : null;
   originalInvites = existsSync(inviteFile) ? readFileSync(inviteFile, "utf8") : null;
   originalAuditLogs = existsSync(auditLogFile) ? readFileSync(auditLogFile, "utf8") : null;
 
   const serverModule = (await import(pathToFileURL(join(process.cwd(), "server.ts")).href)) as {
-    app: { listen: (port: number, callback?: () => void) => Server };
+    app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
   };
   app = serverModule.app;
 
-  await new Promise<void>((resolve) => {
-    server = app.listen(0, () => resolve());
+  await new Promise<void>((resolve, reject) => {
+    server = app.listen(0, "127.0.0.1", () => resolve());
+    server.once("error", reject);
   });
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Failed to bind team isolation test server.");
@@ -117,6 +127,7 @@ before(async () => {
 });
 
 beforeEach(() => {
+  seedTeams();
   seedAccessStore();
   writeFileSync(testMemoryFile, JSON.stringify({}, null, 2));
 });

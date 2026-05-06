@@ -1,3 +1,4 @@
+import "./test-env.js";
 import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -24,7 +25,7 @@ const testMemoryFile = join(process.cwd(), "tmp", "guto-memory.video-gate-test.j
 const userAccessFile = join(process.cwd(), "tmp", "user-access.json");
 const customExerciseFile = join(process.cwd(), "tmp", "custom-exercises.video-gate-test.json");
 
-let app: { listen: (port: number, callback?: () => void) => Server };
+let app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
 let server: Server;
 let baseUrl = "";
 let originalUserAccess = "";
@@ -161,14 +162,15 @@ before(async () => {
   writeFileSync(customExerciseFile, JSON.stringify({ exercises: {} }, null, 2));
 
   const serverModule = (await import(pathToFileURL(join(process.cwd(), "server.ts")).href)) as {
-    app: { listen: (port: number, callback?: () => void) => Server };
+    app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
   };
   const userAccessModule = await import(pathToFileURL(join(process.cwd(), "src", "user-access-store.ts")).href);
   upsertUserAccess = userAccessModule.upsertUserAccess;
   app = serverModule.app;
 
-  await new Promise<void>((resolve) => {
-    server = app.listen(0, () => resolve());
+  await new Promise<void>((resolve, reject) => {
+    server = app.listen(0, "127.0.0.1", () => resolve());
+    server.once("error", reject);
   });
 
   const address = server.address();

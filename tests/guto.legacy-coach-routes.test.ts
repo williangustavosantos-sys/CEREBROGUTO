@@ -1,3 +1,4 @@
+import "./test-env.js";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
@@ -10,7 +11,7 @@ import jwt from "jsonwebtoken";
 const testMemoryDir = join(process.cwd(), "tmp");
 const testMemoryFile = join(testMemoryDir, "guto-memory.legacy-coach-routes-test.json");
 
-let app: { listen: (port: number, callback?: () => void) => Server };
+let app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
 let server: Server;
 let baseUrl = "";
 
@@ -31,12 +32,13 @@ before(async () => {
   delete process.env.GUTO_ENABLE_LEGACY_COACH_ROUTES;
 
   const serverModule = (await import(pathToFileURL(join(process.cwd(), "server.ts")).href)) as {
-    app: { listen: (port: number, callback?: () => void) => Server };
+    app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
   };
   app = serverModule.app;
 
-  await new Promise<void>((resolve) => {
-    server = app.listen(0, () => resolve());
+  await new Promise<void>((resolve, reject) => {
+    server = app.listen(0, "127.0.0.1", () => resolve());
+    server.once("error", reject);
   });
 
   const address = server.address();
@@ -99,8 +101,9 @@ describe("legacy /guto/coach quarantine", () => {
     legacyApp.use(parseAuth);
     legacyApp.use("/guto/coach", coachRouter);
 
-    const legacyServer = await new Promise<Server>((resolve) => {
-      const listeningServer = legacyApp.listen(0, () => resolve(listeningServer));
+    const legacyServer = await new Promise<Server>((resolve, reject) => {
+      const listeningServer = legacyApp.listen(0, "127.0.0.1", () => resolve(listeningServer));
+      listeningServer.once("error", reject);
     });
 
     try {

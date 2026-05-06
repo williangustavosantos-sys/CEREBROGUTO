@@ -1,3 +1,4 @@
+import "./test-env.js";
 import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -21,7 +22,7 @@ const testMemoryDir = join(process.cwd(), "tmp");
 const testMemoryFile = join(testMemoryDir, "guto-memory.history-context-test.json");
 const originalFetch = globalThis.fetch.bind(globalThis);
 
-let app: { listen: (port: number, callback?: () => void) => Server };
+let app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
 let server: Server;
 let baseUrl = "";
 
@@ -235,12 +236,13 @@ before(async () => {
   installGeminiMock();
 
   const serverModule = (await import(pathToFileURL(join(process.cwd(), "server.ts")).href)) as {
-    app: { listen: (port: number, callback?: () => void) => Server };
+    app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
   };
   app = serverModule.app;
 
-  await new Promise<void>((resolve) => {
-    server = app.listen(0, () => resolve());
+  await new Promise<void>((resolve, reject) => {
+    server = app.listen(0, "127.0.0.1", () => resolve());
+    server.once("error", reject);
   });
 
   const address = server.address();
