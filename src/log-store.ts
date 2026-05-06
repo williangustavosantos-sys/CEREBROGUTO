@@ -31,6 +31,8 @@ export type LogAction =
   | "diet_unlocked"
   | "diet_reset"
   | "diet_published"
+  | "custom_exercise_requested"
+  | "custom_exercise_approved"
   | "arena_reset"
   | "password_reset"
   | "user_deleted";

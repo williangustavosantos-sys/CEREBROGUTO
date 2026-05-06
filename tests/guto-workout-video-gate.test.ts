@@ -160,10 +160,12 @@ before(async () => {
   writeFileSync(testMemoryFile, JSON.stringify({}, null, 2));
   writeFileSync(customExerciseFile, JSON.stringify({ exercises: {} }, null, 2));
 
-  const serverModule = (await import(pathToFileURL(join(process.cwd(), "server.ts")).href)) as any;
+  const serverModule = (await import(pathToFileURL(join(process.cwd(), "server.ts")).href)) as {
+    app: { listen: (port: number, callback?: () => void) => Server };
+  };
   const userAccessModule = await import(pathToFileURL(join(process.cwd(), "src", "user-access-store.ts")).href);
   upsertUserAccess = userAccessModule.upsertUserAccess;
-  app = serverModule.app ?? serverModule.default?.app ?? serverModule["module.exports"]?.app;
+  app = serverModule.app;
 
   await new Promise<void>((resolve) => {
     server = app.listen(0, () => resolve());
