@@ -1,3 +1,5 @@
+import { getApprovedCustomCatalogExercises } from "./src/custom-exercise-store.js";
+
 export type CatalogLanguage = "pt-BR" | "it-IT" | "en-US" | "es-ES";
 export type CatalogMuscleGroup =
   | "aquecimento"
@@ -2095,23 +2097,27 @@ const catalogById = new Map<string, CatalogExercise>(
   ValidatedExerciseCatalog.map((e) => [e.id, e])
 );
 
+export function getAggregatedExerciseCatalog(): CatalogExercise[] {
+  return [...ValidatedExerciseCatalog, ...getApprovedCustomCatalogExercises()];
+}
+
 export function getCatalogById(id: string): CatalogExercise | undefined {
-  return catalogById.get(id);
+  return catalogById.get(id) ?? getApprovedCustomCatalogExercises().find((entry) => entry.id === id);
 }
 
 export function getCatalogByGroup(group: CatalogMuscleGroup): CatalogExercise[] {
-  return ValidatedExerciseCatalog.filter((e) => e.muscleGroup === group);
+  return getAggregatedExerciseCatalog().filter((e) => e.muscleGroup === group);
 }
 
 export function getExerciseName(id: string, language: CatalogLanguage): string {
-  const entry = catalogById.get(id);
+  const entry = getCatalogById(id);
   if (!entry) return id;
   return entry.namesByLanguage[language] ?? entry.canonicalNamePt;
 }
 
 export function findByAlias(alias: string, language: CatalogLanguage): CatalogExercise | undefined {
   const normalized = alias.toLowerCase().trim();
-  return ValidatedExerciseCatalog.find((e) =>
+  return getAggregatedExerciseCatalog().find((e) =>
     (e.aliasesByLanguage[language] ?? []).some((a) => a.toLowerCase() === normalized)
   );
 }

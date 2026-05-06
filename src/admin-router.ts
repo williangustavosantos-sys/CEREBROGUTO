@@ -1,7 +1,7 @@
 import express, { Request, Response } from "express";
 import crypto from "crypto";
 import bcrypt from "bcrypt";
-import { ValidatedExerciseCatalog } from "../exercise-catalog";
+import { getAggregatedExerciseCatalog, getCatalogById, type CatalogMuscleGroup } from "../exercise-catalog";
 import {
   requireCoachOrAdmin,
   requireAdmin,
@@ -36,6 +36,19 @@ import {
   isWorkoutCatalogValidationError,
   normalizeWorkoutPlanAgainstCatalog,
 } from "./workout-catalog-validation.js";
+import {
+  assertValidExerciseVideoMetadata,
+  isExerciseVideoValidationError,
+  suggestSafeExerciseVideoFileName,
+} from "./exercise-video-validation.js";
+import {
+  buildAliasMap,
+  buildLanguageMap,
+  getCustomExerciseRequest,
+  readCustomExerciseRequests,
+  saveCustomExerciseRequest,
+  type CustomExerciseRequest,
+} from "./custom-exercise-store.js";
 
 export const adminRouter = express.Router();
 
@@ -47,6 +60,7 @@ type ResetScope = "weekly" | "monthly" | "individual" | "validationHistory" | "a
 
 const PLAN_SOURCES: PlanSource[] = ["guto_generated", "coach_manual", "mixed"];
 const ADMIN_ROLES: UserRole[] = ["admin", "super_admin"];
+const CATALOG_MUSCLE_GROUPS: CatalogMuscleGroup[] = ["aquecimento", "peito", "costas", "ombro", "bracos", "pernas", "abdomen"];
 
 function isAdminRole(role?: string): boolean {
   return role === "admin" || role === "super_admin";
@@ -80,6 +94,84 @@ function asBoolean(value: unknown, fallback = false): boolean {
 function normalizeStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((item) => String(item).trim()).filter(Boolean);
+}
+
+function normalizeExerciseId(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .replace(/_{2,}/g, "_");
+}
+
+function customExerciseFromBody(req: Request): CustomExerciseRequest {
+  const body = asRecord(req.body);
+  const video = assertValidExerciseVideoMetadata(
+    {
+      ...asRecord(body.video),
+      ...asRecord(body.videoMetadata),
+      sourceFileName: body.sourceFileName ?? asRecord(body.video).sourceFileName ?? asRecord(body.videoMetadata).sourceFileName,
+      fileName: body.fileName ?? asRecord(body.video).fileName ?? asRecord(body.videoMetadata).fileName,
+      videoUrl: body.videoUrl ?? asRecord(body.video).videoUrl ?? asRecord(body.videoMetadata).videoUrl,
+      fileSizeBytes: body.fileSizeBytes ?? asRecord(body.video).fileSizeBytes ?? asRecord(body.videoMetadata).fileSizeBytes,
+      durationSeconds: body.durationSeconds ?? asRecord(body.video).durationSeconds ?? asRecord(body.videoMetadata).durationSeconds,
+      width: body.width ?? asRecord(body.video).width ?? asRecord(body.videoMetadata).width,
+      height: body.height ?? asRecord(body.video).height ?? asRecord(body.videoMetadata).height,
+      fps: body.fps ?? asRecord(body.video).fps ?? asRecord(body.videoMetadata).fps,
+      mimeType: body.mimeType ?? asRecord(body.video).mimeType ?? asRecord(body.videoMetadata).mimeType,
+      hasAudio: body.hasAudio ?? asRecord(body.video).hasAudio ?? asRecord(body.videoMetadata).hasAudio,
+    },
+    { customOnly: true }
+  );
+  const canonicalNamePt = asString(body.canonicalNamePt || body.name, "").trim();
+  if (!canonicalNamePt) {
+    throw new Error("Nome do exercício é obrigatório.");
+  }
+  const requestedId = normalizeExerciseId(asString(body.id, ""));
+  const id = requestedId || normalizeExerciseId(video.sourceFileName.replace(/\.mp4$/i, ""));
+  const muscleGroup = asString(body.muscleGroup, "peito") as CatalogMuscleGroup;
+  if (!CATALOG_MUSCLE_GROUPS.includes(muscleGroup)) {
+    throw new Error(`Grupo muscular inválido: ${muscleGroup}`);
+  }
+  const caller = req.gutoUser!;
+  const now = new Date().toISOString();
+  return {
+    id,
+    canonicalNamePt,
+    namesByLanguage: buildLanguageMap(canonicalNamePt, body.namesByLanguage),
+    aliasesByLanguage: buildAliasMap(body.aliasesByLanguage),
+    muscleGroup,
+    videoUrl: video.videoUrl,
+    sourceFileName: video.sourceFileName,
+    videoProvider: "local",
+    movementPattern: asString(body.movementPattern, "") || undefined,
+    equipment: asString(body.equipment, "") || undefined,
+    tags: normalizeStringArray(body.tags),
+    status: "pending",
+    requestedBy: caller.userId,
+    requestedByRole: caller.role,
+    requestedAt: now,
+    videoValidated: true,
+    videoMetadata: {
+      fileSizeBytes: video.fileSizeBytes,
+      durationSeconds: video.durationSeconds,
+      width: video.width,
+      height: video.height,
+      fps: video.fps,
+      mimeType: video.mimeType,
+      ...(video.hasAudio !== undefined ? { hasAudio: video.hasAudio } : {}),
+    },
+    custom: true,
+  };
+}
+
+function customExerciseView(exercise: CustomExerciseRequest) {
+  return {
+    ...exercise,
+    suggestedFileName: suggestSafeExerciseVideoFileName(exercise.sourceFileName),
+  };
 }
 
 function resolveActorId(req: Request): string {
@@ -441,6 +533,14 @@ function asyncHandler(fn: (req: Request, res: Response) => Promise<void>) {
         });
         return;
       }
+      if (isExerciseVideoValidationError(error)) {
+        res.status(error.status).json({
+          message: "Esse vídeo está pesado demais para o app. Use MP4 até 30 segundos, máximo 12MB e 720p.",
+          code: error.code,
+          issues: error.issues,
+        });
+        return;
+      }
       res.status(500).json({ message: "Backend recusou a ação: erro interno.", detail: error instanceof Error ? error.message : String(error) });
     });
   };
@@ -452,7 +552,7 @@ function routeParam(req: Request, name: string): string {
 }
 
 adminRouter.get("/exercises/catalog", asyncHandler(async (_req, res) => {
-  const exercises = ValidatedExerciseCatalog
+  const exercises = getAggregatedExerciseCatalog()
     .map((entry) => ({
       id: entry.id,
       canonicalNamePt: entry.canonicalNamePt,
@@ -472,6 +572,83 @@ adminRouter.get("/exercises/catalog", asyncHandler(async (_req, res) => {
     });
 
   res.json({ exercises });
+}));
+
+adminRouter.get("/exercises/custom", asyncHandler(async (_req, res) => {
+  res.json({ exercises: readCustomExerciseRequests().map(customExerciseView) });
+}));
+
+adminRouter.post("/exercises/custom", asyncHandler(async (req, res) => {
+  const exercise = customExerciseFromBody(req);
+  if (getCatalogById(exercise.id) || getCustomExerciseRequest(exercise.id)) {
+    res.status(409).json({ message: "Exercício já existe no catálogo ou na fila customizada.", code: "EXERCISE_ALREADY_EXISTS" });
+    return;
+  }
+  const saved = saveCustomExerciseRequest(exercise);
+  addLog({
+    action: "custom_exercise_requested",
+    actorUserId: req.gutoUser!.userId,
+    actorRole: req.gutoUser!.role,
+    metadata: { exerciseId: saved.id, videoUrl: saved.videoUrl },
+  });
+  res.status(201).json({ exercise: customExerciseView(saved) });
+}));
+
+adminRouter.post("/exercises/custom/:exerciseId/approve", requireAdmin, asyncHandler(async (req, res) => {
+  const existing = getCustomExerciseRequest(routeParam(req, "exerciseId"));
+  if (!existing) {
+    res.status(404).json({ message: "Exercício customizado não encontrado." });
+    return;
+  }
+  const video = assertValidExerciseVideoMetadata({
+    sourceFileName: existing.sourceFileName,
+    videoUrl: existing.videoUrl,
+    ...existing.videoMetadata,
+  }, { customOnly: true });
+  const updated: CustomExerciseRequest = {
+    ...existing,
+    status: "approved",
+    videoValidated: true,
+    videoUrl: video.videoUrl,
+    sourceFileName: video.sourceFileName,
+    videoMetadata: {
+      fileSizeBytes: video.fileSizeBytes,
+      durationSeconds: video.durationSeconds,
+      width: video.width,
+      height: video.height,
+      fps: video.fps,
+      mimeType: video.mimeType,
+      ...(video.hasAudio !== undefined ? { hasAudio: video.hasAudio } : {}),
+    },
+    approvedBy: req.gutoUser!.userId,
+    approvedAt: new Date().toISOString(),
+    rejectionReason: undefined,
+  };
+  saveCustomExerciseRequest(updated);
+  addLog({
+    action: "custom_exercise_approved",
+    actorUserId: req.gutoUser!.userId,
+    actorRole: req.gutoUser!.role,
+    metadata: { exerciseId: updated.id, videoUrl: updated.videoUrl },
+  });
+  res.json({ exercise: customExerciseView(updated) });
+}));
+
+adminRouter.post("/exercises/custom/:exerciseId/reject", requireAdmin, asyncHandler(async (req, res) => {
+  const existing = getCustomExerciseRequest(routeParam(req, "exerciseId"));
+  if (!existing) {
+    res.status(404).json({ message: "Exercício customizado não encontrado." });
+    return;
+  }
+  const updated: CustomExerciseRequest = {
+    ...existing,
+    status: "rejected",
+    rejectedBy: req.gutoUser!.userId,
+    rejectedAt: new Date().toISOString(),
+    rejectionReason: asString(asRecord(req.body).reason, "Vídeo fora do padrão técnico do GUTO."),
+  };
+  saveCustomExerciseRequest(updated);
+  res.json({ exercise: customExerciseView(updated) });
 }));
 
 // ─── Students ────────────────────────────────────────────────────────────────

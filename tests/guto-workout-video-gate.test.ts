@@ -1,6 +1,6 @@
 import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Server } from "node:http";
@@ -11,9 +11,18 @@ import {
   normalizeWorkoutPlanAgainstCatalog,
   WorkoutCatalogValidationError,
 } from "../src/workout-catalog-validation";
+import {
+  validateExerciseVideoMetadata,
+  type ExerciseVideoMetadata,
+} from "../src/exercise-video-validation";
+import {
+  saveCustomExerciseRequest,
+  type CustomExerciseRequest,
+} from "../src/custom-exercise-store";
 
 const testMemoryFile = join(process.cwd(), "tmp", "guto-memory.video-gate-test.json");
 const userAccessFile = join(process.cwd(), "tmp", "user-access.json");
+const customExerciseFile = join(process.cwd(), "tmp", "custom-exercises.video-gate-test.json");
 
 let app: { listen: (port: number, callback?: () => void) => Server };
 let server: Server;
@@ -51,6 +60,77 @@ function workoutPlan(exercise: Record<string, unknown> = catalogExercise()) {
   };
 }
 
+function validCustomVideo(overrides: Partial<ExerciseVideoMetadata> = {}): ExerciseVideoMetadata {
+  return {
+    sourceFileName: "supino-inclinado-halter.mp4",
+    videoUrl: "/exercise/visuals/custom/supino-inclinado-halter.mp4",
+    fileSizeBytes: 8 * 1024 * 1024,
+    durationSeconds: 20,
+    width: 1280,
+    height: 720,
+    fps: 30,
+    mimeType: "video/mp4",
+    hasAudio: false,
+    ...overrides,
+  };
+}
+
+function validCustomBody(id: string, sourceFileName: string) {
+  return {
+    id,
+    canonicalNamePt: "Supino customizado",
+    muscleGroup: "peito",
+    sourceFileName,
+    videoUrl: `/exercise/visuals/custom/${sourceFileName}`,
+    fileSizeBytes: 8 * 1024 * 1024,
+    durationSeconds: 20,
+    width: 1280,
+    height: 720,
+    fps: 30,
+    mimeType: "video/mp4",
+    hasAudio: false,
+  };
+}
+
+function customExerciseRecord(overrides: Partial<CustomExerciseRequest> = {}): CustomExerciseRequest {
+  return {
+    id: "custom_invalid_approval",
+    canonicalNamePt: "Custom inválido",
+    namesByLanguage: {
+      "pt-BR": "Custom inválido",
+      "it-IT": "Custom inválido",
+      "en-US": "Custom inválido",
+      "es-ES": "Custom inválido",
+    },
+    aliasesByLanguage: {
+      "pt-BR": [],
+      "it-IT": [],
+      "en-US": [],
+      "es-ES": [],
+    },
+    muscleGroup: "peito",
+    videoUrl: "/exercise/visuals/custom/custom-invalido.mp4",
+    sourceFileName: "custom-invalido.mp4",
+    videoProvider: "local",
+    status: "pending",
+    requestedBy: "coach-video-gate",
+    requestedByRole: "coach",
+    requestedAt: new Date().toISOString(),
+    videoValidated: false,
+    videoMetadata: {
+      fileSizeBytes: 8 * 1024 * 1024,
+      durationSeconds: 31,
+      width: 1280,
+      height: 720,
+      fps: 30,
+      mimeType: "video/mp4",
+      hasAudio: false,
+    },
+    custom: true,
+    ...overrides,
+  };
+}
+
 function assertCatalogError(fn: () => unknown, code: string) {
   assert.throws(
     fn,
@@ -71,18 +151,19 @@ async function request(path: string, options: RequestInit = {}) {
 
 before(async () => {
   process.env.GUTO_MEMORY_FILE = testMemoryFile;
+  process.env.GUTO_CUSTOM_EXERCISE_FILE = customExerciseFile;
   process.env.GUTO_DISABLE_LISTEN = "1";
   process.env.GUTO_ALLOW_DEV_ACCESS = "true";
 
   originalUserAccess = existsSync(userAccessFile) ? readFileSync(userAccessFile, "utf8") : "";
+  mkdirSync(join(process.cwd(), "tmp"), { recursive: true });
   writeFileSync(testMemoryFile, JSON.stringify({}, null, 2));
+  writeFileSync(customExerciseFile, JSON.stringify({ exercises: {} }, null, 2));
 
-  const serverModule = (await import(pathToFileURL(join(process.cwd(), "server.ts")).href)) as {
-    app: { listen: (port: number, callback?: () => void) => Server };
-  };
+  const serverModule = (await import(pathToFileURL(join(process.cwd(), "server.ts")).href)) as any;
   const userAccessModule = await import(pathToFileURL(join(process.cwd(), "src", "user-access-store.ts")).href);
   upsertUserAccess = userAccessModule.upsertUserAccess;
-  app = serverModule.app;
+  app = serverModule.app ?? serverModule.default?.app ?? serverModule["module.exports"]?.app;
 
   await new Promise<void>((resolve) => {
     server = app.listen(0, () => resolve());
@@ -95,6 +176,7 @@ before(async () => {
 
 beforeEach(() => {
   writeFileSync(testMemoryFile, JSON.stringify({}, null, 2));
+  writeFileSync(customExerciseFile, JSON.stringify({ exercises: {} }, null, 2));
   upsertUserAccess("student-video-gate", {
     role: "student",
     coachId: "admin",
@@ -111,10 +193,163 @@ after(async () => {
     server.close((error) => (error ? reject(error) : resolve()));
   });
   if (existsSync(testMemoryFile)) unlinkSync(testMemoryFile);
+  if (existsSync(customExerciseFile)) unlinkSync(customExerciseFile);
   if (originalUserAccess) writeFileSync(userAccessFile, originalUserAccess);
 });
 
 describe("workout catalog video gate", () => {
+  it("accepts a valid MP4 exercise video under the mobile standard", () => {
+    const result = validateExerciseVideoMetadata(validCustomVideo(), { customOnly: true });
+
+    assert.equal(result.valid, true);
+    assert.equal(result.normalized?.durationSeconds, 20);
+    assert.equal(result.normalized?.fileSizeBytes, 8 * 1024 * 1024);
+  });
+
+  it("fails when an exercise video has 31 seconds", () => {
+    const result = validateExerciseVideoMetadata(validCustomVideo({ durationSeconds: 31 }), { customOnly: true });
+
+    assert.equal(result.valid, false);
+    assert.equal(result.errors[0]?.code, "EXERCISE_VIDEO_TOO_LONG");
+  });
+
+  it("fails when an exercise video is above 12MB", () => {
+    const result = validateExerciseVideoMetadata(validCustomVideo({ fileSizeBytes: 13 * 1024 * 1024 }), { customOnly: true });
+
+    assert.equal(result.valid, false);
+    assert.equal(result.errors[0]?.code, "EXERCISE_VIDEO_TOO_LARGE");
+  });
+
+  it("fails when an exercise video is 1920x1080", () => {
+    const result = validateExerciseVideoMetadata(validCustomVideo({ width: 1920, height: 1080 }), { customOnly: true });
+
+    assert.equal(result.valid, false);
+    assert.equal(result.errors[0]?.code, "EXERCISE_VIDEO_RESOLUTION_TOO_HIGH");
+  });
+
+  it("fails when an exercise video uses an external URL", () => {
+    const result = validateExerciseVideoMetadata(validCustomVideo({ videoUrl: "https://cdn.example.com/supino.mp4" }), { customOnly: true });
+
+    assert.equal(result.valid, false);
+    assert.equal(result.errors[0]?.code, "EXERCISE_VIDEO_EXTERNAL_URL_NOT_ALLOWED");
+  });
+
+  it("fails when an exercise video has no videoUrl", () => {
+    const result = validateExerciseVideoMetadata(validCustomVideo({ videoUrl: "" }), { customOnly: true });
+
+    assert.equal(result.valid, false);
+    assert.equal(result.errors[0]?.code, "EXERCISE_VIDEO_REQUIRED");
+  });
+
+  it("fails when exercise video metadata is missing", () => {
+    const result = validateExerciseVideoMetadata({ sourceFileName: "supino.mp4", videoUrl: "/exercise/visuals/custom/supino.mp4" }, { customOnly: true });
+
+    assert.equal(result.valid, false);
+    assert.equal(result.errors.some((error) => error.code === "EXERCISE_VIDEO_METADATA_REQUIRED"), true);
+  });
+
+  it("fails when an exercise video is .mov", () => {
+    const result = validateExerciseVideoMetadata(validCustomVideo({
+      sourceFileName: "supino.mov",
+      videoUrl: "/exercise/visuals/custom/supino.mov",
+      mimeType: "video/quicktime",
+    }), { customOnly: true });
+
+    assert.equal(result.valid, false);
+    assert.equal(result.errors.some((error) => error.code === "EXERCISE_VIDEO_INVALID_FORMAT"), true);
+  });
+
+  it("fails when an exercise video is .gif", () => {
+    const result = validateExerciseVideoMetadata(validCustomVideo({
+      sourceFileName: "supino.gif",
+      videoUrl: "/exercise/visuals/custom/supino.gif",
+      mimeType: "image/gif",
+    }), { customOnly: true });
+
+    assert.equal(result.valid, false);
+    assert.equal(result.errors.some((error) => error.code === "EXERCISE_VIDEO_INVALID_FORMAT"), true);
+  });
+
+  it("blocks admin approval when the custom exercise video is invalid", async () => {
+    saveCustomExerciseRequest(customExerciseRecord());
+
+    const response = await request("/admin/exercises/custom/custom_invalid_approval/approve", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${signToken("admin", "admin-video-gate")}` },
+    });
+
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { code?: string };
+    assert.equal(body.code, "EXERCISE_VIDEO_TOO_LONG");
+  });
+
+  it("blocks coach custom exercise requests with invalid video metadata", async () => {
+    const response = await request("/admin/exercises/custom", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${signToken("coach", "coach-video-gate")}`,
+      },
+      body: JSON.stringify({
+        ...validCustomBody("custom_video_longo", "custom-video-longo.mp4"),
+        durationSeconds: 31,
+      }),
+    });
+
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { code?: string };
+    assert.equal(body.code, "EXERCISE_VIDEO_TOO_LONG");
+  });
+
+  it("shows an approved custom exercise with valid video in the official catalog", async () => {
+    const createResponse = await request("/admin/exercises/custom", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${signToken("coach", "coach-video-gate")}`,
+      },
+      body: JSON.stringify(validCustomBody("custom_catalog_valid", "custom-catalog-valid.mp4")),
+    });
+
+    assert.equal(createResponse.status, 201);
+
+    const approveResponse = await request("/admin/exercises/custom/custom_catalog_valid/approve", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${signToken("admin", "admin-video-gate")}` },
+    });
+
+    assert.equal(approveResponse.status, 200);
+
+    const catalogResponse = await request("/admin/exercises/catalog", {
+      headers: { Authorization: `Bearer ${signToken("admin", "admin-video-gate")}` },
+    });
+    const body = (await catalogResponse.json()) as { exercises?: Array<Record<string, unknown>> };
+
+    assert.equal(catalogResponse.status, 200);
+    assert.ok(body.exercises?.some((exercise) => exercise.id === "custom_catalog_valid"));
+  });
+
+  it("keeps a pending custom exercise out of the official catalog until approval", async () => {
+    const createResponse = await request("/admin/exercises/custom", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${signToken("coach", "coach-video-gate")}`,
+      },
+      body: JSON.stringify(validCustomBody("custom_catalog_pending", "custom-catalog-pending.mp4")),
+    });
+
+    assert.equal(createResponse.status, 201);
+
+    const catalogResponse = await request("/admin/exercises/catalog", {
+      headers: { Authorization: `Bearer ${signToken("admin", "admin-video-gate")}` },
+    });
+    const body = (await catalogResponse.json()) as { exercises?: Array<Record<string, unknown>> };
+
+    assert.equal(catalogResponse.status, 200);
+    assert.equal(body.exercises?.some((exercise) => exercise.id === "custom_catalog_pending"), false);
+  });
+
   it("lists the official exercise catalog for admin users", async () => {
     const response = await request("/admin/exercises/catalog", {
       headers: { Authorization: `Bearer ${signToken("admin", "admin-video-gate")}` },
