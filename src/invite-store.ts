@@ -13,6 +13,7 @@ export type SubscriptionStatus = "pending_payment" | "active" | "expired" | "can
 export interface Invite {
   id: string;
   tokenHash: string;
+  rawToken?: string;
   userId: string;
   name: string;
   role: "student";
@@ -133,6 +134,7 @@ export async function createInvite(params: {
   const invite: Invite = {
     id: crypto.randomUUID(),
     tokenHash,
+    rawToken,
     userId: params.userId,
     name: params.name,
     role: "student",
@@ -201,4 +203,14 @@ export async function revokeInviteByUserId(userId: string): Promise<void> {
 export async function getAllInvites(): Promise<Invite[]> {
   const store = await readStore();
   return Object.values(store.invites);
+}
+
+export async function regenerateInviteByUserId(params: {
+  userId: string;
+  name: string;
+  coachId: string;
+  expiresInDays?: number;
+}): Promise<{ invite: Invite; rawToken: string }> {
+  await revokeInviteByUserId(params.userId);
+  return createInvite(params);
 }

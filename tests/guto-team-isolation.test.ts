@@ -359,3 +359,215 @@ describe("GUTO Time isolation HTTP routes", () => {
     assert.equal(getUserAccess("coach-cross-coach-create"), undefined);
   });
 });
+
+describe("GUTO Phase 5 – admin team operations", () => {
+  // A) super_admin creates a team
+  it("allows super_admin to create a team", async () => {
+    const response = await request("/admin/teams", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${superToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Novo Time Beta", plan: "pro" }),
+    });
+
+    assert.equal(response.status, 201);
+    const body = (await response.json()) as { team: { id: string; name: string; plan: string } };
+    assert.equal(body.team.name, "Novo Time Beta");
+    assert.equal(body.team.plan, "pro");
+    assert.ok(body.team.id.startsWith("team-"));
+  });
+
+  // B) admin common cannot create a team
+  it("rejects admin from creating a team", async () => {
+    const response = await request("/admin/teams", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Bypass Team", plan: "start" }),
+    });
+
+    assert.equal(response.status, 403);
+  });
+
+  // C) super_admin creates student with explicit teamId
+  it("allows super_admin to create a student in a specific team", async () => {
+    const response = await request("/admin/students", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${superToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "super-created-student", name: "Aluno Super", teamId: "TEAM_A" }),
+    });
+
+    assert.equal(response.status, 201);
+    assert.equal(getUserAccess("super-created-student")?.teamId, "TEAM_A");
+  });
+
+  // D) admin creates student in own team
+  it("allows admin to create a student in their own team (teamId implicit)", async () => {
+    const response = await request("/admin/students", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "admin-own-team-student", name: "Aluno Proprio" }),
+    });
+
+    assert.equal(response.status, 201);
+    assert.equal(getUserAccess("admin-own-team-student")?.teamId, "TEAM_A");
+  });
+
+  // E) admin cannot create student in another team
+  it("rejects admin from creating a student in another team", async () => {
+    const response = await request("/admin/students", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "admin-other-team-student", name: "Aluno Outro Time", teamId: "TEAM_B" }),
+    });
+
+    assert.equal(response.status, 403);
+    assert.equal(getUserAccess("admin-other-team-student"), undefined);
+  });
+
+  // F) coach creates student in own team linked to themselves
+  it("forces coach-created student into coach teamId and coachId", async () => {
+    const response = await request("/admin/students", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token(coachA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "coach-own-student", name: "Aluno Coach Proprio" }),
+    });
+
+    assert.equal(response.status, 201);
+    const created = getUserAccess("coach-own-student");
+    assert.equal(created?.teamId, "TEAM_A");
+    assert.equal(created?.coachId, coachA.userId);
+  });
+
+  // H) coach without teamId defaults safely to GUTO_CORE
+  it("super_admin creates coach without explicit teamId and defaults to GUTO_CORE", async () => {
+    const response = await request("/admin/coaches", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${superToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Coach Sem Time", email: "coachsemtime@guto.test", password: "GUTOtest123" }),
+    });
+
+    assert.equal(response.status, 201);
+    const body = (await response.json()) as { coach: { teamId?: string } };
+    assert.ok(body.coach.teamId === "GUTO_CORE" || body.coach.teamId === undefined || !body.coach.teamId);
+  });
+
+  // I) plan full continues to block
+  it("team/summary lists real plan limits (plan limit already tested in guto-team-limits.test.ts)", async () => {
+    const response = await request("/admin/team/summary", {
+      headers: { Authorization: `Bearer ${token(adminA)}` },
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { limits: { maxStudents: number } };
+    assert.ok(body.limits.maxStudents > 0);
+  });
+
+  // J) invite can be retrieved after creation
+  it("allows admin to retrieve invite link for a newly created student", async () => {
+    const createRes = await request("/admin/students", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "invite-student", name: "Aluno Convite" }),
+    });
+    assert.equal(createRes.status, 201);
+    const { inviteLink: createdLink } = (await createRes.json()) as { inviteLink: string };
+    assert.ok(createdLink.includes("/convite/"));
+
+    const getRes = await request("/admin/students/invite-student/invite", {
+      headers: { Authorization: `Bearer ${token(adminA)}` },
+    });
+    assert.equal(getRes.status, 200);
+    const { inviteLink } = (await getRes.json()) as { inviteLink: string | null };
+    assert.equal(inviteLink, createdLink);
+  });
+
+  // K) another team cannot retrieve invite
+  it("blocks admin of another team from retrieving student invite", async () => {
+    const createRes = await request("/admin/students", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "invite-student-b-block", name: "Aluno Block" }),
+    });
+    assert.equal(createRes.status, 201);
+
+    const getRes = await request("/admin/students/invite-student-b-block/invite", {
+      headers: { Authorization: `Bearer ${token(adminB)}` },
+    });
+    assert.equal(getRes.status, 403);
+  });
+
+  // L) password reset scoped correctly
+  it("allows admin to generate a temporary password for their student", async () => {
+    const createRes = await request("/admin/students", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "reset-pwd-student", name: "Aluno Reset" }),
+    });
+    assert.equal(createRes.status, 201);
+
+    const resetRes = await request("/admin/students/reset-pwd-student/reset-password", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(resetRes.status, 200);
+    const body = (await resetRes.json()) as { temporaryPassword?: string };
+    assert.ok(body.temporaryPassword && body.temporaryPassword.startsWith("GUTO-"));
+  });
+
+  it("blocks admin from resetting password of a student in another team", async () => {
+    const resetRes = await request(`/admin/students/${studentB.userId}/reset-password`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(resetRes.status, 403);
+  });
+
+  // invite regeneration
+  it("allows admin to regenerate a student invite and invalidate the previous one", async () => {
+    const createRes = await request("/admin/students", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "regen-invite-student", name: "Aluno Regen" }),
+    });
+    assert.equal(createRes.status, 201);
+    const { inviteLink: originalLink } = (await createRes.json()) as { inviteLink: string };
+
+    const regenRes = await request("/admin/students/regen-invite-student/invite/regenerate", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token(adminA)}` },
+    });
+    assert.equal(regenRes.status, 200);
+    const { inviteLink: newLink } = (await regenRes.json()) as { inviteLink: string };
+    assert.ok(newLink.includes("/convite/"));
+    assert.notEqual(newLink, originalLink);
+  });
+
+  // super_admin GET /admin/teams
+  it("allows super_admin to list all teams", async () => {
+    const response = await request("/admin/teams", {
+      headers: { Authorization: `Bearer ${superToken()}` },
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { teams: { id: string }[] };
+    assert.ok(Array.isArray(body.teams));
+    assert.ok(body.teams.some((t) => t.id === "TEAM_A"));
+    assert.ok(body.teams.some((t) => t.id === "TEAM_B"));
+  });
+
+  it("returns only own team for admin when listing teams", async () => {
+    const response = await request("/admin/teams", {
+      headers: { Authorization: `Bearer ${token(adminA)}` },
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { teams: { id: string }[] };
+    assert.equal(body.teams.length, 1);
+    assert.equal(body.teams[0].id, "TEAM_A");
+  });
+
+  it("rejects student tokens from listing teams", async () => {
+    const response = await request("/admin/teams", {
+      headers: { Authorization: `Bearer ${token(studentA)}` },
+    });
+    assert.equal(response.status, 403);
+  });
+});

@@ -5,6 +5,7 @@ import { getAggregatedExerciseCatalog, getCatalogById, type CatalogMuscleGroup }
 import {
   requireCoachOrAdmin,
   requireAdmin,
+  requireSuperAdmin,
   assertCanAccessUserAccess,
   canAccessUserAccess,
   getRequestActorAccess,
@@ -25,13 +26,17 @@ import {
 } from "./user-access-store.js";
 import {
   assertTeamPlanCapacity,
+  createTeam,
+  getAllTeams,
   getTeam,
   getTeamPlanUsage,
   GUTO_CORE_TEAM_ID,
   GutoTeamNotFoundError,
   GutoTeamPlanLimitError,
+  type GutoTeam,
   type TeamCapacitySubject,
 } from "./team-store.js";
+import type { GutoTeamPlan } from "./team-plans.js";
 import {
   getArenaProfile,
   saveArenaProfile,
@@ -47,7 +52,13 @@ import { getMemory, saveMemory, buildWorkoutPlanFromSemanticFocus } from "../ser
 import { getDietPlan, saveDietPlan, deleteDietPlan } from "./diet-store.js";
 import { addLog, getLogs } from "./log-store.js";
 import { config } from "./config.js";
-import { createInvite, revokeInviteByUserId, updateInviteByUserId } from "./invite-store.js";
+import {
+  createInvite,
+  findInviteByUserId,
+  regenerateInviteByUserId,
+  revokeInviteByUserId,
+  updateInviteByUserId,
+} from "./invite-store.js";
 import {
   isWorkoutCatalogValidationError,
   normalizeWorkoutPlanAgainstCatalog,
@@ -76,6 +87,7 @@ type ResetScope = "weekly" | "monthly" | "individual" | "validationHistory" | "a
 
 const PLAN_SOURCES: PlanSource[] = ["guto_generated", "coach_manual", "mixed"];
 const ADMIN_ROLES: UserRole[] = ["admin", "super_admin"];
+const VALID_TEAM_PLANS: GutoTeamPlan[] = ["start", "pro", "elite", "custom"];
 const CATALOG_MUSCLE_GROUPS: CatalogMuscleGroup[] = ["aquecimento", "peito", "costas", "ombro", "bracos", "pernas", "abdomen"];
 
 function isAdminRole(role?: string): boolean {
@@ -1426,6 +1438,104 @@ adminRouter.get("/students/:userId/diet/history", asyncHandler(async (req, res) 
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
   res.json({ history: dietHistory(student.userId) });
+}));
+
+// ─── Teams ───────────────────────────────────────────────────────────────────
+
+adminRouter.get("/teams", asyncHandler(async (req, res) => {
+  const actor = requireActor(req, res);
+  if (!actor) return;
+  if (actor.role === "super_admin") {
+    res.json({ teams: getAllTeams() });
+    return;
+  }
+  const teamId = normalizeAccessTeamId(actor.teamId);
+  const team = getTeam(teamId);
+  if (!team) {
+    res.status(404).json({ message: `Time não encontrado: ${teamId}`, code: "GUTO_TEAM_NOT_FOUND" });
+    return;
+  }
+  res.json({ teams: [team] });
+}));
+
+adminRouter.post("/teams", requireSuperAdmin, asyncHandler(async (req, res) => {
+  const body = asRecord(req.body);
+  const name = asString(body.name, "").trim();
+  if (!name) {
+    res.status(400).json({ message: "Nome do Time é obrigatório." });
+    return;
+  }
+  const plan = asString(body.plan, "");
+  if (!VALID_TEAM_PLANS.includes(plan as GutoTeamPlan)) {
+    res.status(400).json({ message: `Plano inválido. Use: ${VALID_TEAM_PLANS.join(", ")}.` });
+    return;
+  }
+  const customLimitsRaw = asRecord(body.customLimits);
+  const customLimits = plan === "custom" && Object.keys(customLimitsRaw).length
+    ? {
+        maxStudents: customLimitsRaw.maxStudents !== undefined ? asNumber(customLimitsRaw.maxStudents, 0) || null : undefined,
+        maxCoaches: customLimitsRaw.maxCoaches !== undefined ? asNumber(customLimitsRaw.maxCoaches, 0) || null : undefined,
+      }
+    : undefined;
+  const id = `team-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  const now = new Date().toISOString();
+  const team: GutoTeam = {
+    id,
+    name,
+    plan: plan as GutoTeamPlan,
+    status: "active",
+    createdAt: now,
+    updatedAt: now,
+    ...(customLimits ? { customLimits } : {}),
+  };
+  const created = createTeam(team);
+  addLog({
+    action: "team_created",
+    actorUserId: req.gutoUser!.userId,
+    actorRole: req.gutoUser!.role,
+    metadata: { teamId: created.id, name: created.name, plan: created.plan },
+  });
+  res.status(201).json({ team: created });
+}));
+
+// ─── Invite recovery ──────────────────────────────────────────────────────────
+
+adminRouter.get("/students/:userId/invite", asyncHandler(async (req, res) => {
+  const student = await getManagedStudent(req, res, routeParam(req, "userId"));
+  if (!student) return;
+  const invite = await findInviteByUserId(student.userId);
+  if (!invite || invite.status === "revoked") {
+    res.status(404).json({ message: "Convite não encontrado para este aluno.", code: "GUTO_INVITE_NOT_FOUND" });
+    return;
+  }
+  const inviteLink = invite.rawToken && invite.status === "pending_claim"
+    ? buildInviteLink(invite.rawToken)
+    : null;
+  const message =
+    invite.status === "active" ? "Convite já foi utilizado pelo aluno." :
+    invite.status === "expired" ? "Convite expirado. Use regenerar para criar um novo." :
+    invite.status === "pending_claim" && !invite.rawToken ? "Link do convite não disponível. Use regenerar." :
+    undefined;
+  res.json({ invite: { ...invite, rawToken: undefined }, inviteLink, ...(message ? { message } : {}) });
+}));
+
+adminRouter.post("/students/:userId/invite/regenerate", asyncHandler(async (req, res) => {
+  const caller = req.gutoUser!;
+  const student = await getManagedStudent(req, res, routeParam(req, "userId"));
+  if (!student) return;
+  const { rawToken } = await regenerateInviteByUserId({
+    userId: student.userId,
+    name: student.name || student.userId,
+    coachId: student.coachId || "admin",
+  });
+  const inviteLink = buildInviteLink(rawToken);
+  addLog({
+    action: "invite_regenerated",
+    actorUserId: caller.userId,
+    actorRole: caller.role,
+    targetUserId: student.userId,
+  });
+  res.json({ inviteLink });
 }));
 
 // ─── Logs ────────────────────────────────────────────────────────────────────

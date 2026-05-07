@@ -35,7 +35,9 @@ export type LogAction =
   | "custom_exercise_approved"
   | "arena_reset"
   | "password_reset"
-  | "user_deleted";
+  | "user_deleted"
+  | "team_created"
+  | "invite_regenerated";
 
 export interface AuditLog {
   id: string;
