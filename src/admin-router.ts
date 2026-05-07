@@ -33,6 +33,8 @@ import {
   GUTO_CORE_TEAM_ID,
   GutoTeamNotFoundError,
   GutoTeamPlanLimitError,
+  normalizeTeamId,
+  updateTeam,
   type GutoTeam,
   type TeamCapacitySubject,
 } from "./team-store.js";
@@ -291,6 +293,7 @@ function buildStudentView(access: UserAccess) {
   const memory = getMemory(access.userId);
   const arena = getArenaProfile(access.userId);
   const coach = access.coachId ? getUserAccess(access.coachId) : undefined;
+  const team = access.teamId ? getTeam(normalizeTeamId(access.teamId)) : undefined;
   const totalXp = arena?.totalXp ?? memory.totalXp ?? 0;
   const lastValidation =
     arena?.lastWorkoutValidatedAt ??
@@ -302,6 +305,7 @@ function buildStudentView(access: UserAccess) {
     ...access,
     name: access.name || memory.name || access.userId,
     coachName: coach?.name || coach?.email || access.coachId || null,
+    teamName: team?.name ?? null,
     age: memory.userAge ?? null,
     gender: memory.biologicalSex ?? null,
     biologicalSex: memory.biologicalSex ?? null,
@@ -847,9 +851,13 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
     return;
   }
 
-  const requestedTeamId = typeof body.teamId === "string" ? body.teamId : undefined;
+  const requestedTeamId = typeof body.teamId === "string" ? body.teamId.trim() : undefined;
+  if (actor.role === "super_admin" && !requestedTeamId) {
+    res.status(400).json({ message: "super_admin precisa informar teamId ao criar aluno.", code: "GUTO_TEAM_REQUIRED" });
+    return;
+  }
   const teamId = actor.role === "super_admin"
-    ? requestedTeamId || GUTO_CORE_TEAM_ID
+    ? requestedTeamId!
     : normalizeAccessTeamId(actor.teamId);
   if (actor.role !== "super_admin" && requestedTeamId && requestedTeamId !== teamId) {
     res.status(403).json({ message: "Admin/coach não pode criar aluno em outro Time.", code: "TEAM_ACCESS_FORBIDDEN" });
@@ -1091,9 +1099,13 @@ adminRouter.post("/coaches", asyncHandler(async (req, res) => {
     res.status(400).json({ message: "Nome e email do coach são obrigatórios." });
     return;
   }
-  const requestedTeamId = typeof body.teamId === "string" ? body.teamId : undefined;
+  const requestedTeamId = typeof body.teamId === "string" ? body.teamId.trim() : undefined;
+  if (actor.role === "super_admin" && !requestedTeamId) {
+    res.status(400).json({ message: "super_admin precisa informar teamId ao criar coach.", code: "GUTO_TEAM_REQUIRED" });
+    return;
+  }
   const teamId = actor.role === "super_admin"
-    ? requestedTeamId || GUTO_CORE_TEAM_ID
+    ? requestedTeamId!
     : normalizeAccessTeamId(actor.teamId);
   if (actor.role !== "super_admin" && requestedTeamId && requestedTeamId !== teamId) {
     res.status(403).json({ message: "Admin não pode criar coach em outro Time.", code: "TEAM_ACCESS_FORBIDDEN" });
@@ -1496,6 +1508,53 @@ adminRouter.post("/teams", requireSuperAdmin, asyncHandler(async (req, res) => {
     metadata: { teamId: created.id, name: created.name, plan: created.plan },
   });
   res.status(201).json({ team: created });
+}));
+
+adminRouter.patch("/teams/:teamId", requireSuperAdmin, asyncHandler(async (req, res) => {
+  const teamId = routeParam(req, "teamId");
+  const existing = getTeam(teamId);
+  if (!existing) {
+    res.status(404).json({ message: `Time não encontrado: ${teamId}`, code: "GUTO_TEAM_NOT_FOUND" });
+    return;
+  }
+  const body = asRecord(req.body);
+  const patch: Partial<GutoTeam> = {};
+  if (body.name !== undefined) {
+    const name = asString(body.name, "").trim();
+    if (!name) { res.status(400).json({ message: "Nome do Time não pode ser vazio." }); return; }
+    patch.name = name;
+  }
+  if (body.plan !== undefined) {
+    const plan = asString(body.plan, "");
+    if (!VALID_TEAM_PLANS.includes(plan as GutoTeamPlan)) {
+      res.status(400).json({ message: `Plano inválido. Use: ${VALID_TEAM_PLANS.join(", ")}.` }); return;
+    }
+    patch.plan = plan as GutoTeamPlan;
+  }
+  if (body.status !== undefined) {
+    const status = asString(body.status, "");
+    if (!["active", "paused", "archived"].includes(status)) {
+      res.status(400).json({ message: "Status inválido. Use: active, paused, archived." }); return;
+    }
+    patch.status = status as GutoTeam["status"];
+  }
+  if (body.customLimits !== undefined) {
+    const raw = asRecord(body.customLimits);
+    patch.customLimits = Object.keys(raw).length
+      ? {
+          maxStudents: raw.maxStudents !== undefined ? asNumber(raw.maxStudents, 0) || null : undefined,
+          maxCoaches: raw.maxCoaches !== undefined ? asNumber(raw.maxCoaches, 0) || null : undefined,
+        }
+      : undefined;
+  }
+  const updated = updateTeam(teamId, patch);
+  addLog({
+    action: "team_updated",
+    actorUserId: req.gutoUser!.userId,
+    actorRole: req.gutoUser!.role,
+    metadata: { teamId, ...patch },
+  });
+  res.json({ team: updated });
 }));
 
 // ─── Invite recovery ──────────────────────────────────────────────────────────

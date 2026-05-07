@@ -37,6 +37,7 @@ export type LogAction =
   | "password_reset"
   | "user_deleted"
   | "team_created"
+  | "team_updated"
   | "invite_regenerated";
 
 export interface AuditLog {

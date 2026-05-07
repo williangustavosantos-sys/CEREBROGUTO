@@ -81,6 +81,14 @@ export function createTeam(team: GutoTeam): GutoTeam {
     return team;
 }
 
+export function updateTeam(teamId: string, patch: Partial<Omit<GutoTeam, "id" | "createdAt">>): GutoTeam {
+    const existing = teams[teamId];
+    if (!existing) throw new GutoTeamNotFoundError(teamId);
+    const updated: GutoTeam = { ...existing, ...patch, id: existing.id, createdAt: existing.createdAt, updatedAt: new Date().toISOString() };
+    teams[teamId] = updated;
+    return updated;
+}
+
 export function normalizeTeamId(teamId?: string | null): string {
     return teamId || GUTO_CORE_TEAM_ID;
 }

@@ -437,17 +437,29 @@ describe("GUTO Phase 5 – admin team operations", () => {
     assert.equal(created?.coachId, coachA.userId);
   });
 
-  // H) coach without teamId defaults safely to GUTO_CORE
-  it("super_admin creates coach without explicit teamId and defaults to GUTO_CORE", async () => {
+  // H) super_admin must provide teamId — omitting it returns 400
+  it("rejects super_admin coach creation without teamId (GUTO_TEAM_REQUIRED)", async () => {
     const response = await request("/admin/coaches", {
       method: "POST",
       headers: { Authorization: `Bearer ${superToken()}`, "Content-Type": "application/json" },
       body: JSON.stringify({ name: "Coach Sem Time", email: "coachsemtime@guto.test", password: "GUTOtest123" }),
     });
 
-    assert.equal(response.status, 201);
-    const body = (await response.json()) as { coach: { teamId?: string } };
-    assert.ok(body.coach.teamId === "GUTO_CORE" || body.coach.teamId === undefined || !body.coach.teamId);
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { code?: string };
+    assert.equal(body.code, "GUTO_TEAM_REQUIRED");
+  });
+
+  it("rejects super_admin student creation without teamId (GUTO_TEAM_REQUIRED)", async () => {
+    const response = await request("/admin/students", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${superToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "super-no-team-student", name: "Aluno Sem Time" }),
+    });
+
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { code?: string };
+    assert.equal(body.code, "GUTO_TEAM_REQUIRED");
   });
 
   // I) plan full continues to block
@@ -569,5 +581,56 @@ describe("GUTO Phase 5 – admin team operations", () => {
       headers: { Authorization: `Bearer ${token(studentA)}` },
     });
     assert.equal(response.status, 403);
+  });
+
+  // PATCH /teams/:teamId
+  it("allows super_admin to update team name and status", async () => {
+    const response = await request("/admin/teams/TEAM_A", {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${superToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Time A Atualizado", status: "paused" }),
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { team: { name: string; status: string } };
+    assert.equal(body.team.name, "Time A Atualizado");
+    assert.equal(body.team.status, "paused");
+  });
+
+  it("allows super_admin to update team plan", async () => {
+    const response = await request("/admin/teams/TEAM_B", {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${superToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ plan: "elite" }),
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { team: { plan: string } };
+    assert.equal(body.team.plan, "elite");
+  });
+
+  it("blocks admin from updating a team", async () => {
+    const response = await request("/admin/teams/TEAM_A", {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Tentativa Admin" }),
+    });
+    assert.equal(response.status, 403);
+  });
+
+  it("returns 404 when super_admin tries to update a non-existent team", async () => {
+    const response = await request("/admin/teams/team-does-not-exist", {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${superToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Fantasma" }),
+    });
+    assert.equal(response.status, 404);
+  });
+
+  it("returns 400 when PATCH /teams/:teamId receives invalid status", async () => {
+    const response = await request("/admin/teams/TEAM_A", {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${superToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "deleted" }),
+    });
+    assert.equal(response.status, 400);
   });
 });
