@@ -125,6 +125,25 @@ export interface WeeklyWorkoutPlan {
   days: Partial<Record<WeekDayKey, WorkoutPlan>>;
 }
 
+export interface WeeklyDietDay {
+  breakfast?: string;
+  lunch?: string;
+  dinner?: string;
+  snacks?: string;
+  notes?: string;
+  hydration?: string;
+  caloriesEstimate?: number;
+  proteinEstimate?: number;
+  status?: string;
+}
+
+export interface WeeklyDietPlan {
+  studentId: string;
+  updatedAt: string;
+  updatedBy: string;
+  days: Partial<Record<WeekDayKey, WeeklyDietDay>>;
+}
+
 interface WorkoutExercise {
   id: string;
   name: string;
@@ -252,6 +271,7 @@ interface GutoMemory {
   lastLimitationCheckAt?: string;
   lastWorkoutPlan?: WorkoutPlan | null;
   weeklyWorkoutPlan?: WeeklyWorkoutPlan | null;
+  weeklyDietPlan?: WeeklyDietPlan | null;
   recentTrainingHistory?: RecentTrainingHistoryItem[];
   nextWorkoutFocus?: WorkoutFocus;
   lastSuggestedFocus?: WorkoutFocus;
@@ -602,6 +622,7 @@ function sanitizeOperationalMemory(memory: GutoMemory): GutoMemory {
     trainingLimitations: isOperationalNoise(memory.trainingLimitations) ? undefined : memory.trainingLimitations,
     lastWorkoutPlan: memory.lastWorkoutPlan || null,
     weeklyWorkoutPlan: memory.weeklyWorkoutPlan || null,
+    weeklyDietPlan: memory.weeklyDietPlan || null,
     recentTrainingHistory: Array.isArray(memory.recentTrainingHistory) ? memory.recentTrainingHistory.slice(0, 12) : [],
   };
 }
@@ -794,6 +815,7 @@ export function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
       lastLimitationCheckAt: existing.lastLimitationCheckAt,
       lastWorkoutPlan: existing.lastWorkoutPlan || null,
       weeklyWorkoutPlan: existing.weeklyWorkoutPlan || null,
+      weeklyDietPlan: existing.weeklyDietPlan || null,
       recentTrainingHistory: Array.isArray(existing.recentTrainingHistory) ? existing.recentTrainingHistory : [],
       nextWorkoutFocus:
         existing.nextWorkoutFocus === "chest_triceps" ||
@@ -828,6 +850,7 @@ export function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
     xpEvents: [],
     lastWorkoutPlan: null,
     weeklyWorkoutPlan: null,
+    weeklyDietPlan: null,
     recentTrainingHistory: [],
     nextWorkoutFocus: undefined,
     proactiveSent: {},
@@ -1229,6 +1252,13 @@ function buildGutoSystemPrompt(language = "pt-BR") {
     "OBJETIVO FINAL",
     "Você não existe para agradar.",
     "Você existe para ser real o suficiente para o usuário confiar, voltar e agir.",
+    "",
+    "LIMITE CRÍTICO — DADOS DE PERFIL",
+    "GUTO NUNCA afirma ter alterado dados do perfil do usuário via chat. Isso inclui: idioma, nome, idade, peso, altura, objetivo, local de treino, restrições alimentares, telefone.",
+    "Esses campos SÓ podem ser alterados pelo próprio usuário em Configurações. O chat não tem essa capacidade técnica.",
+    "Se o usuário pedir para mudar qualquer um desses dados: reconheça o pedido, diga para ele abrir Configurações e fazer a alteração lá. Não diga 'já mudei', 'atualizei', 'troquei' ou qualquer variante que implique que você alterou.",
+    "Exemplo correto: 'Idioma não mudo por aqui — vai em Configurações e troca. Lá já salva na hora.' (adapte para o idioma atual).",
+    "Nunca simule uma confirmação de atualização de perfil.",
     "",
     "FORMATO OBRIGATÓRIO",
     `Responda obrigatoriamente no idioma: ${languageName(selectedLanguage)}.`,

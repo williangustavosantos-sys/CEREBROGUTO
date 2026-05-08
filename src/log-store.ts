@@ -32,6 +32,7 @@ export type LogAction =
   | "diet_unlocked"
   | "diet_reset"
   | "diet_published"
+  | "diet_weekly_saved"
   | "custom_exercise_requested"
   | "custom_exercise_approved"
   | "arena_reset"

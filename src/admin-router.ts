@@ -50,7 +50,7 @@ import {
   readMemoryStoreAsync,
   writeMemoryStoreAsync,
 } from "./memory-store.js";
-import { getMemory, saveMemory, buildWorkoutPlanFromSemanticFocus, type WeekDayKey, type WeeklyWorkoutPlan } from "../server.js";
+import { getMemory, saveMemory, buildWorkoutPlanFromSemanticFocus, type WeekDayKey, type WeeklyWorkoutPlan, type WeeklyDietDay, type WeeklyDietPlan } from "../server.js";
 import { getDietPlan, saveDietPlan, deleteDietPlan } from "./diet-store.js";
 import { addLog, getLogs } from "./log-store.js";
 import { config } from "./config.js";
@@ -1512,6 +1512,142 @@ adminRouter.get("/students/:userId/diet/history", asyncHandler(async (req, res) 
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
   res.json({ history: dietHistory(student.userId) });
+}));
+
+// ─── Weekly Diet Plan ──────────────────────────────────────────────────────────
+
+const VALID_DIET_DAYS: WeekDayKey[] = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+const VALID_DIET_DAY_FIELDS: Array<keyof WeeklyDietDay> = ["breakfast", "lunch", "dinner", "snacks", "notes", "hydration", "caloriesEstimate", "proteinEstimate", "status"];
+const MAX_DIET_TEXT_LENGTH = 2000;
+
+function normalizeDietDay(rawValue: unknown): WeeklyDietDay | null {
+  if (rawValue == null || typeof rawValue !== "object" || Array.isArray(rawValue)) return null;
+  const raw = rawValue as Record<string, unknown>;
+
+  // Reject unknown keys
+  const keys = Object.keys(raw);
+  for (const key of keys) {
+    if (!VALID_DIET_DAY_FIELDS.includes(key as keyof WeeklyDietDay)) {
+      throw new Error(`Campo inválido no dia de dieta: "${key}".`);
+    }
+  }
+
+  const day: WeeklyDietDay = {};
+  const textFields = ["breakfast", "lunch", "dinner", "snacks", "notes", "hydration", "status"] as const;
+  for (const field of textFields) {
+    if (raw[field] !== undefined) {
+      const val = typeof raw[field] === "string" ? (raw[field] as string).trim() : String(raw[field] ?? "").trim();
+      if (val.length > MAX_DIET_TEXT_LENGTH) {
+        throw new Error(`Campo "${field}" excede o limite de ${MAX_DIET_TEXT_LENGTH} caracteres.`);
+      }
+      if (val) day[field] = val;
+    }
+  }
+  if (raw.caloriesEstimate !== undefined) {
+    const n = Number(raw.caloriesEstimate);
+    if (Number.isFinite(n) && n >= 0) day.caloriesEstimate = Math.round(n);
+  }
+  if (raw.proteinEstimate !== undefined) {
+    const n = Number(raw.proteinEstimate);
+    if (Number.isFinite(n) && n >= 0) day.proteinEstimate = Math.round(n);
+  }
+
+  // Day is "empty" if no text field was filled and no numeric fields
+  const hasContent = textFields.some((f) => day[f]) || day.caloriesEstimate != null || day.proteinEstimate != null;
+  if (!hasContent) return null;
+
+  return day;
+}
+
+adminRouter.get("/students/:userId/diet/week", asyncHandler(async (req, res) => {
+  const student = await getManagedStudent(req, res, routeParam(req, "userId"));
+  if (!student) return;
+  const memory = getMemory(student.userId);
+  res.json({ weeklyDiet: memory.weeklyDietPlan || null });
+}));
+
+adminRouter.put("/students/:userId/diet/week", asyncHandler(async (req, res) => {
+  const caller = req.gutoUser!;
+  const student = await getManagedStudent(req, res, routeParam(req, "userId"));
+  if (!student) return;
+
+  const body = req.body as { days?: unknown };
+  const rawDays = asRecord(body.days ?? req.body);
+
+  // Reject keys outside the valid day names
+  const incomingKeys = Object.keys(rawDays);
+  if (incomingKeys.length === 0) {
+    res.status(400).json({ message: "Payload vazio: informe pelo menos um dia com dados." });
+    return;
+  }
+  for (const key of incomingKeys) {
+    if (!VALID_DIET_DAYS.includes(key as WeekDayKey)) {
+      res.status(400).json({ message: `Dia inválido: "${key}". Use monday, tuesday, wednesday, thursday, friday, saturday ou sunday.` });
+      return;
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const days: Partial<Record<WeekDayKey, WeeklyDietDay>> = {};
+  try {
+    for (const day of VALID_DIET_DAYS) {
+      const rawDay = rawDays[day];
+      if (rawDay == null) continue;
+      const normalized = normalizeDietDay(rawDay);
+      if (normalized) days[day] = normalized;
+    }
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "Payload de dieta inválido." });
+    return;
+  }
+
+  if (Object.keys(days).length === 0) {
+    res.status(400).json({ message: "Nenhum dia válido com dados foi encontrado no payload." });
+    return;
+  }
+
+  const weeklyDietPlan: WeeklyDietPlan = {
+    studentId: student.userId,
+    updatedAt: new Date().toISOString(),
+    updatedBy: caller.userId,
+    days,
+  };
+
+  const memory = getMemory(student.userId);
+  memory.weeklyDietPlan = weeklyDietPlan;
+  saveMemory(memory);
+
+  addLog({
+    action: "diet_weekly_saved",
+    actorUserId: caller.userId,
+    actorRole: caller.role,
+    targetUserId: student.userId,
+    metadata: { days: Object.keys(days) },
+  });
+
+  res.json({ weeklyDiet: weeklyDietPlan });
+}));
+
+adminRouter.get("/students/:userId/diet/today", asyncHandler(async (req, res) => {
+  // NOTE: endpoint GET /admin/students/:userId/diet/today is intentionally available
+  // for future student-side integration. The student app can consume this endpoint
+  // to display today's diet. Integration with the student UI is planned for a future phase.
+  const student = await getManagedStudent(req, res, routeParam(req, "userId"));
+  if (!student) return;
+  const memory = getMemory(student.userId);
+  const today = getTodayDayKey();
+  const todayDiet = memory.weeklyDietPlan?.days?.[today] ?? null;
+  if (todayDiet) {
+    res.json({ diet: todayDiet, dayKey: today, fromWeeklyPlan: true });
+    return;
+  }
+  // Fallback: return existing official diet if no weekly plan day exists
+  const officialDiet = await getDietPlan(student.userId);
+  if (officialDiet) {
+    res.json({ diet: officialDiet, dayKey: today, fromWeeklyPlan: false, fallback: "official_diet" });
+    return;
+  }
+  res.json({ diet: null, dayKey: today, fromWeeklyPlan: false });
 }));
 
 // ─── Teams ───────────────────────────────────────────────────────────────────
