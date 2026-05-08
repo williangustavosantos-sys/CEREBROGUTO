@@ -84,3 +84,8 @@ export function getProfilesByGroup(arenaGroupId: string): ArenaProfile[] {
   const store = readArenaStore();
   return Object.values(store.profiles).filter((p) => p.arenaGroupId === arenaGroupId);
 }
+
+export function getAllArenaProfiles(): ArenaProfile[] {
+  const store = readArenaStore();
+  return Object.values(store.profiles);
+}

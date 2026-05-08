@@ -5,6 +5,7 @@ import {
   saveArenaProfile,
   appendArenaEvent,
   getProfilesByGroup,
+  getAllArenaProfiles,
 } from "./arena-store.js";
 import { getEffectiveUserAccess } from "./user-access-store.js";
 import {
@@ -256,6 +257,34 @@ export function getIndividualRanking(arenaGroupId: string) {
   return {
     rankingType: "individual",
     arenaGroupId,
+    items: sorted.map((p, i) => {
+      const nextEvolutionXp = getNextEvolutionXp(p.totalXp);
+      return {
+        position: i + 1,
+        userId: p.userId,
+        pairName: p.pairName,
+        avatarStage: getAvatarStage(p.totalXp),
+        xp: p.totalXp,
+        validatedWorkouts: p.validatedWorkoutsTotal,
+        currentStreak: p.currentStreak,
+        nextEvolutionXp,
+        xpToNextEvolution: nextEvolutionXp !== null ? nextEvolutionXp - p.totalXp : null,
+      };
+    }),
+  };
+}
+
+/**
+ * Ranking individual GLOBAL — todos os alunos do GUTO no mundo, independente de Time.
+ * Conforme visão do produto: "Ranking individual global com todos os usuários do GUTO".
+ * Apenas weekly/monthly ficam scoped por Time.
+ */
+export function getGlobalIndividualRanking() {
+  const profiles = getAllArenaProfiles().filter((p) => isVisibleInRanking(p.userId));
+  const sorted = [...profiles].sort((a, b) => b.totalXp - a.totalXp);
+  return {
+    rankingType: "individual",
+    arenaGroupId: "global",
     items: sorted.map((p, i) => {
       const nextEvolutionXp = getNextEvolutionXp(p.totalXp);
       return {

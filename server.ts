@@ -23,6 +23,7 @@ import {
   getWeeklyRanking,
   getMonthlyRanking,
   getIndividualRanking,
+  getGlobalIndividualRanking,
   getMyArenaProfile,
   syncArenaDisplayName,
   DEFAULT_ARENA_GROUP,
@@ -4120,12 +4121,15 @@ app.get("/guto/arena/monthly", requireActiveUser, (req, res) => {
   res.json(getMonthlyRanking(arenaGroupId));
 });
 
+// Individual ranking é GLOBAL — todos os alunos do GUTO no mundo,
+// independente de Time. Apenas weekly/monthly ficam scoped por Time.
+// Conforme visão do produto: "Ranking individual global com todos os usuários do GUTO".
 app.get("/guto/arena/individual", requireActiveUser, (req, res) => {
   const userId = req.gutoUser!.userId;
-  const arenaGroupId = (req.query.arenaGroupId as string) || getUserArenaGroup(userId);
   const memory = getMemory(userId);
-  syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
-  res.json(getIndividualRanking(arenaGroupId));
+  // Mantém o display name do usuário sincronizado no contexto do próprio Time dele
+  syncArenaDisplayName(userId, memory.name || userId, getUserArenaGroup(userId));
+  res.json(getGlobalIndividualRanking());
 });
 
 app.get("/guto/arena/me", requireActiveUser, (req, res) => {
