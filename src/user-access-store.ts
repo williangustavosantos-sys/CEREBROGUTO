@@ -318,3 +318,8 @@ export async function upsertUserAccessAsync(
   await writeStoreAsync(store);
   return updated;
 }
+
+// ─── Bootstrap: load persisted users from Redis on module init ───────────────
+// Without this, after a Render cold start (file system wiped), readStoreSync
+// would read an empty file and miss every user that was saved to Redis.
+readStoreAsync().catch(() => {});
