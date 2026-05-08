@@ -29,7 +29,8 @@ import {
 } from "./src/arena";
 import { coachRankingsRouter, coachRouter } from "./src/coach-router.js";
 import { authRouter } from "./src/auth-router.js";
-import { adminRouter } from "./src/admin-router.js";
+import { adminRouter, deleteStudentEverywhere } from "./src/admin-router.js";
+import { addLog } from "./src/log-store.js";
 import { parseAuth, requireActiveUser } from "./src/auth-middleware.js";
 import { getEffectiveUserAccess } from "./src/user-access-store.js";
 import {
@@ -3466,6 +3467,44 @@ app.get("/guto/memory", requireActiveUser, (req, res) => {
     return;
   }
   res.json(memory);
+});
+
+app.delete("/guto/account", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
+  const access = getEffectiveUserAccess(userId);
+
+  if (!access || access.role !== "student") {
+    return res.status(403).json({
+      message: "Apenas alunos podem excluir a própria conta por este caminho.",
+      code: "GUTO_DELETE_NOT_STUDENT",
+    });
+  }
+
+  const confirmation = typeof req.body?.confirmation === "string" ? req.body.confirmation.trim() : "";
+  if (confirmation !== "EXCLUIR") {
+    return res.status(400).json({
+      message: "Confirmação inválida. Envie { confirmation: \"EXCLUIR\" } para confirmar.",
+      code: "GUTO_DELETE_CONFIRMATION_REQUIRED",
+    });
+  }
+
+  try {
+    await deleteStudentEverywhere(userId);
+    addLog({
+      action: "account_self_deleted",
+      actorUserId: userId,
+      actorRole: access.role,
+      targetUserId: userId,
+      metadata: { teamId: access.teamId ?? null },
+    });
+    res.status(204).send();
+  } catch (error) {
+    console.error("[GUTO] account self-delete failed", error);
+    res.status(500).json({
+      message: "Falha ao excluir conta. Tente novamente em alguns minutos.",
+      code: "GUTO_DELETE_FAILED",
+    });
+  }
 });
 
 app.post("/guto/memory", requireActiveUser, (req, res) => {

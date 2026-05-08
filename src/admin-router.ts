@@ -428,7 +428,7 @@ async function updateMemoryFromStudentPatch(userId: string, patch: Partial<UserA
   saveMemory(memory);
 }
 
-async function deleteStudentEverywhere(userId: string): Promise<void> {
+export async function deleteStudentEverywhere(userId: string): Promise<void> {
   const memStore = await readMemoryStoreAsync();
   delete (memStore as Record<string, unknown>)[userId];
   await writeMemoryStoreAsync(memStore);
