@@ -25,6 +25,7 @@ export type LogAction =
   | "workout_unlocked"
   | "workout_reset"
   | "workout_published"
+  | "workout_weekly_saved"
   | "diet_edited"
   | "diet_generated"
   | "diet_locked"

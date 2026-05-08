@@ -50,7 +50,7 @@ import {
   readMemoryStoreAsync,
   writeMemoryStoreAsync,
 } from "./memory-store.js";
-import { getMemory, saveMemory, buildWorkoutPlanFromSemanticFocus } from "../server.js";
+import { getMemory, saveMemory, buildWorkoutPlanFromSemanticFocus, type WeekDayKey, type WeeklyWorkoutPlan } from "../server.js";
 import { getDietPlan, saveDietPlan, deleteDietPlan } from "./diet-store.js";
 import { addLog, getLogs } from "./log-store.js";
 import { config } from "./config.js";
@@ -1340,6 +1340,68 @@ adminRouter.get("/students/:userId/workout/history", asyncHandler(async (req, re
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
   res.json({ history: workoutHistory(student.userId) });
+}));
+
+// ─── Weekly Workout Plan ──────────────────────────────────────────────────────
+
+function getTodayDayKey(): WeekDayKey {
+  const dayIndex = new Date().getDay(); // 0=Sunday
+  const map: Record<number, WeekDayKey> = { 0: "sunday", 1: "monday", 2: "tuesday", 3: "wednesday", 4: "thursday", 5: "friday", 6: "saturday" };
+  return map[dayIndex];
+}
+
+adminRouter.get("/students/:userId/workout/week", asyncHandler(async (req, res) => {
+  const student = await getManagedStudent(req, res, routeParam(req, "userId"));
+  if (!student) return;
+  const memory = getMemory(student.userId);
+  res.json({ weeklyWorkout: memory.weeklyWorkoutPlan || null });
+}));
+
+adminRouter.put("/students/:userId/workout/week", asyncHandler(async (req, res) => {
+  const caller = req.gutoUser!;
+  const student = await getManagedStudent(req, res, routeParam(req, "userId"));
+  if (!student) return;
+  const memory = getMemory(student.userId);
+  const body = req.body as { days?: unknown };
+  const rawDays = asRecord(body.days ?? req.body);
+  const VALID_DAYS: WeekDayKey[] = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const days: Partial<Record<WeekDayKey, any>> = {};
+  for (const day of VALID_DAYS) {
+    const rawDay = rawDays[day];
+    if (rawDay == null) continue;
+    const normalized = normalizeWorkoutPlan(rawDay, null, req, `Weekly plan — ${day}`);
+    normalized.studentId = student.userId;
+    normalized.weekDay = day;
+    days[day] = normalizeWorkoutPlanAgainstCatalog(normalized);
+  }
+  const weeklyWorkoutPlan: WeeklyWorkoutPlan = {
+    studentId: student.userId,
+    updatedAt: new Date().toISOString(),
+    updatedBy: caller.userId,
+    days: days as WeeklyWorkoutPlan["days"],
+  };
+  memory.weeklyWorkoutPlan = weeklyWorkoutPlan;
+  saveMemory(memory);
+  addLog({ action: "workout_weekly_saved", actorUserId: caller.userId, actorRole: caller.role, targetUserId: student.userId, metadata: { days: Object.keys(days) } });
+  res.json({ weeklyWorkout: weeklyWorkoutPlan });
+}));
+
+adminRouter.get("/students/:userId/workout/today", asyncHandler(async (req, res) => {
+  const student = await getManagedStudent(req, res, routeParam(req, "userId"));
+  if (!student) return;
+  const memory = getMemory(student.userId);
+  const today = getTodayDayKey();
+  const todayWorkout = memory.weeklyWorkoutPlan?.days?.[today] ?? null;
+  if (todayWorkout) {
+    res.json({ workout: todayWorkout, dayKey: today, fromWeeklyPlan: true });
+    return;
+  }
+  if (memory.lastWorkoutPlan) {
+    res.json({ workout: memory.lastWorkoutPlan, dayKey: today, fromWeeklyPlan: false });
+    return;
+  }
+  res.json({ workout: null, dayKey: today, fromWeeklyPlan: false });
 }));
 
 // ─── Diet ────────────────────────────────────────────────────────────────────

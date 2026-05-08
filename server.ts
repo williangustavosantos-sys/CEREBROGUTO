@@ -116,6 +116,15 @@ interface ExpectedResponse {
   instruction?: string;
   context?: "training_schedule" | "training_location" | "training_status" | "training_limitations" | "limitation_check";
 }
+export type WeekDayKey = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
+
+export interface WeeklyWorkoutPlan {
+  studentId: string;
+  updatedAt: string;
+  updatedBy: string;
+  days: Partial<Record<WeekDayKey, WorkoutPlan>>;
+}
+
 interface WorkoutExercise {
   id: string;
   name: string;
@@ -242,6 +251,7 @@ interface GutoMemory {
   xpEvents: XpEvent[];
   lastLimitationCheckAt?: string;
   lastWorkoutPlan?: WorkoutPlan | null;
+  weeklyWorkoutPlan?: WeeklyWorkoutPlan | null;
   recentTrainingHistory?: RecentTrainingHistoryItem[];
   nextWorkoutFocus?: WorkoutFocus;
   lastSuggestedFocus?: WorkoutFocus;
@@ -591,6 +601,7 @@ function sanitizeOperationalMemory(memory: GutoMemory): GutoMemory {
     trainingStatus: isOperationalNoise(memory.trainingStatus) ? undefined : memory.trainingStatus,
     trainingLimitations: isOperationalNoise(memory.trainingLimitations) ? undefined : memory.trainingLimitations,
     lastWorkoutPlan: memory.lastWorkoutPlan || null,
+    weeklyWorkoutPlan: memory.weeklyWorkoutPlan || null,
     recentTrainingHistory: Array.isArray(memory.recentTrainingHistory) ? memory.recentTrainingHistory.slice(0, 12) : [],
   };
 }
@@ -782,6 +793,7 @@ export function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
       xpEvents: Array.isArray(existing.xpEvents) ? existing.xpEvents : [],
       lastLimitationCheckAt: existing.lastLimitationCheckAt,
       lastWorkoutPlan: existing.lastWorkoutPlan || null,
+      weeklyWorkoutPlan: existing.weeklyWorkoutPlan || null,
       recentTrainingHistory: Array.isArray(existing.recentTrainingHistory) ? existing.recentTrainingHistory : [],
       nextWorkoutFocus:
         existing.nextWorkoutFocus === "chest_triceps" ||
@@ -815,6 +827,7 @@ export function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
     missedMissionDates: [],
     xpEvents: [],
     lastWorkoutPlan: null,
+    weeklyWorkoutPlan: null,
     recentTrainingHistory: [],
     nextWorkoutFocus: undefined,
     proactiveSent: {},
