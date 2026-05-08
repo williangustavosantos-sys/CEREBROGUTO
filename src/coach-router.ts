@@ -3,6 +3,7 @@ import {
   getUserAccess,
   getEffectiveUserAccess,
   upsertUserAccess,
+  upsertUserAccessAsync,
   deleteUserAccessHard,
   getAllUserAccess,
   writeUserAccessStoreRaw,
@@ -22,8 +23,9 @@ import {
   writeMemoryStoreSync,
 } from "./memory-store.js";
 import { deleteDietPlan } from "./diet-store.js";
-import { createInvite } from "./invite-store.js";
+import { createInvite, findInviteByUserId } from "./invite-store.js";
 import { config } from "./config.js";
+import bcrypt from "bcrypt";
 import {
   assertCanAccessUserAccess,
   getRequestActorAccess,
@@ -460,6 +462,36 @@ coachRouter.post("/student/:userId/hard-delete", requireSuperAdmin, async (req: 
   } catch (err) {
     res.status(500).json({ error: "delete_failed", message: String(err) });
   }
+});
+
+// GET /guto/coach/student/:userId/invite-link — returns existing pending link or generates a new one
+coachRouter.get("/student/:userId/invite-link", async (req: Request, res: Response) => {
+  const userId = req.params["userId"] as string;
+  const existing = getManagedStudent(req, res, userId);
+  if (!existing) return;
+
+  const invite = await findInviteByUserId(userId);
+  if (invite?.rawToken && invite.status === "pending_claim") {
+    return res.json({ inviteLink: `${config.frontendPublicUrl}/convite/${invite.rawToken}` });
+  }
+
+  const actor = getRequestActorAccess(req);
+  const coachId = existing.coachId || actor?.userId || "";
+  const { rawToken } = await createInvite({ userId, name: existing.name ?? userId, coachId });
+  return res.json({ inviteLink: `${config.frontendPublicUrl}/convite/${rawToken}` });
+});
+
+// POST /guto/coach/student/:userId/reset-password — generates a temporary password
+coachRouter.post("/student/:userId/reset-password", async (req: Request, res: Response) => {
+  const userId = req.params["userId"] as string;
+  const existing = getManagedStudent(req, res, userId);
+  if (!existing) return;
+
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+  const tempPassword = Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  const passwordHash = await bcrypt.hash(tempPassword, 10);
+  await upsertUserAccessAsync(userId, { passwordHash });
+  return res.json({ tempPassword, message: "Senha temporária gerada." });
 });
 
 // GET /guto/coach/rankings
