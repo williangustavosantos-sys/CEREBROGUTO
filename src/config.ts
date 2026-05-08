@@ -37,4 +37,10 @@ export const config = {
   pushVapidSubject: process.env.PUSH_VAPID_SUBJECT || "mailto:app.guto.life@gmail.com",
   // Cron secret — required to call POST /guto/push/dispatch
   pushCronSecret: process.env.PUSH_CRON_SECRET || "",
+  // Stripe (B2C subscriptions). Disabled when secretKey is empty.
+  stripeSecretKey: process.env.STRIPE_SECRET_KEY || "",
+  stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || "",
+  stripePriceMonthly: process.env.STRIPE_PRICE_MONTHLY || "",
+  stripePriceAnnual: process.env.STRIPE_PRICE_ANNUAL || "",
+  stripePriceBeta: process.env.STRIPE_PRICE_BETA || "",
 };

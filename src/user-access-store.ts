@@ -35,6 +35,9 @@ export interface UserAccess {
   accessDurationDays?: number;
   phone?: string;
   teamId?: string;
+  stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  stripePriceId?: string;
 }
 
 interface UserAccessStore {

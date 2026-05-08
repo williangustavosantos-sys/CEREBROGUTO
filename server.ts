@@ -31,6 +31,7 @@ import {
 import { coachRankingsRouter, coachRouter } from "./src/coach-router.js";
 import { authRouter } from "./src/auth-router.js";
 import { adminRouter, deleteStudentEverywhere } from "./src/admin-router.js";
+import { billingRouter, stripeWebhookHandler } from "./src/billing-router.js";
 import { addLog } from "./src/log-store.js";
 import {
   upsertSubscription,
@@ -414,6 +415,9 @@ if (pushEnabled) {
     config.pushVapidPrivateKey,
   );
 }
+// Stripe webhook MUST be mounted before express.json() — needs raw body.
+app.post("/guto/billing/webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
+
 app.use(express.json({ limit: "1mb" }));
 app.use(createRateLimit({
   windowMs: config.rateLimitWindowMs,
@@ -476,6 +480,7 @@ if (config.enableLegacyCoachRoutes) {
 }
 app.use("/auth", authRouter);
 app.use("/admin", adminRouter);
+app.use("/guto/billing", billingRouter);
 
 app.post("/guto/events", requireActiveUser, (req, res) => {
   const body = req.body as {

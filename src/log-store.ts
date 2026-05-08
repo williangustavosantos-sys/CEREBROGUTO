@@ -40,6 +40,8 @@ export type LogAction =
   | "user_deleted"
   | "account_self_deleted"
   | "push_dispatch"
+  | "billing_checkout_completed"
+  | "billing_subscription_updated"
   | "team_created"
   | "team_updated"
   | "invite_regenerated";
