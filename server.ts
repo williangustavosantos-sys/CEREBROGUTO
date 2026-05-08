@@ -47,7 +47,7 @@ import {
   validateWorkoutExerciseAgainstCatalog,
 } from "./src/workout-catalog-validation";
 
-type Acao = "none" | "updateWorkout" | "lock";
+type Acao = "none" | "updateWorkout" | "lock" | "changeLanguage" | "requestDeleteAccount" | "showProfile";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
 type GutoAvatarEmotion = "default" | "alert" | "critical" | "reward";
 type TrainingScheduleIntent = "today" | "tomorrow";
@@ -307,6 +307,17 @@ interface OperationalContext {
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 12 * 1024 * 1024 } });
+
+// ── Arena group resolver ──────────────────────────────────────────────────────
+// Resolves the arena group for a user: uses their teamId when available,
+// falls back to DEFAULT_ARENA_GROUP so existing data is never orphaned.
+function getUserArenaGroup(userId: string): string {
+  try {
+    const access = getEffectiveUserAccess(userId);
+    if (access?.teamId && access.teamId !== "GUTO_CORE") return access.teamId;
+  } catch {}
+  return DEFAULT_ARENA_GROUP;
+}
 
 const PORT = config.port;
 const GEMINI_API_KEY = config.geminiApiKey;
@@ -1669,7 +1680,7 @@ function parseGutoResponse(raw: string | undefined, language = "pt-BR"): GutoMod
     const expectedResponse = normalizeExpectedResponse(parsed.expectedResponse);
     return {
       fala,
-      acao: parsed.acao === "updateWorkout" || parsed.acao === "lock" ? parsed.acao : "none",
+      acao: parsed.acao === "updateWorkout" || parsed.acao === "lock" || parsed.acao === "changeLanguage" || parsed.acao === "requestDeleteAccount" || parsed.acao === "showProfile" ? parsed.acao : "none",
       expectedResponse,
       avatarEmotion:
         parsed.avatarEmotion === "default" ||
@@ -2031,6 +2042,9 @@ QUANDO USAR CADA acao:
 - "updateWorkout": SEMPRE use isso na primeira oportunidade para iniciar a execução do treino. Se a memória já tem os dados (idade, local, objetivo, limitação), não pergunte nada: decida o treino, devolva "updateWorkout" e preencha o memoryPatch.nextWorkoutFocus ou workoutPlan.
 - "none": Apenas quando a conversa for fora do contexto de treino (ex: estudo, drama relacional) ou se estiver recalibrando.
 - "lock": Quando o usuário fechar compromisso para o futuro.
+- "changeLanguage": Quando o usuário pedir para mudar o idioma do app (ex: "muda pra inglês", "switch to italian", "cambia a español"). SEMPRE preencha memoryPatch.language com um destes códigos: "pt-BR" | "en-US" | "it-IT" | "es-ES". A resposta "fala" deve ser CURTA e JÁ NO NOVO IDIOMA, confirmando que mudou. Não fale antes. Não pergunte se tem certeza. Apenas mude.
+- "requestDeleteAccount": Quando o usuário pedir para excluir/apagar/deletar a conta (ex: "quero apagar minha conta", "delete my account"). NÃO execute. Direcione com tom de melhor amigo firme: lembre que a dupla acaba aqui se ele confirmar e que vai precisar confirmar em Configurações → Privacidade. NÃO seja melodramático.
+- "showProfile": Quando o usuário perguntar quais dados você sabe sobre ele (ex: "qual meu peso?", "que idade você sabe que eu tenho?", "me passa meus dados"). Recite naturalmente os dados relevantes do contexto de perfil que você já tem — sem listar como tabela, como um amigo que lembra: "Conheço você bem. 33 anos, 80kg, treina em casa, objetivo é evolução. Algo errado?". Se não souber um dado, fale que ainda não sabe.
 
 REGRAS DE CONDUÇÃO (MANIFESTO GUTO):
 - O objetivo nunca muda. O caminho sempre se adapta. JAMAIS desencoraje o treino.
@@ -2049,13 +2063,30 @@ memoryPatch:
 - Atualize APENAS os campos que o usuário acabou de revelar nesta mensagem ou os que você decidiu proativamente.
 - recentTrainingHistory: adicione apenas se ele relatar treino concluído de forma explícita (ex: "terminei perna"). Se ele usar referências como "treinei isso ontem", NÃO use memoryPatch para isso, use o campo "trainedReference" na raiz do JSON.
 - trainedToday=true: SÓ E SOMENTE SÓ se o usuário disser explicitamente "terminei", "treino feito", "finalizado". JAMAIS assuma que ele treinou só por um "oi" ou "academia".
+
+CAMPOS EDITÁVEIS PELO CHAT (você é o terminal do app, pode atualizar via memoryPatch):
+- name (string): se o usuário pedir mudar nome da dupla
+- language ("pt-BR" | "en-US" | "it-IT" | "es-ES"): use APENAS esses códigos quando mudar idioma
+- weightKg (30-300): peso em kg
+- heightCm (100-250): altura em cm
+- userAge (14-99): idade
+- biologicalSex ("female" | "male" | "prefer_not_to_say"): sexo biológico
+- trainingGoal ("consistency" | "fat_loss" | "muscle_gain" | "conditioning" | "mobility_health"): objetivo
+- preferredTrainingLocation ("gym" | "home" | "park" | "mixed"): local preferido
+- trainingLevel ("beginner" | "returning" | "consistent" | "advanced"): nível
+- trainingPathology (string): patologia/limitação
+- country (string): país
+- foodRestrictions (string): restrições alimentares
+- trainingLimitations (string): limitação livre
+
+REGRA: você confirma A ALTERAÇÃO na fala, mas só DEPOIS que efetivamente preencheu o memoryPatch certo. Não diga "alterei" sem ter colocado no patch. Se o usuário pedir algo fora desses campos (ex: "muda meu CPF"), responda que isso não rola por aqui.
 `.trim();
 
   const formatoSaida = `
 FORMATO DE SAÍDA — JSON ESTRITO, SEM MARKDOWN, SEM \`\`\`:
 ${JSON.stringify({
     fala: "string curta no idioma certo, voz do GUTO",
-    acao: "none | updateWorkout | lock",
+    acao: "none | updateWorkout | lock | changeLanguage | requestDeleteAccount | showProfile",
     expectedResponse: {
       type: "text",
       context: "training_schedule | training_location | training_status | training_limitations | limitation_check | null",
@@ -2110,6 +2141,22 @@ Usuário quebra a regra:
 Usuário entrega contexto fora de ordem:
 [user] tenho 32 anos, sem dor, vou em casa, voltando depois de 2 meses parado
 [guto] {"fala":"Pacote completo, eu gostei. Volta leve, sem heroísmo. Treino tá montando.","acao":"updateWorkout","expectedResponse":null,"avatarEmotion":"reward","memoryPatch":{"trainingAge":32,"trainingLimitations":"sem dor","trainingLocation":"casa","trainingStatus":"voltando depois de 2 meses parado","nextWorkoutFocus":"full_body"}}
+
+Usuário pede mudança de idioma:
+[user] muda pra italiano
+[guto] {"fala":"Fatto. Da adesso parlo italiano con te.","acao":"changeLanguage","expectedResponse":null,"avatarEmotion":"default","memoryPatch":{"language":"it-IT"}}
+
+Usuário pergunta dados:
+[user] que idade você sabe que eu tenho?
+[guto] {"fala":"Você tem 33 anos, 80kg, mora aí na sua casa e a meta é evolução. Quer ajustar algo?","acao":"showProfile","expectedResponse":null,"avatarEmotion":"default","memoryPatch":{}}
+
+Usuário diz peso novo:
+[user] tô com 78 agora
+[guto] {"fala":"Anotado, 78 kg. Bora seguir.","acao":"none","expectedResponse":null,"avatarEmotion":"reward","memoryPatch":{"weightKg":78}}
+
+Usuário pede excluir conta:
+[user] quero apagar minha conta
+[guto] {"fala":"Sério mesmo? Se for isso, a dupla acaba aqui. Vai em Configurações → Privacidade e Dados, lá você confirma. Eu não faço isso por você nesse atalho.","acao":"requestDeleteAccount","expectedResponse":null,"avatarEmotion":"alert","memoryPatch":{}}
 `.trim();
 
   return [
@@ -2300,6 +2347,45 @@ function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryP
   if (patch.lastWorkoutPlan) {
     memory.lastWorkoutPlan = enrichWorkoutPlanAnimations(patch.lastWorkoutPlan);
   }
+
+  // GUTO terminal: campos editáveis via chat
+  if (typeof patch.name === "string" && patch.name.trim()) {
+    memory.name = patch.name.trim().slice(0, 60);
+  }
+  if (typeof patch.language === "string" && ["pt-BR", "en-US", "it-IT", "es-ES"].includes(patch.language)) {
+    memory.language = patch.language;
+  }
+  if (typeof patch.weightKg === "number" && patch.weightKg >= 30 && patch.weightKg <= 300) {
+    memory.weightKg = Math.round(patch.weightKg * 10) / 10;
+  }
+  if (typeof patch.heightCm === "number" && patch.heightCm >= 100 && patch.heightCm <= 250) {
+    memory.heightCm = Math.round(patch.heightCm);
+  }
+  if (typeof patch.userAge === "number" && patch.userAge >= 14 && patch.userAge <= 99) {
+    memory.userAge = Math.round(patch.userAge);
+  }
+  if (typeof patch.biologicalSex === "string" && ["female", "male", "prefer_not_to_say"].includes(patch.biologicalSex)) {
+    memory.biologicalSex = patch.biologicalSex;
+  }
+  if (typeof patch.trainingGoal === "string" && ["consistency", "fat_loss", "muscle_gain", "conditioning", "mobility_health"].includes(patch.trainingGoal)) {
+    memory.trainingGoal = patch.trainingGoal;
+  }
+  if (typeof patch.preferredTrainingLocation === "string" && ["gym", "home", "park", "mixed"].includes(patch.preferredTrainingLocation)) {
+    memory.preferredTrainingLocation = patch.preferredTrainingLocation;
+  }
+  if (typeof patch.trainingLevel === "string" && ["beginner", "returning", "consistent", "advanced"].includes(patch.trainingLevel)) {
+    memory.trainingLevel = patch.trainingLevel;
+  }
+  if (typeof patch.trainingPathology === "string") {
+    memory.trainingPathology = normalizeMemoryValue(patch.trainingPathology);
+  }
+  if (typeof patch.country === "string" && patch.country.trim()) {
+    memory.country = normalizeMemoryValue(patch.country);
+  }
+  if (typeof patch.foodRestrictions === "string") {
+    memory.foodRestrictions = normalizeMemoryValue(patch.foodRestrictions);
+  }
+
   memory.lastActiveAt = new Date().toISOString();
   saveMemory(memory);
   return memory;
@@ -3353,13 +3439,13 @@ app.get("/guto/memory", requireActiveUser, (req, res) => {
     awardArenaXp({
       userId,
       displayName,
-      arenaGroupId: DEFAULT_ARENA_GROUP,
+      arenaGroupId: getUserArenaGroup(userId),
       type: "bonus",
       xp: 100,
       sourceValidationId: "grant_initial_xp",
     });
   } else if (memory.name) {
-    syncArenaDisplayName(userId, memory.name, DEFAULT_ARENA_GROUP);
+    syncArenaDisplayName(userId, memory.name, getUserArenaGroup(userId));
   }
   saveMemory(memory);
   if (memory.lastWorkoutPlan) {
@@ -3433,7 +3519,7 @@ app.post("/guto/memory", requireActiveUser, (req, res) => {
 
   saveMemory(memory);
   if (memory.name) {
-    syncArenaDisplayName(userId, memory.name, DEFAULT_ARENA_GROUP);
+    syncArenaDisplayName(userId, memory.name, getUserArenaGroup(userId));
   }
 
   if (memory.lastWorkoutPlan) {
@@ -3954,7 +4040,7 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
     const arenaResult = awardArenaXp({
       userId,
       displayName: (memory as { name?: string }).name || userId,
-      arenaGroupId: DEFAULT_ARENA_GROUP,
+      arenaGroupId: getUserArenaGroup(userId),
       type: "workout_validated",
       xp: XP_AMOUNT,
       workoutFocus,
@@ -3981,7 +4067,7 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
 
 app.get("/guto/arena/weekly", requireActiveUser, (req, res) => {
   const userId = req.gutoUser!.userId;
-  const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
+  const arenaGroupId = (req.query.arenaGroupId as string) || getUserArenaGroup(userId);
   const memory = getMemory(userId);
   syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
   res.json(getWeeklyRanking(arenaGroupId));
@@ -3989,7 +4075,7 @@ app.get("/guto/arena/weekly", requireActiveUser, (req, res) => {
 
 app.get("/guto/arena/monthly", requireActiveUser, (req, res) => {
   const userId = req.gutoUser!.userId;
-  const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
+  const arenaGroupId = (req.query.arenaGroupId as string) || getUserArenaGroup(userId);
   const memory = getMemory(userId);
   syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
   res.json(getMonthlyRanking(arenaGroupId));
@@ -3997,7 +4083,7 @@ app.get("/guto/arena/monthly", requireActiveUser, (req, res) => {
 
 app.get("/guto/arena/individual", requireActiveUser, (req, res) => {
   const userId = req.gutoUser!.userId;
-  const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
+  const arenaGroupId = (req.query.arenaGroupId as string) || getUserArenaGroup(userId);
   const memory = getMemory(userId);
   syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
   res.json(getIndividualRanking(arenaGroupId));
@@ -4005,7 +4091,7 @@ app.get("/guto/arena/individual", requireActiveUser, (req, res) => {
 
 app.get("/guto/arena/me", requireActiveUser, (req, res) => {
   const userId = req.gutoUser!.userId;
-  const arenaGroupId = (req.query.arenaGroupId as string) || DEFAULT_ARENA_GROUP;
+  const arenaGroupId = (req.query.arenaGroupId as string) || getUserArenaGroup(userId);
   const memory = getMemory(userId);
   syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
   const profile = getMyArenaProfile(userId, arenaGroupId);
