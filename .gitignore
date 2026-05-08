@@ -25,3 +25,7 @@ pnpm-debug.log*
 .DS_Store
 .vscode/
 .idea/
+
+# runtime data + next
+tmp/
+.next/

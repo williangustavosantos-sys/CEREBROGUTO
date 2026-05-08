@@ -1,5 +1,12 @@
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { config } from "./config.js";
 import { GUTO_TEAM_PLAN_LIMITS, GutoTeamPlan } from "./team-plans.js";
 import type { UserAccess } from "./user-access-store.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const TEAM_STORE_PATH = path.join(__dirname, "../tmp/teams.json");
 
 export type GutoTeam = {
     id: string;
@@ -57,35 +64,152 @@ export class GutoTeamNotFoundError extends Error {
     }
 }
 
-const teams: Record<string, GutoTeam> = {
-    [GUTO_CORE_TEAM_ID]: {
-        id: GUTO_CORE_TEAM_ID,
-        name: "GUTO Core",
-        plan: "custom",
-        status: "active",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-    }
+// ─── Storage layer (Redis → file → memory) ────────────────────────────────────
+
+interface TeamStore {
+    teams: Record<string, GutoTeam>;
+}
+
+const GUTO_CORE_SEED: GutoTeam = {
+    id: GUTO_CORE_TEAM_ID,
+    name: "GUTO Core",
+    plan: "custom",
+    status: "active",
+    createdAt: "2024-01-01T00:00:00.000Z",
+    updatedAt: "2024-01-01T00:00:00.000Z",
 };
 
+let memCache: TeamStore = { teams: { [GUTO_CORE_TEAM_ID]: GUTO_CORE_SEED } };
+
+const REDIS_KEY = "guto:teams";
+
+function useRedis(): boolean {
+    return Boolean(config.upstashRedisUrl && config.upstashRedisToken);
+}
+
+async function redisGet(key: string): Promise<string | null> {
+    try {
+        const res = await fetch(`${config.upstashRedisUrl}/get/${key}`, {
+            headers: { Authorization: `Bearer ${config.upstashRedisToken}` },
+        });
+        if (!res.ok) return null;
+        const data = (await res.json()) as { result: string | null };
+        return data.result;
+    } catch {
+        return null;
+    }
+}
+
+async function redisSet(key: string, value: string): Promise<void> {
+    try {
+        await fetch(`${config.upstashRedisUrl}/set/${key}`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${config.upstashRedisToken}` },
+            body: value,
+        });
+    } catch {
+        // ignore
+    }
+}
+
+function ensureStoreFile(): void {
+    if (!fs.existsSync(TEAM_STORE_PATH)) {
+        fs.mkdirSync(path.dirname(TEAM_STORE_PATH), { recursive: true });
+        fs.writeFileSync(TEAM_STORE_PATH, JSON.stringify({ teams: { [GUTO_CORE_TEAM_ID]: GUTO_CORE_SEED } }, null, 2));
+    }
+}
+
+function readTeamsSync(): TeamStore {
+    if (useRedis() && Object.keys(memCache.teams).length > 0) {
+        return memCache;
+    }
+    try {
+        ensureStoreFile();
+        const parsed = JSON.parse(fs.readFileSync(TEAM_STORE_PATH, "utf-8")) as TeamStore;
+        const store = parsed && typeof parsed.teams === "object" ? parsed : { teams: {} };
+        // Always ensure GUTO_CORE exists
+        if (!store.teams[GUTO_CORE_TEAM_ID]) {
+            store.teams[GUTO_CORE_TEAM_ID] = GUTO_CORE_SEED;
+        }
+        if (Object.keys(store.teams).length === 0 && Object.keys(memCache.teams).length > 0) {
+            return memCache;
+        }
+        return store;
+    } catch {
+        return memCache;
+    }
+}
+
+function writeTeamsSync(store: TeamStore): void {
+    memCache = store;
+    try {
+        ensureStoreFile();
+        fs.writeFileSync(TEAM_STORE_PATH, JSON.stringify(store, null, 2));
+    } catch {
+        // in-memory only
+    }
+}
+
+async function readTeamsAsync(): Promise<TeamStore> {
+    if (useRedis()) {
+        try {
+            const raw = await redisGet(REDIS_KEY);
+            if (raw) {
+                let parsed = JSON.parse(raw);
+                if (typeof parsed === "string") parsed = JSON.parse(parsed);
+                if (!parsed || typeof parsed !== "object" || !("teams" in parsed)) {
+                    parsed = { teams: {} };
+                }
+                if (!parsed.teams[GUTO_CORE_TEAM_ID]) {
+                    parsed.teams[GUTO_CORE_TEAM_ID] = GUTO_CORE_SEED;
+                }
+                memCache = parsed as TeamStore;
+                return memCache;
+            }
+        } catch {
+            // fall through
+        }
+    }
+    const store = readTeamsSync();
+    memCache = store;
+    return store;
+}
+
+async function writeTeamsAsync(store: TeamStore): Promise<void> {
+    memCache = store;
+    if (useRedis()) {
+        await redisSet(REDIS_KEY, JSON.stringify(store));
+    }
+    writeTeamsSync(store);
+}
+
+// Bootstrap: load persisted teams on module init
+readTeamsAsync().catch(() => {});
+
 export function getTeam(teamId: string): GutoTeam | undefined {
-    return teams[teamId];
+    return readTeamsSync().teams[teamId];
 }
 
 export function getAllTeams(): GutoTeam[] {
-    return Object.values(teams);
+    return Object.values(readTeamsSync().teams);
 }
 
 export function createTeam(team: GutoTeam): GutoTeam {
-    teams[team.id] = team;
+    const store = readTeamsSync();
+    store.teams[team.id] = team;
+    writeTeamsSync(store);
+    writeTeamsAsync(store).catch(() => {});
     return team;
 }
 
 export function updateTeam(teamId: string, patch: Partial<Omit<GutoTeam, "id" | "createdAt">>): GutoTeam {
-    const existing = teams[teamId];
+    const store = readTeamsSync();
+    const existing = store.teams[teamId];
     if (!existing) throw new GutoTeamNotFoundError(teamId);
     const updated: GutoTeam = { ...existing, ...patch, id: existing.id, createdAt: existing.createdAt, updatedAt: new Date().toISOString() };
-    teams[teamId] = updated;
+    store.teams[teamId] = updated;
+    writeTeamsSync(store);
+    writeTeamsAsync(store).catch(() => {});
     return updated;
 }
 
