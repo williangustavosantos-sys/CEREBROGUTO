@@ -39,6 +39,7 @@ export type LogAction =
   | "password_reset"
   | "user_deleted"
   | "account_self_deleted"
+  | "push_dispatch"
   | "team_created"
   | "team_updated"
   | "invite_regenerated";

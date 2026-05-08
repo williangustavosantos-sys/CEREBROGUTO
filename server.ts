@@ -32,6 +32,15 @@ import { coachRankingsRouter, coachRouter } from "./src/coach-router.js";
 import { authRouter } from "./src/auth-router.js";
 import { adminRouter, deleteStudentEverywhere } from "./src/admin-router.js";
 import { addLog } from "./src/log-store.js";
+import {
+  upsertSubscription,
+  getAllSubscriptions,
+  getSubscriptionsByUser,
+  deleteSubscriptionByEndpoint,
+  recordSuccessfulDelivery,
+  recordFailedDelivery,
+} from "./src/push-store.js";
+import webpush from "web-push";
 import { parseAuth, requireActiveUser } from "./src/auth-middleware.js";
 import { getEffectiveUserAccess } from "./src/user-access-store.js";
 import {
@@ -396,6 +405,15 @@ app.use(cors({
     callback(new Error("Origem não permitida pelo GUTO."));
   },
 }));
+
+const pushEnabled = Boolean(config.pushVapidPublicKey && config.pushVapidPrivateKey);
+if (pushEnabled) {
+  webpush.setVapidDetails(
+    config.pushVapidSubject,
+    config.pushVapidPublicKey,
+    config.pushVapidPrivateKey,
+  );
+}
 app.use(express.json({ limit: "1mb" }));
 app.use(createRateLimit({
   windowMs: config.rateLimitWindowMs,
@@ -3507,6 +3525,175 @@ app.delete("/guto/account", requireActiveUser, async (req, res) => {
     });
   }
 });
+
+// ─── Web Push (Sprint 5: proatividade) ────────────────────────────────────────
+
+app.get("/guto/push/vapid-public-key", (_req, res) => {
+  if (!pushEnabled) {
+    return res.status(503).json({ message: "Push notifications not configured.", code: "PUSH_DISABLED" });
+  }
+  res.json({ publicKey: config.pushVapidPublicKey });
+});
+
+app.post("/guto/push/subscribe", requireActiveUser, (req, res) => {
+  if (!pushEnabled) {
+    return res.status(503).json({ message: "Push notifications not configured.", code: "PUSH_DISABLED" });
+  }
+  const userId = req.gutoUser!.userId;
+  const sub = req.body?.subscription;
+  if (!sub || typeof sub.endpoint !== "string" || !sub.keys?.p256dh || !sub.keys?.auth) {
+    return res.status(400).json({ message: "Invalid subscription payload.", code: "PUSH_INVALID_SUB" });
+  }
+  const saved = upsertSubscription({
+    userId,
+    endpoint: sub.endpoint,
+    keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
+  });
+  res.status(201).json({ ok: true, endpoint: saved.endpoint });
+});
+
+app.delete("/guto/push/subscribe", requireActiveUser, (req, res) => {
+  const endpoint = typeof req.body?.endpoint === "string" ? req.body.endpoint : "";
+  if (!endpoint) return res.status(400).json({ message: "endpoint required.", code: "PUSH_NO_ENDPOINT" });
+  const removed = deleteSubscriptionByEndpoint(endpoint);
+  res.json({ ok: removed });
+});
+
+// Cron-only: must include the shared secret in Authorization: Bearer <secret>
+app.post("/guto/push/dispatch", async (req, res) => {
+  if (!pushEnabled) {
+    return res.status(503).json({ message: "Push notifications not configured.", code: "PUSH_DISABLED" });
+  }
+  const auth = req.headers.authorization || "";
+  const expected = `Bearer ${config.pushCronSecret}`;
+  if (!config.pushCronSecret || auth !== expected) {
+    return res.status(401).json({ message: "Unauthorized.", code: "PUSH_UNAUTHORIZED" });
+  }
+
+  const subs = getAllSubscriptions();
+  const today = new Date().toISOString().slice(0, 10);
+  const memoryStore = await readMemoryStoreAsync();
+
+  let sent = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const sub of subs) {
+    const memory = memoryStore[sub.userId] as Record<string, unknown> | undefined;
+    if (!memory) {
+      skipped++;
+      continue;
+    }
+
+    const completedDates = Array.isArray(memory.completedWorkoutDates) ? (memory.completedWorkoutDates as string[]) : [];
+    const trainedToday = completedDates.includes(today);
+    if (trainedToday) {
+      skipped++;
+      continue;
+    }
+
+    const lastSent = sub.lastSentAt ? sub.lastSentAt.slice(0, 10) : "";
+    if (lastSent === today) {
+      skipped++;
+      continue;
+    }
+
+    const totalXp = Math.max(0, typeof memory.totalXp === "number" ? memory.totalXp : 100);
+    const missedDates = Array.isArray(memory.missedMissionDates) ? (memory.missedMissionDates as string[]) : [];
+    const missedCount = missedDates.length;
+    const language = (typeof memory.language === "string" ? memory.language : "pt-BR") as GutoLanguage;
+    const preferredName = typeof memory.preferredName === "string" ? memory.preferredName : "";
+    const fallbackName = typeof memory.name === "string" ? memory.name : "";
+    const userName = preferredName || fallbackName;
+
+    let title = "GUTO";
+    let body = "";
+    let slot = "morning";
+
+    if (totalXp <= 0) {
+      slot = "critical";
+      body = pickPushCopy(language, "dead", userName);
+    } else if (totalXp <= 19 || missedCount >= 4) {
+      slot = "critical";
+      body = pickPushCopy(language, "dying", userName);
+    } else if (totalXp <= 49 || missedCount >= 2) {
+      slot = "critical";
+      body = pickPushCopy(language, "critical", userName);
+    } else if (totalXp <= 70 || missedCount >= 1) {
+      slot = "morning";
+      body = pickPushCopy(language, "alert", userName);
+    } else {
+      slot = "morning";
+      body = pickPushCopy(language, "healthy", userName);
+    }
+
+    try {
+      await webpush.sendNotification(
+        {
+          endpoint: sub.endpoint,
+          keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
+        },
+        JSON.stringify({ title, body, tag: `guto-${slot}`, url: "/" }),
+        { TTL: 3600 },
+      );
+      recordSuccessfulDelivery(sub.endpoint, slot);
+      sent++;
+    } catch (err: any) {
+      const status = err?.statusCode ?? 0;
+      if (status === 404 || status === 410) {
+        deleteSubscriptionByEndpoint(sub.endpoint);
+      } else {
+        recordFailedDelivery(sub.endpoint);
+      }
+      failed++;
+    }
+  }
+
+  addLog({
+    action: "push_dispatch",
+    actorUserId: "cron",
+    actorRole: "system",
+    targetUserId: "all",
+    metadata: { sent, skipped, failed, total: subs.length },
+  });
+
+  res.json({ ok: true, sent, skipped, failed, total: subs.length });
+});
+
+function pickPushCopy(language: GutoLanguage, state: "healthy" | "alert" | "critical" | "dying" | "dead", name: string): string {
+  const who = name ? `, ${name}` : "";
+  const map: Record<GutoLanguage, Record<string, string>> = {
+    "pt-BR": {
+      healthy: `Bom dia${who}. Eu já montei. Bora.`,
+      alert: `${name || "Ei"}, perdeu um dia. Hoje a gente volta.`,
+      critical: `Sumiu de novo${who}. Eu ainda tô aqui — mas tô fraco.`,
+      dying: `Tô apagando${who}. Se você não voltar, eu vou.`,
+      dead: `Eu morri esperando você. Volta se for sério dessa vez.`,
+    },
+    "en-US": {
+      healthy: `Morning${who}. I built today's session. Let's move.`,
+      alert: `${name || "Hey"}, you missed a day. Today we come back.`,
+      critical: `You're slipping${who}. I'm still here — barely.`,
+      dying: `I'm fading${who}. If you don't show up, I'm gone.`,
+      dead: `I died waiting. Come back only if you're serious this time.`,
+    },
+    "it-IT": {
+      healthy: `Buongiorno${who}. Ho già preparato. Andiamo.`,
+      alert: `${name || "Ehi"}, hai perso un giorno. Oggi torniamo.`,
+      critical: `Stai sparendo${who}. Sono ancora qui — a malapena.`,
+      dying: `Mi sto spegnendo${who}. Se non torni, sparisco.`,
+      dead: `Sono morto aspettandoti. Torna solo se è serio stavolta.`,
+    },
+    "es-ES": {
+      healthy: `Buenos días${who}. Ya armé el día. Vamos.`,
+      alert: `${name || "Oye"}, perdiste un día. Hoy volvemos.`,
+      critical: `Estás desapareciendo${who}. Aún estoy aquí — apenas.`,
+      dying: `Me estoy apagando${who}. Si no vuelves, me voy.`,
+      dead: `Morí esperándote. Vuelve solo si va en serio esta vez.`,
+    },
+  };
+  return map[language]?.[state] || map["pt-BR"][state];
+}
 
 app.post("/guto/memory", requireActiveUser, (req, res) => {
   const userId = req.gutoUser!.userId;
