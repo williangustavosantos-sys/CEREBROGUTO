@@ -926,6 +926,22 @@ function grantInitialXp(memory: GutoMemory) {
   if (memory.initialXpGranted) return memory;
   appendXpEvent(memory, "grant_initial_xp", 100, "lifetime");
   memory.initialXpGranted = true;
+
+  // Bug fix: os 100 XP iniciais também precisam ir pra Arena, senão o
+  // arenaProfile.totalXp começa em 0 e fica 100 atrás de memory.totalXp.
+  // Esse desync fazia o app mostrar "200 XP" no home mas "100" na Arena.
+  try {
+    awardArenaXp({
+      userId: memory.userId,
+      displayName: (memory as { name?: string }).name || memory.userId,
+      arenaGroupId: getUserArenaGroup(memory.userId),
+      type: "bonus",
+      xp: 100,
+    });
+  } catch {
+    // Não bloqueia o login se Arena falhar
+  }
+
   return memory;
 }
 

@@ -44,6 +44,7 @@ import {
   saveArenaProfile,
   readArenaStore,
   writeArenaStore,
+  getAllArenaProfiles,
 } from "./arena-store.js";
 import { getAvatarStage, DEFAULT_ARENA_GROUP } from "./arena.js";
 import {
@@ -1827,4 +1828,26 @@ adminRouter.get("/logs", asyncHandler(async (req, res) => {
 
   const scopedUserIds = new Set(getScopedUserAccessList(actor, await getAllUserAccessAsync()).map((user) => user.userId));
   res.json({ logs: getLogs().filter((log) => !log.targetUserId || scopedUserIds.has(log.targetUserId)) });
+}));
+
+// ─── Maintenance: backfill arena XP for existing users ──────────────────────
+// Bug fix one-shot: usuários criados antes do fix de grantInitialXp ficaram
+// com arenaProfile.totalXp 100 abaixo de memory.totalXp. Este endpoint
+// adiciona +100 XP em todos os arenaProfiles que estão com totalXp < 100,
+// alinhando-os com os 100 XP que já foram concedidos no memory.
+adminRouter.post("/maintenance/backfill-arena-initial-xp", requireAdmin, asyncHandler(async (_req, res) => {
+  const profiles = getAllArenaProfiles();
+  const fixed: Array<{ userId: string; before: number; after: number }> = [];
+  for (const profile of profiles) {
+    if (profile.totalXp < 100) {
+      const before = profile.totalXp;
+      profile.totalXp = profile.totalXp + 100;
+      profile.weeklyXp = profile.weeklyXp + 100;
+      profile.monthlyXp = profile.monthlyXp + 100;
+      profile.updatedAt = new Date().toISOString();
+      saveArenaProfile(profile);
+      fixed.push({ userId: profile.userId, before, after: profile.totalXp });
+    }
+  }
+  res.json({ fixedCount: fixed.length, fixed });
 }));
