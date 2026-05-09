@@ -9,6 +9,7 @@ export const config = {
   voiceApiKey: (process.env.VOICE_API_KEY || "").replace(/['"]/g, ""),
   workoutxApiKey: (process.env.WORKOUTX_API_KEY || "").replace(/['"]/g, ""),
   openaiApiKey: process.env.OPENAI_API_KEY || "",
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
   memoryFile: process.env.GUTO_MEMORY_FILE || join(process.cwd(), "data", "guto-memory.json"),
   defaultUserId: process.env.GUTO_DEFAULT_USER_ID || "local-user",
   timeZone: process.env.GUTO_TIME_ZONE || process.env.TZ || "Europe/Rome",
