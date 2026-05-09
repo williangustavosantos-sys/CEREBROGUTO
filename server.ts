@@ -28,6 +28,7 @@ import {
   syncArenaDisplayName,
   DEFAULT_ARENA_GROUP,
 } from "./src/arena";
+import { curateWorkout, hydrateCuratedExercises, type LocationMode as CuratorLocationMode } from "./src/workout-curator.js";
 import { coachRankingsRouter, coachRouter } from "./src/coach-router.js";
 import { authRouter } from "./src/auth-router.js";
 import { adminRouter, deleteStudentEverywhere } from "./src/admin-router.js";
@@ -58,6 +59,14 @@ import {
   normalizeWorkoutPlanAgainstCatalog,
   validateWorkoutExerciseAgainstCatalog,
 } from "./src/workout-catalog-validation";
+import {
+  resolveProfileFreeFields,
+  getPendingClarification,
+  shouldEnterConservativeMode,
+  acknowledgeClarification,
+  type ResolvedProfileFields,
+  type FreeField,
+} from "./src/dirty-data-resolver.js";
 
 type Acao = "none" | "updateWorkout" | "lock" | "changeLanguage" | "requestDeleteAccount" | "showProfile";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
@@ -229,6 +238,8 @@ type GutoMemoryPatch = Partial<GutoMemory> & {
     raw: string;
   }>;
   nextWorkoutFocus?: WorkoutFocus;
+  /** Set when the model just answered the pending free-field clarification. */
+  acknowledgeClarification?: FreeField;
 };
 interface GutoModelResponse {
   fala?: string;
@@ -290,6 +301,14 @@ interface GutoMemory {
   proactiveSent: Record<string, string[]>;
   initialXpRewardSeen: boolean;
   validationHistory?: WorkoutValidationRecord[];
+  /**
+   * Result of the dirty-data resolver applied to the 3 free fields
+   * (country / pathology / foodRestrictions). Cached by rawValue hash.
+   * Empty string in the source field is NOT the same as missing here:
+   * absent ResolvedField means "user did not inform"; a ResolvedField with
+   * status="unknown" means "user wrote something we did not understand".
+   */
+  resolvedFields?: ResolvedProfileFields;
 }
 
 type XpEventType =
@@ -2123,6 +2142,24 @@ CAMPOS EDITÁVEIS PELO CHAT (você é o terminal do app, pode atualizar via memo
 REGRA: você confirma A ALTERAÇÃO na fala, mas só DEPOIS que efetivamente preencheu o memoryPatch certo. Não diga "alterei" sem ter colocado no patch. Se o usuário pedir algo fora desses campos (ex: "muda meu CPF"), responda que isso não rola por aqui.
 `.trim();
 
+  const clarificationRegra = `
+PENDÊNCIA DE CLAREZA (DADO CONFUSO ≠ DADO VAZIO):
+- O onboarding já coletou tudo o que importa. Você NUNCA repete o onboarding.
+- Apenas três campos são livres e podem chegar confusos: country, pathology, foodRestriction.
+- O backend já interpretou esses campos (veja "resolvedFields" na memória). Se algum deles tiver status "needs_confirmation" ou "risky_unclear" e bloquear a próxima ação, a "Pendência de clareza" virá preenchida nos dados do turno.
+- Quando houver pendência:
+  * Faça UMA pergunta curta, no idioma do usuário, no seu próprio jeito (use "hint" como guia, NUNCA copie literal).
+  * UMA dúvida por vez. Nunca empilhe perguntas.
+  * Se for "risky_unclear", reconheça que viu, jogue seguro, mas NÃO drama. Uma frase, sem sermão.
+  * Não pergunte sobre dado que já foi respondido (acknowledged) ou que está "clear".
+- Quando o usuário responder a pendência:
+  * Se ele esclareceu o significado do dado, ATUALIZE o campo certo no memoryPatch (ex: foodRestrictions: "feijão") e ADICIONE memoryPatch.acknowledgeClarification = "country" | "pathology" | "foodRestriction".
+  * Se ele apenas confirmou ("é isso mesmo", "sim, era feijão"), apenas marque acknowledgeClarification = <field>.
+  * Se ele se recusou a explicar, marque acknowledgeClarification = <field> mesmo assim, para você não insistir. Você seguirá em modo conservador.
+- NUNCA trate dado confuso como dado vazio. Se foodRestriction = "vergão" com status "needs_confirmation", você NÃO pode dizer "você não tem restrições".
+- Se NÃO houver pendência, ignore esse bloco totalmente. Não invente clarificação.
+`.trim();
+
   const formatoSaida = `
 FORMATO DE SAÍDA — JSON ESTRITO, SEM MARKDOWN, SEM \`\`\`:
 ${JSON.stringify({
@@ -2209,6 +2246,8 @@ Usuário pede excluir conta:
     "",
     acoesRegra,
     "",
+    clarificationRegra,
+    "",
     formatoSaida,
     "",
     contextoAtual,
@@ -2239,7 +2278,9 @@ Usuário pede excluir conta:
       lastWorkoutFocus: (memory.lastWorkoutPlan as { focusKey?: string } | null)?.focusKey ?? null,
       recentTrainingHistory: memory.recentTrainingHistory,
       completedWorkoutCount: memory.completedWorkoutDates?.length ?? 0,
+      resolvedFields: memory.resolvedFields,
     })}`,
+    `Pendência de clareza: ${JSON.stringify(getPendingClarification(memory.resolvedFields, "chat"))}`,
     `expectedResponse atual da UI (sugestão, não trava): ${JSON.stringify(normalizeExpectedResponse(expectedResponse))}`,
     `Histórico recente:\n${formatHistoryForPrompt(history) || "sem histórico recente"}`,
     `Mensagem atual do usuário: ${input || ""}`,
@@ -2417,18 +2458,40 @@ function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryP
   if (typeof patch.trainingLevel === "string" && ["beginner", "returning", "consistent", "advanced"].includes(patch.trainingLevel)) {
     memory.trainingLevel = patch.trainingLevel;
   }
+  let freeFieldChanged = false;
   if (typeof patch.trainingPathology === "string") {
-    memory.trainingPathology = normalizeMemoryValue(patch.trainingPathology);
+    const next = normalizeMemoryValue(patch.trainingPathology);
+    if (next !== memory.trainingPathology) freeFieldChanged = true;
+    memory.trainingPathology = next;
   }
   if (typeof patch.country === "string" && patch.country.trim()) {
-    memory.country = normalizeMemoryValue(patch.country);
+    const next = normalizeMemoryValue(patch.country);
+    if (next !== memory.country) freeFieldChanged = true;
+    memory.country = next;
   }
   if (typeof patch.foodRestrictions === "string") {
-    memory.foodRestrictions = normalizeMemoryValue(patch.foodRestrictions);
+    const next = normalizeMemoryValue(patch.foodRestrictions);
+    if (next !== memory.foodRestrictions) freeFieldChanged = true;
+    memory.foodRestrictions = next;
+  }
+
+  if (
+    patch.acknowledgeClarification === "country" ||
+    patch.acknowledgeClarification === "pathology" ||
+    patch.acknowledgeClarification === "foodRestriction"
+  ) {
+    memory.resolvedFields = acknowledgeClarification(memory.resolvedFields, patch.acknowledgeClarification);
   }
 
   memory.lastActiveAt = new Date().toISOString();
   saveMemory(memory);
+
+  if (freeFieldChanged) {
+    void runFreeFieldsResolution(memory.userId, memory).catch((err) => {
+      console.warn("[GUTO] Free-fields resolution (chat patch) failed:", err);
+    });
+  }
+
   return memory;
 }
 
@@ -3391,20 +3454,75 @@ async function askGutoModel({
     }
 
     const hasIncompletePlan = parsedResponse.workoutPlan && (!parsedResponse.workoutPlan.exercises || parsedResponse.workoutPlan.exercises.length === 0);
-    
+
     if ((parsedResponse.acao === "updateWorkout" || hasIncompletePlan) && !workoutPlan) {
-      const semanticFocus = parsedResponse.memoryPatch?.nextWorkoutFocus || memory.nextWorkoutFocus;
-      workoutPlan = buildWorkoutPlanFromSemanticFocus({
-        language: selectedLanguage,
-        location: memory.preferredTrainingLocation || memory.trainingLocation || "casa",
-        status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
-        limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
-        age: memory.userAge ?? memory.trainingAge,
-        scheduleIntent: memory.trainingSchedule,
-        focus: semanticFocus,
-        trainingGoal: memory.trainingGoal,
-      });
-      const pv = validateWorkoutPlan(workoutPlan, memory.recentTrainingHistory || [], getLocationMode(memory.preferredTrainingLocation || memory.trainingLocation || "casa"));
+      const semanticFocus: WorkoutFocus =
+        parsedResponse.memoryPatch?.nextWorkoutFocus ||
+        memory.nextWorkoutFocus ||
+        chooseNextWorkoutFocus(memory);
+      const locationRaw = memory.preferredTrainingLocation || memory.trainingLocation || "casa";
+      const locationMode = getLocationMode(locationRaw) as CuratorLocationMode;
+
+      // Tenta primeiro o GUTO Curator (IA decide dentro do pool catálogo).
+      // Se falhar (timeout, JSON inválido, validação de grupo muscular), cai pro
+      // template determinístico (buildWorkoutPlanFromSemanticFocus).
+      const curated = await curateWorkout(
+        {
+          name: memory.name || (memory as any).preferredName || "Aluno",
+          age: memory.userAge,
+          heightCm: memory.heightCm,
+          weightKg: memory.weightKg,
+          pathology: memory.trainingLimitations || memory.trainingPathology || undefined,
+          foodRestrictions: memory.foodRestrictions,
+          goal: memory.trainingGoal,
+          level: memory.trainingStatus || memory.trainingLevel,
+          lastWeekFeedback: (memory as any).lastWeekFeedback,
+          focus: semanticFocus,
+          location: locationMode,
+          recentTrainingHistory: (memory.recentTrainingHistory || []).slice(0, 14).map((h: any) => ({
+            date: h.date || h.dateLabel || "recent",
+            exerciseIds: Array.isArray(h.exerciseIds) ? h.exerciseIds : [],
+          })),
+          language: selectedLanguage as "pt-BR" | "en-US" | "it-IT" | "es-ES",
+        },
+        {
+          apiKey: GEMINI_API_KEY,
+          model: "gemini-2.5-flash-lite",
+          timeoutMs: 18_000,
+        }
+      );
+
+      if (curated && curated.exercises.length > 0) {
+        const hydrated = hydrateCuratedExercises(curated.exercises, selectedLanguage as "pt-BR" | "en-US" | "it-IT" | "es-ES");
+        if (hydrated.length > 0) {
+          workoutPlan = {
+            focus: curated.summary ? curated.summary.split(".")[0] : localizeMuscleGroup(semanticFocus, selectedLanguage),
+            focusKey: semanticFocus,
+            dateLabel: getWorkoutDateLabel(selectedLanguage, new Date()),
+            scheduledFor: new Date().toISOString(),
+            summary: curated.summary || "",
+            exercises: hydrated as any,
+          } as WorkoutPlan;
+          console.log(`[GUTO] curator succeeded: ${hydrated.length} exercises for ${semanticFocus}/${locationMode}`);
+        }
+      }
+
+      // Fallback determinístico se o Curator falhar
+      if (!workoutPlan) {
+        console.warn(`[GUTO] curator failed — falling back to template for ${semanticFocus}/${locationMode}`);
+        workoutPlan = buildWorkoutPlanFromSemanticFocus({
+          language: selectedLanguage,
+          location: locationRaw,
+          status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
+          limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
+          age: memory.userAge ?? memory.trainingAge,
+          scheduleIntent: memory.trainingSchedule,
+          focus: semanticFocus,
+          trainingGoal: memory.trainingGoal,
+        });
+      }
+
+      const pv = validateWorkoutPlan(workoutPlan, memory.recentTrainingHistory || [], locationMode);
       if (!pv.valid) console.warn("[GUTO] validateWorkoutPlan errors:", pv.errors);
       if (pv.warnings.length > 0) console.info("[GUTO] validateWorkoutPlan warnings:", pv.warnings);
     }
@@ -3716,6 +3834,27 @@ function pickPushCopy(language: GutoLanguage, state: "healthy" | "alert" | "crit
   return map[language]?.[state] || map["pt-BR"][state];
 }
 
+/**
+ * Resolves the 3 free-text fields semantically (country / pathology / food).
+ * Runs after the memory is already saved: the user gets fast feedback while
+ * we enrich in the background. Cached by rawValue hash inside the resolver,
+ * so an unchanged field never re-hits Gemini.
+ */
+async function runFreeFieldsResolution(userId: string, memorySnapshot: GutoMemory) {
+  const resolved = await resolveProfileFreeFields({
+    country: memorySnapshot.country,
+    pathology: memorySnapshot.trainingPathology || memorySnapshot.trainingLimitations,
+    foodRestriction: memorySnapshot.foodRestrictions,
+    previous: memorySnapshot.resolvedFields,
+  });
+
+  // Re-read the latest memory to avoid clobbering concurrent writes from the
+  // chat pipeline, then persist only the resolvedFields field.
+  const latest = getMemory(userId);
+  latest.resolvedFields = resolved;
+  saveMemory(latest);
+}
+
 app.post("/guto/memory", requireActiveUser, (req, res) => {
   const userId = req.gutoUser!.userId;
   console.log(`[GUTO] Saving memory for user "${userId}":`, req.body);
@@ -3769,6 +3908,12 @@ app.post("/guto/memory", requireActiveUser, (req, res) => {
   if (memory.name) {
     syncArenaDisplayName(userId, memory.name, getUserArenaGroup(userId));
   }
+
+  // Fire-and-forget: resolve the 3 free fields semantically and persist the
+  // result. Skips if the rawValue did not change (cached by hash).
+  void runFreeFieldsResolution(userId, memory).catch((err) => {
+    console.warn("[GUTO] Free-fields resolution failed:", err);
+  });
 
   if (memory.lastWorkoutPlan) {
     try {

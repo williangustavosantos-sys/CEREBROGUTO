@@ -10,6 +10,9 @@ export type CatalogMuscleGroup =
   | "pernas"
   | "abdomen";
 
+export type CatalogLocation = "gym" | "home" | "park";
+export type CatalogLevel = "beginner" | "intermediate" | "advanced";
+
 export interface CatalogExercise {
   id: string;
   canonicalNamePt: string;
@@ -22,6 +25,23 @@ export interface CatalogExercise {
   movementPattern?: string;
   equipment?: string;
   tags?: string[];
+  /**
+   * Optional fields used by the safety/substitution layer. When absent we
+   * derive sensible defaults from `equipment` and `movementPattern` — a
+   * progressive enrichment, not a forced migration.
+   */
+  locations?: CatalogLocation[];
+  level?: CatalogLevel;
+  /**
+   * Tags that should EXCLUDE this exercise when present in the user's
+   * resolved pathology riskTags or bodyRegion. Examples:
+   * ["knee_load", "spine_compression", "shoulder_overhead", "high_impact"].
+   */
+  avoidIfTags?: string[];
+  /**
+   * Exercise IDs that can replace this one without changing the training stimulus.
+   */
+  substitutes?: string[];
 }
 
 // Base path for exercise videos in the frontend public folder
@@ -2168,4 +2188,108 @@ export function getExercisesForFocus(
           : ["agachamento_livre", "flexao", "perdigueiro", "prancha_isometrica"],
       };
   }
+}
+
+// ─── Safety / location derivation ─────────────────────────────────────────────
+
+const GYM_ONLY_EQUIPMENT = new Set([
+  "bike", "esteira", "escada", "elliptical", "halter", "barra", "barra-w",
+  "máquina", "maquina", "polia", "cabo", "leg-press", "smith", "gravitron", "banco",
+]);
+
+/**
+ * Returns the locations where this exercise can be performed. If the catalog
+ * entry already declares `locations`, those win. Otherwise we derive from
+ * equipment: bodyweight/no-equipment/caixote/box can run anywhere; named
+ * machines/free-weights are gym-only by default.
+ */
+export function getExerciseLocations(exercise: CatalogExercise): CatalogLocation[] {
+  if (exercise.locations && exercise.locations.length > 0) return exercise.locations;
+  const eq = (exercise.equipment ?? "").toLowerCase().trim();
+  if (!eq || eq === "bodyweight" || eq === "corpo-livre" || eq === "nenhum") {
+    return ["gym", "home", "park"];
+  }
+  if (eq === "caixote" || eq === "caixa" || eq === "box" || eq === "step") {
+    return ["gym", "home", "park"];
+  }
+  if (eq === "corda" || eq === "battle rope") {
+    return ["gym", "park"];
+  }
+  for (const token of GYM_ONLY_EQUIPMENT) {
+    if (eq.includes(token)) return ["gym"];
+  }
+  return ["gym"];
+}
+
+/**
+ * Filters a list of exercise IDs by the user's resolved pathology riskTags
+ * and bodyRegion. Pure function — no side-effects, no Gemini calls.
+ *
+ * Rules:
+ *   - If the exercise declares `avoidIfTags`, exclude when ANY tag is in
+ *     userRiskTags OR matches userBodyRegion.
+ *   - When the user has a clear bodyRegion (e.g. "knee"), we also avoid
+ *     exercises whose movementPattern is heavy load on that region (squat /
+ *     lunge / jump for "knee"; deadlift / bridge for "lower_back"; overhead
+ *     press / pulldown behind for "shoulder").
+ */
+export function filterExercisesBySafety(
+  ids: string[],
+  options: { userRiskTags?: string[]; userBodyRegion?: string }
+): string[] {
+  const tags = new Set((options.userRiskTags ?? []).map((t) => t.toLowerCase()));
+  const region = (options.userBodyRegion ?? "").toLowerCase();
+  if (tags.size === 0 && !region) return ids;
+
+  const dangerByRegion: Record<string, Set<string>> = {
+    knee: new Set(["jump", "deep_squat", "lunge_loaded", "sprint", "high_impact"]),
+    lower_back: new Set(["deadlift", "good_morning", "loaded_bend", "high_impact"]),
+    shoulder: new Set(["overhead_press", "behind_neck", "upright_row_high"]),
+    ankle: new Set(["jump", "sprint", "high_impact"]),
+    chest: new Set(["sprint", "max_intensity", "high_impact"]),
+  };
+
+  return ids.filter((id) => {
+    const ex = getCatalogById(id);
+    if (!ex) return true;
+
+    const avoid = (ex.avoidIfTags ?? []).map((t) => t.toLowerCase());
+    if (avoid.some((t) => tags.has(t) || t === region)) return false;
+
+    if (region && dangerByRegion[region]) {
+      const danger = dangerByRegion[region];
+      const pattern = (ex.movementPattern ?? "").toLowerCase();
+      if (pattern && danger.has(pattern)) return false;
+    }
+    return true;
+  });
+}
+
+/**
+ * Suggests substitute exercise IDs for one given exercise. Prefers explicit
+ * substitutes declared on the catalog entry; falls back to the same muscle
+ * group with compatible locations.
+ */
+export function suggestExerciseSubstitutes(
+  id: string,
+  options: { location?: CatalogLocation; userRiskTags?: string[]; userBodyRegion?: string } = {}
+): string[] {
+  const ex = getCatalogById(id);
+  if (!ex) return [];
+
+  const candidates = ex.substitutes && ex.substitutes.length > 0
+    ? ex.substitutes
+        .map((sid) => getCatalogById(sid))
+        .filter((c): c is CatalogExercise => Boolean(c))
+    : getCatalogByGroup(ex.muscleGroup).filter((c) => c.id !== id);
+
+  const filtered = candidates.filter((c) => {
+    if (options.location && !getExerciseLocations(c).includes(options.location)) return false;
+    return true;
+  });
+
+  return filterExercisesBySafety(
+    filtered.map((c) => c.id),
+    { userRiskTags: options.userRiskTags, userBodyRegion: options.userBodyRegion }
+  );
 }
