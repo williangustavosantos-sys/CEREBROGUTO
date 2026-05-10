@@ -1,4 +1,11 @@
-const GEMINI_MODEL = process.env.GUTO_EVAL_GEMINI_MODEL || process.env.GUTO_GEMINI_MODEL || "gemini-2.5-flash";
+// Judge LLM dos evals do GUTO — Claude Sonnet via Anthropic Messages API.
+// Independente do modelo do GUTO (Gemini), evita auto-grade.
+//
+// Uses direct fetch (não SDK) porque este arquivo é CJS e o @anthropic-ai/sdk
+// é ESM-first — interop é frágil. fetch nativo é Node 18+ e basta.
+const JUDGE_MODEL =
+  process.env.GUTO_EVAL_JUDGE_MODEL ||
+  "claude-sonnet-4-5-20250929";
 
 function parseOutput(output) {
   try {
@@ -12,23 +19,18 @@ function parseOutput(output) {
   }
 }
 
-async function fetchJson(url, init) {
-  const response = await fetch(url, init);
-  const data = await response.json().catch(() => ({}));
-  return { response, data };
-}
-
 module.exports = async function gutoRubricJudge(output, context) {
   const vars = context.vars || {};
   const rubric = Array.isArray(vars.rubric?.items) ? vars.rubric.items : [];
   const enabled = process.env.GUTO_EVAL_JUDGE !== "0";
   const response = parseOutput(output);
 
-  if (!enabled || !process.env.GEMINI_API_KEY || !rubric.length || !response.fala) {
+  if (!enabled || !process.env.ANTHROPIC_API_KEY || !rubric.length || !response.fala) {
     return {
       pass: true,
       score: 1,
-      reason: "Juiz LLM ignorado. Defina GEMINI_API_KEY e mantenha GUTO_EVAL_JUDGE diferente de 0 para ativar.",
+      reason:
+        "Juiz LLM ignorado. Defina ANTHROPIC_API_KEY e mantenha GUTO_EVAL_JUDGE != 0 para ativar.",
     };
   }
 
@@ -37,6 +39,9 @@ module.exports = async function gutoRubricJudge(output, context) {
     "Julgue comportamento, nao estilo bonito.",
     "Retorne somente JSON valido no formato:",
     '{"passed":true,"score":5,"failures":[],"notes":"..."}',
+    "Score 1-5: 1=quebra persona/erra grave; 3=ok com falha menor; 4=cumpre rubrica; 5=cumpre + execucao exemplar.",
+    "Pass = passed:true AND score>=4 AND failures vazio.",
+    "",
     "Criterios obrigatorios:",
     ...rubric.map((item) => `- ${item}`),
     "",
@@ -48,31 +53,49 @@ module.exports = async function gutoRubricJudge(output, context) {
     `ExpectedResponse: ${JSON.stringify(response.expectedResponse || null)}`,
   ].join("\n");
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`;
-  const { response: judgeResponse, data } = await fetchJson(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: {
-        response_mime_type: "application/json",
-        temperature: 0,
-        topP: 0.1,
+  let judgeResponse;
+  let data;
+  try {
+    judgeResponse = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
       },
-    }),
-  });
-
-  if (!judgeResponse.ok || data?.error) {
+      body: JSON.stringify({
+        model: JUDGE_MODEL,
+        max_tokens: 1024,
+        system:
+          "You are a strict judge of GUTO chatbot behavior. Return ONLY valid JSON: " +
+          '{"passed": <boolean>, "score": <1-5>, "failures": <string[]>, "notes": <string>}. ' +
+          "No prose, no markdown, no code fences.",
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    data = await judgeResponse.json().catch(() => ({}));
+  } catch (err) {
     return {
       pass: true,
       score: 1,
-      reason: `Juiz LLM indisponivel: ${data?.error?.message || judgeResponse.status}`,
+      reason: `Juiz LLM indisponivel: ${err && err.message ? err.message : String(err)}`,
+    };
+  }
+
+  if (!judgeResponse.ok || (data && data.error)) {
+    return {
+      pass: true,
+      score: 1,
+      reason: `Juiz LLM indisponivel: ${(data && data.error && data.error.message) || judgeResponse.status}`,
     };
   }
 
   try {
-    const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-    const parsed = JSON.parse(raw);
+    // Anthropic Messages API shape: { content: [{ type: "text", text: "..." }] }
+    const raw = (data && data.content && data.content[0] && data.content[0].text) || "{}";
+    // Strip markdown fences se Claude tiver enviado mesmo após o system prompt
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+    const parsed = JSON.parse(cleaned);
     const failures = Array.isArray(parsed.failures)
       ? parsed.failures.filter((item) => typeof item === "string")
       : [];
@@ -82,7 +105,9 @@ module.exports = async function gutoRubricJudge(output, context) {
     return {
       pass,
       score: Math.max(0, Math.min(1, score / 5)),
-      reason: pass ? parsed.notes || "Rubrica aprovada." : failures.join(" | ") || parsed.notes || "Rubrica reprovada.",
+      reason: pass
+        ? parsed.notes || "Rubrica aprovada."
+        : failures.join(" | ") || parsed.notes || "Rubrica reprovada.",
     };
   } catch {
     return {

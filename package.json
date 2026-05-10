@@ -15,6 +15,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.95.1",
     "@types/web-push": "^3.6.4",
     "@upstash/redis": "^1.37.0",
     "bcrypt": "^6.0.0",

@@ -67,6 +67,12 @@ import {
   type ResolvedProfileFields,
   type FreeField,
 } from "./src/dirty-data-resolver.js";
+import {
+  classifyRisk,
+  buildSafetyOverrideBlock,
+  type RiskClassification,
+  type ClassifierLanguage,
+} from "./src/risk-classifier.js";
 
 type Acao = "none" | "updateWorkout" | "lock" | "changeLanguage" | "requestDeleteAccount" | "showProfile";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
@@ -1925,6 +1931,7 @@ function buildGutoBrainPrompt({
   language,
   operationalContext,
   expectedResponse,
+  riskOverride,
 }: {
   input: string;
   memory: GutoMemory;
@@ -1932,6 +1939,14 @@ function buildGutoBrainPrompt({
   language: string;
   operationalContext: OperationalContext;
   expectedResponse?: ExpectedResponse | null;
+  /**
+   * P0 safety override. Quando o risk-classifier ativa flag != null com
+   * confidence >= 0.6, o caller passa o resultado aqui — um bloco
+   * SAFETY_OVERRIDE é injetado no TOPO do prompt, suspendendo a persona
+   * normal de cobrança/swap por UM turno e forçando acolhimento +
+   * encaminhamento para recurso real (CVV, emergência, profissional TA).
+   */
+  riskOverride?: RiskClassification | null;
 }) {
   const selectedLanguage = normalizeLanguage(language);
   const langName = languageName(selectedLanguage);
@@ -2237,7 +2252,15 @@ Usuário pede excluir conta:
 [guto] {"fala":"Sério mesmo? Se for isso, a dupla acaba aqui. Vai em Configurações → Privacidade e Dados, lá você confirma. Eu não faço isso por você nesse atalho.","acao":"requestDeleteAccount","expectedResponse":null,"avatarEmotion":"alert","memoryPatch":{}}
 `.trim();
 
+  // P0 safety: bloco override no TOPO quando o classifier ativou flag
+  // (precede a persona — modelo entende que esta regra vence o resto).
+  const safetyOverrideBlock =
+    riskOverride && riskOverride.flag
+      ? buildSafetyOverrideBlock(riskOverride.flag, selectedLanguage as ClassifierLanguage)
+      : null;
+
   return [
+    ...(safetyOverrideBlock ? [safetyOverrideBlock, ""] : []),
     persona,
     "",
     idiomaRegra,
@@ -3402,6 +3425,20 @@ async function askGutoModel({
     return finalize(buildTechnicalFallback(selectedLanguage));
   }
 
+  // P0 safety: classifica risco do input ANTES de montar o brain prompt.
+  // Falha aberta — qualquer erro/timeout vira flag=null (comportamento normal).
+  // Threshold de ativação: confidence >= 0.6 (definido em buildGutoBrainPrompt).
+  const risk = await classifyRisk(input || "", selectedLanguage as ClassifierLanguage, {
+    timeoutMs: 1800,
+  });
+  const riskOverride: RiskClassification | null =
+    risk.flag && risk.confidence >= 0.6 ? risk : null;
+  if (riskOverride) {
+    console.log(
+      `[GUTO][safety] risk=${riskOverride.flag} conf=${riskOverride.confidence.toFixed(2)} reason="${riskOverride.reasoning.slice(0, 80)}" input="${(input || "").slice(0, 80)}"`
+    );
+  }
+
   const brainPrompt = buildGutoBrainPrompt({
     input: input || "",
     memory,
@@ -3409,6 +3446,7 @@ async function askGutoModel({
     language: selectedLanguage,
     operationalContext,
     expectedResponse: normalizedExpectedResponse,
+    riskOverride,
   });
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
