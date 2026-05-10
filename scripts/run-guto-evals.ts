@@ -95,7 +95,12 @@ interface FailureSummary {
 const DEFAULT_CASES_FILE = "evals/guto-cases.jsonl";
 const DEFAULT_BASE_URL = process.env.GUTO_EVAL_BASE_URL || "http://localhost:3001";
 const DEFAULT_TIMEOUT_MS = Number(process.env.GUTO_EVAL_TIMEOUT_MS || 45_000);
-const GEMINI_MODEL = process.env.GUTO_EVAL_GEMINI_MODEL || process.env.GUTO_GEMINI_MODEL || "gemini-2.5-flash";
+// Judge LLM — Claude Sonnet por default. Independente do modelo do GUTO
+// (Gemini), evita auto-grade (Gemini julgando Gemini). Override via env.
+// Mantemos GUTO_EVAL_GEMINI_MODEL como deprecated alias para compat retro
+// (usado apenas se GUTO_EVAL_JUDGE_MODEL não vier definido e se ainda
+// alguém estiver chamando o judge antigo via promptfoo legacy).
+const JUDGE_MODEL = process.env.GUTO_EVAL_JUDGE_MODEL || "claude-sonnet-4-5-20250929";
 const GLOBAL_FORBIDDEN = [
   "como posso ajudar",
   "em que posso ajudar",
@@ -366,17 +371,23 @@ function runDeterministicAssertions(testCase: EvalCase, response: GutoResponse |
   return { passed: failures.length === 0, failures };
 }
 
-async function judgeWithGemini(testCase: EvalCase, response: GutoResponse | null, enabled: boolean): Promise<JudgeResult> {
-  if (!enabled || !process.env.GEMINI_API_KEY || !testCase.rubric?.length || !response?.fala) {
+async function judgeWithClaude(
+  testCase: EvalCase,
+  response: GutoResponse | null,
+  enabled: boolean
+): Promise<JudgeResult> {
+  if (!enabled || !process.env.ANTHROPIC_API_KEY || !testCase.rubric?.length || !response?.fala) {
     return { skipped: true, passed: true, score: null, failures: [] };
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`;
   const prompt = [
     "Voce avalia respostas do GUTO, um sistema de acao e accountability.",
     "Julgue comportamento, nao estilo bonito.",
     "Retorne somente JSON valido no formato:",
     '{"passed":true,"score":5,"failures":[],"notes":"..."}',
+    "Score 1-5: 1=quebra persona/erra grave; 3=ok com falha menor; 4=cumpre rubrica; 5=cumpre + execucao exemplar.",
+    "Pass = passed:true AND score>=4 AND failures vazio.",
+    "",
     "Criterios obrigatorios:",
     ...(testCase.rubric || []).map((item) => `- ${item}`),
     "",
@@ -385,18 +396,26 @@ async function judgeWithGemini(testCase: EvalCase, response: GutoResponse | null
     `ExpectedResponse: ${JSON.stringify(response.expectedResponse || null)}`,
   ].join("\n");
 
-  const { response: judgeResponse, data } = await fetchJson<any>(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: {
-        response_mime_type: "application/json",
-        temperature: 0,
-        topP: 0.1,
+  const { response: judgeResponse, data } = await fetchJson<any>(
+    "https://api.anthropic.com/v1/messages",
+    {
+      method: "POST",
+      headers: {
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
       },
-    }),
-  });
+      body: JSON.stringify({
+        model: JUDGE_MODEL,
+        max_tokens: 1024,
+        system:
+          "You are a strict judge of GUTO chatbot behavior. Return ONLY valid JSON: " +
+          '{"passed": <boolean>, "score": <1-5>, "failures": <string[]>, "notes": <string>}. ' +
+          "No prose, no markdown, no code fences.",
+        messages: [{ role: "user", content: prompt }],
+      }),
+    }
+  );
 
   if (!judgeResponse.ok || data?.error) {
     return {
@@ -408,8 +427,11 @@ async function judgeWithGemini(testCase: EvalCase, response: GutoResponse | null
   }
 
   try {
-    const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-    const parsed = JSON.parse(raw) as Partial<JudgeResult>;
+    // Anthropic Messages API shape: { content: [{ type: "text", text: "..." }] }
+    const raw = data?.content?.[0]?.text || "{}";
+    // Strip markdown fences if Claude added them despite the system prompt
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+    const parsed = JSON.parse(cleaned) as Partial<JudgeResult>;
     const failures = Array.isArray(parsed.failures)
       ? parsed.failures.filter((item): item is string => typeof item === "string")
       : [];
@@ -442,7 +464,7 @@ async function runCase(baseUrl: string, runId: string, testCase: EvalCase, judge
   const deterministic = runDeterministicAssertions(testCase, response);
   failures.push(...deterministic.failures);
 
-  const judge = await judgeWithGemini(testCase, response, judgeEnabled);
+  const judge = await judgeWithClaude(testCase, response, judgeEnabled);
   if (!judge.passed) {
     failures.push(...judge.failures.map((failure) => `Rubrica: ${failure}`));
   }
