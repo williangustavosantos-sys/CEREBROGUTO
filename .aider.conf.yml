@@ -1,0 +1,4 @@
+model: deepseek/deepseek-chat
+auto-commits: true
+dark-mode: true
+read: .aider.rules.md
