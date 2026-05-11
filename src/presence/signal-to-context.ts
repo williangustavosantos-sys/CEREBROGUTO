@@ -1,6 +1,7 @@
 // Mapeia sinais extraídos para Context Items persistidos
 
 import { addContextItem, isDuplicate } from "./context-bank";
+import { syncValidationQueue } from "./validation-engine";
 import type { ContextState, ContextType, ExtractedSignal } from "./types";
 
 // ─── Mapeamento de tipo de sinal para tipo de contexto ────────────────────────
@@ -96,7 +97,7 @@ function defaultExpiresAt(signal: ExtractedSignal): string | null {
 export async function persistSignals(
   userId: string,
   signals: ExtractedSignal[]
-): Promise<{ persisted: number; skipped: number }> {
+): Promise<{ persisted: number; skipped: number; validationsCreated: number }> {
   let persisted = 0;
   let skipped = 0;
 
@@ -148,5 +149,9 @@ export async function persistSignals(
     persisted++;
   }
 
-  return { persisted, skipped };
+  const validationSync = persisted > 0
+    ? await syncValidationQueue(userId)
+    : { created: 0, pending: 0 };
+
+  return { persisted, skipped, validationsCreated: validationSync.created };
 }
