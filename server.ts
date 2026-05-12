@@ -869,6 +869,8 @@ export function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
       heightCm: (typeof existing.heightCm === "number" && existing.heightCm > 0) ? existing.heightCm : (typeof existing.heightCm === "string" && !isNaN(Number(existing.heightCm)) ? Number(existing.heightCm) : undefined),
       weightKg: (typeof existing.weightKg === "number" && existing.weightKg > 0) ? existing.weightKg : (typeof existing.weightKg === "string" && !isNaN(Number(existing.weightKg)) ? Number(existing.weightKg) : undefined),
       foodRestrictions: existing.foodRestrictions,
+      phone: existing.phone,
+      foodIntolerances: existing.foodIntolerances,
       validationHistory: Array.isArray(existing.validationHistory) ? existing.validationHistory : undefined,
       lastWorkoutCompletedAt: existing.lastWorkoutCompletedAt,
       completedWorkoutDates: completedWorkoutDates.sort(),
@@ -3928,6 +3930,8 @@ app.post("/guto/memory", requireActiveUser, (req, res) => {
   if (typeof b.heightCm !== "undefined" && !isNaN(Number(b.heightCm)) && Number(b.heightCm) > 0) memory.heightCm = Number(b.heightCm);
   if (typeof b.weightKg !== "undefined" && !isNaN(Number(b.weightKg)) && Number(b.weightKg) > 0) memory.weightKg = Number(b.weightKg);
   if (typeof b.foodRestrictions === "string") memory.foodRestrictions = b.foodRestrictions;
+  if (typeof b.phone === "string") memory.phone = b.phone;
+  if (typeof b.foodIntolerances === "string") memory.foodIntolerances = b.foodIntolerances;
   if (typeof b.initialXpRewardSeen === "boolean") memory.initialXpRewardSeen = b.initialXpRewardSeen;
   if (b.lastWorkoutPlan && Array.isArray(b.lastWorkoutPlan.exercises)) {
     if (!isCoachLockedWorkout(memory.lastWorkoutPlan)) {
