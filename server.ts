@@ -73,6 +73,10 @@ import {
   type RiskClassification,
   type ClassifierLanguage,
 } from "./src/risk-classifier.js";
+import {
+  injectDailyBriefIntoBrainPrompt,
+  markHookUsedAfterResponse,
+} from "./src/daily-briefing/chat-brief-integrator.js";
 
 type Acao = "none" | "updateWorkout" | "lock" | "changeLanguage" | "requestDeleteAccount" | "showProfile";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
@@ -3448,6 +3452,9 @@ async function askGutoModel({
     expectedResponse: normalizedExpectedResponse,
     riskOverride,
   });
+
+  const brainPromptWithBrief = await injectDailyBriefIntoBrainPrompt(memory.userId, brainPrompt);
+
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
   try {
@@ -3457,7 +3464,7 @@ async function askGutoModel({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: brainPrompt }] }],
+          contents: [{ role: "user", parts: [{ text: brainPromptWithBrief }] }],
           generationConfig: {
             response_mime_type: "application/json",
             temperature: Math.min(GUTO_MODEL_TEMPERATURE, 0.3),
@@ -3577,6 +3584,8 @@ async function askGutoModel({
         saveMemory(memory);
       }
     }
+
+    await markHookUsedAfterResponse(memory.userId);
 
     return finalize({
       fala: parsedResponse.fala,

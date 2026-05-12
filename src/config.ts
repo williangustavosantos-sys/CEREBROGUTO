@@ -44,4 +44,6 @@ export const config = {
   stripePriceMonthly: process.env.STRIPE_PRICE_MONTHLY || "",
   stripePriceAnnual: process.env.STRIPE_PRICE_ANNUAL || "",
   stripePriceBeta: process.env.STRIPE_PRICE_BETA || "",
+  // Feature flag para o Daily Briefing
+  enableDailyBriefing: process.env.ENABLE_DAILY_BRIEFING !== "false",
 };

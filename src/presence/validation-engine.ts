@@ -289,11 +289,13 @@ export async function resolveValidation(
 
   if (resolution === "clarified" && clarifiedValue?.trim()) {
     patch.value = clarifiedValue.trim().slice(0, 240);
+    // Preserve existing meta and merge with validation fields
     patch.meta = {
+      ...(item.meta ?? {}),
       validationResolution: resolution,
       originalUnclearValue: item.contextValue,
       clarifiedAt: current,
-    } as ContextItem["meta"];
+    } as unknown as ContextItem["meta"]; // safe because meta has index signature
   }
 
   await updateContextItem(userId, item.contextItemId, patch);

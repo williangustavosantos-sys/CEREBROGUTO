@@ -80,6 +80,9 @@ import {
   type CustomExerciseRequest,
 } from "./custom-exercise-store.js";
 
+import { getDailyHooks } from "./daily-briefing/hook-store.js";
+import { runDailyBriefingForUser } from "./daily-briefing/daily-briefing-job.js";
+
 export const adminRouter = express.Router();
 
 adminRouter.use(requireCoachOrAdmin);
@@ -1850,4 +1853,22 @@ adminRouter.post("/maintenance/backfill-arena-initial-xp", requireAdmin, asyncHa
     }
   }
   res.json({ fixedCount: fixed.length, fixed });
+}));
+
+// ─── Daily Briefing Debug ────────────────────────────────────────────────────
+
+adminRouter.get("/debug/daily-briefing/:userId", asyncHandler(async (req, res) => {
+  const actor = requireActor(req, res);
+  if (!actor || !requireSuperAdminLike(req, res)) return;
+  const targetUserId = routeParam(req, "userId");
+  const hooks = await getDailyHooks(targetUserId);
+  res.json({ hooks });
+}));
+
+adminRouter.post("/debug/daily-briefing/:userId/run", asyncHandler(async (req, res) => {
+  const actor = requireActor(req, res);
+  if (!actor || !requireSuperAdminLike(req, res)) return;
+  const targetUserId = routeParam(req, "userId");
+  const result = await runDailyBriefingForUser(targetUserId);
+  res.json({ result });
 }));
