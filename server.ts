@@ -292,6 +292,8 @@ interface GutoMemory {
   heightCm?: number;
   weightKg?: number;
   foodRestrictions?: string;
+  phone?: string;
+  foodIntolerances?: string;
   lastWorkoutCompletedAt?: string;
   completedWorkoutDates: string[];
   adaptedMissionDates: string[];
