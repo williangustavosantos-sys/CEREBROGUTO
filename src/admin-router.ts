@@ -81,7 +81,7 @@ import {
 } from "./custom-exercise-store.js";
 
 import { getDailyHooks } from "./daily-briefing/hook-store.js";
-import { runDailyBriefingForUser } from "./daily-briefing/daily-briefing-job.js";
+import { runDailyBriefingForUser } from "./daily-briefing/jobs/daily-briefing-job.js";
 
 export const adminRouter = express.Router();
 
@@ -1869,6 +1869,6 @@ adminRouter.post("/debug/daily-briefing/:userId/run", asyncHandler(async (req, r
   const actor = requireActor(req, res);
   if (!actor || !requireSuperAdminLike(req, res)) return;
   const targetUserId = routeParam(req, "userId");
-  const result = await runDailyBriefingForUser(targetUserId);
+  const result = await runDailyBriefingForUser(targetUserId, new Date().toISOString());
   res.json({ result });
 }));

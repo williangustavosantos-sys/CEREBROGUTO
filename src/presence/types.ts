@@ -8,7 +8,8 @@ export type SignalType =
   | "preference_block"
   | "weak_signal"
   | "location_shift"
-  | "completion_signal";
+  | "completion_signal"
+  | "routine_signal";
 
 export type DetectedLanguage = "pt" | "en" | "it" | "es" | "mixed";
 
@@ -31,7 +32,8 @@ export type ContextType =
   | "future_event"
   | "preference_signal"
   | "weak_signal"
-  | "location_signal";
+  | "location_signal"
+  | "routine_signal";
 
 export type ContextState =
   | "validated"

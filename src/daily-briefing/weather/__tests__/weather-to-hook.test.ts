@@ -26,9 +26,17 @@ function makeForecast(overrides: Partial<RawForecastData> = {}): RawForecastData
 }
 
 describe("weatherToDailyHooks", () => {
-  it("returns empty array for normal weather and any location", () => {
+  it("returns good weather hook for clear sky and outdoor", () => {
     const data = makeForecast();
-    const hooks = weatherToDailyHooks("user1", data, { trainingLocation: "park" });
+    const hooks = weatherToDailyHooks("user1", data, { trainingLocation: "park" }, "2026-05-11T10:00:00.000Z");
+    assert.strictEqual(hooks.length, 1);
+    assert.strictEqual(hooks[0].objective, "use_good_weather");
+  });
+
+  it("returns empty array for normal weather and indoor", () => {
+    const data = makeForecast();
+    // Indoor (gym) doesn't care about good outdoor weather unless explicitly set likesOutdoor
+    const hooks = weatherToDailyHooks("user1", data, { trainingLocation: "academia", likesOutdoor: false }, "2026-05-11T10:00:00.000Z");
     assert.strictEqual(hooks.length, 0);
   });
 
@@ -44,10 +52,10 @@ describe("weatherToDailyHooks", () => {
         },
       ],
     });
-    const hooks = weatherToDailyHooks("user1", data, { trainingLocation: "park" });
+    const hooks = weatherToDailyHooks("user1", data, { trainingLocation: "park" }, "2026-05-11T10:00:00.000Z");
     assert.strictEqual(hooks.length, 1);
     assert.strictEqual(hooks[0].actionImpact, "high");
-    assert.strictEqual(hooks[0].changesAction, true);
+    assert.strictEqual(hooks[0].objective, "adapt_training");
   });
 
   it("returns hook for extreme heat", () => {
@@ -62,7 +70,7 @@ describe("weatherToDailyHooks", () => {
         },
       ],
     });
-    const hooks = weatherToDailyHooks("user1", data, { trainingLocation: "home" });
+    const hooks = weatherToDailyHooks("user1", data, { trainingLocation: "home" }, "2026-05-11T10:00:00.000Z");
     assert.strictEqual(hooks.length, 1);
     assert.strictEqual(hooks[0].actionImpact, "high");
     assert.ok(hooks[0].content.includes("38°C"));
@@ -80,7 +88,7 @@ describe("weatherToDailyHooks", () => {
         },
       ],
     });
-    const hooks = weatherToDailyHooks("user1", data, { trainingLocation: "academia" });
+    const hooks = weatherToDailyHooks("user1", data, { trainingLocation: "academia" }, "2026-05-11T10:00:00.000Z");
     assert.strictEqual(hooks.length, 0);
   });
 });

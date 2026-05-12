@@ -1,41 +1,35 @@
-import type { DailyHook, GateDecision } from "./types";
+import { DailyHook, GateDecision, UserInteractionProfile } from "./types";
 
-export interface GateOptions {
-  now?: string; // ISO
-  maxDailyHooks?: number; // not used in this gate, but future
-}
+export function shouldUseHook(params: {
+  hook: DailyHook;
+  userInteractionProfile: UserInteractionProfile;
+  now: string;
+}): GateDecision {
+  const { hook, userInteractionProfile, now } = params;
 
-export function shouldUseHook(
-  hook: DailyHook,
-  options: GateOptions = {}
-): GateDecision {
-  const now = options.now ?? new Date().toISOString();
-
-  // Expired
-  if (hook.staleAfter && hook.staleAfter <= now) {
-    return "silence_expired";
-  }
-
-  // Already used
   if (hook.usedAt) {
-    return "silence"; // already spoken
+    return { decision: "silence", reason: "already_used" };
   }
 
-  // Cooldown active
-  if (hook.cooldownUntil && hook.cooldownUntil > now) {
-    return "silence_cooldown";
+  if (hook.staleAfter <= now) {
+    return { decision: "silence", reason: "stale" };
   }
 
-  // Does not change action
-  if (!hook.changesAction) {
-    return "silence_low_impact";
+  if (hook.actionImpact === "none") {
+    return { decision: "silence", reason: "does_not_change_action" };
   }
 
-  // Impact low/none
-  if (hook.actionImpact === "none" || hook.actionImpact === "low") {
-    return "silence_low_impact";
+  if (userInteractionProfile.blocked) {
+    return { decision: "silence", reason: "user_blocked" };
   }
 
-  // Good to speak
-  return "speak";
+  if (
+    userInteractionProfile.ignoredCount >= 2 &&
+    hook.actionImpact !== "critical" &&
+    hook.actionImpact !== "high"
+  ) {
+    return { decision: "silence", reason: "user_ignoring" };
+  }
+
+  return { decision: "speak", reason: "relevant" };
 }

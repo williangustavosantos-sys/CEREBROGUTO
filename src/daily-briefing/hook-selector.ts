@@ -1,5 +1,6 @@
 import { getActiveDailyHooks } from "./hook-store";
 import { shouldUseHook } from "./relevance-gate";
+import { getUserFeedbackProfile, getInteractionProfileForCategory } from "./user-feedback";
 import type { DailyHook } from "./types";
 
 export async function selectBestHook(
@@ -7,12 +8,15 @@ export async function selectBestHook(
   now: string = new Date().toISOString()
 ): Promise<DailyHook | null> {
   const active = await getActiveDailyHooks(userId, now);
+  const profileMap = await getUserFeedbackProfile(userId);
 
   // Filter candidates where gate allows speak
   const candidates: DailyHook[] = [];
   for (const hook of active) {
-    const decision = shouldUseHook(hook, { now });
-    if (decision === "speak") {
+    const userInteractionProfile = getInteractionProfileForCategory(profileMap, hook.category, userId);
+    
+    const decision = shouldUseHook({ hook, userInteractionProfile, now });
+    if (decision.decision === "speak") {
       candidates.push(hook);
     }
   }

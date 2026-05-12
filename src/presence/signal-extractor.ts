@@ -19,6 +19,7 @@ const VALID_SIGNAL_TYPES = new Set<string>([
   "weak_signal",
   "location_shift",
   "completion_signal",
+  "routine_signal",
 ]);
 
 const VALID_LANGUAGES = new Set<string>(["pt", "en", "it", "es", "mixed"]);
@@ -56,6 +57,7 @@ Signal types:
 - weak_signal: vague tiredness, mood, low energy, sleep quality, stress
 - location_shift: gym change, home workout, travel affecting routine
 - completion_signal: user completed a workout or task
+- routine_signal: weekly planning information, busy days, trips, no-training days
 
 For each signal return:
 {

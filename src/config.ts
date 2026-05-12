@@ -45,5 +45,7 @@ export const config = {
   stripePriceAnnual: process.env.STRIPE_PRICE_ANNUAL || "",
   stripePriceBeta: process.env.STRIPE_PRICE_BETA || "",
   // Feature flag para o Daily Briefing
-  enableDailyBriefing: process.env.ENABLE_DAILY_BRIEFING !== "false",
+  enableDailyBriefing: process.env.ENABLE_DAILY_BRIEFING === "true",
+  openWeatherApiKey: process.env.OPENWEATHER_API_KEY || "",
+  holidayApiKey: process.env.HOLIDAY_API_KEY || "",
 };

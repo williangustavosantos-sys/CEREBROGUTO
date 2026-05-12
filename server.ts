@@ -3585,7 +3585,7 @@ async function askGutoModel({
       }
     }
 
-    await markHookUsedAfterResponse(memory.userId);
+    await markHookUsedAfterResponse(memory.userId, input);
 
     return finalize({
       fala: parsedResponse.fala,

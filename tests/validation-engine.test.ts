@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { addContextItem } from "../src/presence/context-bank";
 import {
@@ -14,11 +14,15 @@ import { writeMemoryStoreAsync } from "../src/memory-store";
 
 const USER_ID = "validation-test-user";
 
+beforeEach(async () => {
+  await writeMemoryStoreAsync({});
+});
+
 afterEach(async () => {
   await writeMemoryStoreAsync({});
 });
 
-describe("presence validation engine", () => {
+describe("presence validation engine", { concurrency: false }, () => {
   it("cria validação para health_signal sem permitir uso direto", async () => {
     const context = await addContextItem(USER_ID, {
       type: "health_signal",

@@ -12,8 +12,13 @@ const createHook = (overrides: Partial<DailyHook> & { content: string }): DailyH
   category: "weather",
   title: "Hook",
   actionImpact: "medium",
-  changesAction: true,
-  source: "weather_api",
+  objective: "adapt_training",
+  mustMention: [],
+  mustAvoid: [],
+  source: {
+    type: "weather_api",
+    checkedAt: "2025-01-01T06:00:00.000Z",
+  },
   createdAt: "2025-01-01T06:00:00.000Z",
   peakUntil: "2025-01-01T12:00:00.000Z",
   staleAfter: "2025-01-02T00:00:00.000Z",
@@ -29,7 +34,7 @@ describe("hook-selector", () => {
 
   it("returns null when all hooks are irrelevant (gate blocks)", async () => {
     const hooks: DailyHook[] = [
-      createHook({ content: "low impact", actionImpact: "low", changesAction: false }),
+      createHook({ content: "low impact", actionImpact: "low" }),
       createHook({ content: "expired", staleAfter: "2024-01-01T00:00:00.000Z" }),
     ];
     mockGetActiveDailyHooks.mock.mockImplementationOnce(async () => hooks);

@@ -12,6 +12,7 @@ const SIGNAL_TO_CONTEXT_TYPE: Record<ExtractedSignal["type"], ContextType | null
   preference_block: "preference_signal",
   weak_signal: "weak_signal",
   location_shift: "location_signal",
+  routine_signal: "routine_signal",
   completion_signal: null,
 };
 
@@ -24,6 +25,7 @@ const CONFIDENCE_THRESHOLDS: Record<ContextType, number> = {
   preference_signal: 0.5,
   weak_signal: 0.5,
   location_signal: 0.5,
+  routine_signal: 0.5,
 };
 
 function getThreshold(contextType: ContextType): number {

@@ -1,4 +1,4 @@
-import type { DailyHook, DailyHookSource } from "./types";
+import type { DailyHook } from "../types";
 
 // Dados brutos retornados pela OpenWeather (apenas o essencial)
 export interface RawForecastData {
@@ -31,8 +31,9 @@ export interface RawForecastData {
 }
 
 export interface WeatherInput {
-  lat: number;
-  lon: number;
+  lat?: number;
+  lon?: number;
+  q?: string; // city name
   units?: "metric" | "imperial";
 }
 
@@ -50,7 +51,14 @@ export async function fetchWeatherForecast(
   }
 
   const units = input.units ?? "metric";
-  const url = `https://api.openweathermap.org/data/2.5/forecast?lat=${input.lat}&lon=${input.lon}&units=${units}&appid=${apiKey}`;
+  let url = "";
+  if (input.lat !== undefined && input.lon !== undefined) {
+    url = `https://api.openweathermap.org/data/2.5/forecast?lat=${input.lat}&lon=${input.lon}&units=${units}&appid=${apiKey}`;
+  } else if (input.q) {
+    url = `https://api.openweathermap.org/data/2.5/forecast?q=${encodeURIComponent(input.q)}&units=${units}&appid=${apiKey}`;
+  } else {
+    return null;
+  }
 
   try {
     const controller = new AbortController();
