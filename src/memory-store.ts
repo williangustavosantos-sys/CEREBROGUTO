@@ -8,8 +8,8 @@
  * exactly as before. Zero breaking change.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname } from "path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "fs";
+import { dirname, join } from "path";
 import { config } from "./config";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -58,7 +58,11 @@ function readFromFile(): MemoryStore {
 function writeToFile(store: MemoryStore): boolean {
   try {
     mkdirSync(dirname(config.memoryFile), { recursive: true });
-    writeFileSync(config.memoryFile, JSON.stringify(store, null, 2));
+    // Write atômico: escreve em temp, depois renomeia
+    // Isso evita corrupção se 2 processos escreverem simultaneamente
+    const tmpFile = config.memoryFile + ".tmp." + Date.now();
+    writeFileSync(tmpFile, JSON.stringify(store, null, 2));
+    renameSync(tmpFile, config.memoryFile);
     return true;
   } catch {
     return false;

@@ -3479,7 +3479,7 @@ async function askGutoModel({
     }
 
     const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    require('fs').appendFileSync('gemini.log', `\n--- INPUT: ${input} ---\n${rawText}\n`);
+    console.log("[GEMINI_RESPONSE]", rawText?.slice(0, 500));
     const parsedResponse = parseGutoResponse(rawText, language);
 
     applyMemoryPatch(memory, parsedResponse.memoryPatch, parsedResponse.trainedReference, input);

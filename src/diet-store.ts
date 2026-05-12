@@ -5,7 +5,7 @@
  * Usa o mesmo mecanismo de persistência do memory-store (Redis → filesystem → in-memory).
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "fs";
 import { join, dirname } from "path";
 import type { DietPlan } from "./nutrition.js";
 
@@ -51,7 +51,10 @@ function readFromFile(): Record<string, DietPlan> {
 function writeToFile(store: Record<string, DietPlan>): void {
   try {
     mkdirSync(dirname(DIET_FILE), { recursive: true });
-    writeFileSync(DIET_FILE, JSON.stringify(store, null, 2));
+    // Write atômico: escreve em temp, depois renomeia
+    const tmpFile = DIET_FILE + ".tmp." + Date.now();
+    writeFileSync(tmpFile, JSON.stringify(store, null, 2));
+    renameSync(tmpFile, DIET_FILE);
   } catch {
     // Filesystem write failure is non-fatal — in-memory cache is the fallback.
   }
