@@ -183,7 +183,14 @@ describe("GUTO Time plan capacity HTTP routes", () => {
         Authorization: `Bearer ${token("admin-start-limit")}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ userId: "student-over-limit", name: "Aluno Extra", teamId: "TEAM_START_LIMIT" }),
+      body: JSON.stringify({
+        userId: "student-over-limit",
+        firstName: "Aluno",
+        lastName: "Extra",
+        email: "student-over-limit@guto.test",
+        phone: "+390212345678",
+        teamId: "TEAM_START_LIMIT",
+      }),
     });
 
     assert.equal(response.status, 409);

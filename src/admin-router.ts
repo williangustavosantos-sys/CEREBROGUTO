@@ -612,11 +612,7 @@ function normalizeDietMeal(rawValue: unknown, index: number): LooseRecord {
   const raw = asRecord(rawValue);
   const foodsInput = Array.isArray(raw.foods) ? raw.foods : Array.isArray(raw.items) ? raw.items : [];
   const foods = foodsInput.map(normalizeDietFood);
-  const totalKcal = raw.totalKcal !== undefined
-    ? asNumber(raw.totalKcal, 0)
-    : raw.kcal !== undefined
-      ? asNumber(raw.kcal, 0)
-      : foods.reduce((sum, food) => sum + asNumber(food.kcal, 0), 0);
+  const totalKcal = Math.round(foods.reduce((sum, food) => sum + asNumber(food.kcal, 0), 0));
   return {
     id: asString(raw.id, `meal-${index + 1}`),
     name: asString(raw.name, `Refeição ${index + 1}`),
@@ -627,6 +623,25 @@ function normalizeDietMeal(rawValue: unknown, index: number): LooseRecord {
     gutoNote: asString(raw.gutoNote || raw.notes, ""),
     alternatives: normalizeStringArray(raw.alternatives || raw.substitutions),
   };
+}
+
+function dietFoodKcalTotal(diet: LooseRecord): number {
+  const meals = Array.isArray(diet.meals) ? diet.meals : [];
+  return Math.round(meals.reduce((sum, mealValue) => {
+    const meal = asRecord(mealValue);
+    const foods = Array.isArray(meal.foods) ? meal.foods : [];
+    return sum + foods.reduce((foodSum, foodValue) => foodSum + asNumber(asRecord(foodValue).kcal, 0), 0);
+  }, 0));
+}
+
+function dietCalorieValidationMessage(diet: LooseRecord): string | null {
+  const macros = asRecord(diet.macros);
+  const targetKcal = Math.round(asNumber(macros.targetKcal, asNumber(diet.targetKcal, 0)));
+  if (targetKcal <= 0) return null;
+  const totalKcal = dietFoodKcalTotal(diet);
+  if (totalKcal === targetKcal) return null;
+  const delta = targetKcal - totalKcal;
+  return `Total dos alimentos (${totalKcal} kcal) precisa bater com a meta da dieta (${targetKcal} kcal). ${delta > 0 ? "Faltam" : "Excedeu"} ${Math.abs(delta)} kcal.`;
 }
 
 function normalizeDietPlan(rawValue: unknown, existing: LooseRecord | null, req: Request, userId: string, reason?: string): LooseRecord {
@@ -1528,6 +1543,11 @@ adminRouter.put(["/students/:userId/diet", "/users/:userId/diet"], asyncHandler(
   const body = req.body as { diet?: unknown; reason?: string };
   const previous = await getDietPlan(student.userId);
   const diet = normalizeDietPlan(body.diet ?? req.body, previous as LooseRecord | null, req, student.userId, body.reason);
+  const calorieError = dietCalorieValidationMessage(diet);
+  if (calorieError) {
+    res.status(400).json({ message: calorieError, code: "DIET_CALORIES_MISMATCH" });
+    return;
+  }
   await saveDietPlan(diet as any);
   addLog({
     action: "diet_edited",
@@ -1546,6 +1566,11 @@ adminRouter.patch(["/students/:userId/diet", "/users/:userId/diet"], asyncHandle
   const body = req.body as { diet?: unknown; reason?: string };
   const previous = await getDietPlan(student.userId);
   const diet = normalizeDietPlan({ ...(previous || {}), ...asRecord(body.diet ?? req.body) }, previous as LooseRecord | null, req, student.userId, body.reason);
+  const calorieError = dietCalorieValidationMessage(diet);
+  if (calorieError) {
+    res.status(400).json({ message: calorieError, code: "DIET_CALORIES_MISMATCH" });
+    return;
+  }
   await saveDietPlan(diet as any);
   addLog({
     action: "diet_edited",

@@ -291,6 +291,7 @@ describe("weekly workout plan — admin/coach routes", () => {
 
   // J) Fallback to lastWorkoutPlan when no weekly plan exists
   it("J) GET /workout/today falls back to lastWorkoutPlan when no weeklyWorkoutPlan exists", async () => {
+    writeMemoryStoreSync({});
     // Set a lastWorkoutPlan via the existing workout route
     const putRes = await req(`/admin/students/${studentA.userId}/workout`, {
       method: "PUT",
@@ -311,6 +312,7 @@ describe("weekly workout plan — admin/coach routes", () => {
 
   // GET week returns saved plan
   it("GET /workout/week returns null when no plan saved yet", async () => {
+    writeMemoryStoreSync({});
     const res = await req(`/admin/students/${studentA.userId}/workout/week`, {
       headers: authHeaders(token(adminA)),
     });

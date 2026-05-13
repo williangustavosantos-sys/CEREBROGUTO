@@ -129,6 +129,18 @@ async function request(path: string, options: RequestInit = {}) {
   return fetch(`${baseUrl}${path}`, options);
 }
 
+function studentCreatePayload(userId: string, firstName: string, lastName: string, patch: Record<string, unknown> = {}) {
+  return {
+    userId,
+    firstName,
+    lastName,
+    name: `${firstName} ${lastName}`,
+    email: `${userId}@guto.test`,
+    phone: "+55 11 98765-4321",
+    ...patch,
+  };
+}
+
 before(async () => {
   process.env.GUTO_DISABLE_LISTEN = "1";
   process.env.GUTO_MEMORY_FILE = testMemoryFile;
@@ -332,7 +344,7 @@ describe("GUTO Time isolation HTTP routes", () => {
         Authorization: `Bearer ${token(adminA)}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ userId: "created-by-admin-a", name: "Aluno Admin", teamId: "TEAM_A" }),
+      body: JSON.stringify(studentCreatePayload("created-by-admin-a", "Aluno", "Admin", { teamId: "TEAM_A" })),
     });
 
     assert.equal(response.status, 201);
@@ -346,7 +358,7 @@ describe("GUTO Time isolation HTTP routes", () => {
         Authorization: `Bearer ${token(adminA)}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ userId: "admin-cross-team-create", name: "Bypass", teamId: "TEAM_B" }),
+      body: JSON.stringify(studentCreatePayload("admin-cross-team-create", "Aluno", "Bypass", { teamId: "TEAM_B" })),
     });
 
     assert.equal(response.status, 403);
@@ -360,7 +372,7 @@ describe("GUTO Time isolation HTTP routes", () => {
         Authorization: `Bearer ${token(coachA)}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ userId: "created-by-coach-a", name: "Aluno Coach", teamId: "TEAM_A" }),
+      body: JSON.stringify(studentCreatePayload("created-by-coach-a", "Aluno", "Coach", { teamId: "TEAM_A" })),
     });
 
     assert.equal(response.status, 201);
@@ -376,7 +388,7 @@ describe("GUTO Time isolation HTTP routes", () => {
         Authorization: `Bearer ${token(coachA)}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ userId: "coach-cross-coach-create", name: "Bypass", coachId: coachOtherA.userId }),
+      body: JSON.stringify(studentCreatePayload("coach-cross-coach-create", "Aluno", "Bypass", { coachId: coachOtherA.userId })),
     });
 
     assert.equal(response.status, 403);
@@ -416,7 +428,7 @@ describe("GUTO Phase 5 – admin team operations", () => {
     const response = await request("/admin/students", {
       method: "POST",
       headers: { Authorization: `Bearer ${superToken()}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: "super-created-student", name: "Aluno Super", teamId: "TEAM_A" }),
+      body: JSON.stringify(studentCreatePayload("super-created-student", "Aluno", "Super", { teamId: "TEAM_A" })),
     });
 
     assert.equal(response.status, 201);
@@ -428,7 +440,7 @@ describe("GUTO Phase 5 – admin team operations", () => {
     const response = await request("/admin/students", {
       method: "POST",
       headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: "admin-own-team-student", name: "Aluno Proprio" }),
+      body: JSON.stringify(studentCreatePayload("admin-own-team-student", "Aluno", "Proprio")),
     });
 
     assert.equal(response.status, 201);
@@ -440,7 +452,7 @@ describe("GUTO Phase 5 – admin team operations", () => {
     const response = await request("/admin/students", {
       method: "POST",
       headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: "admin-other-team-student", name: "Aluno Outro Time", teamId: "TEAM_B" }),
+      body: JSON.stringify(studentCreatePayload("admin-other-team-student", "Aluno", "Outro", { teamId: "TEAM_B" })),
     });
 
     assert.equal(response.status, 403);
@@ -452,7 +464,7 @@ describe("GUTO Phase 5 – admin team operations", () => {
     const response = await request("/admin/students", {
       method: "POST",
       headers: { Authorization: `Bearer ${token(coachA)}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: "coach-own-student", name: "Aluno Coach Proprio" }),
+      body: JSON.stringify(studentCreatePayload("coach-own-student", "Aluno", "Coach")),
     });
 
     assert.equal(response.status, 201);
@@ -478,7 +490,7 @@ describe("GUTO Phase 5 – admin team operations", () => {
     const response = await request("/admin/students", {
       method: "POST",
       headers: { Authorization: `Bearer ${superToken()}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: "super-no-team-student", name: "Aluno Sem Time" }),
+      body: JSON.stringify(studentCreatePayload("super-no-team-student", "Aluno", "SemTime")),
     });
 
     assert.equal(response.status, 400);
@@ -501,7 +513,7 @@ describe("GUTO Phase 5 – admin team operations", () => {
     const createRes = await request("/admin/students", {
       method: "POST",
       headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: "invite-student", name: "Aluno Convite" }),
+      body: JSON.stringify(studentCreatePayload("invite-student", "Aluno", "Convite")),
     });
     assert.equal(createRes.status, 201);
     const { inviteLink: createdLink } = (await createRes.json()) as { inviteLink: string };
@@ -520,7 +532,7 @@ describe("GUTO Phase 5 – admin team operations", () => {
     const createRes = await request("/admin/students", {
       method: "POST",
       headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: "invite-student-b-block", name: "Aluno Block" }),
+      body: JSON.stringify(studentCreatePayload("invite-student-b-block", "Aluno", "Block")),
     });
     assert.equal(createRes.status, 201);
 
@@ -535,7 +547,7 @@ describe("GUTO Phase 5 – admin team operations", () => {
     const createRes = await request("/admin/students", {
       method: "POST",
       headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: "reset-pwd-student", name: "Aluno Reset" }),
+      body: JSON.stringify(studentCreatePayload("reset-pwd-student", "Aluno", "Reset")),
     });
     assert.equal(createRes.status, 201);
 
@@ -671,7 +683,7 @@ describe("GUTO Phase 5 – admin team operations", () => {
     const createRes = await request("/admin/students", {
       method: "POST",
       headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: "regen-invite-student", name: "Aluno Regen" }),
+      body: JSON.stringify(studentCreatePayload("regen-invite-student", "Aluno", "Regen")),
     });
     assert.equal(createRes.status, 201);
     const { inviteLink: originalLink } = (await createRes.json()) as { inviteLink: string };
