@@ -321,13 +321,6 @@ export function buildDietPrompt(
       mobility_health: "Salute e mobilità",
       consistency: "Costanza",
     },
-    "es-ES": {
-      fat_loss: "Pérdida de grasa",
-      muscle_gain: "Hipertrofia",
-      conditioning: "Acondicionamiento",
-      mobility_health: "Salud y movilidad",
-      consistency: "Consistencia",
-    },
   };
   const goalLabel = goalLabels[language]?.[profile.trainingGoal] ?? profile.trainingGoal;
 

@@ -102,13 +102,11 @@ function customExerciseRecord(overrides: Partial<CustomExerciseRequest> = {}): C
       "pt-BR": "Custom inválido",
       "it-IT": "Custom inválido",
       "en-US": "Custom inválido",
-      "es-ES": "Custom inválido",
     },
     aliasesByLanguage: {
       "pt-BR": [],
       "it-IT": [],
       "en-US": [],
-      "es-ES": [],
     },
     muscleGroup: "peito",
     videoUrl: "/exercise/visuals/custom/custom-invalido.mp4",

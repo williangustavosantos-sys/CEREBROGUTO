@@ -24,6 +24,8 @@ export interface UserAccess {
   subscriptionEndsAt: string | null;
   passwordHash?: string;
   email?: string;
+  firstName?: string;
+  lastName?: string;
   name?: string;
   whatsapp?: string;
   instagram?: string;

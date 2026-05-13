@@ -15,7 +15,7 @@ import {
   readArenaStore,
   writeArenaStore,
 } from "./arena-store.js";
-import { getAvatarStage, getWeeklyRanking, getMonthlyRanking, getIndividualRanking, DEFAULT_ARENA_GROUP } from "./arena.js";
+import { getAvatarStage, getWeeklyRanking, getMonthlyRanking, getGlobalIndividualRanking, DEFAULT_ARENA_GROUP } from "./arena.js";
 import {
   readMemoryStoreAsync,
   writeMemoryStoreAsync,
@@ -31,6 +31,7 @@ import {
   getRequestActorAccess,
   getScopedUserAccessList,
   normalizeAccessTeamId,
+  requireAdmin,
   requireCoachOrAdmin,
   requireSuperAdmin,
   TeamAccessError,
@@ -185,11 +186,16 @@ async function deleteUserEverywhere(userId: string): Promise<void> {
   await deleteDietPlan(userId);
 }
 
-function sendRankings(_req: Request, res: Response): void {
-  const arenaGroupId = DEFAULT_ARENA_GROUP;
+function sendRankings(req: Request, res: Response): void {
+  const actor = requireActor(req, res);
+  if (!actor) return;
+  const requestedTeamId = typeof req.query["teamId"] === "string" ? req.query["teamId"].trim() : "";
+  const arenaGroupId = actor.role === "super_admin"
+    ? normalizeAccessTeamId(requestedTeamId || GUTO_CORE_TEAM_ID)
+    : normalizeAccessTeamId(actor.teamId);
   const weekly = getWeeklyRanking(arenaGroupId);
   const monthly = getMonthlyRanking(arenaGroupId);
-  const individual = getIndividualRanking(arenaGroupId);
+  const individual = getGlobalIndividualRanking();
 
   res.json({ weekly, monthly, individual });
 }
@@ -284,8 +290,8 @@ coachRouter.patch("/student/:userId", express.json(), (req: Request, res: Respon
   res.json(buildStudentView(userId));
 });
 
-// PATCH /guto/coach/student/:userId/access
-coachRouter.patch("/student/:userId/access", express.json(), (req: Request, res: Response) => {
+// PATCH /guto/coach/student/:userId/access — apenas admin/super_admin
+coachRouter.patch("/student/:userId/access", requireAdmin, express.json(), (req: Request, res: Response) => {
   const userId = req.params["userId"] as string;
   const { active } = req.body as { active?: boolean };
   const existing = getManagedStudent(req, res, userId);
@@ -313,8 +319,8 @@ coachRouter.patch("/student/:userId/archive", (req: Request, res: Response) => {
   res.json({ success: true, archived: true, userId });
 });
 
-// POST /guto/coach/student/:userId/reset
-coachRouter.post("/student/:userId/reset", express.json(), (req: Request, res: Response) => {
+// POST /guto/coach/student/:userId/reset — apenas admin/super_admin
+coachRouter.post("/student/:userId/reset", requireAdmin, express.json(), (req: Request, res: Response) => {
   const userId = req.params["userId"] as string;
   const existing = getManagedStudent(req, res, userId);
   if (!existing) return;
@@ -481,8 +487,8 @@ coachRouter.get("/student/:userId/invite-link", async (req: Request, res: Respon
   return res.json({ inviteLink: `${config.frontendPublicUrl}/convite/${rawToken}` });
 });
 
-// POST /guto/coach/student/:userId/reset-password — generates a temporary password
-coachRouter.post("/student/:userId/reset-password", async (req: Request, res: Response) => {
+// POST /guto/coach/student/:userId/reset-password — apenas admin/super_admin
+coachRouter.post("/student/:userId/reset-password", requireAdmin, async (req: Request, res: Response) => {
   const userId = req.params["userId"] as string;
   const existing = getManagedStudent(req, res, userId);
   if (!existing) return;

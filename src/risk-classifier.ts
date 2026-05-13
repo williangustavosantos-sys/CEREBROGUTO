@@ -27,7 +27,7 @@ export type RiskFlag =
   | "trauma_acute"        // estalo + inchaço, perda de sensibilidade, queda recente sem apoio
   | null;
 
-export type ClassifierLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
+export type ClassifierLanguage = "pt-BR" | "en-US" | "it-IT";
 
 export interface RiskClassification {
   flag: RiskFlag;
@@ -272,7 +272,6 @@ const SAFETY_HEADERS: Record<ClassifierLanguage, string> = {
   "pt-BR": "⚠️ ALERTA DE SEGURANÇA — TURNO ATUAL",
   "en-US": "⚠️ SAFETY OVERRIDE — CURRENT TURN",
   "it-IT": "⚠️ ALLERTA DI SICUREZZA — TURNO ATTUALE",
-  "es-ES": "⚠️ ALERTA DE SEGURIDAD — TURNO ACTUAL",
 };
 
 /**

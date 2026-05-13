@@ -18,6 +18,7 @@ import {
   writeUserAccessStoreRaw,
   type UserAccess,
 } from "../src/user-access-store.js";
+import { writeArenaStore, type ArenaProfile } from "../src/arena-store.js";
 import { GUTO_CORE_TEAM_ID, createTeam } from "../src/team-store.js";
 import { config } from "../src/config.js";
 
@@ -60,6 +61,28 @@ function access(userId: string, role: UserAccess["role"], coachId: string, teamI
     updatedAt: now,
     subscriptionStatus: "active",
     subscriptionEndsAt: null,
+    ...patch,
+  };
+}
+
+function arenaProfile(userId: string, arenaGroupId: string, totalXp: number, patch: Partial<ArenaProfile> = {}): ArenaProfile {
+  const now = new Date().toISOString();
+  return {
+    userId,
+    displayName: userId,
+    pairName: `GUTO & ${userId.toUpperCase()}`,
+    arenaGroupId,
+    avatarStage: "baby",
+    totalXp,
+    weeklyXp: totalXp,
+    monthlyXp: totalXp,
+    validatedWorkoutsTotal: 1,
+    validatedWorkoutsWeek: 1,
+    validatedWorkoutsMonth: 1,
+    currentStreak: 1,
+    lastWorkoutValidatedAt: now,
+    createdAt: now,
+    updatedAt: now,
     ...patch,
   };
 }
@@ -132,6 +155,7 @@ before(async () => {
 beforeEach(() => {
   seedTeams();
   seedAccessStore();
+  writeArenaStore({ profiles: {}, events: [] });
   writeFileSync(testMemoryFile, JSON.stringify({}, null, 2));
 });
 
@@ -532,6 +556,114 @@ describe("GUTO Phase 5 – admin team operations", () => {
       body: JSON.stringify({}),
     });
     assert.equal(resetRes.status, 403);
+  });
+
+  it("blocks coach from bureaucratic student access actions", async () => {
+    const calls: Array<{ path: string; body?: Record<string, unknown> }> = [
+      { path: `/admin/students/${studentA.userId}/pause` },
+      { path: `/admin/students/${studentA.userId}/reactivate` },
+      { path: `/admin/students/${studentA.userId}/renew`, body: { days: 30 } },
+      { path: `/admin/students/${studentA.userId}/reset-password`, body: {} },
+      { path: `/admin/students/${studentA.userId}/reset`, body: { scope: "weekly" } },
+    ];
+
+    for (const call of calls) {
+      const response = await request(call.path, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token(coachA)}`, "Content-Type": "application/json" },
+        body: JSON.stringify(call.body ?? {}),
+      });
+      assert.equal(response.status, 403, call.path);
+    }
+  });
+
+  it("blocks coach from changing bureaucratic fields through student patch", async () => {
+    const response = await request(`/admin/students/${studentA.userId}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token(coachA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ active: false, visibleInArena: false, subscriptionStatus: "paused" }),
+    });
+
+    assert.equal(response.status, 403);
+    const unchanged = getUserAccess(studentA.userId);
+    assert.equal(unchanged?.active, true);
+    assert.equal(unchanged?.visibleInArena, true);
+    assert.equal(unchanged?.subscriptionStatus, "active");
+  });
+
+  it("still allows coach to update operational calibration for their student", async () => {
+    const response = await request(`/admin/students/${studentA.userId}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token(coachA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ calibration: { trainingGoal: "ganhar massa" } }),
+    });
+
+    assert.equal(response.status, 200);
+  });
+
+  it("allows admin to run own-team bureaucratic actions and blocks another team", async () => {
+    const ownPause = await request(`/admin/students/${studentA.userId}/pause`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token(adminA)}` },
+    });
+    assert.equal(ownPause.status, 200);
+
+    const ownReset = await request(`/admin/students/${studentA.userId}/reset`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: "weekly" }),
+    });
+    assert.equal(ownReset.status, 200);
+
+    const otherRenew = await request(`/admin/students/${studentB.userId}/renew`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ days: 30 }),
+    });
+    assert.equal(otherRenew.status, 403);
+  });
+
+  it("allows admin and super_admin to hard delete managed students", async () => {
+    const adminDelete = await request(`/admin/students/${studentA.userId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token(adminA)}` },
+    });
+    assert.equal(adminDelete.status, 204);
+    assert.equal(getUserAccess(studentA.userId), undefined);
+
+    const superDelete = await request(`/admin/students/${studentB.userId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${superToken()}` },
+    });
+    assert.equal(superDelete.status, 204);
+    assert.equal(getUserAccess(studentB.userId), undefined);
+  });
+
+  it("scopes coach panel weekly and monthly rankings by actor team and keeps individual global", async () => {
+    writeArenaStore({
+      profiles: {
+        [studentA.userId]: arenaProfile(studentA.userId, "TEAM_A", 100),
+        [studentB.userId]: arenaProfile(studentB.userId, "TEAM_B", 900),
+      },
+      events: [],
+    });
+
+    const response = await request("/guto/coach/rankings", {
+      headers: { Authorization: `Bearer ${token(coachA)}` },
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      weekly: { arenaGroupId: string; items: Array<{ userId: string }> };
+      monthly: { arenaGroupId: string; items: Array<{ userId: string }> };
+      individual: { arenaGroupId: string; items: Array<{ userId: string }> };
+    };
+
+    assert.equal(body.weekly.arenaGroupId, "TEAM_A");
+    assert.deepEqual(body.weekly.items.map((item) => item.userId), [studentA.userId]);
+    assert.equal(body.monthly.arenaGroupId, "TEAM_A");
+    assert.deepEqual(body.monthly.items.map((item) => item.userId), [studentA.userId]);
+    assert.equal(body.individual.arenaGroupId, "global");
+    assert.deepEqual(body.individual.items.map((item) => item.userId), [studentB.userId, studentA.userId]);
   });
 
   // invite regeneration

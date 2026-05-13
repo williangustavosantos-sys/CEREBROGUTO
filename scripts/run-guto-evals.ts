@@ -47,7 +47,7 @@ interface EvalCase {
   group: string;
   category?: EvalCategory;
   input: string;
-  language?: "pt-BR" | "it-IT" | "es-ES" | "en-US";
+  language?: "pt-BR" | "it-IT" | "en-US";
   history?: GutoHistoryItem[];
   profile?: Record<string, unknown>;
   expectedResponse?: GutoExpectedResponse;

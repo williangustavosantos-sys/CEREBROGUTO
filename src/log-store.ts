@@ -44,6 +44,7 @@ export type LogAction =
   | "billing_subscription_updated"
   | "team_created"
   | "team_updated"
+  | "guto_revived"
   | "invite_regenerated";
 
 export interface AuditLog {

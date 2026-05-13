@@ -118,7 +118,7 @@ export interface AwardXpOptions {
   userId: string;
   displayName: string;
   arenaGroupId?: string;
-  type: "workout_validated" | "reduced_mission_validated" | "bonus";
+  type: "workout_validated" | "reduced_mission_validated" | "bonus" | "miss_penalty";
   xp: number;
   workoutFocus?: string;
   sourceValidationId?: string;

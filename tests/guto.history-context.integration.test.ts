@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import type { Server } from "node:http";
 import jwt from "jsonwebtoken";
 
-type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
+type GutoLanguage = "pt-BR" | "en-US" | "it-IT";
 
 type GutoResponse = {
   fala?: string;
@@ -29,7 +29,6 @@ let baseUrl = "";
 const forbiddenPortuguese: Record<Exclude<GutoLanguage, "pt-BR">, string[]> = {
   "en-US": ["amanhã", "hoje", "peito", "costas", "pernas", "treino", "academia", "dor", "limitação", "me manda", "boa", "ontem", "anteontem"],
   "it-IT": ["amanhã", "hoje", "peito", "costas", "pernas", "treino", "academia", "limitação", "me manda", "boa", "ontem", "anteontem"],
-  "es-ES": ["amanhã", "hoje", "peito", "costas", "treino", "academia", "limitação", "me manda", "boa", "ontem", "anteontem"],
 };
 
 function normalize(value: string) {
@@ -347,14 +346,6 @@ describe("GUTO contextual muscle history", () => {
         dayBefore: "l'ho allenato avantieri",
         compound: "ho allenato gambe e core e petto e tricipiti negli ultimi due giorni",
         expectedCompound: /non ripeto gambe\/core né petto\/tricipiti/i,
-      },
-      {
-        language: "es-ES",
-        historyText: "Hoy vamos con piernas y core.",
-        yesterday: "lo entrené ayer",
-        dayBefore: "lo entrené antes de ayer",
-        compound: "entrené piernas y core y pecho y tríceps los últimos dos días",
-        expectedCompound: /no repito piernas\/core ni pecho\/tríceps/i,
       },
     ];
 

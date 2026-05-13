@@ -92,6 +92,18 @@ const PLAN_SOURCES: PlanSource[] = ["guto_generated", "coach_manual", "mixed"];
 const ADMIN_ROLES: UserRole[] = ["admin", "super_admin"];
 const VALID_TEAM_PLANS: GutoTeamPlan[] = ["start", "pro", "elite", "custom"];
 const CATALOG_MUSCLE_GROUPS: CatalogMuscleGroup[] = ["aquecimento", "peito", "costas", "ombro", "bracos", "pernas", "abdomen"];
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i;
+const COACH_FORBIDDEN_STUDENT_PATCH_FIELDS = [
+  "active",
+  "archived",
+  "visibleInArena",
+  "subscriptionStatus",
+  "subscriptionEndsAt",
+  "paymentStatus",
+  "plan",
+  "accessDurationDays",
+  "teamId",
+] as const;
 
 function isAdminRole(role?: string): boolean {
   return role === "admin" || role === "super_admin";
@@ -305,6 +317,8 @@ function buildStudentView(access: UserAccess) {
   return {
     ...access,
     name: access.name || memory.name || access.userId,
+    firstName: access.firstName ?? null,
+    lastName: access.lastName ?? null,
     coachName: coach?.name || coach?.email || access.coachId || null,
     teamName: team?.name ?? null,
     age: memory.userAge ?? null,
@@ -389,11 +403,61 @@ function buildInviteLink(rawToken: string): string {
   return `${config.frontendPublicUrl}/convite/${rawToken}`;
 }
 
+function normalizePersonName(value: unknown): string {
+  return asString(value, "")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function isValidEmail(value: string): boolean {
+  return EMAIL_PATTERN.test(value.trim());
+}
+
+function normalizePhone(value: unknown): string {
+  return asString(value, "")
+    .trim()
+    .replace(/[^\d+]/g, "");
+}
+
+function phoneDigits(value: string): string {
+  return value.replace(/\D/g, "");
+}
+
+function isValidPhone(value: string): boolean {
+  const digits = phoneDigits(value);
+  return digits.length >= 8 && digits.length <= 15 && !/^(\d)\1+$/.test(digits);
+}
+
+function userIdPart(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toUpperCase()
+    .slice(0, 24);
+}
+
+function buildStudentUserId(body: Partial<UserAccess>): string {
+  const first = userIdPart(normalizePersonName(body.firstName || body.name || "ALUNO"));
+  const last = userIdPart(normalizePersonName(body.lastName || ""));
+  const base = ["G", first, last].filter(Boolean).join("-") || `G-ALUNO-${crypto.randomUUID().slice(0, 6).toUpperCase()}`;
+  let candidate = base;
+  let suffix = 2;
+  while (getUserAccess(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
 function publicUserPatch(body: Partial<UserAccess>): Partial<Omit<UserAccess, "userId" | "createdAt">> {
   const patch: Partial<Omit<UserAccess, "userId" | "createdAt">> = {};
+  if (typeof body.firstName === "string") patch.firstName = normalizePersonName(body.firstName);
+  if (typeof body.lastName === "string") patch.lastName = normalizePersonName(body.lastName);
   if (typeof body.name === "string") patch.name = body.name.trim();
-  if (typeof body.email === "string") patch.email = body.email.trim();
-  if (typeof body.phone === "string") patch.phone = body.phone.trim();
+  if (typeof body.email === "string") patch.email = body.email.trim().toLowerCase();
+  if (typeof body.phone === "string") patch.phone = normalizePhone(body.phone);
   if (typeof body.whatsapp === "string") patch.whatsapp = body.whatsapp.trim();
   if (typeof body.instagram === "string") patch.instagram = body.instagram.trim();
   if (typeof body.country === "string") patch.country = body.country.trim();
@@ -411,9 +475,14 @@ function publicUserPatch(body: Partial<UserAccess>): Partial<Omit<UserAccess, "u
   return patch;
 }
 
+function hasBodyField(body: LooseRecord, field: string): boolean {
+  return Object.prototype.hasOwnProperty.call(body, field) && body[field] !== undefined;
+}
+
 async function updateMemoryFromStudentPatch(userId: string, patch: Partial<UserAccess> & LooseRecord): Promise<void> {
   const memory = getMemory(userId);
-  if (typeof patch.name === "string" && patch.name.trim()) memory.name = patch.name.trim();
+  if (typeof patch.firstName === "string" && patch.firstName.trim()) memory.name = patch.firstName.trim();
+  else if (typeof patch.name === "string" && patch.name.trim()) memory.name = patch.name.trim();
   const calibration = asRecord(patch.calibration);
   const merged = { ...patch, ...calibration };
   if (typeof merged.userAge !== "undefined" && !Number.isNaN(Number(merged.userAge))) memory.userAge = Number(merged.userAge);
@@ -839,8 +908,20 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
   const actor = requireActor(req, res);
   if (!actor) return;
   const body = req.body as Partial<UserAccess> & { password?: string };
-  if (!body.name?.trim()) {
-    res.status(400).json({ message: "Nome do aluno é obrigatório." });
+  const firstName = normalizePersonName(body.firstName || body.name);
+  const lastName = normalizePersonName(body.lastName);
+  const email = asString(body.email, "").trim().toLowerCase();
+  const phone = normalizePhone(body.phone);
+  if (!firstName || !lastName) {
+    res.status(400).json({ message: "Nome e sobrenome do aluno são obrigatórios." });
+    return;
+  }
+  if (!email || !isValidEmail(email)) {
+    res.status(400).json({ message: "Email válido do aluno é obrigatório." });
+    return;
+  }
+  if (!phone || !isValidPhone(phone)) {
+    res.status(400).json({ message: "Telefone válido do aluno é obrigatório." });
     return;
   }
   if (body.role && body.role !== "student") {
@@ -865,7 +946,8 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
     return;
   }
 
-  const userId = body.userId || `u-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  const fullName = `${firstName} ${lastName}`.trim();
+  const userId = body.userId || buildStudentUserId({ ...body, firstName, lastName, name: fullName });
   let coachId = body.coachId || actor.userId;
   if (actor.role === "coach") {
     if (body.coachId && body.coachId !== actor.userId) {
@@ -891,7 +973,7 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
   const subscriptionEndsAt = active ? (body.subscriptionEndsAt || setDaysFromNow(durationDays)) : (body.subscriptionEndsAt || null);
 
   const user = await upsertUserAccessAsync(userId, {
-    ...publicUserPatch(body),
+    ...publicUserPatch({ ...body, firstName, lastName, name: fullName, email, phone }),
     role: "student",
     coachId,
     teamId,
@@ -904,11 +986,11 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
     ...(passwordHash ? { passwordHash } : {}),
   });
 
-  await updateMemoryFromStudentPatch(userId, body);
+  await updateMemoryFromStudentPatch(userId, { ...body, firstName, lastName, name: fullName, email, phone });
 
   let inviteLink = "";
   if (!passwordHash) {
-    const { rawToken } = await createInvite({ userId, name: body.name.trim(), coachId });
+    const { rawToken } = await createInvite({ userId, name: fullName, coachId });
     inviteLink = buildInviteLink(rawToken);
   }
 
@@ -937,6 +1019,22 @@ adminRouter.patch(["/students/:userId", "/users/:userId"], asyncHandler(async (r
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
   const body = req.body as Partial<UserAccess> & LooseRecord;
+  if (typeof body.email === "string" && body.email.trim() && !isValidEmail(body.email)) {
+    res.status(400).json({ message: "Email inválido." });
+    return;
+  }
+  if (typeof body.phone === "string" && body.phone.trim() && !isValidPhone(normalizePhone(body.phone))) {
+    res.status(400).json({ message: "Telefone inválido." });
+    return;
+  }
+  if (typeof body.firstName === "string" && !normalizePersonName(body.firstName)) {
+    res.status(400).json({ message: "Nome não pode ser vazio." });
+    return;
+  }
+  if (typeof body.lastName === "string" && !normalizePersonName(body.lastName)) {
+    res.status(400).json({ message: "Sobrenome não pode ser vazio." });
+    return;
+  }
 
   if (body.role && body.role !== "student") {
     res.status(403).json({ message: "Esta rota altera apenas alunos.", code: "ADMIN_ACCESS_FORBIDDEN" });
@@ -947,6 +1045,15 @@ adminRouter.patch(["/students/:userId", "/users/:userId"], asyncHandler(async (r
     return;
   }
   if (isCoachRole(actor.role)) {
+    const forbiddenField = COACH_FORBIDDEN_STUDENT_PATCH_FIELDS.find((field) => hasBodyField(body, field));
+    if (forbiddenField) {
+      res.status(403).json({
+        message: "Coach não pode alterar acesso, pagamento, assinatura, Time ou visibilidade de Arena.",
+        code: "ADMIN_ACCESS_FORBIDDEN",
+        field: forbiddenField,
+      });
+      return;
+    }
     if (body.coachId && body.coachId !== actor.userId) {
       res.status(403).json({ message: "Coach não pode transferir aluno para outro coach.", code: "COACH_STUDENT_ACCESS_FORBIDDEN" });
       return;
@@ -1001,7 +1108,7 @@ adminRouter.delete(["/students/:userId", "/users/:userId"], requireAdmin, asyncH
   res.status(204).send();
 }));
 
-adminRouter.post("/students/:userId/reactivate", asyncHandler(async (req, res) => {
+adminRouter.post("/students/:userId/reactivate", requireAdmin, asyncHandler(async (req, res) => {
   const caller = req.gutoUser!;
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
@@ -1021,7 +1128,7 @@ adminRouter.post("/students/:userId/reactivate", asyncHandler(async (req, res) =
   res.json({ student: buildStudentView(updated), user: updated });
 }));
 
-adminRouter.post("/students/:userId/pause", asyncHandler(async (req, res) => {
+adminRouter.post("/students/:userId/pause", requireAdmin, asyncHandler(async (req, res) => {
   const caller = req.gutoUser!;
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
@@ -1030,7 +1137,7 @@ adminRouter.post("/students/:userId/pause", asyncHandler(async (req, res) => {
   res.json({ student: buildStudentView(updated), user: updated });
 }));
 
-adminRouter.post("/students/:userId/renew", asyncHandler(async (req, res) => {
+adminRouter.post("/students/:userId/renew", requireAdmin, asyncHandler(async (req, res) => {
   const caller = req.gutoUser!;
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
@@ -1048,7 +1155,7 @@ adminRouter.post("/students/:userId/renew", asyncHandler(async (req, res) => {
   res.json({ student: buildStudentView(updated), user: updated });
 }));
 
-adminRouter.post("/students/:userId/reset-password", asyncHandler(async (req, res) => {
+adminRouter.post("/students/:userId/reset-password", requireAdmin, asyncHandler(async (req, res) => {
   const caller = req.gutoUser!;
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
@@ -1064,7 +1171,7 @@ adminRouter.post("/students/:userId/reset-password", asyncHandler(async (req, re
   res.json({ user: updated, temporaryPassword: body.password ? undefined : temporaryPassword });
 }));
 
-adminRouter.post("/students/:userId/reset", asyncHandler(async (req, res) => {
+adminRouter.post("/students/:userId/reset", requireAdmin, asyncHandler(async (req, res) => {
   const caller = req.gutoUser!;
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;

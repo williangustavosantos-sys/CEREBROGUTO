@@ -9,7 +9,7 @@
  * só para renderização. As bases de cada país controlam o que vai pro plano.
  */
 
-export type FoodLanguage = "pt-BR" | "it-IT" | "en-US" | "es-ES";
+export type FoodLanguage = "pt-BR" | "it-IT" | "en-US";
 
 export type FoodCountry =
   | "italy"
@@ -66,13 +66,11 @@ export const foodCatalog: FoodItem[] = [
       "pt-BR": "frango grelhado",
       "it-IT": "pollo grigliato",
       "en-US": "grilled chicken",
-      "es-ES": "pollo a la plancha",
     },
     aliases: {
       "pt-BR": ["frango", "peito de frango"],
       "it-IT": ["pollo", "petto di pollo"],
       "en-US": ["chicken", "chicken breast"],
-      "es-ES": ["pollo", "pechuga de pollo"],
     },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "common" },
     tags: ["high_protein", "lean", "lunch", "dinner"],
@@ -85,7 +83,6 @@ export const foodCatalog: FoodItem[] = [
       "pt-BR": "atum em conserva",
       "it-IT": "tonno in scatola",
       "en-US": "canned tuna",
-      "es-ES": "atún en conserva",
     },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "available", france: "common", argentina: "common" },
     tags: ["high_protein", "fast", "lunch"],
@@ -95,7 +92,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "eggs",
     category: "protein",
-    names: { "pt-BR": "ovos", "it-IT": "uova", "en-US": "eggs", "es-ES": "huevos" },
+    names: { "pt-BR": "ovos", "it-IT": "uova", "en-US": "eggs" },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "common" },
     tags: ["high_protein", "breakfast", "snack"],
     allergens: ["egg"],
@@ -104,7 +101,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "white_fish",
     category: "protein",
-    names: { "pt-BR": "peixe branco", "it-IT": "pesce bianco", "en-US": "white fish", "es-ES": "pescado blanco" },
+    names: { "pt-BR": "peixe branco", "it-IT": "pesce bianco", "en-US": "white fish" },
     countries: { italy: "common", brazil: "available", spain: "common", portugal: "common", usa: "available", uk: "common", germany: "available", france: "common", argentina: "available" },
     tags: ["high_protein", "lean", "dinner"],
     allergens: ["fish"],
@@ -113,7 +110,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "bresaola",
     category: "protein",
-    names: { "pt-BR": "bresaola", "it-IT": "bresaola", "en-US": "bresaola", "es-ES": "bresaola" },
+    names: { "pt-BR": "bresaola", "it-IT": "bresaola", "en-US": "bresaola" },
     countries: { italy: "common", brazil: "rare", spain: "available", portugal: "rare", usa: "rare", uk: "available", germany: "available", france: "available", argentina: "rare" },
     tags: ["high_protein", "snack"],
     substitutes: ["chicken_breast", "tuna_canned"],
@@ -123,7 +120,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "rice",
     category: "carb",
-    names: { "pt-BR": "arroz", "it-IT": "riso", "en-US": "rice", "es-ES": "arroz" },
+    names: { "pt-BR": "arroz", "it-IT": "riso", "en-US": "rice" },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "common" },
     tags: ["lunch", "dinner"],
     substitutes: ["pasta", "potato", "oats"],
@@ -131,7 +128,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "pasta",
     category: "carb",
-    names: { "pt-BR": "macarrão", "it-IT": "pasta", "en-US": "pasta", "es-ES": "pasta" },
+    names: { "pt-BR": "macarrão", "it-IT": "pasta", "en-US": "pasta" },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "common" },
     tags: ["lunch", "dinner"],
     allergens: ["gluten"],
@@ -140,7 +137,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "oats",
     category: "carb",
-    names: { "pt-BR": "aveia", "it-IT": "avena", "en-US": "oats", "es-ES": "avena" },
+    names: { "pt-BR": "aveia", "it-IT": "avena", "en-US": "oats" },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "common" },
     tags: ["breakfast", "fiber"],
     allergens: ["gluten"],
@@ -149,7 +146,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "wholegrain_bread",
     category: "carb",
-    names: { "pt-BR": "pão integral", "it-IT": "pane integrale", "en-US": "whole grain bread", "es-ES": "pan integral" },
+    names: { "pt-BR": "pão integral", "it-IT": "pane integrale", "en-US": "whole grain bread" },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "common" },
     tags: ["breakfast", "snack"],
     allergens: ["gluten"],
@@ -158,7 +155,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "potato",
     category: "carb",
-    names: { "pt-BR": "batata", "it-IT": "patata", "en-US": "potato", "es-ES": "patata" },
+    names: { "pt-BR": "batata", "it-IT": "patata", "en-US": "potato" },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "common" },
     tags: ["lunch", "dinner"],
     substitutes: ["rice", "sweet_potato"],
@@ -166,7 +163,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "sweet_potato",
     category: "carb",
-    names: { "pt-BR": "batata-doce", "it-IT": "patata dolce", "en-US": "sweet potato", "es-ES": "batata" },
+    names: { "pt-BR": "batata-doce", "it-IT": "patata dolce", "en-US": "sweet potato" },
     countries: { italy: "available", brazil: "common", spain: "available", portugal: "available", usa: "common", uk: "common", germany: "available", france: "available", argentina: "common" },
     tags: ["lunch", "dinner"],
     substitutes: ["potato", "rice"],
@@ -174,7 +171,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "tapioca",
     category: "carb",
-    names: { "pt-BR": "tapioca", "it-IT": "tapioca", "en-US": "tapioca", "es-ES": "tapioca" },
+    names: { "pt-BR": "tapioca", "it-IT": "tapioca", "en-US": "tapioca" },
     countries: { italy: "rare", brazil: "common", spain: "rare", portugal: "available", usa: "rare", uk: "rare", germany: "rare", france: "rare", argentina: "rare" },
     tags: ["breakfast", "gluten_free"],
     substitutes: ["oats", "wholegrain_bread", "rice_cakes"],
@@ -184,7 +181,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "greek_yogurt",
     category: "dairy",
-    names: { "pt-BR": "iogurte grego", "it-IT": "yogurt greco", "en-US": "Greek yogurt", "es-ES": "yogur griego" },
+    names: { "pt-BR": "iogurte grego", "it-IT": "yogurt greco", "en-US": "Greek yogurt" },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "available" },
     tags: ["breakfast", "snack", "high_protein"],
     allergens: ["milk"],
@@ -194,7 +191,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "soy_yogurt",
     category: "dairy",
-    names: { "pt-BR": "iogurte de soja", "it-IT": "yogurt di soia", "en-US": "soy yogurt", "es-ES": "yogur de soja" },
+    names: { "pt-BR": "iogurte de soja", "it-IT": "yogurt di soia", "en-US": "soy yogurt" },
     countries: { italy: "available", brazil: "available", spain: "available", portugal: "available", usa: "available", uk: "available", germany: "common", france: "available", argentina: "rare" },
     tags: ["breakfast", "snack"],
     allergens: ["soy"],
@@ -203,7 +200,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "cottage_cheese",
     category: "dairy",
-    names: { "pt-BR": "cottage", "it-IT": "ricotta", "en-US": "cottage cheese", "es-ES": "queso fresco" },
+    names: { "pt-BR": "cottage", "it-IT": "ricotta", "en-US": "cottage cheese" },
     countries: { italy: "common", brazil: "available", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "available" },
     tags: ["breakfast", "snack", "high_protein"],
     allergens: ["milk"],
@@ -215,7 +212,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "banana",
     category: "fruit",
-    names: { "pt-BR": "banana", "it-IT": "banana", "en-US": "banana", "es-ES": "plátano" },
+    names: { "pt-BR": "banana", "it-IT": "banana", "en-US": "banana" },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "common" },
     tags: ["breakfast", "snack"],
     substitutes: ["apple", "berries"],
@@ -223,7 +220,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "apple",
     category: "fruit",
-    names: { "pt-BR": "maçã", "it-IT": "mela", "en-US": "apple", "es-ES": "manzana" },
+    names: { "pt-BR": "maçã", "it-IT": "mela", "en-US": "apple" },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "common" },
     tags: ["snack"],
     substitutes: ["banana", "berries"],
@@ -231,7 +228,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "berries",
     category: "fruit",
-    names: { "pt-BR": "frutas vermelhas", "it-IT": "frutti di bosco", "en-US": "berries", "es-ES": "frutos rojos" },
+    names: { "pt-BR": "frutas vermelhas", "it-IT": "frutti di bosco", "en-US": "berries" },
     countries: { italy: "common", brazil: "available", spain: "common", portugal: "available", usa: "common", uk: "common", germany: "common", france: "common", argentina: "available" },
     tags: ["breakfast", "snack"],
     substitutes: ["banana", "apple"],
@@ -239,7 +236,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "zucchini",
     category: "vegetable",
-    names: { "pt-BR": "abobrinha", "it-IT": "zucchine", "en-US": "zucchini", "es-ES": "calabacín" },
+    names: { "pt-BR": "abobrinha", "it-IT": "zucchine", "en-US": "zucchini" },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "common" },
     tags: ["lunch", "dinner"],
     substitutes: ["broccoli", "spinach"],
@@ -247,7 +244,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "broccoli",
     category: "vegetable",
-    names: { "pt-BR": "brócolis", "it-IT": "broccoli", "en-US": "broccoli", "es-ES": "brócoli" },
+    names: { "pt-BR": "brócolis", "it-IT": "broccoli", "en-US": "broccoli" },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "common" },
     tags: ["lunch", "dinner"],
     substitutes: ["zucchini", "spinach"],
@@ -255,7 +252,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "spinach",
     category: "vegetable",
-    names: { "pt-BR": "espinafre", "it-IT": "spinaci", "en-US": "spinach", "es-ES": "espinacas" },
+    names: { "pt-BR": "espinafre", "it-IT": "spinaci", "en-US": "spinach" },
     countries: { italy: "common", brazil: "available", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "available" },
     tags: ["lunch", "dinner"],
     substitutes: ["broccoli", "zucchini"],
@@ -263,7 +260,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "lentils",
     category: "legume",
-    names: { "pt-BR": "lentilha", "it-IT": "lenticchie", "en-US": "lentils", "es-ES": "lentejas" },
+    names: { "pt-BR": "lentilha", "it-IT": "lenticchie", "en-US": "lentils" },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "common" },
     tags: ["lunch", "dinner", "fiber"],
     substitutes: ["chickpeas", "beans"],
@@ -271,7 +268,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "beans",
     category: "legume",
-    names: { "pt-BR": "feijão", "it-IT": "fagioli", "en-US": "beans", "es-ES": "frijoles" },
+    names: { "pt-BR": "feijão", "it-IT": "fagioli", "en-US": "beans" },
     countries: { italy: "available", brazil: "common", spain: "common", portugal: "common", usa: "available", uk: "available", germany: "available", france: "available", argentina: "common" },
     tags: ["lunch", "fiber"],
     substitutes: ["lentils", "chickpeas"],
@@ -279,7 +276,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "chickpeas",
     category: "legume",
-    names: { "pt-BR": "grão-de-bico", "it-IT": "ceci", "en-US": "chickpeas", "es-ES": "garbanzos" },
+    names: { "pt-BR": "grão-de-bico", "it-IT": "ceci", "en-US": "chickpeas" },
     countries: { italy: "common", brazil: "available", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "available" },
     tags: ["lunch", "fiber"],
     substitutes: ["lentils", "beans"],
@@ -287,7 +284,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "olive_oil",
     category: "fat",
-    names: { "pt-BR": "azeite de oliva", "it-IT": "olio d'oliva", "en-US": "olive oil", "es-ES": "aceite de oliva" },
+    names: { "pt-BR": "azeite de oliva", "it-IT": "olio d'oliva", "en-US": "olive oil" },
     countries: { italy: "common", brazil: "common", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "common" },
     tags: ["lunch", "dinner"],
     substitutes: ["avocado"],
@@ -295,7 +292,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "avocado",
     category: "fat",
-    names: { "pt-BR": "abacate", "it-IT": "avocado", "en-US": "avocado", "es-ES": "aguacate" },
+    names: { "pt-BR": "abacate", "it-IT": "avocado", "en-US": "avocado" },
     countries: { italy: "available", brazil: "common", spain: "common", portugal: "available", usa: "common", uk: "common", germany: "available", france: "available", argentina: "available" },
     tags: ["breakfast", "snack"],
     substitutes: ["olive_oil"],
@@ -303,7 +300,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "almonds",
     category: "fat",
-    names: { "pt-BR": "amêndoas", "it-IT": "mandorle", "en-US": "almonds", "es-ES": "almendras" },
+    names: { "pt-BR": "amêndoas", "it-IT": "mandorle", "en-US": "almonds" },
     countries: { italy: "common", brazil: "available", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "available" },
     tags: ["snack"],
     allergens: ["tree_nut"],
@@ -312,7 +309,7 @@ export const foodCatalog: FoodItem[] = [
   {
     id: "rice_cakes",
     category: "carb",
-    names: { "pt-BR": "biscoito de arroz", "it-IT": "gallette di riso", "en-US": "rice cakes", "es-ES": "tortitas de arroz" },
+    names: { "pt-BR": "biscoito de arroz", "it-IT": "gallette di riso", "en-US": "rice cakes" },
     countries: { italy: "common", brazil: "available", spain: "common", portugal: "common", usa: "common", uk: "common", germany: "common", france: "common", argentina: "available" },
     tags: ["snack", "gluten_free"],
     substitutes: ["wholegrain_bread", "oats"],

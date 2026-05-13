@@ -283,7 +283,6 @@ const MEAL_TITLES: Record<FoodLanguage, Record<MealType, string>> = {
   "pt-BR": { breakfast: "Café da manhã", lunch: "Almoço", dinner: "Jantar", snack: "Lanche" },
   "it-IT": { breakfast: "Colazione", lunch: "Pranzo", dinner: "Cena", snack: "Spuntino" },
   "en-US": { breakfast: "Breakfast", lunch: "Lunch", dinner: "Dinner", snack: "Snack" },
-  "es-ES": { breakfast: "Desayuno", lunch: "Almuerzo", dinner: "Cena", snack: "Merienda" },
 };
 
 export interface RenderedMeal {

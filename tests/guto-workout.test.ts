@@ -39,8 +39,8 @@ describe("ValidatedExerciseCatalog integrity", () => {
     }
   });
 
-  it("every entry has namesByLanguage for all 4 supported languages", () => {
-    const langs: CatalogLanguage[] = ["pt-BR", "it-IT", "en-US", "es-ES"];
+  it("every entry has namesByLanguage for all 3 supported languages", () => {
+    const langs: CatalogLanguage[] = ["pt-BR", "it-IT", "en-US"];
     for (const entry of ValidatedExerciseCatalog) {
       for (const lang of langs) {
         assert.ok(
@@ -51,8 +51,8 @@ describe("ValidatedExerciseCatalog integrity", () => {
     }
   });
 
-  it("every entry has aliasesByLanguage for all 4 supported languages", () => {
-    const langs: CatalogLanguage[] = ["pt-BR", "it-IT", "en-US", "es-ES"];
+  it("every entry has aliasesByLanguage for all 3 supported languages", () => {
+    const langs: CatalogLanguage[] = ["pt-BR", "it-IT", "en-US"];
     for (const entry of ValidatedExerciseCatalog) {
       for (const lang of langs) {
         assert.ok(
@@ -103,9 +103,8 @@ describe("getExerciseName", () => {
     const pt = getExerciseName(id, "pt-BR");
     const en = getExerciseName(id, "en-US");
     const it = getExerciseName(id, "it-IT");
-    const es = getExerciseName(id, "es-ES");
     // Names must exist and be non-empty
-    for (const [lang, name] of [["pt-BR", pt], ["en-US", en], ["it-IT", it], ["es-ES", es]] as const) {
+    for (const [lang, name] of [["pt-BR", pt], ["en-US", en], ["it-IT", it]] as const) {
       assert.ok(name && name.length > 0, `Name missing for lang ${lang}`);
     }
     // They don't all have to differ (some share names across langs), but each must resolve

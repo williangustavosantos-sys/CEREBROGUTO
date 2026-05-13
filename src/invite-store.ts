@@ -214,3 +214,8 @@ export async function regenerateInviteByUserId(params: {
   await revokeInviteByUserId(params.userId);
   return createInvite(params);
 }
+
+// ─── Bootstrap: load persisted invites from Redis on module init ─────────────
+// Without this, after a Render cold start (file system wiped), in-flight
+// invite lookups fail until the first async read populates memCache.
+readStore().catch(() => {});

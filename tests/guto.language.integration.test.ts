@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import type { Server } from "node:http";
 import jwt from "jsonwebtoken";
 
-type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
+type GutoLanguage = "pt-BR" | "en-US" | "it-IT";
 
 type GutoResponse = {
   fala?: string;
@@ -48,18 +48,12 @@ const forbiddenPortuguese: Record<Exclude<GutoLanguage, "pt-BR">, string[]> = {
     "treino", "treinar", "academia", "limitação", "me manda", "me responde",
     "fechado", "boa", "sem dor", "ontem", "anteontem",
   ],
-  "es-ES": [
-    "amanhã", "hoje", "peito", "costas", "ombros", "treino", "treinar",
-    "academia", "limitação", "me manda", "me responde", "fechado", "boa", "sem dor",
-    "ontem", "anteontem",
-  ],
 };
 
 const expectedFocusByLanguage: Record<GutoLanguage, string[]> = {
   "pt-BR": ["peito e tríceps", "peito, ombro e tríceps", "costas e bíceps", "pernas e core", "ombros e abdômen", "corpo inteiro"],
   "en-US": ["chest and triceps", "chest, shoulders and triceps", "back and biceps", "legs and core", "shoulders and abs", "full body"],
   "it-IT": ["petto e tricipiti", "petto, spalle e tricipiti", "schiena e bicipiti", "gambe e core", "spalle e addome", "corpo intero"],
-  "es-ES": ["pecho y tríceps", "pecho, hombros y tríceps", "espalda y bíceps", "piernas y core", "hombros y abdomen", "cuerpo completo"],
 };
 
 function normalize(value: string) {
@@ -330,7 +324,6 @@ describe("GUTO visible language guarantees", () => {
     { language: "pt-BR", input: "amanhã às 15 na academia, tô voltando agora e tenho 30 anos sem dor" },
     { language: "en-US", input: "tomorrow at 3 pm at the gym, I am getting back into training and I am 30 with no pain" },
     { language: "it-IT", input: "domani alle 15 in palestra, sto riprendendo adesso e ho 30 anni senza dolore" },
-    { language: "es-ES", input: "mañana a las 15 en el gimnasio, estoy volviendo ahora y tengo 30 años sin dolor" },
   ];
 
   for (const { language, input } of fullInputs) {
@@ -378,12 +371,6 @@ describe("GUTO visible language guarantees", () => {
       historyText: "Oggi la base è petto e tricipiti.",
       input: "l'ho allenato ieri",
       expected: /non ripeto petto e tricipiti/i,
-    },
-    {
-      language: "es-ES",
-      historyText: "Hoy la base es pecho y tríceps.",
-      input: "lo entrené ayer",
-      expected: /no repito pecho y tríceps/i,
     },
   ];
 

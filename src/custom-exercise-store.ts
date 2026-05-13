@@ -35,7 +35,7 @@ interface CustomExerciseStore {
   exercises: Record<string, CustomExerciseRequest>;
 }
 
-const DEFAULT_NAMES: CatalogLanguage[] = ["pt-BR", "it-IT", "en-US", "es-ES"];
+const DEFAULT_NAMES: CatalogLanguage[] = ["pt-BR", "it-IT", "en-US"];
 
 function storePath(): string {
   return process.env.GUTO_CUSTOM_EXERCISE_FILE || path.join(__dirname, "../tmp/custom-exercises.json");

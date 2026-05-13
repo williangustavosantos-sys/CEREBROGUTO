@@ -75,7 +75,7 @@ import {
 } from "./src/risk-classifier.js";
 
 type Acao = "none" | "updateWorkout" | "lock" | "changeLanguage" | "requestDeleteAccount" | "showProfile";
-type GutoLanguage = "pt-BR" | "en-US" | "it-IT" | "es-ES";
+type GutoLanguage = "pt-BR" | "en-US" | "it-IT";
 type GutoAvatarEmotion = "default" | "alert" | "critical" | "reward";
 type TrainingScheduleIntent = "today" | "tomorrow";
 type FallbackLineKey = "system_key" | "parse" | "internal_error" | "speech_short";
@@ -416,11 +416,6 @@ const GUTO_VOICES: Record<GutoLanguage, GutoVoiceProfile> = {
     primaryName: "it-IT-Chirp3-HD-Charon",
     fallbackName: "it-IT-Neural2-F",
   },
-  "es-ES": {
-    languageCode: "es-ES",
-    primaryName: "es-ES-Chirp3-HD-Charon",
-    fallbackName: "es-ES-Neural2-F",
-  },
 };
 
 app.use(cors({
@@ -543,14 +538,13 @@ app.post("/guto/events", requireActiveUser, (req, res) => {
 
 // --- HELPERS ---
 function normalizeLanguage(language?: string): GutoLanguage {
-  if (language === "en-US" || language === "it-IT" || language === "es-ES" || language === "pt-BR") {
+  if (language === "en-US" || language === "it-IT" || language === "pt-BR") {
     return language;
   }
 
   const lower = (language || "").toLocaleLowerCase();
   if (lower.startsWith("en")) return "en-US";
   if (lower.startsWith("it")) return "it-IT";
-  if (lower.startsWith("es")) return "es-ES";
   return "pt-BR";
 }
 
@@ -565,7 +559,6 @@ function languageName(language: string) {
   const selectedLanguage = normalizeLanguage(language);
   if (selectedLanguage === "en-US") return "English";
   if (selectedLanguage === "it-IT") return "Italiano";
-  if (selectedLanguage === "es-ES") return "Español";
   return "Português do Brasil";
 }
 
@@ -589,12 +582,6 @@ function fallbackLine(language: string, key: FallbackLineKey) {
       parse: "Fallo e basta. Dieci minuti, senza trattare.",
       internal_error: "C'è un problema tecnico. Riprova tra un attimo.",
       speech_short: "Audio troppo corto. Tieni premuto il microfono e dì una frase completa.",
-    },
-    "es-ES": {
-      system_key: "Falta la clave de acción. Corrige el backend y vuelve con una frase directa.",
-      parse: "Hazlo ya. Diez minutos, sin negociar.",
-      internal_error: "Un fallo por aquí. Dale unos segundos y vuelve a intentar.",
-      speech_short: "Audio demasiado corto. Mantén el micrófono y di una frase completa.",
     },
   };
   return copy[selectedLanguage][key];
@@ -623,13 +610,6 @@ function expectedInstruction(context: NonNullable<ExpectedResponse["context"]>, 
       training_status: "Dimmi se riparti da zero o se sei già in ritmo.",
       training_limitations: "Dimmi la tua età e se c'è qualche fastidio.",
       limitation_check: "Dimmi se ti ha dato fastidio o è rimasto tranquillo.",
-    },
-    "es-ES": {
-      training_schedule: "hacemos algo corto ahora o cerramos una hora para mañana",
-      training_location: "Dime dónde vas a entrenar.",
-      training_status: "Dime si vuelves de un parón o ya traes ritmo.",
-      training_limitations: "Dime tu edad y cualquier dolorcito.",
-      limitation_check: "Responde cómo reaccionó la limitación durante el entrenamiento.",
     },
   };
   return copy[selectedLanguage][context];
@@ -1150,10 +1130,9 @@ function buildProactiveInput(memory: GutoMemory, slot: string, context: Operatio
 function buildGutoSystemPrompt(language = "pt-BR") {
   const selectedLanguage = normalizeLanguage(language);
   const nativeLanguageInstruction: Record<GutoLanguage, string> = {
-    "pt-BR": "Idioma: responda como brasileiro nativo. Use português natural, direto e atual. Não misture inglês, italiano ou espanhol sem necessidade.",
+    "pt-BR": "Idioma: responda como brasileiro nativo. Use português natural, direto e atual. Não misture inglês ou italiano sem necessidade.",
     "en-US": "Language: answer as a native English speaker. Do not translate Portuguese phrasing. Use natural, direct English, including casual fitness language when it fits.",
     "it-IT": "Lingua: rispondi da madrelingua italiano. Non tradurre frasi portoghesi. Usa italiano naturale, diretto, anche colloquiale quando serve: palestra, allenamento, fastidio, ci sta, dai, niente zero.",
-    "es-ES": "Idioma: responde como hablante nativo de español. No traduzcas frases portuguesas. Usa español natural, directo y coloquial cuando encaje.",
   };
 
   return [
@@ -1390,31 +1369,26 @@ const MUSCLE_GROUP_LABELS: Record<WorkoutFocus, Record<GutoLanguage, string>> = 
     "pt-BR": "peito e tríceps",
     "en-US": "chest and triceps",
     "it-IT": "petto e tricipiti",
-    "es-ES": "pecho y tríceps",
   },
   back_biceps: {
     "pt-BR": "costas e bíceps",
     "en-US": "back and biceps",
     "it-IT": "schiena e bicipiti",
-    "es-ES": "espalda y bíceps",
   },
   legs_core: {
     "pt-BR": "pernas e core",
     "en-US": "legs and core",
     "it-IT": "gambe e core",
-    "es-ES": "piernas y core",
   },
   shoulders_abs: {
     "pt-BR": "ombros e abdômen",
     "en-US": "shoulders and abs",
     "it-IT": "spalle e addome",
-    "es-ES": "hombros y abdomen",
   },
   full_body: {
     "pt-BR": "corpo inteiro",
     "en-US": "full body",
     "it-IT": "corpo intero",
-    "es-ES": "cuerpo completo",
   },
 };
 
@@ -1462,24 +1436,6 @@ const FORBIDDEN_PORTUGUESE_VISIBLE_TERMS: Record<Exclude<GutoLanguage, "pt-BR">,
     "ontem",
     "anteontem",
   ],
-  "es-ES": [
-    "amanhã",
-    "hoje",
-    "peito",
-    "costas",
-    "ombros",
-    "treino",
-    "treinar",
-    "academia",
-    "limitação",
-    "me manda",
-    "me responde",
-    "fechado",
-    "boa",
-    "sem dor",
-    "ontem",
-    "anteontem",
-  ],
 };
 
 function localizeMuscleGroup(group: WorkoutFocus, language: string) {
@@ -1515,9 +1471,9 @@ function localizeLocationLabel(location: string | undefined, language: string) {
   const normalized = normalize(location || "");
   const locationKey = getLocationMode(normalized);
   const copy: Record<"gym" | "park" | "home", Record<GutoLanguage, string>> = {
-    gym: { "pt-BR": "academia", "en-US": "gym", "it-IT": "palestra", "es-ES": "gimnasio" },
-    park: { "pt-BR": "parque", "en-US": "park", "it-IT": "parco", "es-ES": "parque" },
-    home: { "pt-BR": "casa", "en-US": "home", "it-IT": "casa", "es-ES": "casa" },
+    gym: { "pt-BR": "academia", "en-US": "gym", "it-IT": "palestra" },
+    park: { "pt-BR": "parque", "en-US": "park", "it-IT": "parco" },
+    home: { "pt-BR": "casa", "en-US": "home", "it-IT": "casa" },
   };
   return copy[locationKey][selectedLanguage];
 }
@@ -1559,7 +1515,6 @@ function buildLanguageRepairFallback(language: string, keepWorkout = false): Gut
       "pt-BR": "Fechado. O treino está pronto na aba treino do dia.",
       "en-US": "Locked in. The workout is ready in today's training tab.",
       "it-IT": "Va bene. Allenamento pronto nella scheda di oggi.",
-      "es-ES": "Vale. El entrenamiento está listo en la pestaña de hoy.",
     };
     return { fala: fala[selectedLanguage], acao: "updateWorkout", expectedResponse: null };
   }
@@ -1576,10 +1531,6 @@ function buildLanguageRepairFallback(language: string, keepWorkout = false): Gut
     "it-IT": {
       fala: "Non invento adesso. Rispondimi in una frase: luogo, stato del corpo e dolore o limitazione.",
       instruction: "Rispondi con luogo, stato del corpo e dolore o limitazione.",
-    },
-    "es-ES": {
-      fala: "No voy a inventar ahora. Respóndeme en una frase: lugar, estado del cuerpo y dolor o limitación.",
-      instruction: "Responde lugar, estado del cuerpo y dolor o limitación.",
     },
   };
 
@@ -1601,31 +1552,26 @@ function localizedHttpMessage(key: "model_error" | "voice_key" | "voice_text" | 
       "pt-BR": "Falha ao consultar o modelo.",
       "en-US": "Failed to reach the model.",
       "it-IT": "Errore nel contatto con il modello.",
-      "es-ES": "Error al consultar el modelo.",
     },
     voice_key: {
       "pt-BR": "VOICE_API_KEY ausente no backend.",
       "en-US": "VOICE_API_KEY is missing in the backend.",
       "it-IT": "VOICE_API_KEY mancante nel backend.",
-      "es-ES": "Falta VOICE_API_KEY en el backend.",
     },
     voice_text: {
       "pt-BR": "Texto ausente para gerar voz.",
       "en-US": "Missing text for voice generation.",
       "it-IT": "Testo mancante per generare la voce.",
-      "es-ES": "Falta texto para generar la voz.",
     },
     voice_error: {
       "pt-BR": "Falha ao gerar voz do GUTO.",
       "en-US": "Failed to generate GUTO voice.",
       "it-IT": "Errore nella generazione della voce di GUTO.",
-      "es-ES": "Error al generar la voz de GUTO.",
     },
     voice_connect: {
       "pt-BR": "Falha ao conectar no serviço de voz.",
       "en-US": "Failed to connect to the voice service.",
       "it-IT": "Errore di connessione al servizio voce.",
-      "es-ES": "Error al conectar con el servicio de voz.",
     },
   };
   return copy[key][selectedLanguage];
@@ -2090,7 +2036,6 @@ FUGA DE PERNA (e de qualquer grupo base):
   pt-BR: "Quer virar um triângulo premium com base de palito?"
   en-US: "Skipping legs? Suspicious. Legs are not optional. I only negotiate if there's a real reason. What's the context?"
   it-IT: "Scappi dalle gambe? Sospetto. Le gambe non sono opzionali. Tratto solo se c'è un motivo vero. Qual è il contesto?"
-  es-ES: "¿Escapando de piernas? Sospechoso. Piernas no es opcional. Solo negocio si hay un motivo real. ¿Cuál es el contexto?"
 
 CONTEXTO REAL MUDA A ROTA:
 - Se o usuário der motivo concreto (feriado, parque sem academia, pouco tempo, cansaço real, dor, lesão), GUTO recalcula sem insistir.
@@ -2121,7 +2066,7 @@ QUANDO USAR CADA acao:
 - "updateWorkout": SEMPRE use isso na primeira oportunidade para iniciar a execução do treino. Se a memória já tem os dados (idade, local, objetivo, limitação), não pergunte nada: decida o treino, devolva "updateWorkout" e preencha o memoryPatch.nextWorkoutFocus ou workoutPlan.
 - "none": Apenas quando a conversa for fora do contexto de treino (ex: estudo, drama relacional) ou se estiver recalibrando.
 - "lock": Quando o usuário fechar compromisso para o futuro.
-- "changeLanguage": Quando o usuário pedir para mudar o idioma do app (ex: "muda pra inglês", "switch to italian", "cambia a español"). SEMPRE preencha memoryPatch.language com um destes códigos: "pt-BR" | "en-US" | "it-IT" | "es-ES". A resposta "fala" deve ser CURTA e JÁ NO NOVO IDIOMA, confirmando que mudou. Não fale antes. Não pergunte se tem certeza. Apenas mude.
+- "changeLanguage": Quando o usuário pedir para mudar o idioma do app (ex: "muda pra inglês", "switch to italian"). SEMPRE preencha memoryPatch.language com um destes códigos: "pt-BR" | "en-US" | "it-IT". A resposta "fala" deve ser CURTA e JÁ NO NOVO IDIOMA, confirmando que mudou. Não fale antes. Não pergunte se tem certeza. Apenas mude.
 - "requestDeleteAccount": Quando o usuário pedir para excluir/apagar/deletar a conta (ex: "quero apagar minha conta", "delete my account"). NÃO execute. Direcione com tom de melhor amigo firme: lembre que a dupla acaba aqui se ele confirmar e que vai precisar confirmar em Configurações → Privacidade. NÃO seja melodramático.
 - "showProfile": Quando o usuário perguntar quais dados você sabe sobre ele (ex: "qual meu peso?", "que idade você sabe que eu tenho?", "me passa meus dados"). Recite naturalmente os dados relevantes do contexto de perfil que você já tem — sem listar como tabela, como um amigo que lembra: "Conheço você bem. 33 anos, 80kg, treina em casa, objetivo é evolução. Algo errado?". Se não souber um dado, fale que ainda não sabe.
 
@@ -2145,7 +2090,7 @@ memoryPatch:
 
 CAMPOS EDITÁVEIS PELO CHAT (você é o terminal do app, pode atualizar via memoryPatch):
 - name (string): se o usuário pedir mudar nome da dupla
-- language ("pt-BR" | "en-US" | "it-IT" | "es-ES"): use APENAS esses códigos quando mudar idioma
+- language ("pt-BR" | "en-US" | "it-IT"): use APENAS esses códigos quando mudar idioma
 - weightKg (30-300): peso em kg
 - heightCm (100-250): altura em cm
 - userAge (14-99): idade
@@ -2461,7 +2406,7 @@ function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryP
   if (typeof patch.name === "string" && patch.name.trim()) {
     memory.name = patch.name.trim().slice(0, 60);
   }
-  if (typeof patch.language === "string" && ["pt-BR", "en-US", "it-IT", "es-ES"].includes(patch.language)) {
+  if (typeof patch.language === "string" && ["pt-BR", "en-US", "it-IT"].includes(patch.language)) {
     memory.language = patch.language;
   }
   if (typeof patch.weightKg === "number" && patch.weightKg >= 30 && patch.weightKg <= 300) {
@@ -2775,39 +2720,6 @@ const CUE_COPY_BY_LANG: Record<Exclude<GutoLanguage, "pt-BR">, Record<string, Cu
     elevacao_lateral_halter_sentado: { cue: "Slight elbow bend, arms to shoulder height.", note: "Do not swing the torso." },
     remada_alta_halter: { cue: "Dumbbells close to the body, elbows rise above shoulders.", note: "Traps and delts work together." },
   },
-  "es-ES": {
-    puxada_frente: { cue: "Pecho alto, tira la barra hasta la línea del mentón y controla la vuelta.", note: "Abre espalda sin hacer trampa." },
-    remada_baixa_polia: { cue: "Columna firme y codos hacia atrás.", note: "La espalda trabaja, el brazo acompaña." },
-    remada_cavalinho: { cue: "Torso firme, barra cerca del cuerpo y codos atrás.", note: "Densidad de espalda sin prisa." },
-    remada_neutra_maquina: { cue: "Pecho fijo en el apoyo, codos atrás y sin tirones.", note: "Densidad limpia, sin trampas." },
-    biceps_maquina: { cue: "Codos quietos y subida sin lanzar el tronco.", note: "Bíceps limpio." },
-    rosca_alternada_halter_sentado: { cue: "Brazo largo abajo y subida sin hacer trampa.", note: "Cierra bíceps con amplitud." },
-    supino_reto: { cue: "Escápulas firmes, pies estables y barra bajando controlada.", note: "Primer bloque pesado y limpio." },
-    supino_inclinado_halter: { cue: "Banco inclinado y codos alineados con el pecho.", note: "Amplitud antes que carga." },
-    crucifixo_maquina: { cue: "Brazos semiflexionados y cierre sin golpear las manos.", note: "Control, no ego." },
-    supino_reto_maquina: { cue: "Espalda apoyada, hombros quietos y empuje controlado.", note: "Cierra pecho con volumen." },
-    triceps_barra_v_cabo: { cue: "Codos fijos y extensión completa.", note: "El tríceps cierra la misión." },
-    triceps_frances_cabo: { cue: "Estiramiento controlado detrás de la cabeza.", note: "Sin prisa en el estiramiento." },
-    paralelas_gravitron: { cue: "Baja controlado y sube sin lanzar el cuerpo.", note: "Mantén el pecho abierto." },
-    flexao: { cue: "Cuerpo en línea, pecho abajo y subida controlada.", note: "Simple, directa, sin truco." },
-    burpee: { cue: "Baja, lleva los pies atrás, vuelve compacto y sube con control.", note: "Enciende el sistema ahora." },
-    bike_academia: { cue: "Sube temperatura y suelta rodillas y cadera sin vaciar la pierna.", note: "Primero enciende el sistema, luego pides rendimiento." },
-    escada_academia: { cue: "Sube el ritmo poco a poco, tronco firme y paso limpio.", note: "Despierta cardio y coordinación sin caos." },
-    polichinelo: { cue: "Abre y cierra sin perder ritmo.", note: "Enciende el motor ahora." },
-    perdigueiro: { cue: "Brazo y pierna contrarios se estiran juntos, espalda quieta.", note: "Activa core y lumbar antes del bloque serio." },
-    prancha_isometrica: { cue: "Codos bajo los hombros, abdomen firme y cadera quieta.", note: "Bloquea el centro antes de ejecutar." },
-    agachamento_livre: { cue: "Cadera baja limpia y rodilla alineada con el pie.", note: "Ritmo constante." },
-    afundo_halter: { cue: "Paso largo y torso alto.", note: "No colapses hacia dentro." },
-    serrote: { cue: "Apoyo estable, codo atrás y espalda quieta.", note: "Tracción simple y seria." },
-    triceps_coice_halter_banco: { cue: "Apoyo en banco, codo fijo, extiende el brazo hasta el bloqueo.", note: "Tríceps aislado sin necesitar cables." },
-    prancha_lateral: { cue: "Codo bajo el hombro, cuerpo en línea y cadera elevada.", note: "Mantén el lado firme." },
-    legpress_45: { cue: "Pies a la anchura de hombros, baja controlado y empuja sin bloquear rodillas.", note: "Toda la pierna trabaja." },
-    cadeira_extensora: { cue: "Espalda apoyada, extiende completamente y vuelve controlado.", note: "Cuádriceps cierra limpio." },
-    posterior_maquina: { cue: "Tronco quieto, lleva los talones hacia los glúteos sin rebotar.", note: "Los femorales trabajan sin prisa." },
-    desenvolvimento_sentado: { cue: "Espalda firme, empuja hacia arriba sin arquear.", note: "Hombros antes que el ego." },
-    elevacao_lateral_halter_sentado: { cue: "Codos ligeramente flexionados, brazos hasta la altura de los hombros.", note: "No balancees el tronco." },
-    remada_alta_halter: { cue: "Mancuernas cerca del cuerpo, codos suben por encima de los hombros.", note: "Trapecios y deltoides trabajan juntos." },
-  },
 };
 
 const FOCUS_NAME_BY_LANG: Record<GutoLanguage, Record<string, string>> = {
@@ -2848,21 +2760,6 @@ const FOCUS_NAME_BY_LANG: Record<GutoLanguage, Record<string, string>> = {
     "Cardio e corpo livre": "Cardio and bodyweight",
     "Condicionamento em casa": "Home conditioning",
   },
-  "es-ES": {
-    chest_triceps: "Pecho y tríceps",
-    back_biceps: "Espalda y bíceps",
-    legs_core: "Piernas y core",
-    shoulders_abs: "Hombros y abdomen",
-    full_body: "Cuerpo completo",
-    "Peito e tríceps": "Pecho y tríceps",
-    "Costas e bíceps": "Espalda y bíceps",
-    "Pernas e core": "Piernas y core",
-    "Ombros e abdome": "Hombros y abdomen",
-    "Corpo todo": "Cuerpo completo",
-    "Corpo inteiro": "Cuerpo completo",
-    "Cardio e corpo livre": "Cardio y peso corporal",
-    "Condicionamento em casa": "Condicionamiento en casa",
-  },
 };
 
 const WORKOUT_TITLE_BY_LANG: Record<WorkoutFocus, Record<GutoLanguage, string>> = {
@@ -2870,31 +2767,26 @@ const WORKOUT_TITLE_BY_LANG: Record<WorkoutFocus, Record<GutoLanguage, string>> 
     "pt-BR": "Força total",
     "it-IT": "Forza totale",
     "en-US": "Full-body strength",
-    "es-ES": "Fuerza total",
   },
   legs_core: {
     "pt-BR": "Inferiores e core",
     "it-IT": "Gambe e core",
     "en-US": "Legs and core",
-    "es-ES": "Piernas y core",
   },
   chest_triceps: {
     "pt-BR": "Peito, ombro e tríceps",
     "it-IT": "Petto, spalle e tricipiti",
     "en-US": "Chest, shoulders and triceps",
-    "es-ES": "Pecho, hombros y tríceps",
   },
   back_biceps: {
     "pt-BR": "Costas e bíceps",
     "it-IT": "Schiena e bicipiti",
     "en-US": "Back and biceps",
-    "es-ES": "Espalda y bíceps",
   },
   shoulders_abs: {
     "pt-BR": "Ombros e abdômen",
     "it-IT": "Spalle e addome",
     "en-US": "Shoulders and abs",
-    "es-ES": "Hombros y abdomen",
   },
 };
 
@@ -2940,14 +2832,14 @@ function getLimitationFocus(limitations?: string, language = "pt-BR") {
   const selectedLanguage = normalizeLanguage(language);
   const value = (limitations || "").toLocaleLowerCase("pt-BR");
   const labels: Record<string, Record<GutoLanguage, string>> = {
-    generic: { "pt-BR": "o ponto que você marcou", "en-US": "the point you marked", "it-IT": "il punto che hai segnato", "es-ES": "la zona que marcaste" },
-    knee: { "pt-BR": "o joelho", "en-US": "the knee", "it-IT": "il ginocchio", "es-ES": "la rodilla" },
-    shoulder: { "pt-BR": "o ombro", "en-US": "the shoulder", "it-IT": "la spalla", "es-ES": "el hombro" },
-    lowerBack: { "pt-BR": "a lombar", "en-US": "the lower back", "it-IT": "la zona lombare", "es-ES": "la zona lumbar" },
-    hip: { "pt-BR": "o quadril", "en-US": "the hip", "it-IT": "l'anca", "es-ES": "la cadera" },
-    ankle: { "pt-BR": "o tornozelo", "en-US": "the ankle", "it-IT": "la caviglia", "es-ES": "el tobillo" },
-    wrist: { "pt-BR": "o punho", "en-US": "the wrist", "it-IT": "il polso", "es-ES": "la muñeca" },
-    point: { "pt-BR": "esse ponto", "en-US": "that point", "it-IT": "quel punto", "es-ES": "esa zona" },
+    generic: { "pt-BR": "o ponto que você marcou", "en-US": "the point you marked", "it-IT": "il punto che hai segnato" },
+    knee: { "pt-BR": "o joelho", "en-US": "the knee", "it-IT": "il ginocchio" },
+    shoulder: { "pt-BR": "o ombro", "en-US": "the shoulder", "it-IT": "la spalla" },
+    lowerBack: { "pt-BR": "a lombar", "en-US": "the lower back", "it-IT": "la zona lombare" },
+    hip: { "pt-BR": "o quadril", "en-US": "the hip", "it-IT": "l'anca" },
+    ankle: { "pt-BR": "o tornozelo", "en-US": "the ankle", "it-IT": "la caviglia" },
+    wrist: { "pt-BR": "o punho", "en-US": "the wrist", "it-IT": "il polso" },
+    point: { "pt-BR": "esse ponto", "en-US": "that point", "it-IT": "quel punto" },
   };
   if (!value) return labels.generic[selectedLanguage];
   if (value.includes("joelho") || value.includes("ginocchio") || value.includes("knee") || value.includes("rodilla")) return labels.knee[selectedLanguage];
@@ -3378,7 +3270,6 @@ function buildTechnicalFallback(language: string): GutoModelResponse {
     "pt-BR": "Perdi conexão por um momento. Reorganiza e me manda de novo em 1 frase.",
     "en-US": "Lost connection for a moment. Regroup and send me one sentence.",
     "it-IT": "Ho perso la connessione un attimo. Riorganizza e mandami una frase.",
-    "es-ES": "Perdí la conexión un momento. Reorganiza y mándame una frase.",
   };
   return { fala: copy[selectedLanguage], acao: "none", expectedResponse: null };
 }
@@ -3525,7 +3416,7 @@ async function askGutoModel({
             date: h.date || h.dateLabel || "recent",
             exerciseIds: Array.isArray(h.exerciseIds) ? h.exerciseIds : [],
           })),
-          language: selectedLanguage as "pt-BR" | "en-US" | "it-IT" | "es-ES",
+          language: selectedLanguage as "pt-BR" | "en-US" | "it-IT",
         },
         {
           apiKey: GEMINI_API_KEY,
@@ -3535,7 +3426,7 @@ async function askGutoModel({
       );
 
       if (curated && curated.exercises.length > 0) {
-        const hydrated = hydrateCuratedExercises(curated.exercises, selectedLanguage as "pt-BR" | "en-US" | "it-IT" | "es-ES");
+        const hydrated = hydrateCuratedExercises(curated.exercises, selectedLanguage as "pt-BR" | "en-US" | "it-IT");
         if (hydrated.length > 0) {
           workoutPlan = {
             focus: curated.summary ? curated.summary.split(".")[0] : localizeMuscleGroup(semanticFocus, selectedLanguage),
@@ -3865,13 +3756,6 @@ function pickPushCopy(language: GutoLanguage, state: "healthy" | "alert" | "crit
       dying: `Mi sto spegnendo${who}. Se non torni, sparisco.`,
       dead: `Sono morto aspettandoti. Torna solo se è serio stavolta.`,
     },
-    "es-ES": {
-      healthy: `Buenos días${who}. Ya armé el día. Vamos.`,
-      alert: `${name || "Oye"}, perdiste un día. Hoy volvemos.`,
-      critical: `Estás desapareciendo${who}. Aún estoy aquí — apenas.`,
-      dying: `Me estoy apagando${who}. Si no vuelves, me voy.`,
-      dead: `Morí esperándote. Vuelve solo si va en serio esta vez.`,
-    },
   };
   return map[language]?.[state] || map["pt-BR"][state];
 }
@@ -3915,6 +3799,11 @@ app.post("/guto/memory", requireActiveUser, (req, res) => {
   }
   memory.lastActiveAt = new Date().toISOString();
   if (typeof b.trainedToday === "boolean") memory.trainedToday = b.trainedToday;
+  if (b.xpEvent === "complete_daily_mission") {
+    completeWorkout(memory);
+  } else if (b.xpEvent === "accept_adapted_mission") {
+    acceptAdaptedMission(memory);
+  }
   if (b.energyLast) memory.energyLast = b.energyLast;
   if (b.trainingSchedule === "today" || b.trainingSchedule === "tomorrow") memory.trainingSchedule = b.trainingSchedule;
   if (b.trainingLocation) memory.trainingLocation = normalizeMemoryValue(b.trainingLocation);
@@ -4030,9 +3919,6 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
         "en-US": safeName
           ? `${safeName}, you finally arrived, I was waiting for you. Meanwhile I analyzed everything and put together a workout so we can evolve together. Let's go?`
           : `You finally arrived. Workout is ready. Let's go?`,
-        "es-ES": safeName
-          ? `${safeName}, finalmente llegaste, te estaba esperando, mientras tanto ya analicé todo y armé un entrenamiento para que evolucionemos juntos. ¿Vamos?`
-          : `Llegaste. Te estaba esperando. Entrenamiento listo. ¿Vamos?`,
         "it-IT": safeName
           ? `${safeName}, finalmente sei arrivato, ti stavo aspettando, nel frattempo ho analizzato tutto e ho preparato un allenamento per farci evolvere insieme. Andiamo?`
           : `Sei arrivato. Ti stavo aspettando. Allenamento pronto. Andiamo?`,
@@ -4453,7 +4339,6 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
         "pt-BR": "Missão fechada. O que foi feito conta. O que não foi, você sabe.",
         "en-US": "Mission closed. What was done counts. What wasn't, you know.",
         "it-IT": "Missione chiusa. Quello che è stato fatto conta. Quello che non è stato fatto, lo sai.",
-        "es-ES": "Misión cerrada. Lo que se hizo cuenta. Lo que no, tú lo sabes.",
       } as const)[selectedLanguage],
     };
 
@@ -4743,6 +4628,158 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
 
   await saveDietPlan(plan);
   return res.json(plan);
+});
+
+// ─── GUTO Online — Exceções IA ───────────────────────────────────────────────
+// Responde contextualizadamente a situações de dor, troca, fadiga ou comando
+// não reconhecido durante uma sessão ativa. GUTO responde como amigo —
+// nunca expõe erro técnico; sempre usa fallback local se IA falhar.
+//
+// Max 80 tokens de output + timeout de 4s = custo próximo de zero no beta.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type OnlineExceptionType = "pain" | "substitute" | "fatigue" | "unknown_command";
+
+// Fallbacks em 3 idiomas — usados quando a IA expira ou falha.
+// GUTO nunca expõe erro técnico; sempre responde como amigo.
+const ONLINE_EXCEPTION_FALLBACKS: Record<string, Record<OnlineExceptionType, string>> = {
+  "pt-BR": {
+    pain:            "Para. Me fala curto: é dor, cansaço ou dúvida de execução? Quero entender antes de seguir.",
+    substitute:      "Tudo bem. Qual equipamento você tem agora? Me fala e eu adapto na hora.",
+    fatigue:         "Entendido. Baixa a carga em 20%, mantém a técnica, e me fala quando a série fechar.",
+    unknown_command: "Não entendi bem. Me diz: é dor, cansaço, troca de exercício ou a série fechou?",
+  },
+  "en-US": {
+    pain:            "Stop. Quick — is it pain, fatigue, or a form question? I need to know before we continue.",
+    substitute:      "All good. What equipment do you have right now? Tell me and I'll adapt.",
+    fatigue:         "Got it. Drop the weight 20%, hold the technique, tell me when the set closes.",
+    unknown_command: "Didn't catch that. Tell me — pain, fatigue, exercise swap, or set done?",
+  },
+  "it-IT": {
+    pain:            "Fermati. Dimmi in breve: è dolore, stanchezza o dubbio sulla tecnica? Voglio capire prima di continuare.",
+    substitute:      "Tranquillo. Che attrezzatura hai adesso? Dimmi e mi adatto.",
+    fatigue:         "Capito. Abbassa del 20%, tieni la tecnica, dimmi quando chiudi la serie.",
+    unknown_command: "Non ho capito bene. Dimmi: dolore, stanchezza, cambio esercizio o serie finita?",
+  },
+};
+
+function getOnlineFallback(type: OnlineExceptionType, language: string): string {
+  const lang = language in ONLINE_EXCEPTION_FALLBACKS ? language : "pt-BR";
+  return ONLINE_EXCEPTION_FALLBACKS[lang][type];
+}
+
+function buildOnlineExceptionPrompt(
+  type: OnlineExceptionType,
+  context: {
+    exerciseName?: string;
+    exerciseMuscle?: string;
+    currentSet?: number;
+    totalSets?: number;
+    userMessage?: string;
+    alternatives?: string[];
+  },
+  language = "pt-BR"
+): string {
+  const langNote = language !== "pt-BR" ? `Responda em ${language}.` : "";
+  const exercise = context.exerciseName ? `Exercício: ${context.exerciseName}` : "";
+  const muscle = context.exerciseMuscle ? `Músculo: ${context.exerciseMuscle}` : "";
+  const setInfo = context.currentSet && context.totalSets
+    ? `Série ${context.currentSet} de ${context.totalSets}`
+    : "";
+  const userSaid = context.userMessage ? `O usuário disse: "${context.userMessage}"` : "";
+  const alts = context.alternatives?.length
+    ? `Alternativas definidas: ${context.alternatives.join(", ")}`
+    : "";
+
+  const typeInstructions: Record<OnlineExceptionType, string> = {
+    pain: "O usuário sinalizou dor durante o treino. Responda como um melhor amigo personal trainer: seja direto, empático, pergunte onde dói ou se quer parar. Máximo 2 frases.",
+    substitute: "O usuário precisa trocar um exercício (equipamento ocupado ou indisponível). Se houver alternativas listadas, sugira a primeira. Senão, pergunte o que está disponível. Máximo 2 frases.",
+    fatigue: "O usuário está com dificuldade com a carga ou ritmo. Sugira reduzir 20-30% e continuar. Seja encorajador sem ser condescendente. Máximo 2 frases.",
+    unknown_command: "O usuário disse algo que não foi reconhecido como um comando do treino. Responda como amigo: reconheça o que ele disse de forma natural e peça clareza sobre o que precisa (dor, cansaço, troca ou série feita). Máximo 2 frases.",
+  };
+
+  return [
+    "Você é o GUTO, personal trainer e melhor amigo digital.",
+    "Você está conduzindo um treino ao vivo pelo microfone.",
+    "Responda de forma curta, direta e humana — como um amigo, nunca como um sistema.",
+    "Não use *asteriscos*, emojis, markdown. Texto puro.",
+    langNote,
+    "",
+    typeInstructions[type],
+    "",
+    [exercise, muscle, setInfo, userSaid, alts].filter(Boolean).join(". "),
+  ].filter(Boolean).join("\n");
+}
+
+app.post("/guto/online/exception", requireActiveUser, async (req, res) => {
+  const { type, context = {} } = req.body as {
+    type?: OnlineExceptionType;
+    context?: {
+      exerciseName?: string;
+      exerciseMuscle?: string;
+      currentSet?: number;
+      totalSets?: number;
+      userMessage?: string;
+      alternatives?: string[];
+    };
+  };
+
+  const exceptionType: OnlineExceptionType =
+    type && ["pain", "substitute", "fatigue", "unknown_command"].includes(type)
+      ? type
+      : "unknown_command";
+
+  const userLanguage = (req as any).user?.language || "pt-BR";
+  const fallback = getOnlineFallback(exceptionType, userLanguage);
+
+  if (!GEMINI_API_KEY) {
+    return res.json({ text: fallback });
+  }
+
+  // Usa gemini-2.5-flash-lite (mais rápido, mais barato) para respostas curtas
+  const EXCEPTION_MODEL = "gemini-2.5-flash-lite";
+  const prompt = buildOnlineExceptionPrompt(exceptionType, context, userLanguage);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${EXCEPTION_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+
+    const geminiRes = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: 80,
+          stopSequences: ["\n\n"],
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (!geminiRes.ok) {
+      return res.json({ text: fallback });
+    }
+
+    const data = (await geminiRes.json()) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    };
+
+    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+    const cleanText = rawText
+      .replace(/[*_`#]/g, "")    // remove markdown
+      .replace(/\s+/g, " ")      // normaliza espaços
+      .trim();
+
+    return res.json({ text: cleanText || fallback });
+  } catch {
+    // Timeout, rede, modelo indisponível — GUTO usa fallback no idioma certo, nunca expõe erro
+    return res.json({ text: fallback });
+  }
 });
 
 // Middleware global para capturar erros não tratados e evitar crash do Node

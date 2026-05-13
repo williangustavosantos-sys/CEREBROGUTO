@@ -135,13 +135,12 @@ export interface CuratorContext {
     sets?: Array<{ id: string; sets: number; reps: string }>;
   }>;
   // Idioma do prompt de saída
-  language?: "pt-BR" | "en-US" | "it-IT" | "es-ES";
+  language?: "pt-BR" | "en-US" | "it-IT";
 }
 
 function buildCuratorPrompt(ctx: CuratorContext, pool: CatalogExercise[]): string {
   const langLabel = ctx.language === "en-US" ? "English (US)"
     : ctx.language === "it-IT" ? "Italiano"
-    : ctx.language === "es-ES" ? "Español"
     : "Português do Brasil";
 
   // Pool resumida — só o que o curator precisa pra escolher
@@ -309,7 +308,7 @@ export async function curateWorkout(
  */
 export function hydrateCuratedExercises(
   curated: CuratedExercise[],
-  language: "pt-BR" | "en-US" | "it-IT" | "es-ES" = "pt-BR"
+  language: "pt-BR" | "en-US" | "it-IT" = "pt-BR"
 ): Array<{
   id: string;
   name: string;
