@@ -74,6 +74,24 @@ import {
   type ClassifierLanguage,
 } from "./src/risk-classifier.js";
 
+import {
+  buildProactivityContextBlock,
+  extractEventsFromConversation,
+  buildPendingMemoryData,
+  enrichPendingMemories,
+  openWeeklyConversation,
+  getProactiveMemories,
+  getProactiveMemoriesByStatus,
+  hasMatchingProactiveMemory,
+  addProactiveMemory,
+  updateProactiveMemory,
+  discardProactiveMemory,
+  markWeeklyConversationDone,
+  resolveProactiveMemoryActionFromUserReply,
+} from "./src/proactivity/index.js";
+import type { ProactiveMemory, WeeklyConversation } from "./src/proactivity/types.js";
+import type { ResolverResult } from "./src/proactivity/memory-action-resolver.js";
+
 type Acao = "none" | "updateWorkout" | "lock" | "changeLanguage" | "requestDeleteAccount" | "showProfile";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT";
 type GutoAvatarEmotion = "default" | "alert" | "critical" | "reward";
@@ -259,6 +277,11 @@ interface GutoModelResponse {
     explicitMuscleGroup?: WorkoutFocus | null;
     raw?: string;
   } | null;
+  proactiveMemoryAction?: {
+    type: "confirm" | "discard" | "validate";
+    memoryId: string;
+    outcome?: "happened" | "postponed" | "discarded";
+  } | null;
 }
 interface GutoVoiceProfile {
   languageCode: GutoLanguage;
@@ -309,6 +332,8 @@ interface GutoMemory {
   proactiveSent: Record<string, string[]>;
   initialXpRewardSeen: boolean;
   validationHistory?: WorkoutValidationRecord[];
+  proactiveMemories?: ProactiveMemory[];
+  weeklyConversation?: WeeklyConversation;
   /**
    * Result of the dirty-data resolver applied to the 3 free fields
    * (country / pathology / foodRestrictions). Cached by rawValue hash.
@@ -872,6 +897,13 @@ export function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
           : undefined,
       lastSuggestedFocus: isWorkoutFocus(existing.lastSuggestedFocus) ? existing.lastSuggestedFocus : undefined,
       proactiveSent: existing.proactiveSent || {},
+      proactiveMemories: Array.isArray(existing.proactiveMemories) ? existing.proactiveMemories : [],
+      weeklyConversation:
+        existing.weeklyConversation &&
+        typeof existing.weeklyConversation === "object" &&
+        !Array.isArray(existing.weeklyConversation)
+          ? existing.weeklyConversation
+          : undefined,
       initialXpRewardSeen: Boolean(existing.initialXpRewardSeen),
     });
   }
@@ -899,12 +931,21 @@ export function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
     recentTrainingHistory: [],
     nextWorkoutFocus: undefined,
     proactiveSent: {},
+    proactiveMemories: [],
   };
 }
 
 export function saveMemory(memory: GutoMemory) {
   const store = readMemoryStore();
-  store[memory.userId] = memory;
+  const existing = store[memory.userId];
+  store[memory.userId] = {
+    ...existing,
+    ...memory,
+    proactiveMemories: Array.isArray(memory.proactiveMemories)
+      ? memory.proactiveMemories
+      : existing?.proactiveMemories,
+    weeklyConversation: memory.weeklyConversation ?? existing?.weeklyConversation,
+  };
   writeMemoryStore(store);
 }
 
@@ -1360,6 +1401,69 @@ function normalizeExpectedResponse(value: unknown): ExpectedResponse | null {
   };
 }
 
+function validateProactiveMemoryAction(value: unknown): GutoModelResponse["proactiveMemoryAction"] {
+  if (!value || typeof value !== "object") return null;
+
+  const candidate = value as {
+    type?: unknown;
+    memoryId?: unknown;
+    outcome?: unknown;
+  };
+  const memoryId =
+    typeof candidate.memoryId === "string"
+      ? candidate.memoryId.replace(/\s+/g, "").trim().slice(0, 160)
+      : "";
+
+  if (!memoryId) return null;
+
+  if (candidate.type === "confirm") {
+    return { type: "confirm", memoryId };
+  }
+
+  if (candidate.type === "discard") {
+    return { type: "discard", memoryId };
+  }
+
+  if (
+    candidate.type === "validate" &&
+    (candidate.outcome === "happened" ||
+      candidate.outcome === "postponed" ||
+      candidate.outcome === "discarded")
+  ) {
+    return {
+      type: "validate",
+      memoryId,
+      outcome: candidate.outcome,
+    };
+  }
+
+  return null;
+}
+
+async function filterProactiveMemoryActionForUser(
+  userId: string | undefined,
+  action: GutoModelResponse["proactiveMemoryAction"]
+): Promise<GutoModelResponse["proactiveMemoryAction"]> {
+  if (!userId || !action) return null;
+
+  try {
+    const memory = (await getProactiveMemories(userId)).find((item) => item.id === action.memoryId);
+    if (!memory) return null;
+
+    if ((action.type === "confirm" || action.type === "discard") && memory.status === "pending_confirmation") {
+      return action;
+    }
+
+    if (action.type === "validate" && memory.status === "pending_validation") {
+      return action;
+    }
+  } catch {
+    // Optional contract field: never let proactivity action validation break chat.
+  }
+
+  return null;
+}
+
 function hasAnyTerm(input: string, terms: string[]) {
   return terms.some((term) => input.includes(normalize(term)));
 }
@@ -1708,6 +1812,7 @@ function parseGutoResponse(raw: string | undefined, language = "pt-BR"): GutoMod
       workoutPlan: enrichWorkoutPlanAnimations(parsed.workoutPlan || null),
       memoryPatch: parsed.memoryPatch,
       trainedReference: parsed.trainedReference,
+      proactiveMemoryAction: validateProactiveMemoryAction(parsed.proactiveMemoryAction),
     };
   } catch {
     const fala = raw.replace(/^```json|```$/g, "").trim() || fallbackLine(language, "parse");
@@ -1882,6 +1987,7 @@ function buildGutoBrainPrompt({
   operationalContext,
   expectedResponse,
   riskOverride,
+  proactivityContext,
 }: {
   input: string;
   memory: GutoMemory;
@@ -1897,6 +2003,8 @@ function buildGutoBrainPrompt({
    * encaminhamento para recurso real (CVV, emergência, profissional TA).
    */
   riskOverride?: RiskClassification | null;
+  /** Optional block injected from the proactivity system. */
+  proactivityContext?: string | null;
 }) {
   const selectedLanguage = normalizeLanguage(language);
   const langName = languageName(selectedLanguage);
@@ -2144,6 +2252,7 @@ ${JSON.stringify({
       dateLabel: "yesterday",
       explicitMuscleGroup: null
     },
+    proactiveMemoryAction: null,
   })}
 
 REGRAS DO JSON:
@@ -2155,6 +2264,7 @@ REGRAS DO JSON:
 - workoutPlan deve ser null na maioria das respostas de chat (o backend gerará os exercícios se você retornar acao: "updateWorkout"). Só preencha workoutPlan se quiser customizar exercícios específicos (raro).
 - memoryPatch pode ser objeto vazio {} quando você não está atualizando memória.
 - avatarEmotion default na maior parte do tempo. "alert" quando cobra. "critical" quando o usuário some / falha. "reward" quando ele entrega.
+- proactiveMemoryAction: use null na maioria das vezes. Só preencha quando o proactivityContext indicar uma memória pendente/validação e o usuário responder com clareza. Ex: { "type": "confirm", "memoryId": "<id>" }, { "type": "discard", "memoryId": "<id>" } ou { "type": "validate", "memoryId": "<id>", "outcome": "happened|postponed|discarded" }. Nunca use isso fora do memoryId indicado no proactivityContext.
 - Não inclua campos que você não está usando. Não invente novos campos.
 `.trim();
 
@@ -2257,6 +2367,14 @@ Usuário pede excluir conta:
     `Histórico recente:\n${formatHistoryForPrompt(history) || "sem histórico recente"}`,
     `Mensagem atual do usuário: ${input || ""}`,
     "",
+    ...(proactivityContext
+      ? [
+          "─── PRIORIDADE PROATIVA DESTE TURNO ───",
+          proactivityContext,
+          "Se houver confirmação pendente ou validação pendente acima, resolva isso ANTES de montar treino, trocar foco ou responder sobre missão. Não retorne acao:updateWorkout enquanto essa confirmação/validação estiver aberta, salvo se o usuário falar claramente de treino e a proatividade não exigir resposta neste turno.",
+          "",
+        ]
+      : []),
     "Agora responda como GUTO, em JSON válido conforme o formato acima.",
   ].join("\n");
 }
@@ -3294,12 +3412,16 @@ async function askGutoModel({
   profile,
   history = [],
   expectedResponse,
+  proactivityContext,
+  resolverResult,
 }: {
   input: string;
   language: string;
   profile?: Profile;
   history?: GutoHistoryItem[];
   expectedResponse?: ExpectedResponse | null;
+  proactivityContext?: string | null;
+  resolverResult?: ResolverResult;
 }) {
   const memory = mergeMemory(profile, language || profile?.language);
   const selectedLanguage = normalizeLanguage(language || profile?.language || memory.language);
@@ -3342,6 +3464,7 @@ async function askGutoModel({
     operationalContext,
     expectedResponse: normalizedExpectedResponse,
     riskOverride,
+    proactivityContext: proactivityContext ?? null,
   });
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
@@ -3369,6 +3492,14 @@ async function askGutoModel({
     const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     require('fs').appendFileSync('gemini.log', `\n--- INPUT: ${input} ---\n${rawText}\n`);
     const parsedResponse = parseGutoResponse(rawText, language);
+    // Deterministic resolver takes priority over model's proactiveMemoryAction.
+    // resolverResult.engaged=true means the resolver has a definitive answer.
+    const proactiveMemoryAction = resolverResult?.engaged
+      ? (resolverResult.action ?? null)
+      : await filterProactiveMemoryActionForUser(
+          memory.userId,
+          parsedResponse.proactiveMemoryAction
+        );
 
     applyMemoryPatch(memory, parsedResponse.memoryPatch, parsedResponse.trainedReference, input);
 
@@ -3485,10 +3616,17 @@ async function askGutoModel({
         recentTrainingHistory: memory.recentTrainingHistory,
       },
       workoutPlan,
+      proactiveMemoryAction,
     });
   } catch (error) {
     console.error(`[GUTO] Fluxo IA falhou para o input: "${input.substring(0, 100)}..."`, error);
-    return finalize(buildTechnicalFallback(selectedLanguage));
+    const fallback = buildTechnicalFallback(selectedLanguage);
+    // When resolver engaged with no action (clarification needed), replace the generic
+    // "lost connection" message with a context-aware proactivity clarification.
+    if (resolverResult?.engaged && resolverResult.action === null && resolverResult.fallbackMessage) {
+      fallback.fala = resolverResult.fallbackMessage;
+    }
+    return finalize(fallback);
   }
 }
 
@@ -4009,23 +4147,47 @@ app.post("/guto", requireActiveUser, async (req, res) => {
     userAge: memory.userAge,
   };
 
+  // Run deterministic resolver in parallel with proactivity context build.
+  // The resolver checks pending memories and decides action from user's text alone.
+  let resolverResultForRoute: import("./src/proactivity/memory-action-resolver.js").ResolverResult = {
+    engaged: false, action: null, reason: 'not_run',
+  };
   try {
+    // Build proactivity context and run deterministic resolver concurrently.
+    const opCtx = getOperationalContext(new Date(), selectedLanguage);
+    const [proactivityCtx, resolverResult] = await Promise.all([
+      buildProactivityContextBlock(userId, opCtx.weekday, selectedLanguage).catch(() => null),
+      resolveProactiveMemoryActionFromUserReply(userId, input || "", selectedLanguage),
+    ]);
+
+    resolverResultForRoute = resolverResult;
+    if (resolverResult.engaged) {
+      console.log(`[GUTO][proactivity] resolver engaged: ${resolverResult.reason}, action: ${resolverResult.action?.type ?? 'null'}`);
+    }
+
     const result = await askGutoModel({
       input: input || "",
       language: selectedLanguage,
       profile,
       history: history || [],
       expectedResponse: normalizeExpectedResponse(expectedResponse),
+      proactivityContext: proactivityCtx,
+      resolverResult,
     });
     res.json(result);
   } catch (e) {
     console.error('Erro na rota /guto:', e);
     const fallbackMemory = mergeMemory(profile, selectedLanguage);
     const fallbackContext = getOperationalContext(new Date(), selectedLanguage || fallbackMemory.language);
+    const fallbackResponse = buildTechnicalFallback(selectedLanguage || fallbackMemory.language);
+    // Use context-aware message if resolver had a clarification for this turn
+    if (resolverResultForRoute.engaged && resolverResultForRoute.action === null && resolverResultForRoute.fallbackMessage) {
+      fallbackResponse.fala = resolverResultForRoute.fallbackMessage;
+    }
     res.json({
       message: localizedHttpMessage("model_error", selectedLanguage || fallbackMemory.language),
       ...attachAvatarEmotion({
-        response: assertAndRepairVisibleLanguage(buildTechnicalFallback(selectedLanguage || fallbackMemory.language), selectedLanguage || fallbackMemory.language),
+        response: assertAndRepairVisibleLanguage(fallbackResponse, selectedLanguage || fallbackMemory.language),
         memory: fallbackMemory,
         context: fallbackContext,
         input: input || "",
@@ -4382,6 +4544,215 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
     if (thumbUrl) await deleteImage(thumbUrl).catch(() => undefined);
     console.error("[GUTO] validate-workout error:", error);
     return res.status(500).json({ error: "Erro ao validar treino." });
+  }
+});
+
+// ── Proactivity endpoints ─────────────────────────────────────────────────────
+
+/**
+ * GET /guto/proactivity/memories
+ * Returns current proactive memories for the user (all non-discarded).
+ */
+app.get("/guto/proactivity/memories", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
+  try {
+    const all = await getProactiveMemories(userId);
+    const active = all.filter((m) => m.status !== "discarded" && m.status !== "validated_happened");
+    res.json({ memories: active });
+  } catch {
+    res.json({ memories: [] });
+  }
+});
+
+/**
+ * POST /guto/proactivity/extract
+ * Extracts events from a completed conversation and saves them as pending_confirmation.
+ * Called by the frontend after a conversation session ends (or when weekly conversation happened).
+ * Body: { conversationText: string, language: string }
+ */
+app.post("/guto/proactivity/extract", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
+  const { conversationText, language } = req.body as {
+    conversationText?: string;
+    language?: string;
+  };
+
+  if (!conversationText || typeof conversationText !== "string") {
+    return res.status(400).json({ error: "conversationText required" });
+  }
+
+  const selectedLanguage = normalizeLanguage(language || "pt-BR");
+  const todayISO = todayKey(); // Usa GUTO_TIME_ZONE ao invés de UTC
+
+  try {
+    const events = await extractEventsFromConversation(
+      conversationText,
+      selectedLanguage,
+      todayISO
+    );
+
+    const saved: import("./src/proactivity/types.js").ProactiveMemory[] = [];
+    const existingMemories = await getProactiveMemories(userId);
+    for (const event of events) {
+      const data = buildPendingMemoryData(userId, event);
+      if (hasMatchingProactiveMemory([...existingMemories, ...saved], data)) {
+        continue;
+      }
+      const memory = await addProactiveMemory(userId, data);
+      saved.push(memory);
+    }
+
+    // Mark weekly extraction as done for this week
+    if (saved.length > 0) {
+      await markWeeklyConversationDone(userId, "extractionDone");
+    }
+
+    res.json({ extracted: saved.length, memories: saved });
+  } catch (e) {
+    console.error("[GUTO][proactivity] extract error:", e);
+    res.json({ extracted: 0, memories: [] });
+  }
+});
+
+/**
+ * POST /guto/proactivity/confirm
+ * Confirms a pending memory (user confirmed GUTO understood correctly).
+ * Body: { memoryId: string }
+ * Triggers background enrichment.
+ */
+app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
+  const { memoryId } = req.body as { memoryId?: string };
+
+  if (!memoryId) {
+    return res.status(400).json({ error: "memoryId required" });
+  }
+
+  try {
+    const current = (await getProactiveMemories(userId)).find((m) => m.id === memoryId);
+    if (!current) {
+      return res.status(404).json({ error: "memory not found" });
+    }
+
+    if (current.status !== "pending_confirmation") {
+      return res.json({ ok: true, memory: current, ignored: true });
+    }
+
+    const confirmedAt = new Date().toISOString();
+    const updated = await updateProactiveMemory(userId, memoryId, {
+      status: "confirmed",
+      confirmedAt,
+    });
+
+    // Trigger background enrichment (fire and forget)
+    const memory = getMemory(userId);
+    const userCountry = memory.country || "";
+    const selectedLanguage = normalizeLanguage(memory.language || "pt-BR");
+    enrichPendingMemories(userId, userCountry, selectedLanguage).catch(() => {});
+
+    res.json({ ok: true, memory: updated });
+  } catch (e) {
+    console.error("[GUTO][proactivity] confirm error:", e);
+    res.status(500).json({ error: "internal error" });
+  }
+});
+
+/**
+ * POST /guto/proactivity/discard
+ * Discards a memory (user said GUTO understood wrong or event was cancelled).
+ * Body: { memoryId: string }
+ */
+app.post("/guto/proactivity/discard", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
+  const { memoryId } = req.body as { memoryId?: string };
+
+  if (!memoryId) {
+    return res.status(400).json({ error: "memoryId required" });
+  }
+
+  try {
+    const current = (await getProactiveMemories(userId)).find((m) => m.id === memoryId);
+    if (!current) {
+      return res.status(404).json({ error: "memory not found" });
+    }
+
+    if (current.status !== "pending_confirmation") {
+      return res.json({ ok: true, memory: current, ignored: true });
+    }
+
+    await discardProactiveMemory(userId, memoryId);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[GUTO][proactivity] discard error:", e);
+    res.status(500).json({ error: "internal error" });
+  }
+});
+
+/**
+ * POST /guto/proactivity/validate
+ * Validates what happened with a pending_validation memory.
+ * Body: { memoryId: string, outcome: "happened" | "postponed" | "discarded" }
+ */
+app.post("/guto/proactivity/validate", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
+  const { memoryId, outcome } = req.body as {
+    memoryId?: string;
+    outcome?: "happened" | "postponed" | "discarded";
+  };
+
+  if (!memoryId || !outcome) {
+    return res.status(400).json({ error: "memoryId and outcome required" });
+  }
+
+  try {
+    const current = (await getProactiveMemories(userId)).find((m) => m.id === memoryId);
+    if (!current) {
+      return res.status(404).json({ error: "memory not found" });
+    }
+
+    if (current.status !== "pending_validation") {
+      return res.json({ ok: true, memory: current, ignored: true });
+    }
+
+    let newStatus: import("./src/proactivity/types.js").ProactiveMemoryStatus;
+    if (outcome === "happened") {
+      newStatus = "validated_happened";
+    } else if (outcome === "postponed") {
+      newStatus = "validated_postponed";
+    } else {
+      newStatus = "discarded";
+    }
+
+    const validatedAt = new Date().toISOString();
+    const updated = await updateProactiveMemory(userId, memoryId, {
+      status: newStatus,
+      validatedAt,
+      ...(newStatus === "discarded" ? { discardedAt: validatedAt } : {}),
+    });
+
+    // Mark validation as done for this week
+    await markWeeklyConversationDone(userId, "validationDone");
+
+    res.json({ ok: true, memory: updated });
+  } catch (e) {
+    console.error("[GUTO][proactivity] validate error:", e);
+    res.status(500).json({ error: "internal error" });
+  }
+});
+
+/**
+ * POST /guto/proactivity/open-weekly
+ * Marks the weekly conversation as opened for this week.
+ * Called by the frontend when the Monday proactive message is delivered.
+ * Body: { language: string }
+ */
+app.post("/guto/proactivity/open-weekly", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
+  try {
+    const wc = await openWeeklyConversation(userId);
+    res.json({ ok: true, weeklyConversation: wc });
+  } catch {
+    res.json({ ok: false });
   }
 });
 
