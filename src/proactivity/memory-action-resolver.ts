@@ -173,7 +173,7 @@ function ambiguousConfirmFallback(memory: ProactiveMemory, language: string): st
   const item = memory.understood
   if (language === 'it-IT') return `"${item}" — ci vai o no? Dimmi chiaramente.`
   if (language === 'en-US') return `"${item}" — yes or no? Tell me straight.`
-  return `"${item}" — vai ou não vai? Me fala direto.`
+  return `"${item}" — confirma ou cancela? Me fala direto.`
 }
 
 function correctionFallback(memory: ProactiveMemory, language: string): string {
