@@ -86,6 +86,8 @@ import {
   addProactiveMemory,
   updateProactiveMemory,
   discardProactiveMemory,
+  requestDiscardProactiveMemory,
+  cancelDiscardRequest,
   markWeeklyConversationDone,
   resolveProactiveMemoryActionFromUserReply,
 } from "./src/proactivity/index.js";
@@ -278,7 +280,7 @@ interface GutoModelResponse {
     raw?: string;
   } | null;
   proactiveMemoryAction?: {
-    type: "confirm" | "discard" | "validate";
+    type: "confirm" | "discard" | "validate" | "request_discard" | "cancel_discard_request";
     memoryId: string;
     outcome?: "happened" | "postponed" | "discarded";
   } | null;
@@ -1424,6 +1426,14 @@ function validateProactiveMemoryAction(value: unknown): GutoModelResponse["proac
     return { type: "discard", memoryId };
   }
 
+  if (candidate.type === "request_discard") {
+    return { type: "request_discard", memoryId };
+  }
+
+  if (candidate.type === "cancel_discard_request") {
+    return { type: "cancel_discard_request", memoryId };
+  }
+
   if (
     candidate.type === "validate" &&
     (candidate.outcome === "happened" ||
@@ -1450,11 +1460,25 @@ async function filterProactiveMemoryActionForUser(
     const memory = (await getProactiveMemories(userId)).find((item) => item.id === action.memoryId);
     if (!memory) return null;
 
+    const activeStatuses = ["confirmed", "enriched", "surfaced"] as const;
+    type ActiveStatus = typeof activeStatuses[number];
+
     if ((action.type === "confirm" || action.type === "discard") && memory.status === "pending_confirmation") {
       return action;
     }
 
     if (action.type === "validate" && memory.status === "pending_validation") {
+      return action;
+    }
+
+    // LLM detected user mentioned cancelling a confirmed/enriched/surfaced memory.
+    // Two-step: first request_discard flags the memory, resolver closes the loop.
+    if (action.type === "request_discard" && (activeStatuses as readonly string[]).includes(memory.status) && !memory.discardRequestedAt) {
+      return action;
+    }
+
+    // LLM detected user said "não, mantém" while GUTO already asked about discarding.
+    if (action.type === "cancel_discard_request" && memory.discardRequestedAt) {
       return action;
     }
   } catch {
@@ -2126,6 +2150,9 @@ ANTI-PADRÕES (NUNCA FAZER):
 - ROTAÇÃO PADRÃO: Peito/Tríceps -> Costas/Bíceps -> Pernas/Core -> Ombros/Abdômen -> Recomeça. Se o usuário treinou Peito ontem e Costas anteontem, HOJE É PERNA.
 - Nunca empurre treino para amanhã se o usuário escolheu hoje.
 - Nunca aja como chatbot médico. Se o usuário estiver doente, reduza intensidade e mantenha presença.
+- PROATIVIDADE — NUNCA anuncie salvamentos: jamais diga "salvei", "registrei", "anotei", "confirmei", "seus dados foram atualizados" ou qualquer frase que soe como sistema. GUTO age, não notifica o que fez internamente.
+- PROATIVIDADE — NUNCA fale de memórias passadas como fatos atuais. Se a data já passou, não mencione o evento como futuro.
+- PROATIVIDADE — Quando o usuário mencionar que cancelou algo de uma memória ativa, use request_discard e pergunte de forma direta e curta ("Roma descarto?" ou "Cancelo isso?"). Não confirme ainda — espere o sim do usuário.
 `.trim();
 
   const confrontoRegra = `
@@ -2264,7 +2291,13 @@ REGRAS DO JSON:
 - workoutPlan deve ser null na maioria das respostas de chat (o backend gerará os exercícios se você retornar acao: "updateWorkout"). Só preencha workoutPlan se quiser customizar exercícios específicos (raro).
 - memoryPatch pode ser objeto vazio {} quando você não está atualizando memória.
 - avatarEmotion default na maior parte do tempo. "alert" quando cobra. "critical" quando o usuário some / falha. "reward" quando ele entrega.
-- proactiveMemoryAction: use null na maioria das vezes. Só preencha quando o proactivityContext indicar uma memória pendente/validação e o usuário responder com clareza. Ex: { "type": "confirm", "memoryId": "<id>" }, { "type": "discard", "memoryId": "<id>" } ou { "type": "validate", "memoryId": "<id>", "outcome": "happened|postponed|discarded" }. Nunca use isso fora do memoryId indicado no proactivityContext.
+- proactiveMemoryAction: use null na maioria das vezes. Só preencha quando o proactivityContext indicar uma memória e o usuário responder com clareza. Tipos disponíveis:
+  • { "type": "confirm", "memoryId": "<id>" } — usuário confirma memória pending_confirmation.
+  • { "type": "discard", "memoryId": "<id>" } — usuário descarta memória pending_confirmation.
+  • { "type": "validate", "memoryId": "<id>", "outcome": "happened|postponed|discarded" } — usuário valida o que aconteceu com uma memória pending_validation.
+  • { "type": "request_discard", "memoryId": "<id>" } — usuário menciona que cancelou/não vai mais a algo de uma memória já confirmada/enriquecida/surfaced. Não descarte ainda — GUTO pergunta primeiro ("Roma descarto?"). O sistema fecha o loop quando o usuário confirmar.
+  • { "type": "cancel_discard_request", "memoryId": "<id>" } — usuário respondeu "não, mantém" quando GUTO perguntou se descartava. Limpa o flag de descarte.
+  Nunca use fora do memoryId indicado no proactivityContext. Nunca anuncie para o usuário que salvou, registrou ou confirmou algo — GUTO age, não notifica.
 - Não inclua campos que você não está usando. Não invente novos campos.
 `.trim();
 
@@ -4676,7 +4709,12 @@ app.post("/guto/proactivity/discard", requireActiveUser, async (req, res) => {
       return res.status(404).json({ error: "memory not found" });
     }
 
-    if (current.status !== "pending_confirmation") {
+    const activeStatuses = ["confirmed", "enriched", "surfaced"] as const;
+    const canDiscard =
+      current.status === "pending_confirmation" ||
+      ((activeStatuses as readonly string[]).includes(current.status) && !!current.discardRequestedAt);
+
+    if (!canDiscard) {
       return res.json({ ok: true, memory: current, ignored: true });
     }
 
@@ -4684,6 +4722,70 @@ app.post("/guto/proactivity/discard", requireActiveUser, async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     console.error("[GUTO][proactivity] discard error:", e);
+    res.status(500).json({ error: "internal error" });
+  }
+});
+
+/**
+ * POST /guto/proactivity/request-discard
+ * Flags a confirmed/enriched/surfaced memory for discard confirmation.
+ * Called when LLM signals the user mentioned cancelling an active memory.
+ * Body: { memoryId: string }
+ */
+app.post("/guto/proactivity/request-discard", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
+  const { memoryId } = req.body as { memoryId?: string };
+
+  if (!memoryId) {
+    return res.status(400).json({ error: "memoryId required" });
+  }
+
+  try {
+    const current = (await getProactiveMemories(userId)).find((m) => m.id === memoryId);
+    if (!current) {
+      return res.status(404).json({ error: "memory not found" });
+    }
+
+    const activeStatuses = ["confirmed", "enriched", "surfaced"] as const;
+    if (!(activeStatuses as readonly string[]).includes(current.status)) {
+      return res.json({ ok: true, memory: current, ignored: true });
+    }
+
+    await requestDiscardProactiveMemory(userId, memoryId);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[GUTO][proactivity] request-discard error:", e);
+    res.status(500).json({ error: "internal error" });
+  }
+});
+
+/**
+ * POST /guto/proactivity/cancel-discard-request
+ * Clears the discard flag from a memory (user decided to keep it).
+ * Body: { memoryId: string }
+ */
+app.post("/guto/proactivity/cancel-discard-request", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
+  const { memoryId } = req.body as { memoryId?: string };
+
+  if (!memoryId) {
+    return res.status(400).json({ error: "memoryId required" });
+  }
+
+  try {
+    const current = (await getProactiveMemories(userId)).find((m) => m.id === memoryId);
+    if (!current) {
+      return res.status(404).json({ error: "memory not found" });
+    }
+
+    if (!current.discardRequestedAt) {
+      return res.json({ ok: true, memory: current, ignored: true });
+    }
+
+    await cancelDiscardRequest(userId, memoryId);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[GUTO][proactivity] cancel-discard-request error:", e);
     res.status(500).json({ error: "internal error" });
   }
 });

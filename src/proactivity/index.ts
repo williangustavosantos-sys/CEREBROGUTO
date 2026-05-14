@@ -13,6 +13,8 @@ export {
   addProactiveMemory,
   updateProactiveMemory,
   discardProactiveMemory,
+  requestDiscardProactiveMemory,
+  cancelDiscardRequest,
   markWeeklyConversationDone,
   markPastActiveMemoriesPendingValidation,
   getDateKey,

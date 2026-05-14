@@ -54,6 +54,7 @@ export interface ProactiveMemory {
   confirmedAt?: string
   validatedAt?: string
   discardedAt?: string
+  discardRequestedAt?: string
 }
 
 export interface WeeklyConversation {

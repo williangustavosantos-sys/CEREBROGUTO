@@ -19,6 +19,32 @@ type ProactiveMemoryCandidate = Pick<
   'type' | 'understood' | 'dateText' | 'dateParsed' | 'location'
 >
 
+// ─── Write mutex ──────────────────────────────────────────────────────────────
+// Node.js is single-threaded but async writes can interleave.
+// All writes go through this queue so read-modify-write is always atomic.
+
+let proactiveWriteQueue: Promise<void> = Promise.resolve()
+
+async function atomicUpdateMemories(
+  userId: string,
+  updater: (current: ProactiveMemory[]) => ProactiveMemory[]
+): Promise<ProactiveMemory[]> {
+  let result: ProactiveMemory[] = []
+  proactiveWriteQueue = proactiveWriteQueue.catch(() => {}).then(async () => {
+    const store = await readMemoryStoreAsync()
+    const user = asUserMemory(store[userId])
+    const current = Array.isArray(user.proactiveMemories)
+      ? (user.proactiveMemories as ProactiveMemory[])
+      : []
+    result = updater(current)
+    user.proactiveMemories = result
+    store[userId] = user
+    await writeMemoryStoreAsync(store)
+  })
+  await proactiveWriteQueue
+  return result
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function asUserMemory(value: unknown): Record<string, unknown> {
@@ -37,7 +63,7 @@ function generateId(userId: string): string {
 function normalizeSignatureText(value?: string): string {
   return (value || '')
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[̀-ͯ]/g, '')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim()
     .toLowerCase()
@@ -90,33 +116,20 @@ export async function getProactiveMemories(userId: string): Promise<ProactiveMem
   return raw as ProactiveMemory[]
 }
 
-async function saveProactiveMemories(
-  userId: string,
-  memories: ProactiveMemory[]
-): Promise<void> {
-  const store = await readMemoryStoreAsync()
-  const user = asUserMemory(store[userId])
-  user.proactiveMemories = memories
-  store[userId] = user
-  await writeMemoryStoreAsync(store)
-}
-
 export async function addProactiveMemory(
   userId: string,
   data: Omit<ProactiveMemory, 'id' | 'userId' | 'createdAt' | 'updatedAt'>
 ): Promise<ProactiveMemory> {
   const now = new Date().toISOString()
-  const memory: ProactiveMemory = {
+  const newMemory: ProactiveMemory = {
     ...data,
     id: generateId(userId),
     userId,
     createdAt: now,
     updatedAt: now,
   }
-  const all = await getProactiveMemories(userId)
-  all.push(memory)
-  await saveProactiveMemories(userId, all)
-  return memory
+  await atomicUpdateMemories(userId, (current) => [...current, newMemory])
+  return newMemory
 }
 
 export async function updateProactiveMemory(
@@ -124,19 +137,15 @@ export async function updateProactiveMemory(
   memoryId: string,
   updates: Partial<Omit<ProactiveMemory, 'id' | 'userId' | 'createdAt'>>
 ): Promise<ProactiveMemory | null> {
-  const all = await getProactiveMemories(userId)
-  const idx = all.findIndex((m) => m.id === memoryId)
-  if (idx === -1) return null
-
-  const current = all[idx]!
-  const updated: ProactiveMemory = {
-    ...current,
-    ...updates,
-    updatedAt: new Date().toISOString(),
-  }
-  all[idx] = updated
-  await saveProactiveMemories(userId, all)
-  return updated
+  let found: ProactiveMemory | null = null
+  await atomicUpdateMemories(userId, (current) => {
+    return current.map((m) => {
+      if (m.id !== memoryId) return m
+      found = { ...m, ...updates, updatedAt: new Date().toISOString() }
+      return found
+    })
+  })
+  return found
 }
 
 export async function getProactiveMemoriesByStatus(
@@ -151,32 +160,26 @@ export async function markPastActiveMemoriesPendingValidation(
   userId: string,
   today = getDateKey()
 ): Promise<ProactiveMemory[]> {
-  const all = await getProactiveMemories(userId)
   const activeStatuses: ProactiveMemoryStatus[] = ['confirmed', 'enriched', 'surfaced']
-  let changed = false
   const now = new Date().toISOString()
+  let transitioned: ProactiveMemory[] = []
 
-  const next = all.map((memory) => {
-    if (
-      activeStatuses.includes(memory.status) &&
-      memory.dateParsed &&
-      memory.dateParsed < today
-    ) {
-      changed = true
-      return {
-        ...memory,
-        status: 'pending_validation' as const,
-        updatedAt: now,
+  await atomicUpdateMemories(userId, (current) => {
+    return current.map((memory) => {
+      if (
+        activeStatuses.includes(memory.status) &&
+        memory.dateParsed &&
+        memory.dateParsed < today
+      ) {
+        const updated = { ...memory, status: 'pending_validation' as const, updatedAt: now }
+        transitioned.push(updated)
+        return updated
       }
-    }
-    return memory
+      return memory
+    })
   })
 
-  if (changed) {
-    await saveProactiveMemories(userId, next)
-  }
-
-  return next.filter((m) => m.status === 'pending_validation')
+  return transitioned
 }
 
 export async function discardProactiveMemory(
@@ -186,9 +189,34 @@ export async function discardProactiveMemory(
   const now = new Date().toISOString()
   await updateProactiveMemory(userId, memoryId, {
     status: 'discarded',
-    validatedAt: now,
     discardedAt: now,
   })
+}
+
+// Marks a confirmed/enriched/surfaced memory as awaiting discard confirmation.
+// Status stays unchanged — GUTO will ask "Descarto X?" before executing.
+export async function requestDiscardProactiveMemory(
+  userId: string,
+  memoryId: string
+): Promise<void> {
+  await updateProactiveMemory(userId, memoryId, {
+    discardRequestedAt: new Date().toISOString(),
+  })
+}
+
+// Clears a pending discard request — user decided to keep the memory.
+export async function cancelDiscardRequest(
+  userId: string,
+  memoryId: string
+): Promise<void> {
+  await atomicUpdateMemories(userId, (current) =>
+    current.map((m) => {
+      if (m.id !== memoryId) return m
+      // Spread without discardRequestedAt — JSON serialisation will omit undefined
+      const { discardRequestedAt: _removed, ...rest } = m
+      return { ...rest, updatedAt: new Date().toISOString() } as ProactiveMemory
+    })
+  )
 }
 
 // ─── WeeklyConversation CRUD ──────────────────────────────────────────────────
