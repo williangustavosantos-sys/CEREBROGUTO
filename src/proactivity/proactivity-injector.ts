@@ -28,10 +28,9 @@ function formatMemoryForPrompt(m: ProactiveMemory, language: string): string {
 
   if (m.weatherEnrichment) {
     const w = m.weatherEnrichment
-    const lang = language
-    if (lang === 'it-IT') {
+    if (language === 'it-IT') {
       lines.push(`  Meteo ${w.city}: ${w.condition}, ${w.tempMin}–${w.tempMax}°C em ${w.date}`)
-    } else if (lang === 'en-US') {
+    } else if (language === 'en-US') {
       lines.push(`  Weather in ${w.city}: ${w.condition}, ${w.tempMin}–${w.tempMax}°C on ${w.date}`)
     } else {
       lines.push(`  Clima em ${w.city}: ${w.condition}, ${w.tempMin}–${w.tempMax}°C em ${w.date}`)
@@ -52,6 +51,20 @@ function formatMemoryForPrompt(m: ProactiveMemory, language: string): string {
   return lines.join('\n')
 }
 
+// ─── Identity rule appended to every action block ─────────────────────────────
+// GUTO never tells the user that data was saved, confirmed, or recorded.
+// That is a chatbot behaviour. GUTO just talks, like a friend.
+
+function identityRule(language: string): string {
+  if (language === 'it-IT') {
+    return `REGOLA IDENTITÀ: quando esegui l'azione nella tua risposta, NON dire all'utente che hai salvato, registrato o confermato qualcosa. Parla come un amico — non come un sistema.`
+  }
+  if (language === 'en-US') {
+    return `IDENTITY RULE: when you execute the action in your response, do NOT tell the user you saved, recorded or confirmed anything. Talk like a friend — not like a system.`
+  }
+  return `REGRA DE IDENTIDADE: quando executar a ação na sua resposta, NÃO diga ao usuário que salvou, registrou ou confirmou algo. Fale como amigo — não como sistema.`
+}
+
 // ─── Main builder ──────────────────────────────────────────────────────────────
 
 export async function buildProactivityContextBlock(
@@ -63,26 +76,25 @@ export async function buildProactivityContextBlock(
     await markPastActiveMemoriesPendingValidation(userId)
     const weeklyCheck = await getWeeklyCheckResult(userId, weekday)
 
-    // Active memories: confirmed, enriched, surfaced (not yet discarded/validated)
-    const activeMemories = await getProactiveMemoriesByStatus(userId, [
+    // All active memories: confirmed, enriched, surfaced
+    const allActiveMemories = await getProactiveMemoriesByStatus(userId, [
       'confirmed',
       'enriched',
       'surfaced',
     ])
 
-    const pendingConfirmation = await getProactiveMemoriesByStatus(userId, [
-      'pending_confirmation',
-    ])
+    // Separate: memories awaiting discard confirmation vs normal active context
+    const awaitingDiscard = allActiveMemories.filter((m) => m.discardRequestedAt)
+    const activeMemories = allActiveMemories.filter((m) => !m.discardRequestedAt)
 
-    const pendingValidation = await getProactiveMemoriesByStatus(userId, [
-      'pending_validation',
-    ])
+    const pendingConfirmation = await getProactiveMemoriesByStatus(userId, ['pending_confirmation'])
+    const pendingValidation = await getProactiveMemoriesByStatus(userId, ['pending_validation'])
 
     // Nothing to inject
     if (
       !weeklyCheck.shouldOpenWeekly &&
       !weeklyCheck.shouldValidate &&
-      activeMemories.length === 0 &&
+      allActiveMemories.length === 0 &&
       pendingConfirmation.length === 0 &&
       pendingValidation.length === 0
     ) {
@@ -90,6 +102,49 @@ export async function buildProactivityContextBlock(
     }
 
     const sections: string[] = []
+
+    // ── Awaiting discard confirmation — absolute priority ──────────────────────
+    // User already said "cancelei X" and GUTO asked "Descarto X então?".
+    // This block must be resolved before anything else happens.
+    if (awaitingDiscard.length > 0) {
+      const first = awaitingDiscard[0]!
+      const item = `"${first.understood}"${first.dateText ? ` — ${first.dateText}` : ''}`
+
+      if (language === 'it-IT') {
+        sections.push(
+          `[PROATTIVITÀ — CONFERMA CANCELLAZIONE]\n` +
+          `L'utente ha detto di voler cancellare questo evento:\n  ${item}\n` +
+          `ID: ${first.id}\n` +
+          `PRIORITÀ ASSOLUTA: prima di qualsiasi altra cosa, chiedi in modo naturale e diretto se vuole davvero toglierlo.\n` +
+          `Se l'utente conferma (dice "sì", "cancella", "vai" o equivalente chiaro): proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
+          `Se l'utente nega o vuole tenerlo (dice "no", "mantieni", "lascia" o equivalente): proactiveMemoryAction: { type: "cancel_discard_request", memoryId: "${first.id}" }\n` +
+          `Se la risposta è AMBIGUA: NON ritornare proactiveMemoryAction — chiedi di nuovo in modo diretto.\n` +
+          identityRule(language)
+        )
+      } else if (language === 'en-US') {
+        sections.push(
+          `[PROACTIVITY — DISCARD CONFIRMATION]\n` +
+          `The user said they want to cancel this event:\n  ${item}\n` +
+          `ID: ${first.id}\n` +
+          `TOP PRIORITY: before doing anything else, directly ask if they really want to drop it.\n` +
+          `If user confirms (says "yes", "cancel it", "sure" or clear equivalent): proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
+          `If user denies or wants to keep it (says "no", "keep it", "never mind" or equivalent): proactiveMemoryAction: { type: "cancel_discard_request", memoryId: "${first.id}" }\n` +
+          `If AMBIGUOUS: do NOT return proactiveMemoryAction — ask again directly.\n` +
+          identityRule(language)
+        )
+      } else {
+        sections.push(
+          `[PROATIVIDADE — CONFIRMAÇÃO DE DESCARTE]\n` +
+          `O usuário disse querer cancelar este evento:\n  ${item}\n` +
+          `ID: ${first.id}\n` +
+          `PRIORIDADE ABSOLUTA: antes de qualquer outra coisa, pergunta direto se ele quer mesmo tirar isso.\n` +
+          `Se o usuário confirmar (disser "sim", "descarta", "vai" ou equivalente claro): proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
+          `Se o usuário negar ou quiser manter (disser "não", "mantém", "deixa" ou equivalente): proactiveMemoryAction: { type: "cancel_discard_request", memoryId: "${first.id}" }\n` +
+          `Se AMBÍGUO: NÃO retorne proactiveMemoryAction — pergunta de novo direto.\n` +
+          identityRule(language)
+        )
+      }
+    }
 
     // ── Weekly conversation signal ─────────────────────────────────────────────
     if (weeklyCheck.shouldOpenWeekly) {
@@ -129,34 +184,37 @@ export async function buildProactivityContextBlock(
           `ID: ${first.id}\n` +
           `PRIORITÀ: risolvi questa validazione prima di parlare di allenamento, dieta o nuova missione.\n` +
           `Chiedi brevemente e naturalmente cosa è successo — solo questo evento, uno alla volta.\n` +
-          `Se l'utente conferma che È SUCCESSO, DEVI ritornare: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "happened" }\n` +
-          `Se l'utente dice che è stato RIMANDATO, DEVI ritornare: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "postponed" }\n` +
-          `Se l'utente dice che è stato CANCELLATO o non succederà più, DEVI ritornare: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "discarded" }\n` +
-          `Se la risposta è ambigua, NON ritornare proactiveMemoryAction — chiedi chiarezza.`
+          `Se SUCCESSO: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "happened" }\n` +
+          `Se RIMANDATO: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "postponed" }\n` +
+          `Se CANCELLATO: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "discarded" }\n` +
+          `Se AMBIGUO: NON ritornare proactiveMemoryAction — chiedi chiarezza.\n` +
+          identityRule(language)
         )
       } else if (language === 'en-US') {
         sections.push(
           `[PROACTIVITY — LAST WEEK VALIDATION]\n` +
-          `Last week you had registered this event:\n  ${item}\n` +
+          `Last week you had this registered:\n  ${item}\n` +
           `ID: ${first.id}\n` +
-          `PRIORITY: resolve this validation before talking about workout, diet, or a new mission.\n` +
-          `Briefly and naturally ask what happened — only this event, one at a time.\n` +
-          `If the user confirms it HAPPENED, you MUST return: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "happened" }\n` +
-          `If the user says it was POSTPONED, you MUST return: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "postponed" }\n` +
-          `If the user says it was CANCELLED or will not happen anymore, you MUST return: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "discarded" }\n` +
-          `If the response is ambiguous, do NOT return proactiveMemoryAction — ask for clarity.`
+          `PRIORITY: resolve this before talking about workout, diet, or a new mission.\n` +
+          `Briefly and naturally ask what happened — only this one, one at a time.\n` +
+          `If HAPPENED: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "happened" }\n` +
+          `If POSTPONED: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "postponed" }\n` +
+          `If CANCELLED: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "discarded" }\n` +
+          `If AMBIGUOUS: do NOT return proactiveMemoryAction — ask for clarity.\n` +
+          identityRule(language)
         )
       } else {
         sections.push(
           `[PROATIVIDADE — VALIDAÇÃO DA SEMANA PASSADA]\n` +
-          `Na semana passada você tinha registrado este evento:\n  ${item}\n` +
+          `Na semana passada você tinha registrado:\n  ${item}\n` +
           `ID: ${first.id}\n` +
-          `PRIORIDADE: resolva essa validação antes de falar de treino, dieta ou nova missão.\n` +
-          `Pergunte rapidinho e naturalmente o que aconteceu — só este evento, um por vez.\n` +
-          `Se o usuário confirmar que ACONTECEU, você DEVE retornar: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "happened" }\n` +
-          `Se o usuário disser que ADIOU, você DEVE retornar: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "postponed" }\n` +
-          `Se o usuário disser que CANCELOU ou não vai mais acontecer, você DEVE retornar: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "discarded" }\n` +
-          `Se a resposta for ambígua, NÃO retorne proactiveMemoryAction — peça clareza.`
+          `PRIORIDADE: resolva isso antes de falar de treino, dieta ou nova missão.\n` +
+          `Pergunta rapidinho e naturalmente o que aconteceu — só este, um por vez.\n` +
+          `Se ACONTECEU: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "happened" }\n` +
+          `Se ADIOU: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "postponed" }\n` +
+          `Se CANCELOU: proactiveMemoryAction: { type: "validate", memoryId: "${first.id}", outcome: "discarded" }\n` +
+          `Se AMBÍGUO: NÃO retorne proactiveMemoryAction — peça clareza.\n` +
+          identityRule(language)
         )
       }
     }
@@ -199,23 +257,25 @@ export async function buildProactivityContextBlock(
           `Hai captato qualcosa dalla conversazione ma non hai ancora confermato:\n  ${item}\n` +
           `ID: ${first.id}\n` +
           `PRIORITÀ: risolvi questa conferma prima di parlare di allenamento, dieta o nuova missione.\n` +
-          `Quando arriva il momento giusto, chiedi naturalmente se ha capito bene — solo questo, non altri. Una cosa alla volta.\n` +
-          `Se l'utente CONFERMA (risponde "sì", "esatto", "confermo" o equivalente chiaro), DEVI ritornare: proactiveMemoryAction: { type: "confirm", memoryId: "${first.id}" }\n` +
-          `Se l'utente NEGA e cancella l'evento o dice che non succederà più, DEVI ritornare: proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
-          `Se l'utente corregge dettagli (es: "no, è venerdì"), NON ritornare proactiveMemoryAction — chiedi conferma del dettaglio corretto; la correzione strutturata non è supportata ancora.\n` +
-          `Se la risposta è AMBIGUA o off-topic, NON ritornare proactiveMemoryAction — richiedi chiarezza.`
+          `Quando arriva il momento giusto, chiedi naturalmente se hai capito bene — solo questo, non altri.\n` +
+          `Se CONFERMA (risponde "sì", "esatto" o equivalente chiaro): proactiveMemoryAction: { type: "confirm", memoryId: "${first.id}" }\n` +
+          `Se NEGA e cancella l'evento: proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
+          `Se corregge dettagli (es: "no, è venerdì"): NON ritornare proactiveMemoryAction — chiedi conferma del dettaglio corretto.\n` +
+          `Se AMBIGUO: NON ritornare proactiveMemoryAction — richiedi chiarezza.\n` +
+          identityRule(language)
         )
       } else if (language === 'en-US') {
         sections.push(
           `[PROACTIVITY — PENDING CONFIRMATION]\n` +
           `You picked up something from the conversation but haven't confirmed it yet:\n  ${item}\n` +
           `ID: ${first.id}\n` +
-          `PRIORITY: resolve this confirmation before talking about workout, diet, or a new mission.\n` +
-          `When the moment is right, naturally check if you understood correctly — just this one, not others. One thing at a time.\n` +
-          `If the user CONFIRMS (says "yes", "that's right", "confirmed" or clear equivalent), you MUST return: proactiveMemoryAction: { type: "confirm", memoryId: "${first.id}" }\n` +
-          `If the user DENIES and cancels the event or says it will not happen anymore, you MUST return: proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
-          `If the user corrects details (ex: "no, Friday"), do NOT return proactiveMemoryAction — ask for confirmation of the corrected detail; structured correction is not supported yet.\n` +
-          `If the response is AMBIGUOUS or off-topic, do NOT return proactiveMemoryAction — ask for clarity.`
+          `PRIORITY: resolve this before talking about workout, diet, or a new mission.\n` +
+          `When the moment is right, naturally check if you understood correctly — just this one.\n` +
+          `If CONFIRMS ("yes", "that's right" or clear equivalent): proactiveMemoryAction: { type: "confirm", memoryId: "${first.id}" }\n` +
+          `If DENIES and cancels the event: proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
+          `If corrects details ("no, Friday"): do NOT return proactiveMemoryAction — ask for the corrected detail.\n` +
+          `If AMBIGUOUS: do NOT return proactiveMemoryAction — ask for clarity.\n` +
+          identityRule(language)
         )
       } else {
         sections.push(
@@ -223,11 +283,12 @@ export async function buildProactivityContextBlock(
           `Você captou algo da conversa mas ainda não confirmou:\n  ${item}\n` +
           `ID: ${first.id}\n` +
           `PRIORIDADE: resolva essa confirmação antes de falar de treino, dieta ou nova missão.\n` +
-          `Quando o momento for certo, confira naturalmente se entendeu direito — só esse, não outros. Um de cada vez.\n` +
-          `Se o usuário CONFIRMAR (responder "sim", "isso mesmo", "confirmo" ou equivalente claro), você DEVE retornar: proactiveMemoryAction: { type: "confirm", memoryId: "${first.id}" }\n` +
-          `Se o usuário NEGAR e cancelar o evento ou disser que não vai mais acontecer, você DEVE retornar: proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
-          `Se o usuário corrigir detalhes (ex: "não, é sexta"), NÃO retorne proactiveMemoryAction — peça confirmação do detalhe corrigido; correção estruturada ainda não é suportada.\n` +
-          `Se a resposta for AMBÍGUA ou off-topic, NÃO retorne proactiveMemoryAction — peça clareza.`
+          `Quando o momento for certo, confira naturalmente se entendeu direito — só esse.\n` +
+          `Se CONFIRMAR ("sim", "isso mesmo" ou equivalente claro): proactiveMemoryAction: { type: "confirm", memoryId: "${first.id}" }\n` +
+          `Se NEGAR e cancelar o evento: proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
+          `Se corrigir detalhes ("não, é sexta"): NÃO retorne proactiveMemoryAction — peça confirmação do detalhe.\n` +
+          `Se AMBÍGUO: NÃO retorne proactiveMemoryAction — peça clareza.\n` +
+          identityRule(language)
         )
       }
     }
