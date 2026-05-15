@@ -24,11 +24,53 @@ services:
         value: 120
       - key: GUTO_MEMORY_FILE
         value: data/guto-memory.json
+
+      # ── Auth ──────────────────────────────────────────────────────────────────
+      - key: JWT_SECRET
+        generateValue: true          # Render gera automaticamente um valor seguro
+
+      # ── CORS / Origins ───────────────────────────────────────────────────────
       - key: GUTO_ALLOWED_ORIGINS
+        sync: false                  # preencher no dashboard: https://seu-app.vercel.app
+
+      # ── Admin bootstrap ──────────────────────────────────────────────────────
+      - key: ADMIN_EMAIL
         sync: false
+      - key: ADMIN_PASSWORD_HASH
+        sync: false                  # bcrypt hash da senha do super_admin
+      - key: ADMIN_KEY
+        generateValue: true          # chave interna de bootstrap do admin
+
+      # ── Frontend URL (usada em links de e-mail, CORS, etc.) ──────────────────
+      - key: FRONTEND_PUBLIC_URL
+        sync: false                  # ex: https://guto.app
+
+      # ── AI APIs ──────────────────────────────────────────────────────────────
       - key: GEMINI_API_KEY
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+
+      # ── Voice (ElevenLabs) ───────────────────────────────────────────────────
       - key: VOICE_API_KEY
+        sync: false
+
+      # ── Redis / Upstash (memória e proatividade) ──────────────────────────────
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+
+      # ── Push Notifications (VAPID) ───────────────────────────────────────────
+      - key: PUSH_VAPID_PUBLIC_KEY
+        sync: false
+      - key: PUSH_VAPID_PRIVATE_KEY
+        sync: false
+      - key: PUSH_CRON_SECRET
+        generateValue: true          # segredo para o cron externo disparar push
+
+      # ── Stripe (pagamentos) ──────────────────────────────────────────────────
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
         sync: false

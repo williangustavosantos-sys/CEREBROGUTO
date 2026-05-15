@@ -5,7 +5,7 @@ import multer from "multer";
 import { existsSync, mkdirSync } from "fs";
 import path from "path";
 
-import { config } from "./src/config";
+import { config, isProductionEnv } from "./src/config";
 import { createRateLimit } from "./src/http/rate-limit";
 import { requestLog } from "./src/http/request-log";
 import { readMemoryStoreSync, writeMemoryStoreSync, readMemoryStoreAsync, writeMemoryStoreAsync } from "./src/memory-store";
@@ -446,11 +446,25 @@ const GUTO_VOICES: Record<GutoLanguage, GutoVoiceProfile> = {
 
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || config.allowedOrigins.length === 0 || config.allowedOrigins.includes(origin)) {
+    // No-origin requests (same-origin, server-to-server, curl) are always allowed.
+    if (!origin) {
       callback(null, true);
       return;
     }
-
+    // In production, an empty allowlist means GUTO_ALLOWED_ORIGINS was not configured.
+    // Deny rather than allow everything — fail secure.
+    if (config.allowedOrigins.length === 0) {
+      if (isProductionEnv) {
+        callback(new Error("[GUTO] CORS: GUTO_ALLOWED_ORIGINS not configured in production."));
+      } else {
+        callback(null, true); // dev: allow all origins when not configured
+      }
+      return;
+    }
+    if (config.allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
     callback(new Error("Origem não permitida pelo GUTO."));
   },
 }));
@@ -3525,7 +3539,7 @@ async function askGutoModel({
     }
 
     const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    require('fs').appendFileSync('gemini.log', `\n--- INPUT: ${input} ---\n${rawText}\n`);
+    // NOTE: debug file-logging removed — never log conversation content in production.
     const parsedResponse = parseGutoResponse(rawText, language);
     // Deterministic resolver takes priority over model's proactiveMemoryAction.
     // resolverResult.engaged=true means the resolver has a definitive answer.
