@@ -50,6 +50,7 @@ export interface ProactiveMemory {
   holidayEnrichment?: HolidayEnrichment[]
   createdAt: string
   updatedAt: string
+  expiresAt?: number         // ms timestamp — auto-set para pending_confirmation (7 dias)
   weekKey: string            // "2026-W20" — semana em que foi criado
   confirmedAt?: string
   validatedAt?: string

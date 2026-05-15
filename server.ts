@@ -89,6 +89,7 @@ import {
   requestDiscardProactiveMemory,
   cancelDiscardRequest,
   markWeeklyConversationDone,
+  getWeekKey,
   resolveProactiveMemoryActionFromUserReply,
 } from "./src/proactivity/index.js";
 import type { ProactiveMemory, WeeklyConversation } from "./src/proactivity/types.js";
@@ -4818,6 +4819,23 @@ app.post("/guto/proactivity/validate", requireActiveUser, async (req, res) => {
       validatedAt,
       ...(newStatus === "discarded" ? { discardedAt: validatedAt } : {}),
     });
+
+    // When postponed, reschedule as a new pending_confirmation 7 days out
+    // so the event surfaces again for the user to confirm — prevents data loss
+    if (newStatus === "validated_postponed") {
+      const rescheduleMs = Date.now() + 7 * 86_400_000;
+      await addProactiveMemory(userId, {
+        type: current.type,
+        status: "pending_confirmation",
+        rawText: current.rawText,
+        understood: current.understood,
+        dateText: current.dateText,
+        dateParsed: current.dateParsed,
+        location: current.location,
+        weekKey: getWeekKey(),
+        expiresAt: rescheduleMs + 3 * 86_400_000,
+      });
+    }
 
     // Mark validation as done for this week
     await markWeeklyConversationDone(userId, "validationDone");

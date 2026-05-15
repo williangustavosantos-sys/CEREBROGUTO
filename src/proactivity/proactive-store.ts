@@ -116,6 +116,8 @@ export async function getProactiveMemories(userId: string): Promise<ProactiveMem
   return raw as ProactiveMemory[]
 }
 
+const PENDING_CONFIRMATION_TTL_MS = 7 * 86_400_000 // 7 days
+
 export async function addProactiveMemory(
   userId: string,
   data: Omit<ProactiveMemory, 'id' | 'userId' | 'createdAt' | 'updatedAt'>
@@ -127,6 +129,10 @@ export async function addProactiveMemory(
     userId,
     createdAt: now,
     updatedAt: now,
+    expiresAt:
+      data.status === 'pending_confirmation' && !data.expiresAt
+        ? Date.now() + PENDING_CONFIRMATION_TTL_MS
+        : data.expiresAt,
   }
   await atomicUpdateMemories(userId, (current) => [...current, newMemory])
   return newMemory
@@ -153,7 +159,23 @@ export async function getProactiveMemoriesByStatus(
   statuses: ProactiveMemoryStatus[]
 ): Promise<ProactiveMemory[]> {
   const all = await getProactiveMemories(userId)
-  return all.filter((m) => statuses.includes(m.status))
+  const now = Date.now()
+  return all.filter((m) => {
+    if (!statuses.includes(m.status)) return false
+    // Auto-discard expired pending_confirmation items silently
+    if (
+      m.status === 'pending_confirmation' &&
+      m.expiresAt &&
+      m.expiresAt < now
+    ) {
+      void updateProactiveMemory(userId, m.id, {
+        status: 'discarded',
+        discardedAt: new Date().toISOString(),
+      }).catch(() => {})
+      return false
+    }
+    return true
+  })
 }
 
 export async function markPastActiveMemoriesPendingValidation(
