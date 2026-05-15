@@ -18,7 +18,6 @@ import {
 import { sanitizeDisplayName } from "./server-utils";
 import { generateWorkoutPoster } from "./src/poster";
 import { initStorage, uploadImage, deleteImage } from "./src/storage";
-import { voiceCacheKey, getVoiceCache, setVoiceCache } from "./src/voice-cache-store";
 import {
   awardArenaXp,
   getWeeklyRanking,
@@ -4243,27 +4242,7 @@ app.post("/voz", requireActiveUser, async (req, res) => {
 
   const selectedLanguage = normalizeLanguage(language);
 
-  // ── 1. Server-side cache check (Redis / filesystem) ──────────────────────
-  // If this exact phrase was already synthesized for this language, return
-  // the cached audio immediately — no Google TTS charge.
-  const cKey = voiceCacheKey(text, selectedLanguage);
-  try {
-    const cached = await getVoiceCache(cKey);
-    if (cached) {
-      console.info("[GUTO_VOICE] cache_hit", { userId, language: selectedLanguage, key: cKey, hitCount: cached.hitCount });
-      return res.json({
-        audioContent: cached.audioContent,
-        voiceUsed: cached.voiceUsed,
-        languageCode: selectedLanguage,
-        fromCache: true,
-      });
-    }
-  } catch (err) {
-    // Cache read error is non-fatal — continue to synthesis.
-    console.warn("[GUTO_VOICE] cache_read_error", { userId, key: cKey, err });
-  }
-
-  // ── 2. API key guard (only needed when synthesis is required) ────────────
+  // ── API key guard ────────────────────────────────────────────────────────
   if (!VOICE_API_KEY) {
     console.error("[GUTO_VOICE] missing_voice_api_key", { userId, language: selectedLanguage });
     return res.status(503).json({ message: localizedHttpMessage("voice_key", selectedLanguage) });
@@ -4278,20 +4257,8 @@ app.post("/voz", requireActiveUser, async (req, res) => {
     fallbackName: voice.fallbackName,
   });
 
-  // ── Helper: synthesize, save to cache, and respond ───────────────────────
+  // ── Helper: respond with synthesized audio ─────────────────────────────────
   const respondWithAudio = async (audioContent: string, voiceUsed: string, languageCode: string) => {
-    // Save to server cache in background — don't block the response.
-    void setVoiceCache({
-      key: cKey,
-      lang: selectedLanguage,
-      textHash: cKey.split(":")[1] ?? cKey,
-      audioContent,
-      mimeType: "audio/mpeg",
-      voiceUsed,
-      createdAt: Date.now(),
-      hitCount: 0,
-    }).catch((err) => console.warn("[GUTO_VOICE] cache_write_error", { key: cKey, err }));
-
     return res.json({ audioContent, voiceUsed, languageCode });
   };
 
@@ -4349,29 +4316,6 @@ app.post("/voz", requireActiveUser, async (req, res) => {
   } catch (error) {
     console.error("[GUTO_VOICE] synth_connect_failed", { userId, language: selectedLanguage, error });
     res.status(502).json({ message: localizedHttpMessage("voice_connect", selectedLanguage) });
-  }
-});
-
-// GET /voz/cache — frontend queries server cache by pre-computed key before sending full text.
-// Returns { hit: true, audioContent, voiceUsed } or { hit: false }.
-app.get("/voz/cache", requireActiveUser, async (req, res) => {
-  const key = typeof req.query.key === "string" ? req.query.key.trim() : "";
-  if (!key) return res.status(400).json({ hit: false, error: "missing key" });
-
-  try {
-    const cached = await getVoiceCache(key);
-    if (cached) {
-      return res.json({
-        hit: true,
-        audioContent: cached.audioContent,
-        voiceUsed: cached.voiceUsed,
-        mimeType: cached.mimeType,
-        fromCache: true,
-      });
-    }
-    return res.json({ hit: false });
-  } catch {
-    return res.json({ hit: false });
   }
 });
 
