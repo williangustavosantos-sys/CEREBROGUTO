@@ -4846,10 +4846,12 @@ app.post("/guto/proactivity/open-weekly", requireActiveUser, async (req, res) =>
 });
 
 // ── Arena endpoints ──────────────────────────────────────────────────────────
+// arenaGroupId is always derived from the authenticated user's own team.
+// Query-param override is intentionally rejected — prevents cross-team data leak.
 
 app.get("/guto/arena/weekly", requireActiveUser, (req, res) => {
   const userId = req.gutoUser!.userId;
-  const arenaGroupId = (req.query.arenaGroupId as string) || getUserArenaGroup(userId);
+  const arenaGroupId = getUserArenaGroup(userId);
   const memory = getMemory(userId);
   syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
   res.json(getWeeklyRanking(arenaGroupId));
@@ -4857,7 +4859,7 @@ app.get("/guto/arena/weekly", requireActiveUser, (req, res) => {
 
 app.get("/guto/arena/monthly", requireActiveUser, (req, res) => {
   const userId = req.gutoUser!.userId;
-  const arenaGroupId = (req.query.arenaGroupId as string) || getUserArenaGroup(userId);
+  const arenaGroupId = getUserArenaGroup(userId);
   const memory = getMemory(userId);
   syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
   res.json(getMonthlyRanking(arenaGroupId));
@@ -4876,7 +4878,7 @@ app.get("/guto/arena/individual", requireActiveUser, (req, res) => {
 
 app.get("/guto/arena/me", requireActiveUser, (req, res) => {
   const userId = req.gutoUser!.userId;
-  const arenaGroupId = (req.query.arenaGroupId as string) || getUserArenaGroup(userId);
+  const arenaGroupId = getUserArenaGroup(userId);
   const memory = getMemory(userId);
   syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
   const profile = getMyArenaProfile(userId, arenaGroupId);
