@@ -3539,7 +3539,7 @@ async function askGutoModel({
     }
 
     const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    require('fs').appendFileSync('gemini.log', `\n--- INPUT: ${input} ---\n${rawText}\n`);
+    // NOTE: debug file-logging removed — never log conversation content in production.
     const parsedResponse = parseGutoResponse(rawText, language);
     // Deterministic resolver takes priority over model's proactiveMemoryAction.
     // resolverResult.engaged=true means the resolver has a definitive answer.
