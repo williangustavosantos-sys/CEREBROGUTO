@@ -109,11 +109,20 @@ export function getWeekKey(date = new Date()): string {
 
 // ─── ProactiveMemory CRUD ─────────────────────────────────────────────────────
 
+// States that should be ignored once expired (pending ones that user never confirmed)
+const EXPIRABLE_STATUSES: ProactiveMemoryStatus[] = ['pending_confirmation']
+
 export async function getProactiveMemories(userId: string): Promise<ProactiveMemory[]> {
   const store = await readMemoryStoreAsync()
   const user = asUserMemory(store[userId])
   const raw = Array.isArray(user.proactiveMemories) ? user.proactiveMemories : []
-  return raw as ProactiveMemory[]
+  const now = new Date().toISOString()
+  return (raw as ProactiveMemory[]).filter((m) => {
+    if (m.expiresAt && m.expiresAt < now && EXPIRABLE_STATUSES.includes(m.status)) {
+      return false
+    }
+    return true
+  })
 }
 
 export async function addProactiveMemory(
@@ -121,12 +130,17 @@ export async function addProactiveMemory(
   data: Omit<ProactiveMemory, 'id' | 'userId' | 'createdAt' | 'updatedAt'>
 ): Promise<ProactiveMemory> {
   const now = new Date().toISOString()
+  // pending_confirmation expires after 24h if user never responds
+  const expiresAt = data.status === 'pending_confirmation'
+    ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+    : data.expiresAt
   const newMemory: ProactiveMemory = {
     ...data,
     id: generateId(userId),
     userId,
     createdAt: now,
     updatedAt: now,
+    expiresAt,
   }
   await atomicUpdateMemories(userId, (current) => [...current, newMemory])
   return newMemory
@@ -141,7 +155,27 @@ export async function updateProactiveMemory(
   await atomicUpdateMemories(userId, (current) => {
     return current.map((m) => {
       if (m.id !== memoryId) return m
-      found = { ...m, ...updates, updatedAt: new Date().toISOString() }
+      let merged = { ...m, ...updates, updatedAt: new Date().toISOString() }
+
+      // validated_postponed: reschedule event to +7 days and re-enter active cycle
+      if (updates.status === 'validated_postponed') {
+        const baseDate = m.dateParsed
+          ? new Date(m.dateParsed)
+          : new Date()
+        const rescheduled = new Date(baseDate.getTime() + 7 * 24 * 60 * 60 * 1000)
+        const rescheduledIso = rescheduled.toISOString().slice(0, 10)
+        merged = {
+          ...merged,
+          status: 'confirmed',
+          dateParsed: rescheduledIso,
+          weekKey: getWeekKey(rescheduled),
+          expiresAt: undefined,
+          confirmedAt: new Date().toISOString(),
+          validatedAt: undefined,
+        }
+      }
+
+      found = merged
       return found
     })
   })

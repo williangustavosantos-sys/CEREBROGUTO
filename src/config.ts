@@ -57,3 +57,13 @@ if (config.allowDevAccess && _isProductionEnv) {
       "Remove this environment variable before deploying."
   );
 }
+
+// P0 — JWT_SECRET must be explicitly set in production.
+// The fallback "dev-secret-change-in-production" is public — if it reaches prod,
+// any attacker can forge valid tokens for any userId.
+if (_isProductionEnv && config.jwtSecret === "dev-secret-change-in-production") {
+  throw new Error(
+    "[GUTO] FATAL: JWT_SECRET env var is not set. " +
+      "Set a strong random secret (32+ chars) before deploying."
+  );
+}

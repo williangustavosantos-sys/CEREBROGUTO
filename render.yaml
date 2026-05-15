@@ -32,3 +32,35 @@ services:
         sync: false
       - key: VOICE_API_KEY
         sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_MONTHLY
+        sync: false
+      - key: STRIPE_PRICE_ANNUAL
+        sync: false
+      - key: STRIPE_PRICE_BETA
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD_HASH
+        sync: false
+      - key: ADMIN_KEY
+        sync: false
+      - key: PUSH_VAPID_PUBLIC_KEY
+        sync: false
+      - key: PUSH_VAPID_PRIVATE_KEY
+        sync: false
+      - key: PUSH_CRON_SECRET
+        sync: false
+      - key: WORKOUTX_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

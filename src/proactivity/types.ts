@@ -50,6 +50,8 @@ export interface ProactiveMemory {
   holidayEnrichment?: HolidayEnrichment[]
   createdAt: string
   updatedAt: string
+  // TTL: pending_confirmation expires after 24h; validated_postponed gets +7d new deadline
+  expiresAt?: string
   weekKey: string            // "2026-W20" — semana em que foi criado
   confirmedAt?: string
   validatedAt?: string
