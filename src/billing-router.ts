@@ -2,7 +2,7 @@ import { Router, raw, type Request, type Response } from "express";
 import Stripe from "stripe";
 import { config } from "./config.js";
 import { requireActiveUser } from "./auth-middleware.js";
-import { getUserAccess, upsertUserAccess, type SubscriptionStatus } from "./user-access-store.js";
+import { getUserAccess, upsertUserAccess, upsertUserAccessAsync, type SubscriptionStatus } from "./user-access-store.js";
 import { addLog } from "./log-store.js";
 
 export const stripeEnabled = Boolean(config.stripeSecretKey);
@@ -51,7 +51,7 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
         const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
         const subscriptionId = typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
         if (userId && customerId) {
-          upsertUserAccess(userId, {
+          await upsertUserAccessAsync(userId, {
             active: true,
             subscriptionStatus: "active" as SubscriptionStatus,
             paymentStatus: "active",
@@ -78,7 +78,7 @@ export async function stripeWebhookHandler(req: Request, res: Response) {
         const status: SubscriptionStatus = mapStripeStatus(sub.status);
         const periodEnd = (sub.items.data[0]?.current_period_end ?? null);
         const endsAt = typeof periodEnd === "number" ? new Date(periodEnd * 1000).toISOString() : null;
-        upsertUserAccess(userId, {
+        await upsertUserAccessAsync(userId, {
           active: status === "active",
           subscriptionStatus: status,
           paymentStatus: status === "active" ? "active" : status === "expired" ? "expired" : "cancelled",
@@ -143,7 +143,7 @@ billingRouter.post("/checkout", async (req, res) => {
         metadata: { userId },
       });
       customerId = customer.id;
-      upsertUserAccess(userId, { stripeCustomerId: customerId });
+      await upsertUserAccessAsync(userId, { stripeCustomerId: customerId });
     }
 
     const session = await stripe.checkout.sessions.create({
