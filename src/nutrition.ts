@@ -25,6 +25,7 @@ export interface NutritionProfile {
   trainingGoal: NutritionGoal;
   country?: string;
   foodRestrictions?: string;
+  foodIntolerances?: string;
 }
 
 export interface DietMacros {
@@ -325,9 +326,10 @@ export function buildDietPrompt(
   const goalLabel = goalLabels[language]?.[profile.trainingGoal] ?? profile.trainingGoal;
 
   const country = profile.country || "Brasil";
-  const restrictions = profile.foodRestrictions
-    ? profile.foodRestrictions.trim()
-    : "none";
+  const restrictionParts: string[] = [];
+  if (profile.foodRestrictions?.trim()) restrictionParts.push(profile.foodRestrictions.trim());
+  if (profile.foodIntolerances?.trim()) restrictionParts.push(`intolerances: ${profile.foodIntolerances.trim()}`);
+  const restrictions = restrictionParts.length ? restrictionParts.join("; ") : "none";
 
   // Country-specific food notes to guide local availability
   const countryFoodHints: Record<string, string> = {

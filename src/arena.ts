@@ -206,11 +206,12 @@ export function awardArenaXp(options: AwardXpOptions): AwardXpResult {
   };
 }
 
+// Returns i18n key — frontend translates via arenaStatusLabels map
 function deriveStatus(xp: number, workouts: number): string {
-  if (workouts >= 5) return "EM CHAMAS";
-  if (workouts >= 3) return "SUBINDO";
-  if (workouts >= 1) return "CONSISTENTE";
-  return "PRECISA REAGIR";
+  if (workouts >= 5) return "arena.status.on_fire";
+  if (workouts >= 3) return "arena.status.rising";
+  if (workouts >= 1) return "arena.status.consistent";
+  return "arena.status.needs_action";
 }
 
 export function getWeeklyRanking(arenaGroupId: string) {
