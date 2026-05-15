@@ -5,7 +5,7 @@ import multer from "multer";
 import { existsSync, mkdirSync } from "fs";
 import path from "path";
 
-import { config } from "./src/config";
+import { config, isProductionEnv } from "./src/config";
 import { createRateLimit } from "./src/http/rate-limit";
 import { requestLog } from "./src/http/request-log";
 import { readMemoryStoreSync, writeMemoryStoreSync, readMemoryStoreAsync, writeMemoryStoreAsync } from "./src/memory-store";
@@ -446,11 +446,25 @@ const GUTO_VOICES: Record<GutoLanguage, GutoVoiceProfile> = {
 
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || config.allowedOrigins.length === 0 || config.allowedOrigins.includes(origin)) {
+    // Same-origin / curl / mobile WebView: no Origin header — always allow.
+    if (!origin) {
       callback(null, true);
       return;
     }
-
+    // P0 — Deny-by-default in production when allowedOrigins is empty.
+    // Without this, a missing GUTO_ALLOWED_ORIGINS env silently allowed *all* origins.
+    if (config.allowedOrigins.length === 0) {
+      if (isProductionEnv) {
+        callback(new Error("[GUTO] CORS: GUTO_ALLOWED_ORIGINS not configured in production."));
+      } else {
+        callback(null, true); // dev: permissive when not configured
+      }
+      return;
+    }
+    if (config.allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
     callback(new Error("Origem não permitida pelo GUTO."));
   },
 }));
@@ -3771,6 +3785,51 @@ app.delete("/guto/account", requireActiveUser, async (req, res) => {
   }
 });
 
+// ─── GDPR — Revoke consent (P2) ──────────────────────────────────────────────
+// Unlike DELETE /guto/account (which wipes everything), this endpoint only
+// withdraws consent for health/fitness data processing and clears the sensitive
+// physical-profile fields. The account itself stays alive so the user can
+// re-consent later without losing identity, plan history, validations, or XP.
+app.post("/guto/consent/revoke", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
+  try {
+    const store = await readMemoryStoreAsync();
+    const existing = (store[userId] && typeof store[userId] === "object" && !Array.isArray(store[userId]))
+      ? (store[userId] as Record<string, unknown>)
+      : {};
+    // Clear sensitive health/fitness fields and flip consent off.
+    const cleared: Record<string, unknown> = {
+      ...existing,
+      consentHealthFitness: false,
+      acceptedTerms: false,
+      consentRevokedAt: new Date().toISOString(),
+      biologicalSex: null,
+      age: null,
+      heightCm: null,
+      weightKg: null,
+      foodRestrictions: null,
+      foodIntolerances: null,
+      trainingPathology: null,
+    };
+    store[userId] = cleared;
+    await writeMemoryStoreAsync(store);
+    addLog({
+      action: "consent_revoked",
+      actorUserId: userId,
+      actorRole: req.gutoUser!.role,
+      targetUserId: userId,
+      metadata: {},
+    });
+    res.status(204).send();
+  } catch (error) {
+    console.error("[GUTO] consent revoke failed", error);
+    res.status(500).json({
+      message: "Falha ao revogar consentimento. Tente novamente em alguns minutos.",
+      code: "GUTO_REVOKE_FAILED",
+    });
+  }
+});
+
 // ─── Web Push (Sprint 5: proatividade) ────────────────────────────────────────
 
 app.get("/guto/push/vapid-public-key", (_req, res) => {
@@ -4435,7 +4494,11 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
 
   const selectedLanguage = normalizeLanguage(language);
   const now = new Date();
-  const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  // P2 — Dedup must use the user's effective timezone (Europe/Rome by default).
+  // Previously this used local UTC, so a user validating between 00:00–02:00
+  // Europe/Rome could be misattributed to the previous UTC day and allowed to
+  // re-validate the same training twice on the same actual day.
+  const todayKeyLocal = todayKey(now);
   const dateLabel = new Intl.DateTimeFormat(selectedLanguage, {
     timeZone: GUTO_TIME_ZONE,
     day: "2-digit",
@@ -4474,8 +4537,8 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
       });
     }
 
-    // Check daily dedup: only one validation per user per day
-    if (existingMemory?.validationHistory?.some((r) => r.createdAt.startsWith(todayKey))) {
+    // Check daily dedup: only one validation per user per day (using GUTO_TIME_ZONE)
+    if (existingMemory?.validationHistory?.some((r) => r.createdAt.startsWith(todayKeyLocal))) {
       return res.status(409).json({ error: "Treino já validado hoje." });
     }
 

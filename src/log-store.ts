@@ -39,6 +39,7 @@ export type LogAction =
   | "password_reset"
   | "user_deleted"
   | "account_self_deleted"
+  | "consent_revoked"
   | "push_dispatch"
   | "billing_checkout_completed"
   | "billing_subscription_updated"

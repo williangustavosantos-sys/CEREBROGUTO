@@ -48,10 +48,10 @@ export const config = {
 // P0 — Startup guard: GUTO_ALLOW_DEV_ACCESS must never reach production/Render.
 // Render sets RENDER=true; standard Node.js prod sets NODE_ENV=production.
 // Failing here causes a visible deploy crash instead of a silent auth bypass.
-const _isProductionEnv =
+export const isProductionEnv =
   process.env.NODE_ENV === "production" || process.env.RENDER === "true";
 
-if (config.allowDevAccess && _isProductionEnv) {
+if (config.allowDevAccess && isProductionEnv) {
   throw new Error(
     "[GUTO] FATAL: GUTO_ALLOW_DEV_ACCESS=true is forbidden in production/Render. " +
       "Remove this environment variable before deploying."
@@ -61,7 +61,7 @@ if (config.allowDevAccess && _isProductionEnv) {
 // P0 — JWT_SECRET must be explicitly set in production.
 // The fallback "dev-secret-change-in-production" is public — if it reaches prod,
 // any attacker can forge valid tokens for any userId.
-if (_isProductionEnv && config.jwtSecret === "dev-secret-change-in-production") {
+if (isProductionEnv && config.jwtSecret === "dev-secret-change-in-production") {
   throw new Error(
     "[GUTO] FATAL: JWT_SECRET env var is not set. " +
       "Set a strong random secret (32+ chars) before deploying."
