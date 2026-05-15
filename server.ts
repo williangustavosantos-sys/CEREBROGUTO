@@ -440,7 +440,7 @@ const GUTO_VOICES: Record<GutoLanguage, GutoVoiceProfile> = {
   "it-IT": {
     languageCode: "it-IT",
     primaryName: "it-IT-Chirp3-HD-Charon",
-    fallbackName: "it-IT-Neural2-F",
+    fallbackName: "it-IT-Neural2-C",
   },
 };
 
