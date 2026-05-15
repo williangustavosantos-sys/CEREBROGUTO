@@ -4971,6 +4971,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
     trainingGoal: (effectiveGoal as NutritionProfile["trainingGoal"]) || "consistency",
     country: memory.country || "Brasil",
     foodRestrictions: memory.foodRestrictions,
+    foodIntolerances: memory.foodIntolerances,
   };
 
   const macros = calculateMacros(nutritionProfile);
