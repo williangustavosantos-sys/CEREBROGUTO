@@ -45,12 +45,12 @@ export const config = {
   stripePriceBeta: process.env.STRIPE_PRICE_BETA || "",
 };
 
-// P0 — Startup guard: GUTO_ALLOW_DEV_ACCESS must never reach production/Render.
-// Render sets RENDER=true; standard Node.js prod sets NODE_ENV=production.
-// Failing here causes a visible deploy crash instead of a silent auth bypass.
+// P0 — Render sets RENDER=true; standard Node.js prod sets NODE_ENV=production.
 export const isProductionEnv =
   process.env.NODE_ENV === "production" || process.env.RENDER === "true";
 
+// P0 guard: GUTO_ALLOW_DEV_ACCESS must never reach production/Render.
+// Failing here causes a visible deploy crash instead of a silent auth bypass.
 if (config.allowDevAccess && isProductionEnv) {
   throw new Error(
     "[GUTO] FATAL: GUTO_ALLOW_DEV_ACCESS=true is forbidden in production/Render. " +
@@ -58,12 +58,12 @@ if (config.allowDevAccess && isProductionEnv) {
   );
 }
 
-// P0 — JWT_SECRET must be explicitly set in production.
-// The fallback "dev-secret-change-in-production" is public — if it reaches prod,
-// any attacker can forge valid tokens for any userId.
-if (isProductionEnv && config.jwtSecret === "dev-secret-change-in-production") {
+// P0 guard: JWT_SECRET must be strong in production.
+// A weak or missing secret lets anyone forge valid tokens.
+const DEV_JWT_SECRET = "dev-secret-change-in-production";
+if (isProductionEnv && (!config.jwtSecret || config.jwtSecret === DEV_JWT_SECRET)) {
   throw new Error(
-    "[GUTO] FATAL: JWT_SECRET env var is not set. " +
-      "Set a strong random secret (32+ chars) before deploying."
+    "[GUTO] FATAL: JWT_SECRET is weak or missing in production/Render. " +
+      "Set a strong JWT_SECRET (32+ random characters) before deploying."
   );
 }

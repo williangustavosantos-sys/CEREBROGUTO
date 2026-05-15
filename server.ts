@@ -446,18 +446,18 @@ const GUTO_VOICES: Record<GutoLanguage, GutoVoiceProfile> = {
 
 app.use(cors({
   origin(origin, callback) {
-    // Same-origin / curl / mobile WebView: no Origin header — always allow.
+    // No-origin requests (same-origin, server-to-server, curl) are always allowed.
     if (!origin) {
       callback(null, true);
       return;
     }
-    // P0 — Deny-by-default in production when allowedOrigins is empty.
-    // Without this, a missing GUTO_ALLOWED_ORIGINS env silently allowed *all* origins.
+    // In production, an empty allowlist means GUTO_ALLOWED_ORIGINS was not configured.
+    // Deny rather than allow everything — fail secure.
     if (config.allowedOrigins.length === 0) {
       if (isProductionEnv) {
         callback(new Error("[GUTO] CORS: GUTO_ALLOWED_ORIGINS not configured in production."));
       } else {
-        callback(null, true); // dev: permissive when not configured
+        callback(null, true); // dev: allow all origins when not configured
       }
       return;
     }
@@ -3539,7 +3539,7 @@ async function askGutoModel({
     }
 
     const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    require('fs').appendFileSync('gemini.log', `\n--- INPUT: ${input} ---\n${rawText}\n`);
+    // NOTE: debug file-logging removed — never log conversation content in production.
     const parsedResponse = parseGutoResponse(rawText, language);
     // Deterministic resolver takes priority over model's proactiveMemoryAction.
     // resolverResult.engaged=true means the resolver has a definitive answer.

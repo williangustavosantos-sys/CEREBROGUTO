@@ -24,20 +24,58 @@ services:
         value: 120
       - key: GUTO_MEMORY_FILE
         value: data/guto-memory.json
+
+      # ── Auth ──────────────────────────────────────────────────────────────────
+      - key: JWT_SECRET
+        generateValue: true
+
+      # ── CORS / Origins ───────────────────────────────────────────────────────
       - key: GUTO_ALLOWED_ORIGINS
         sync: false
+
+      # ── Frontend URL ─────────────────────────────────────────────────────────
+      - key: FRONTEND_PUBLIC_URL
+        sync: false
+
+      # ── Admin bootstrap ──────────────────────────────────────────────────────
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD_HASH
+        sync: false
+      - key: ADMIN_KEY
+        generateValue: true
+
+      # ── AI APIs ──────────────────────────────────────────────────────────────
       - key: GEMINI_API_KEY
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+      # ── Voice (ElevenLabs) ───────────────────────────────────────────────────
       - key: VOICE_API_KEY
         sync: false
-      - key: JWT_SECRET
+
+      # ── Workout API ──────────────────────────────────────────────────────────
+      - key: WORKOUTX_API_KEY
         sync: false
+
+      # ── Redis / Upstash ───────────────────────────────────────────────────────
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
+
+      # ── Push Notifications (VAPID) ───────────────────────────────────────────
+      - key: PUSH_VAPID_PUBLIC_KEY
+        sync: false
+      - key: PUSH_VAPID_PRIVATE_KEY
+        sync: false
+      - key: PUSH_CRON_SECRET
+        generateValue: true
+
+      # ── Stripe (pagamentos) ──────────────────────────────────────────────────
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
@@ -47,20 +85,4 @@ services:
       - key: STRIPE_PRICE_ANNUAL
         sync: false
       - key: STRIPE_PRICE_BETA
-        sync: false
-      - key: ADMIN_EMAIL
-        sync: false
-      - key: ADMIN_PASSWORD_HASH
-        sync: false
-      - key: ADMIN_KEY
-        sync: false
-      - key: PUSH_VAPID_PUBLIC_KEY
-        sync: false
-      - key: PUSH_VAPID_PRIVATE_KEY
-        sync: false
-      - key: PUSH_CRON_SECRET
-        sync: false
-      - key: WORKOUTX_API_KEY
-        sync: false
-      - key: ANTHROPIC_API_KEY
         sync: false
