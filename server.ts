@@ -18,6 +18,7 @@ import {
 import { sanitizeDisplayName } from "./server-utils";
 import { generateWorkoutPoster } from "./src/poster";
 import { initStorage, uploadImage, deleteImage } from "./src/storage";
+import { voiceCacheKey, getVoiceCache, setVoiceCache } from "./src/voice-cache-store";
 import {
   awardArenaXp,
   getWeeklyRanking,
@@ -394,7 +395,6 @@ const VOICE_API_KEY = config.voiceApiKey;
 const OPENAI_API_KEY = config.openaiApiKey;
 const WORKOUTX_API_KEY = config.workoutxApiKey;
 
-const DEFAULT_USER_ID = config.defaultUserId;
 const GUTO_TIME_ZONE = config.timeZone;
 const DEFAULT_VOICE_STYLE = {
   speakingRate: 0.94,
@@ -833,7 +833,7 @@ function writeMemoryStore(store: Record<string, GutoMemory>) {
   );
 }
 
-export function getMemory(userId = DEFAULT_USER_ID): GutoMemory {
+export function getMemory(userId: string): GutoMemory {
   const store = readMemoryStore();
   const existing = store[userId];
   if (existing) {
@@ -1062,8 +1062,11 @@ function applyPendingMissPenalties(memory: GutoMemory) {
   return memory;
 }
 
-function mergeMemory(profile?: Profile, language?: string) {
-  const userId = profile?.userId || DEFAULT_USER_ID;
+function mergeMemory(profile: Profile, language?: string) {
+  const userId = profile.userId;
+  if (!userId) {
+    throw new Error("[GUTO] mergeMemory: profile.userId is required — cannot fall back to local-user in production");
+  }
   const memory = getMemory(userId);
   const selectedLanguage = normalizeLanguage(language || profile?.language || memory.language);
   const next: GutoMemory = {
@@ -3450,7 +3453,7 @@ async function askGutoModel({
 }: {
   input: string;
   language: string;
-  profile?: Profile;
+  profile: Profile;
   history?: GutoHistoryItem[];
   expectedResponse?: ExpectedResponse | null;
   proactivityContext?: string | null;
@@ -4232,10 +4235,6 @@ app.post("/guto", requireActiveUser, async (req, res) => {
 app.post("/voz", requireActiveUser, async (req, res) => {
   const { text, language } = req.body;
   const userId = req.gutoUser!.userId;
-  if (!VOICE_API_KEY) {
-    console.error("[GUTO_VOICE] missing_voice_api_key", { userId, language: language || "pt-BR" });
-    return res.status(503).json({ message: localizedHttpMessage("voice_key", language || "pt-BR") });
-  }
 
   if (!text || typeof text !== "string") {
     console.warn("[GUTO_VOICE] missing_text", { userId, language: language || "pt-BR" });
@@ -4243,6 +4242,33 @@ app.post("/voz", requireActiveUser, async (req, res) => {
   }
 
   const selectedLanguage = normalizeLanguage(language);
+
+  // ── 1. Server-side cache check (Redis / filesystem) ──────────────────────
+  // If this exact phrase was already synthesized for this language, return
+  // the cached audio immediately — no Google TTS charge.
+  const cKey = voiceCacheKey(text, selectedLanguage);
+  try {
+    const cached = await getVoiceCache(cKey);
+    if (cached) {
+      console.info("[GUTO_VOICE] cache_hit", { userId, language: selectedLanguage, key: cKey, hitCount: cached.hitCount });
+      return res.json({
+        audioContent: cached.audioContent,
+        voiceUsed: cached.voiceUsed,
+        languageCode: selectedLanguage,
+        fromCache: true,
+      });
+    }
+  } catch (err) {
+    // Cache read error is non-fatal — continue to synthesis.
+    console.warn("[GUTO_VOICE] cache_read_error", { userId, key: cKey, err });
+  }
+
+  // ── 2. API key guard (only needed when synthesis is required) ────────────
+  if (!VOICE_API_KEY) {
+    console.error("[GUTO_VOICE] missing_voice_api_key", { userId, language: selectedLanguage });
+    return res.status(503).json({ message: localizedHttpMessage("voice_key", selectedLanguage) });
+  }
+
   const voice = GUTO_VOICES[selectedLanguage];
   console.info("[GUTO_VOICE] synth_request", {
     userId,
@@ -4252,7 +4278,25 @@ app.post("/voz", requireActiveUser, async (req, res) => {
     fallbackName: voice.fallbackName,
   });
 
+  // ── Helper: synthesize, save to cache, and respond ───────────────────────
+  const respondWithAudio = async (audioContent: string, voiceUsed: string, languageCode: string) => {
+    // Save to server cache in background — don't block the response.
+    void setVoiceCache({
+      key: cKey,
+      lang: selectedLanguage,
+      textHash: cKey.split(":")[1] ?? cKey,
+      audioContent,
+      mimeType: "audio/mpeg",
+      voiceUsed,
+      createdAt: Date.now(),
+      hitCount: 0,
+    }).catch((err) => console.warn("[GUTO_VOICE] cache_write_error", { key: cKey, err }));
+
+    return res.json({ audioContent, voiceUsed, languageCode });
+  };
+
   try {
+    // ── 3. Primary voice ───────────────────────────────────────────────────
     const primary = await synthesizeGutoVoice({
       text,
       language: selectedLanguage,
@@ -4261,19 +4305,11 @@ app.post("/voz", requireActiveUser, async (req, res) => {
     });
 
     if (primary.ok) {
-      console.info("[GUTO_VOICE] synth_ok", {
-        userId,
-        language: selectedLanguage,
-        voiceUsed: primary.voiceUsed,
-        status: primary.status,
-      });
-      return res.json({
-        audioContent: primary.data.audioContent,
-        voiceUsed: primary.voiceUsed,
-        languageCode: primary.languageCode,
-      });
+      console.info("[GUTO_VOICE] synth_ok", { userId, language: selectedLanguage, voiceUsed: primary.voiceUsed });
+      return respondWithAudio(primary.data.audioContent, primary.voiceUsed, primary.languageCode);
     }
 
+    // ── 4. Fallback voice ──────────────────────────────────────────────────
     const fallback = await synthesizeGutoVoice({
       text,
       language: selectedLanguage,
@@ -4281,19 +4317,11 @@ app.post("/voz", requireActiveUser, async (req, res) => {
     });
 
     if (fallback.ok) {
-      console.info("[GUTO_VOICE] synth_ok", {
-        userId,
-        language: selectedLanguage,
-        voiceUsed: fallback.voiceUsed,
-        status: fallback.status,
-      });
-      return res.json({
-        audioContent: fallback.data.audioContent,
-        voiceUsed: fallback.voiceUsed,
-        languageCode: fallback.languageCode,
-      });
+      console.info("[GUTO_VOICE] synth_ok_fallback", { userId, language: selectedLanguage, voiceUsed: fallback.voiceUsed });
+      return respondWithAudio(fallback.data.audioContent, fallback.voiceUsed, fallback.languageCode);
     }
 
+    // ── 5. Native male (last resort) ───────────────────────────────────────
     const nativeMale = await synthesizeGutoVoice({
       text,
       language: selectedLanguage,
@@ -4301,19 +4329,11 @@ app.post("/voz", requireActiveUser, async (req, res) => {
     });
 
     if (nativeMale.ok) {
-      console.info("[GUTO_VOICE] synth_ok", {
-        userId,
-        language: selectedLanguage,
-        voiceUsed: nativeMale.voiceUsed,
-        status: nativeMale.status,
-      });
-      return res.json({
-        audioContent: nativeMale.data.audioContent,
-        voiceUsed: nativeMale.voiceUsed,
-        languageCode: nativeMale.languageCode,
-      });
+      console.info("[GUTO_VOICE] synth_ok_native", { userId, language: selectedLanguage, voiceUsed: nativeMale.voiceUsed });
+      return respondWithAudio(nativeMale.data.audioContent, nativeMale.voiceUsed, nativeMale.languageCode);
     }
 
+    // ── 6. All attempts failed ─────────────────────────────────────────────
     console.error("[GUTO_VOICE] synth_failed", {
       userId,
       language: selectedLanguage,
@@ -4329,6 +4349,29 @@ app.post("/voz", requireActiveUser, async (req, res) => {
   } catch (error) {
     console.error("[GUTO_VOICE] synth_connect_failed", { userId, language: selectedLanguage, error });
     res.status(502).json({ message: localizedHttpMessage("voice_connect", selectedLanguage) });
+  }
+});
+
+// GET /voz/cache — frontend queries server cache by pre-computed key before sending full text.
+// Returns { hit: true, audioContent, voiceUsed } or { hit: false }.
+app.get("/voz/cache", requireActiveUser, async (req, res) => {
+  const key = typeof req.query.key === "string" ? req.query.key.trim() : "";
+  if (!key) return res.status(400).json({ hit: false, error: "missing key" });
+
+  try {
+    const cached = await getVoiceCache(key);
+    if (cached) {
+      return res.json({
+        hit: true,
+        audioContent: cached.audioContent,
+        voiceUsed: cached.voiceUsed,
+        mimeType: cached.mimeType,
+        fromCache: true,
+      });
+    }
+    return res.json({ hit: false });
+  } catch {
+    return res.json({ hit: false });
   }
 });
 

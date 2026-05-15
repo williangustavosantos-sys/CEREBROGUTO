@@ -2,6 +2,7 @@ import express, { Request, Response } from "express";
 import bcrypt from "bcrypt";
 import { config } from "./config.js";
 import {
+  canAccessUserAccess,
   getRequestActorAccess,
   normalizeAccessTeamId,
   requireAuth,
@@ -381,7 +382,8 @@ authRouter.post("/admin/invites", requireAuth, async (req: Request, res: Respons
 // ─── Admin: update user access ────────────────────────────────────────────────
 
 authRouter.patch("/admin/users/:userId/access", requireAuth, async (req: Request, res: Response) => {
-  if (req.gutoUser!.role !== "admin" && req.gutoUser!.role !== "coach" && req.gutoUser!.role !== "super_admin") {
+  const actor = getRequestActorAccess(req);
+  if (!actor || (actor.role !== "admin" && actor.role !== "coach" && actor.role !== "super_admin")) {
     res.status(403).json({ message: "Acesso negado." });
     return;
   }
@@ -394,6 +396,16 @@ authRouter.patch("/admin/users/:userId/access", requireAuth, async (req: Request
     return;
   }
 
+  const targetAccess = await getUserAccessAsync(userId);
+  if (!targetAccess) {
+    res.status(404).json({ message: "Usuário não encontrado." });
+    return;
+  }
+  if (!canAccessUserAccess(actor, targetAccess)) {
+    res.status(403).json({ message: "Acesso negado." });
+    return;
+  }
+
   const updated = await upsertUserAccessAsync(userId, { active });
   res.json(updated);
 });
@@ -401,12 +413,24 @@ authRouter.patch("/admin/users/:userId/access", requireAuth, async (req: Request
 // ─── Admin: update subscription ───────────────────────────────────────────────
 
 authRouter.patch("/admin/users/:userId/subscription", requireAuth, async (req: Request, res: Response) => {
-  if (req.gutoUser!.role !== "admin" && req.gutoUser!.role !== "coach" && req.gutoUser!.role !== "super_admin") {
+  const actor = getRequestActorAccess(req);
+  if (!actor || (actor.role !== "admin" && actor.role !== "coach" && actor.role !== "super_admin")) {
     res.status(403).json({ message: "Acesso negado." });
     return;
   }
 
   const userId = String(req.params.userId);
+
+  const targetAccess = await getUserAccessAsync(userId);
+  if (!targetAccess) {
+    res.status(404).json({ message: "Usuário não encontrado." });
+    return;
+  }
+  if (!canAccessUserAccess(actor, targetAccess)) {
+    res.status(403).json({ message: "Acesso negado." });
+    return;
+  }
+
   const { subscriptionStatus, subscriptionEndsAt, extendDays } = req.body as {
     subscriptionStatus?: string;
     subscriptionEndsAt?: string;

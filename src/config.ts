@@ -11,7 +11,6 @@ export const config = {
   openaiApiKey: process.env.OPENAI_API_KEY || "",
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
   memoryFile: process.env.GUTO_MEMORY_FILE || join(process.cwd(), "data", "guto-memory.json"),
-  defaultUserId: process.env.GUTO_DEFAULT_USER_ID || "local-user",
   timeZone: process.env.GUTO_TIME_ZONE || process.env.TZ || "Europe/Rome",
   allowedOrigins: (process.env.GUTO_ALLOWED_ORIGINS || "")
     .split(",")
@@ -45,3 +44,16 @@ export const config = {
   stripePriceAnnual: process.env.STRIPE_PRICE_ANNUAL || "",
   stripePriceBeta: process.env.STRIPE_PRICE_BETA || "",
 };
+
+// P0 — Startup guard: GUTO_ALLOW_DEV_ACCESS must never reach production/Render.
+// Render sets RENDER=true; standard Node.js prod sets NODE_ENV=production.
+// Failing here causes a visible deploy crash instead of a silent auth bypass.
+const _isProductionEnv =
+  process.env.NODE_ENV === "production" || process.env.RENDER === "true";
+
+if (config.allowDevAccess && _isProductionEnv) {
+  throw new Error(
+    "[GUTO] FATAL: GUTO_ALLOW_DEV_ACCESS=true is forbidden in production/Render. " +
+      "Remove this environment variable before deploying."
+  );
+}
