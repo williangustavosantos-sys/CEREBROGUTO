@@ -36,6 +36,7 @@ const originalFetch = globalThis.fetch.bind(globalThis);
 let app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
 let server: Server;
 let baseUrl = "";
+let clearMemoryStoreCache: () => void = () => {};
 
 const forbiddenPortuguese: Record<Exclude<GutoLanguage, "pt-BR">, string[]> = {
   "en-US": [
@@ -297,6 +298,13 @@ before(async () => {
   };
   app = serverModule.app;
 
+  // Dynamic import AFTER server import so the same module instance is reused
+  // (config is already built with the correct testMemoryFile path).
+  const memStoreModule = (await import(
+    pathToFileURL(join(process.cwd(), "src/memory-store.ts")).href
+  )) as { clearMemoryStoreCache: () => void };
+  clearMemoryStoreCache = memStoreModule.clearMemoryStoreCache;
+
   await new Promise<void>((resolve, reject) => {
     server = app.listen(0, "127.0.0.1", () => resolve());
     server.once("error", reject);
@@ -316,6 +324,7 @@ after(async () => {
 });
 
 beforeEach(() => {
+  clearMemoryStoreCache();
   resetTestMemory();
 });
 

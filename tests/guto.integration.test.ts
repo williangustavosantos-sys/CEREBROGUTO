@@ -29,6 +29,7 @@ const testMemoryFile = join(testMemoryDir, "guto-memory.integration-test.json");
 let app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
 let server: Server;
 let baseUrl = "";
+let clearMemoryStoreCache: () => void = () => {};
 
 const originalFetch = globalThis.fetch.bind(globalThis);
 
@@ -151,25 +152,45 @@ function installGeminiMock() {
     }
 
     // 2. Referência vaga de histórico
-    if (inputMsg.includes("treinei isso") && inputMsg.includes("ontem")) {
-      if (memory.lastSuggestedFocus || memory.lastWorkoutFocus) {
+    // Matches PT "treinei isso ontem", EN "I trained that yesterday", IT "l'ho allenato ieri"
+    const isVagueHistoryRef =
+      (inputMsg.includes("treinei isso") && inputMsg.includes("ontem")) ||
+      (inputMsg.includes("trained that") && inputMsg.includes("yesterday")) ||
+      inputMsg.includes("allenato ieri") ||
+      inputMsg.includes("l'ho allenato");
+
+    if (isVagueHistoryRef) {
+      // Focus can come from memory OR from the conversation history text (real model reads both)
+      const hasFocusInMemory = memory.lastSuggestedFocus || memory.lastWorkoutFocus;
+      const hasFocusInHistory = /peito e tr[íi]ceps|chest and triceps|petto e tricipiti/i.test(prompt);
+
+      if (hasFocusInMemory || hasFocusInHistory) {
+        // Return response in the correct language to avoid assertAndRepairVisibleLanguage replacing it
+        const lang = (memory.language as string) || "pt-BR";
+        const fala =
+          lang === "en-US"
+            ? "Got it. Not repeating chest and triceps. Give me your age and any pain."
+            : lang === "it-IT"
+            ? "Capito. Non ripeto petto e tricipiti. Dimmi età e dolori."
+            : "Boa. Não repito peito e tríceps. Me manda tua idade e dor.";
+        const instruction =
+          lang === "en-US" ? "age and pain" : lang === "it-IT" ? "età e dolori" : "idade e dor";
+
         return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
-          fala: "Boa. Não repito peito e tríceps. Me manda tua idade e dor.",
+          fala,
           acao: "none",
           expectedResponse: {
             type: "text",
             context: "training_limitations",
-            instruction: "idade e dor",
+            instruction,
           },
-          trainedReference: {
-            dateLabel: "yesterday"
-          }
+          trainedReference: { dateLabel: "yesterday" },
         }))), { status: 200, headers: { "Content-Type": "application/json" } });
       } else {
         return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
           fala: "Treinou o que ontem? Preciso saber pra não repetir.",
           acao: "none",
-          expectedResponse: null
+          expectedResponse: null,
         }))), { status: 200, headers: { "Content-Type": "application/json" } });
       }
     }
@@ -261,6 +282,13 @@ before(async () => {
   };
   app = serverModule.app;
 
+  // Dynamic import AFTER server import so the same module instance is reused
+  // (config is already built with the correct testMemoryFile path).
+  const memStoreModule = (await import(
+    pathToFileURL(join(process.cwd(), "src/memory-store.ts")).href
+  )) as { clearMemoryStoreCache: () => void };
+  clearMemoryStoreCache = memStoreModule.clearMemoryStoreCache;
+
   await new Promise<void>((resolve, reject) => {
     server = app.listen(0, "127.0.0.1", () => resolve());
     server.once("error", reject);
@@ -282,6 +310,7 @@ after(async () => {
 });
 
 beforeEach(() => {
+  clearMemoryStoreCache();
   resetTestMemory();
 });
 

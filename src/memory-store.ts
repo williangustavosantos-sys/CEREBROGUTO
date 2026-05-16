@@ -22,6 +22,16 @@ let redisClient: { get: (key: string) => Promise<unknown>; set: (key: string, va
 const REDIS_KEY = "guto:memory";
 
 function getRedisClient() {
+  // Hard guard: tests must NEVER touch production Redis.
+  // Checked on every call (not cached) so the flag is honored even when env vars
+  // are set later via dotenv after the module is imported.
+  if (
+    process.env.NODE_ENV === "test" ||
+    process.env.GUTO_DISABLE_REDIS_FOR_TESTS === "1"
+  ) {
+    return null;
+  }
+
   if (redisClient) return redisClient;
 
   const url = process.env.UPSTASH_REDIS_REST_URL;
@@ -144,4 +154,13 @@ export function writeMemoryStoreSync(store: MemoryStore): void {
   }
   Object.assign(globalMemoryStore, store);
   writeToFile(store);
+}
+
+/**
+ * Clear the in-memory cache. Use in tests to prevent state leaking between test cases.
+ */
+export function clearMemoryStoreCache(): void {
+  for (const key in globalMemoryStore) {
+    delete globalMemoryStore[key];
+  }
 }
