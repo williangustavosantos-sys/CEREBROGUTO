@@ -2064,11 +2064,20 @@ export function filterExercisesBySafety(
   if (tags.size === 0 && !region) return ids;
 
   const dangerByRegion: Record<string, Set<string>> = {
-    knee: new Set(["jump", "deep_squat", "lunge_loaded", "sprint", "high_impact"]),
-    lower_back: new Set(["deadlift", "good_morning", "loaded_bend", "high_impact"]),
-    shoulder: new Set(["overhead_press", "behind_neck", "upright_row_high"]),
-    ankle: new Set(["jump", "sprint", "high_impact"]),
-    chest: new Set(["sprint", "max_intensity", "high_impact"]),
+    knee: new Set([
+      "jump", "deep_squat", "lunge_loaded", "sprint", "high_impact",
+      "agachamento", "afundo", "salto", "corrida", "cardio_intenso",
+    ]),
+    lower_back: new Set([
+      "deadlift", "good_morning", "loaded_bend", "high_impact",
+      "terra", "levantamento", "remada_curvada", "flexao_lombar", "ponte_carregada",
+    ]),
+    shoulder: new Set([
+      "overhead_press", "behind_neck", "upright_row_high",
+      "desenvolvimento", "elevacao", "remada_alta", "ombro_acima_cabeca",
+    ]),
+    ankle: new Set(["jump", "sprint", "high_impact", "salto", "corrida", "polichinelo"]),
+    chest: new Set(["sprint", "max_intensity", "high_impact", "cardio", "hiit"]),
   };
 
   return ids.filter((id) => {
@@ -2081,7 +2090,9 @@ export function filterExercisesBySafety(
     if (region && dangerByRegion[region]) {
       const danger = dangerByRegion[region];
       const pattern = (ex.movementPattern ?? "").toLowerCase();
+      const exerciseTags = (ex.tags ?? []).map((tag) => tag.toLowerCase());
       if (pattern && danger.has(pattern)) return false;
+      if (exerciseTags.some((tag) => danger.has(tag))) return false;
     }
     return true;
   });

@@ -1,6 +1,8 @@
 import "dotenv/config";
 import { mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
+import jwt from "jsonwebtoken";
+import { upsertUserAccessAsync } from "../src/user-access-store.js";
 
 type Acao = "none" | "updateWorkout" | "lock";
 type ExpectedContext =
@@ -105,6 +107,7 @@ interface FailureSummary {
 const DEFAULT_CASES_FILE = "evals/guto-cases.jsonl";
 const DEFAULT_BASE_URL = process.env.GUTO_EVAL_BASE_URL || "http://localhost:3001";
 const DEFAULT_TIMEOUT_MS = Number(process.env.GUTO_EVAL_TIMEOUT_MS || 45_000);
+const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-in-production";
 // Judge LLM — Claude Sonnet por default. Independente do modelo do GUTO
 // (Gemini), evita auto-grade (Gemini julgando Gemini). Override via env.
 // Mantemos GUTO_EVAL_GEMINI_MODEL como deprecated alias para compat retro
@@ -156,6 +159,7 @@ function parseArgs() {
     judge: process.env.GUTO_EVAL_JUDGE !== "0",
     json: false,
     report: "",
+    delayMs: 0,
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -168,11 +172,16 @@ function parseArgs() {
     else if (arg === "--no-judge") parsed.judge = false;
     else if (arg === "--json") parsed.json = true;
     else if (arg === "--report") parsed.report = args[++index] || "";
+    else if (arg === "--delay-ms") parsed.delayMs = Number(args[++index] || 0);
   }
 
   parsed.ids.delete("");
   parsed.groups.delete("");
   return parsed;
+}
+
+function wait(ms: number) {
+  return new Promise((resolveWait) => setTimeout(resolveWait, ms));
 }
 
 function normalize(value: string) {
@@ -271,6 +280,17 @@ async function fetchJson<T>(url: string, init: RequestInit, timeoutMs = DEFAULT_
 }
 
 async function seedMemory(baseUrl: string, userId: string, testCase: EvalCase) {
+  await upsertUserAccessAsync(userId, {
+    role: "student",
+    coachId: "guto-eval-coach",
+    teamId: "GUTO_CORE",
+    active: true,
+    visibleInArena: false,
+    archived: false,
+    subscriptionStatus: "active",
+    subscriptionEndsAt: null,
+  });
+
   const memoryPayload = {
     userId,
     name: "Will",
@@ -280,9 +300,17 @@ async function seedMemory(baseUrl: string, userId: string, testCase: EvalCase) {
 
   await fetchJson(`${baseUrl}/guto/memory`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders(userId),
     body: JSON.stringify(memoryPayload),
   });
+}
+
+function authHeaders(userId: string) {
+  const token = jwt.sign({ userId, role: "student" }, JWT_SECRET);
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+  };
 }
 
 async function callGuto(baseUrl: string, runId: string, testCase: EvalCase) {
@@ -305,7 +333,7 @@ async function callGuto(baseUrl: string, runId: string, testCase: EvalCase) {
 
   const { response, data } = await fetchJson<GutoResponse>(`${baseUrl}/guto`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders(userId),
     body: JSON.stringify(payload),
   });
 
@@ -568,7 +596,8 @@ async function main() {
   }
 
   const results: EvalResult[] = [];
-  for (const testCase of cases) {
+  for (const [index, testCase] of cases.entries()) {
+    if (index > 0 && args.delayMs > 0) await wait(args.delayMs);
     const result = await runCase(args.baseUrl.replace(/\/$/, ""), runId, testCase, args.judge);
     results.push(result);
     if (!args.json) printResult(result);

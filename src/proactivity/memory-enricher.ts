@@ -63,8 +63,9 @@ export async function fetchWeatherForCity(
     const data = (await res.json()) as { weather?: WttrDay[] }
     const days: WttrDay[] = data?.weather ?? []
 
-    // Find the day matching the requested date (wttr returns 3 days from today)
-    const targetDay = days.find((d) => d.date === date) ?? days[0]
+    // wttr returns only a short forecast window. If the requested date is not
+    // present, do not attach today's weather to a future trip.
+    const targetDay = days.find((d) => d.date === date)
     if (!targetDay) return null
 
     const rawCondition =
@@ -80,6 +81,7 @@ export async function fetchWeatherForCity(
       condition: translateCondition(rawCondition, language),
       conditionEn: rawCondition,
       source: 'wttr.in',
+      fetchedAt: new Date().toISOString(),
     }
   } catch {
     return null
@@ -89,6 +91,8 @@ export async function fetchWeatherForCity(
 // ─── Holidays via date.nager.at ───────────────────────────────────────────────
 
 function getCountryCode(country: string): string | null {
+  const trimmed = country.trim()
+  if (/^[A-Z]{2}$/i.test(trimmed)) return trimmed.toUpperCase()
   const map: Record<string, string> = {
     brazil: 'BR', brasil: 'BR', br: 'BR',
     italy: 'IT', italia: 'IT', itália: 'IT', it: 'IT',
@@ -102,6 +106,40 @@ function getCountryCode(country: string): string | null {
     mexico: 'MX', méxico: 'MX', mx: 'MX',
   }
   return map[country.toLowerCase().trim()] ?? null
+}
+
+function getCountryCodeFromLocation(location?: string): string | null {
+  if (!location) return null
+  const normalized = location
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+  const map: Record<string, string> = {
+    roma: 'IT',
+    rome: 'IT',
+    milano: 'IT',
+    milan: 'IT',
+    napoli: 'IT',
+    florence: 'IT',
+    firenze: 'IT',
+    london: 'GB',
+    londres: 'GB',
+    paris: 'FR',
+    madrid: 'ES',
+    barcelona: 'ES',
+    lisbon: 'PT',
+    lisboa: 'PT',
+    'new york': 'US',
+    miami: 'US',
+    'los angeles': 'US',
+    sao_paulo: 'BR',
+    'sao paulo': 'BR',
+    'são paulo': 'BR',
+    rio: 'BR',
+    'rio de janeiro': 'BR',
+  }
+  return map[normalized] ?? null
 }
 
 interface NagerHoliday {
@@ -174,6 +212,7 @@ export async function enrichMemory(
   memoryId: string,
   memory: import('./types').ProactiveMemory,
   userCountry: string,
+  userCountryCode: string | undefined,
   language: string
 ): Promise<void> {
   const updates: Partial<import('./types').ProactiveMemory> = {
@@ -182,15 +221,26 @@ export async function enrichMemory(
 
   // Weather: only for trips with a known city and date
   if ((memory.type === 'trip' || memory.type === 'commitment') && memory.location && memory.dateParsed) {
-    const weather = await fetchWeatherForCity(memory.location, memory.dateParsed, language)
+    const fetchedAt = memory.weatherFetchedAt || memory.weatherEnrichment?.fetchedAt
+    const shouldRefreshWeather =
+      !memory.weatherEnrichment ||
+      !fetchedAt ||
+      Date.now() - new Date(fetchedAt).getTime() > 6 * 60 * 60 * 1000
+
+    const weather = shouldRefreshWeather
+      ? await fetchWeatherForCity(memory.location, memory.dateParsed, language)
+      : null
     if (weather) {
       updates.weatherEnrichment = weather
+      updates.weatherFetchedAt = weather.fetchedAt
     }
   }
 
-  // Holidays: for any memory with a date, look up holidays in user's country
+  // Holidays: for trips, prefer destination country when it can be resolved.
+  // Otherwise use user's country as fallback.
   if (memory.dateParsed && userCountry) {
-    const countryCode = getCountryCode(userCountry)
+    const destinationCode = memory.type === 'trip' ? getCountryCodeFromLocation(memory.location) : null
+    const countryCode = destinationCode || userCountryCode || getCountryCode(userCountry)
     if (countryCode) {
       const weekStart = getIsoWeekMonday(memory.dateParsed)
 
@@ -209,12 +259,13 @@ export async function enrichMemory(
 export async function enrichPendingMemories(
   userId: string,
   userCountry: string,
+  userCountryCode: string | undefined,
   language: string
 ): Promise<void> {
-  const pending = await getProactiveMemoriesByStatus(userId, ['confirmed'])
+  const pending = await getProactiveMemoriesByStatus(userId, ['confirmed', 'enriched', 'surfaced'])
   for (const memory of pending) {
     try {
-      await enrichMemory(userId, memory.id, memory, userCountry, language)
+      await enrichMemory(userId, memory.id, memory, userCountry, userCountryCode, language)
     } catch {
       // Enrichment is non-critical — never fails the system
     }

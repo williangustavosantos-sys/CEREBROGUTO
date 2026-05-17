@@ -2,6 +2,7 @@ import "./test-env.js";
 import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import jwt from "jsonwebtoken";
+import bcrypt from "bcrypt";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -114,14 +115,14 @@ function seedAccessStore(): void {
 function token(user: UserAccess): string {
   return jwt.sign(
     { userId: user.userId, role: user.role, coachId: user.coachId },
-    process.env.JWT_SECRET || "dev-secret-change-in-production"
+    config.jwtSecret
   );
 }
 
 function superToken(): string {
   return jwt.sign(
     { userId: "super-admin-team-test", role: "super_admin" },
-    process.env.JWT_SECRET || "dev-secret-change-in-production"
+    config.jwtSecret
   );
 }
 
@@ -525,6 +526,25 @@ describe("GUTO Phase 5 – admin team operations", () => {
     assert.equal(getRes.status, 200);
     const { inviteLink } = (await getRes.json()) as { inviteLink: string | null };
     assert.equal(inviteLink, createdLink);
+
+    const inviteToken = createdLink.split("/convite/")[1];
+    assert.ok(inviteToken);
+
+    const previewRes = await request(`/auth/invite/${inviteToken}`);
+    assert.equal(previewRes.status, 200);
+    const preview = (await previewRes.json()) as { name: string; legalName: string };
+    assert.equal(preview.name, "Aluno");
+    assert.equal(preview.legalName, "Aluno Convite");
+
+    const claimRes = await request(`/auth/invite/${inviteToken}/claim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "senha123" }),
+    });
+    assert.equal(claimRes.status, 200);
+    const claim = (await claimRes.json()) as { name: string; token: string };
+    assert.equal(claim.name, "Aluno");
+    assert.ok(claim.token);
   });
 
   // K) another team cannot retrieve invite
@@ -635,13 +655,43 @@ describe("GUTO Phase 5 – admin team operations", () => {
     assert.equal(otherRenew.status, 403);
   });
 
-  it("allows admin and super_admin to hard delete managed students", async () => {
+  it("allows stored admin users to log in through the admin login route", async () => {
+    const passwordHash = await bcrypt.hash("admin-secret", 10);
+    writeUserAccessStoreRaw({
+      users: {
+        ...Object.fromEntries(
+          [adminA, adminB, coachA, coachOtherA, coachB, studentA, studentOtherCoachA, studentB, archivedStudentA, legacyCoreStudent, coreAdmin]
+            .map((user) => [user.userId, user])
+        ),
+        [adminA.userId]: {
+          ...adminA,
+          email: "admin-a@guto.test",
+          passwordHash,
+        },
+      },
+    });
+
+    const response = await request("/auth/admin/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "admin-a@guto.test", password: "admin-secret" }),
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { role: string; userId: string; teamId: string; token: string };
+    assert.equal(body.role, "admin");
+    assert.equal(body.userId, adminA.userId);
+    assert.equal(body.teamId, "TEAM_A");
+    assert.ok(body.token);
+  });
+
+  it("blocks regular admin hard delete and allows only super_admin", async () => {
     const adminDelete = await request(`/admin/students/${studentA.userId}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token(adminA)}` },
     });
-    assert.equal(adminDelete.status, 204);
-    assert.equal(getUserAccess(studentA.userId), undefined);
+    assert.equal(adminDelete.status, 403);
+    assert.equal(getUserAccess(studentA.userId)?.userId, studentA.userId);
 
     const superDelete = await request(`/admin/students/${studentB.userId}`, {
       method: "DELETE",

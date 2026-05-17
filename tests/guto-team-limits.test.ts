@@ -79,7 +79,7 @@ function seedFullStartTeam(): void {
 function token(userId: string, role: UserAccess["role"] = "admin"): string {
   return jwt.sign(
     { userId, role, coachId: userId },
-    process.env.JWT_SECRET || "dev-secret-change-in-production"
+    process.env.JWT_SECRET!
   );
 }
 

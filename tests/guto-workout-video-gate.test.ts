@@ -141,7 +141,7 @@ function assertCatalogError(fn: () => unknown, code: string) {
 function signToken(role: "student" | "admin" | "coach", userId: string) {
   return jwt.sign(
     { userId, role, coachId: role === "coach" ? userId : undefined },
-    process.env.JWT_SECRET || "dev-secret-change-in-production"
+    process.env.JWT_SECRET!
   );
 }
 

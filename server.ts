@@ -11,9 +11,12 @@ import { requestLog } from "./src/http/request-log";
 import { readMemoryStoreSync, writeMemoryStoreSync, readMemoryStoreAsync, writeMemoryStoreAsync } from "./src/memory-store";
 import {
   getCatalogById,
+  getExerciseLocations,
   getExerciseName,
+  filterExercisesBySafety,
   ValidatedExerciseCatalog,
   type CatalogLanguage,
+  type CatalogLocation,
 } from "./exercise-catalog";
 import { sanitizeDisplayName } from "./server-utils";
 import { generateWorkoutPoster } from "./src/poster";
@@ -48,6 +51,8 @@ import { getEffectiveUserAccess } from "./src/user-access-store.js";
 import {
   calculateMacros,
   validateAndCorrectPortions,
+  normalizeMealCalories,
+  validateDietCalories,
   buildDietPrompt,
   type NutritionProfile,
   type DietMeal,
@@ -130,7 +135,9 @@ type GutoTelemetryEvent =
   | "pact_completed"
   | "first_message_sent"
   | "mission_completed"
-  | "user_returned_next_day";
+  | "user_returned_next_day"
+  | "calibration_completed"
+  | "guto_online_session_event";
 
 interface Profile {
   name?: string;
@@ -152,6 +159,8 @@ interface Profile {
   preferredTrainingLocation?: string;
   trainingPathology?: string;
   country?: string;
+  countryCode?: string;
+  city?: string;
   heightCm?: number;
   weightKg?: number;
   foodRestrictions?: string;
@@ -280,9 +289,10 @@ interface GutoModelResponse {
     raw?: string;
   } | null;
   proactiveMemoryAction?: {
-    type: "confirm" | "discard" | "validate" | "request_discard" | "cancel_discard_request";
+    type: "confirm" | "discard" | "validate" | "request_discard" | "cancel_discard_request" | "update";
     memoryId: string;
     outcome?: "happened" | "postponed" | "discarded";
+    patch?: Partial<Pick<ProactiveMemory, "understood" | "dateText" | "dateParsed" | "location">>;
   } | null;
 }
 interface GutoVoiceProfile {
@@ -314,6 +324,8 @@ interface GutoMemory {
   preferredTrainingLocation?: string;
   trainingPathology?: string;
   country?: string;
+  countryCode?: string;
+  city?: string;
   heightCm?: number;
   weightKg?: number;
   foodRestrictions?: string;
@@ -444,6 +456,24 @@ const GUTO_VOICES: Record<GutoLanguage, GutoVoiceProfile> = {
   },
 };
 
+function isDevLocalOrigin(origin: string) {
+  if (isProductionEnv) return false;
+  try {
+    const url = new URL(origin);
+    const host = url.hostname;
+    return (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "0.0.0.0" ||
+      /^192\.168\.\d{1,3}\.\d{1,3}$/.test(host) ||
+      /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ||
+      /^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(host)
+    );
+  } catch {
+    return false;
+  }
+}
+
 app.use(cors({
   origin(origin, callback) {
     // No-origin requests (same-origin, server-to-server, curl) are always allowed.
@@ -462,6 +492,10 @@ app.use(cors({
       return;
     }
     if (config.allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+    if (isDevLocalOrigin(origin)) {
       callback(null, true);
       return;
     }
@@ -558,6 +592,8 @@ app.post("/guto/events", requireActiveUser, (req, res) => {
     "first_message_sent",
     "mission_completed",
     "user_returned_next_day",
+    "calibration_completed",
+    "guto_online_session_event",
   ];
 
   if (!body.event || !allowedEvents.includes(body.event)) {
@@ -608,19 +644,19 @@ function fallbackLine(language: string, key: FallbackLineKey) {
     "pt-BR": {
       system_key: "Sistema sem chave de ação. Corrige o backend e volta com uma frase objetiva.",
       parse: "Executa agora. Dez minutos, sem negociar.",
-      internal_error: "Deu um erro interno aqui. Tenta de novo em alguns segundos.",
+      internal_error: "Deu um curto aqui, mas isso não vira fuga. Respira, tenta de novo em alguns segundos e a gente segue.",
       speech_short: "Áudio curto demais. Segure o microfone e fale uma frase completa.",
     },
     "en-US": {
       system_key: "Action key missing. Fix the backend and give me a straight answer.",
       parse: "Get it done. Ten minutes, no negotiating.",
-      internal_error: "Something broke on my end. Give it a few seconds and try again.",
+      internal_error: "My system tripped for a second, but this is not your escape. Give it a few seconds and we keep moving.",
       speech_short: "Audio too short. Hold the mic and say one full sentence.",
     },
     "it-IT": {
       system_key: "Manca la chiave d'azione. Sistema il backend e torna con una frase diretta.",
       parse: "Fallo e basta. Dieci minuti, senza trattare.",
-      internal_error: "C'è un problema tecnico. Riprova tra un attimo.",
+      internal_error: "Mi si è impuntato il sistema, ma non diventa una scusa. Riprova tra un attimo e ripartiamo.",
       speech_short: "Audio troppo corto. Tieni premuto il microfono e dì una frase completa.",
     },
   };
@@ -886,6 +922,8 @@ export function getMemory(userId: string): GutoMemory {
       preferredTrainingLocation: existing.preferredTrainingLocation,
       trainingPathology: existing.trainingPathology,
       country: existing.country,
+      countryCode: existing.countryCode,
+      city: existing.city,
       heightCm: (typeof existing.heightCm === "number" && existing.heightCm > 0) ? existing.heightCm : (typeof existing.heightCm === "string" && !isNaN(Number(existing.heightCm)) ? Number(existing.heightCm) : undefined),
       weightKg: (typeof existing.weightKg === "number" && existing.weightKg > 0) ? existing.weightKg : (typeof existing.weightKg === "string" && !isNaN(Number(existing.weightKg)) ? Number(existing.weightKg) : undefined),
       foodRestrictions: existing.foodRestrictions,
@@ -1450,6 +1488,19 @@ function validateProactiveMemoryAction(value: unknown): GutoModelResponse["proac
     return { type: "cancel_discard_request", memoryId };
   }
 
+  if (candidate.type === "update") {
+    const rawPatch = (candidate as { patch?: unknown }).patch;
+    const patch: Partial<Pick<ProactiveMemory, "understood" | "dateText" | "dateParsed" | "location">> = {};
+    if (rawPatch && typeof rawPatch === "object" && !Array.isArray(rawPatch)) {
+      const p = rawPatch as Record<string, unknown>;
+      if (typeof p.understood === "string" && p.understood.trim()) patch.understood = p.understood.trim().slice(0, 300);
+      if (typeof p.dateText === "string" && p.dateText.trim()) patch.dateText = p.dateText.trim().slice(0, 80);
+      if (typeof p.dateParsed === "string" && /^\d{4}-\d{2}-\d{2}$/.test(p.dateParsed)) patch.dateParsed = p.dateParsed;
+      if (typeof p.location === "string" && p.location.trim()) patch.location = p.location.trim().slice(0, 120);
+    }
+    return Object.keys(patch).length > 0 ? { type: "update", memoryId, patch } : null;
+  }
+
   if (
     candidate.type === "validate" &&
     (candidate.outcome === "happened" ||
@@ -1484,6 +1535,10 @@ async function filterProactiveMemoryActionForUser(
     }
 
     if (action.type === "validate" && memory.status === "pending_validation") {
+      return action;
+    }
+
+    if (action.type === "update" && memory.status === "pending_confirmation" && action.patch && Object.keys(action.patch).length > 0) {
       return action;
     }
 
@@ -2310,6 +2365,7 @@ REGRAS DO JSON:
 - proactiveMemoryAction: use null na maioria das vezes. Só preencha quando o proactivityContext indicar uma memória e o usuário responder com clareza. Tipos disponíveis:
   • { "type": "confirm", "memoryId": "<id>" } — usuário confirma memória pending_confirmation.
   • { "type": "discard", "memoryId": "<id>" } — usuário descarta memória pending_confirmation.
+  • { "type": "update", "memoryId": "<id>", "patch": { "understood": "...", "dateText": "...", "dateParsed": "YYYY-MM-DD", "location": "..." } } — usuário corrigiu detalhe de uma memória pending_confirmation. Atualize, mas ainda peça confirmação.
   • { "type": "validate", "memoryId": "<id>", "outcome": "happened|postponed|discarded" } — usuário valida o que aconteceu com uma memória pending_validation.
   • { "type": "request_discard", "memoryId": "<id>" } — usuário menciona que cancelou/não vai mais a algo de uma memória já confirmada/enriquecida/surfaced. Não descarte ainda — GUTO pergunta primeiro ("Roma descarto?"). O sistema fecha o loop quando o usuário confirmar.
   • { "type": "cancel_discard_request", "memoryId": "<id>" } — usuário respondeu "não, mantém" quando GUTO perguntou se descartava. Limpa o flag de descarte.
@@ -2634,6 +2690,181 @@ function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryP
   return memory;
 }
 
+function getGutoCallName(memory: GutoMemory): string {
+  const name = (memory.name || (memory as any).preferredName || "").trim();
+  return name ? name.split(/\s+/)[0] : "";
+}
+
+function trainingClarificationMessage(language: GutoLanguage, rawValue: string, callName = ""): string {
+  const prefix = callName ? `${callName}, ` : "";
+  if (language === "en-US") {
+    return `${prefix}I saw you added "${rawValue}" as a limitation, but I didn't fully understand it. Explain it better so I can build your workout without messing with your body.`;
+  }
+  if (language === "it-IT") {
+    return `${prefix}ho visto che hai messo "${rawValue}" come limite, ma non l'ho capito bene. Spiegamelo meglio così preparo l'allenamento senza fregarti il corpo.`;
+  }
+  return `Opa, ${prefix}vi que você colocou "${rawValue}" como limitação, mas eu não entendi direito. Me explica melhor pra eu montar teu treino sem brincar com teu corpo.`;
+}
+
+function dietClarificationMessage(language: GutoLanguage, rawValue: string, callName = ""): string {
+  const prefix = callName ? `${callName}, ` : "";
+  if (language === "en-US") {
+    return `${prefix}I saw you wrote "${rawValue}" as something you don't eat, but I didn't fully understand it. Tell me what it is before I build your diet.`;
+  }
+  if (language === "it-IT") {
+    return `${prefix}ho visto che hai scritto "${rawValue}" come qualcosa che non mangi, ma non l'ho capito bene. Spiegamelo prima che prepari la dieta.`;
+  }
+  return `Opa, ${prefix}vi que você colocou "${rawValue}" no que não come, mas eu não entendi direito. Me explica o que é antes de eu montar tua dieta.`;
+}
+
+function missingDietProfileMessage(language: GutoLanguage, missing: string[]): string {
+  const fields = missing.join(", ");
+  if (language === "en-US") {
+    return `I still don't have everything to build your diet right: ${fields}. Fix it in calibration and I will close the plan without guessing.`;
+  }
+  if (language === "it-IT") {
+    return `Non ho ancora tutto per preparare bene la tua dieta: ${fields}. Sistemalo nella calibrazione e chiudo il piano senza tirare a indovinare.`;
+  }
+  return `Ainda não tenho tudo pra montar tua dieta direito: ${fields}. Ajusta isso na calibragem e eu fecho o plano sem chute.`;
+}
+
+function dietGenerationFailedMessage(language: GutoLanguage): string {
+  if (language === "en-US") {
+    return "My system shorted out while building your diet. Hold on and try again in a few seconds.";
+  }
+  if (language === "it-IT") {
+    return "Mi si è inceppato il sistema mentre preparavo la tua dieta. Aspetta un attimo e riprova tra qualche secondo.";
+  }
+  return "Ixi, deu um curto aqui enquanto eu montava tua dieta. Aguenta aí e tenta de novo em alguns segundos.";
+}
+
+function validateDietAgainstRestrictions(
+  meals: DietMeal[],
+  restrictionsRaw?: string,
+  intolerancesRaw?: string
+): string[] {
+  const declared = normalize([restrictionsRaw, intolerancesRaw].filter(Boolean).join(" "));
+  if (!declared) return [];
+
+  const foodText = normalize(meals
+    .flatMap((meal) => meal.foods.map((food) => `${food.name} ${food.quantity}`))
+    .join(" "));
+  const issues: string[] = [];
+
+  const hasFood = (terms: string[]) => terms.some((term) => foodText.includes(normalize(term)));
+  const hasRestriction = (terms: string[]) => terms.some((term) => declared.includes(normalize(term)));
+
+  if (hasRestriction(["lactose", "leite", "dairy", "milk", "latte", "lattosio"])) {
+    if (hasFood(["leite", "milk", "latte", "iogurte", "yogurt", "yoghurt", "queijo", "cheese", "ricotta", "mozzarella", "parmigiano"])) {
+      issues.push("contains dairy despite lactose/dairy restriction");
+    }
+  }
+  if (hasRestriction(["gluten", "glúten", "celiaco", "celíaco", "celiac"])) {
+    if (hasFood(["pao", "pão", "bread", "pane", "massa", "pasta", "macarrao", "macarrão", "wheat", "trigo", "farinha"])) {
+      issues.push("contains gluten source despite gluten restriction");
+    }
+  }
+  if (hasRestriction(["amendoim", "peanut", "arachidi"])) {
+    if (hasFood(["amendoim", "peanut", "peanut butter", "arachidi"])) {
+      issues.push("contains peanut despite peanut restriction");
+    }
+  }
+  if (hasRestriction(["frutos do mar", "marisco", "camarão", "camarao", "shrimp", "seafood", "shellfish", "gamberi"])) {
+    if (hasFood(["camarão", "camarao", "shrimp", "gamberi", "marisco", "seafood", "shellfish", "salmão", "salmao", "salmon", "atum", "tuna", "tonno"])) {
+      issues.push("contains seafood/fish despite seafood restriction");
+    }
+  }
+  if (hasRestriction(["carne vermelha", "red meat", "manzo", "bovina"])) {
+    if (hasFood(["carne bovina", "bife", "patinho", "alcatra", "beef", "steak", "manzo", "bresaola"])) {
+      issues.push("contains red meat despite restriction");
+    }
+  }
+  if (hasRestriction(["vegano", "vegan"])) {
+    if (hasFood(["frango", "chicken", "pollo", "peixe", "fish", "atum", "tuna", "tonno", "ovo", "egg", "uovo", "leite", "milk", "queijo", "cheese", "iogurte"])) {
+      issues.push("contains animal product despite vegan restriction");
+    }
+  } else if (hasRestriction(["vegetariano", "vegetarian"])) {
+    if (hasFood(["frango", "chicken", "pollo", "peixe", "fish", "atum", "tuna", "tonno", "carne", "beef", "steak", "manzo"])) {
+      issues.push("contains meat/fish despite vegetarian restriction");
+    }
+  }
+
+  return issues;
+}
+
+function getUnresolvedTrainingPathology(memory: GutoMemory): string | null {
+  const raw = memory.trainingPathology || memory.trainingLimitations;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const normalized = normalize(raw);
+  const noLimitation = ["sem dor", "sem dores", "no pain", "pain free", "senza dolore", "senza dolori", "nao", "não", "nenhuma", "nada", "no", "none", "nessuno"].some((term) =>
+    normalized === normalize(term)
+  );
+  if (noLimitation) return null;
+  if (memory.resolvedFields?.pathology?.status === "clear") return null;
+  return raw.trim();
+}
+
+function getUnresolvedFoodRestriction(memory: GutoMemory): string | null {
+  const raw = memory.foodRestrictions || memory.foodIntolerances;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const normalized = normalize(raw);
+  const noRestriction = ["sem restricao", "sem restrição", "nenhuma", "nada", "no", "none", "nessuno"].some((term) =>
+    normalized === normalize(term)
+  );
+  if (noRestriction) return null;
+  if (memory.resolvedFields?.foodRestriction?.status === "clear") return null;
+  return raw.trim();
+}
+
+function safetyFilterWorkoutPlan(plan: WorkoutPlan, memory: GutoMemory): WorkoutPlan {
+  const pathology = memory.resolvedFields?.pathology;
+  const riskTags = pathology?.status === "clear" ? pathology.riskTags : [];
+  const bodyRegion = pathology?.status === "clear" ? pathology.bodyRegion : undefined;
+  if (!riskTags.length && !bodyRegion) return plan;
+
+  const safeIds = new Set(filterExercisesBySafety(plan.exercises.map((exercise) => exercise.id), {
+    userRiskTags: riskTags,
+    userBodyRegion: bodyRegion,
+  }));
+
+  return {
+    ...plan,
+    exercises: plan.exercises.filter((exercise) => safeIds.has(exercise.id)),
+  };
+}
+
+function addDaysToDateKey(dateKey: string, days: number): string {
+  const [year, month, day] = dateKey.split("-").map(Number) as [number, number, number];
+  const utc = new Date(Date.UTC(year, month - 1, day));
+  utc.setUTCDate(utc.getUTCDate() + days);
+  return [
+    String(utc.getUTCFullYear()).padStart(4, "0"),
+    String(utc.getUTCMonth() + 1).padStart(2, "0"),
+    String(utc.getUTCDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+function hasBadTrainingWeather(memory: GutoMemory): boolean {
+  const today = todayKey();
+  const tomorrow = addDaysToDateKey(today, 1);
+  const activeStatuses = new Set(["confirmed", "enriched", "surfaced"]);
+  return (memory.proactiveMemories || []).some((item) => {
+    if (!activeStatuses.has(item.status)) return false;
+    const weather = item.weatherEnrichment;
+    if (!weather || (weather.date !== today && weather.date !== tomorrow)) return false;
+    const condition = (weather.conditionEn || weather.condition || "").toLowerCase();
+    return ["rain", "drizzle", "thunderstorm", "snow", "storm"].some((term) => condition.includes(term));
+  });
+}
+
+function getWeatherAdjustedTrainingLocation(memory: GutoMemory, locationRaw: string): string {
+  const mode = getLocationMode(locationRaw);
+  if ((mode === "park" || locationRaw === "mixed") && hasBadTrainingWeather(memory)) {
+    return "home";
+  }
+  return locationRaw;
+}
+
 function focusToStatusHint(focus?: WorkoutFocus) {
   if (focus === "back_biceps") return "trocar foco para costas e bíceps; não repetir peito e tríceps";
   if (focus === "legs_core") return "trocar foco para pernas e core; não repetir peito, tríceps, costas ou bíceps";
@@ -2644,6 +2875,7 @@ function focusToStatusHint(focus?: WorkoutFocus) {
 
 function getLocationMode(location?: string) {
   const normalized = normalize(location || "");
+  if (normalized === "mixed" || normalized === "misto" || normalized === "ibrido" || normalized === "hibrido") return "gym";
   if (hasAnyTerm(normalized, ["academia", "palestra", "gym", "gimnasio", "fitness", "box"])) return "gym";
   if (hasAnyTerm(normalized, ["parque", "parco", "park", "rua", "calle", "street", "pista", "quadra"])) return "park";
   return "home";
@@ -3377,13 +3609,6 @@ interface WorkoutValidationResult {
   warnings: string[];
 }
 
-// Equipment values in the catalog that require gym infrastructure — not available at park without explicit declaration.
-const PARK_INCOMPATIBLE_EQUIPMENT = new Set([
-  "halter", "maquina", "polia", "barra", "banco",
-  "bike", "esteira", "escada", "eliptico",
-  "dumbbell", "machine", "cable", "barbell", "bench",
-]);
-
 function validateWorkoutPlan(
   plan: WorkoutPlan,
   recentHistory: RecentTrainingHistoryItem[] = [],
@@ -3409,11 +3634,10 @@ function validateWorkoutPlan(
       errors.push(`Duplicate videoUrl "${exercise.videoUrl}" in the same workout.`);
     }
     if (exercise.videoUrl) seenVideoUrls.add(exercise.videoUrl);
-    // Park: reject exercises that require gym equipment
-    if (locationMode === "park" && entry) {
-      const equip = entry.equipment ?? "";
-      if (PARK_INCOMPATIBLE_EQUIPMENT.has(equip)) {
-        errors.push(`Exercise "${exercise.id}" uses equipment "${equip}" which is not available at park.`);
+    if (locationMode && entry) {
+      const allowedLocations = getExerciseLocations(entry);
+      if (!allowedLocations.includes(locationMode as CatalogLocation)) {
+        errors.push(`Exercise "${exercise.id}" is not compatible with location "${locationMode}".`);
       }
     }
   }
@@ -3434,9 +3658,9 @@ function validateWorkoutPlan(
 function buildTechnicalFallback(language: string): GutoModelResponse {
   const selectedLanguage = normalizeLanguage(language);
   const copy: Record<GutoLanguage, string> = {
-    "pt-BR": "Perdi conexão por um momento. Reorganiza e me manda de novo em 1 frase.",
-    "en-US": "Lost connection for a moment. Regroup and send me one sentence.",
-    "it-IT": "Ho perso la connessione un attimo. Riorganizza e mandami una frase.",
+    "pt-BR": "GUTO deu um curto aqui, mas não vira fuga: hoje ainda tem treino. Me manda uma frase direta e a gente segue agora.",
+    "en-US": "GUTO tripped for a second, but this is not an escape: start the workout now. Send me one straight sentence and we keep moving.",
+    "it-IT": "GUTO si è impuntato un attimo, ma non diventa una scusa: parti adesso con l'allenamento. Mandami una frase secca e andiamo avanti.",
   };
   return { fala: copy[selectedLanguage], acao: "none", expectedResponse: null };
 }
@@ -3549,6 +3773,13 @@ async function askGutoModel({
           memory.userId,
           parsedResponse.proactiveMemoryAction
         );
+    if (
+      resolverResult?.engaged &&
+      resolverResult.fallbackMessage &&
+      (resolverResult.action === null || resolverResult.action?.type === "request_discard")
+    ) {
+      parsedResponse.fala = resolverResult.fallbackMessage;
+    }
 
     applyMemoryPatch(memory, parsedResponse.memoryPatch, parsedResponse.trainedReference, input);
 
@@ -3569,12 +3800,36 @@ async function askGutoModel({
     const hasIncompletePlan = parsedResponse.workoutPlan && (!parsedResponse.workoutPlan.exercises || parsedResponse.workoutPlan.exercises.length === 0);
 
     if ((parsedResponse.acao === "updateWorkout" || hasIncompletePlan) && !workoutPlan) {
+      const pendingTrainingClarification = getPendingClarification(memory.resolvedFields, "training");
+      const unresolvedTrainingPathology = getUnresolvedTrainingPathology(memory);
+      if (pendingTrainingClarification?.field === "pathology" || unresolvedTrainingPathology) {
+        return finalize({
+          fala: trainingClarificationMessage(
+            selectedLanguage,
+            pendingTrainingClarification?.rawValue || unresolvedTrainingPathology || "",
+            getGutoCallName(memory)
+          ),
+          acao: "none",
+          expectedResponse: {
+            type: "text",
+            context: "training_limitations",
+            instruction: pendingTrainingClarification?.hint || "Ask one short question to clarify the user's body limitation before generating training.",
+          },
+          avatarEmotion: "alert",
+          trainedReference: parsedResponse.trainedReference,
+          memoryPatch: {},
+          proactiveMemoryAction,
+        });
+      }
+
       const semanticFocus: WorkoutFocus =
         parsedResponse.memoryPatch?.nextWorkoutFocus ||
         memory.nextWorkoutFocus ||
         chooseNextWorkoutFocus(memory);
-      const locationRaw = memory.preferredTrainingLocation || memory.trainingLocation || "casa";
+      const baseLocationRaw = memory.preferredTrainingLocation || memory.trainingLocation || "casa";
+      const locationRaw = getWeatherAdjustedTrainingLocation(memory, baseLocationRaw);
       const locationMode = getLocationMode(locationRaw) as CuratorLocationMode;
+      const conservativeTraining = shouldEnterConservativeMode(memory.resolvedFields, "training");
 
       // Tenta primeiro o GUTO Curator (IA decide dentro do pool catálogo).
       // Se falhar (timeout, JSON inválido, validação de grupo muscular), cai pro
@@ -3585,7 +3840,9 @@ async function askGutoModel({
           age: memory.userAge,
           heightCm: memory.heightCm,
           weightKg: memory.weightKg,
-          pathology: memory.trainingLimitations || memory.trainingPathology || undefined,
+          pathology: conservativeTraining
+            ? `${memory.trainingLimitations || memory.trainingPathology || ""}; unclear limitation — use conservative low-impact choices`
+            : memory.trainingLimitations || memory.trainingPathology || undefined,
           foodRestrictions: memory.foodRestrictions,
           goal: memory.trainingGoal,
           level: memory.trainingStatus || memory.trainingLevel,
@@ -3635,8 +3892,30 @@ async function askGutoModel({
         });
       }
 
+      workoutPlan = safetyFilterWorkoutPlan(workoutPlan, memory);
+
       const pv = validateWorkoutPlan(workoutPlan, memory.recentTrainingHistory || [], locationMode);
-      if (!pv.valid) console.warn("[GUTO] validateWorkoutPlan errors:", pv.errors);
+      if (!pv.valid) {
+        console.warn("[GUTO] validateWorkoutPlan errors:", pv.errors);
+        const repairLocation = locationMode === "gym" ? "academia" : "casa";
+        const repairedPlan = safetyFilterWorkoutPlan(buildWorkoutPlanFromSemanticFocus({
+          language: selectedLanguage,
+          location: repairLocation,
+          status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
+          limitation: memory.trainingLimitations || memory.trainingPathology || "",
+          focus: semanticFocus,
+          scheduleIntent: memory.trainingSchedule || "today",
+        }), memory);
+        const repairedValidation = validateWorkoutPlan(
+          repairedPlan,
+          memory.recentTrainingHistory || [],
+          getLocationMode(repairLocation) as CuratorLocationMode
+        );
+        if (!repairedValidation.valid) {
+          throw new Error(`Workout validation failed after repair: ${repairedValidation.errors.join("; ")}`);
+        }
+        workoutPlan = repairedPlan;
+      }
       if (pv.warnings.length > 0) console.info("[GUTO] validateWorkoutPlan warnings:", pv.warnings);
     }
 
@@ -3707,23 +3986,10 @@ app.post("/guto/validate-name", requireActiveUser, (req, res) => {
 
 app.get("/guto/memory", requireActiveUser, (req, res) => {
   const userId = req.gutoUser!.userId;
-  const rawMemory = getMemory(userId);
-  const wasAlreadyGranted = rawMemory.initialXpGranted;
-  const memory = applyPendingMissPenalties(grantInitialXp(rawMemory));
+  const memory = applyPendingMissPenalties(getMemory(userId));
   memory.lastActiveAt = new Date().toISOString();
 
-  // First time a user loads: seed their Arena profile with the initial 100 XP bonus
-  if (!wasAlreadyGranted) {
-    const displayName = memory.name || userId;
-    awardArenaXp({
-      userId,
-      displayName,
-      arenaGroupId: getUserArenaGroup(userId),
-      type: "bonus",
-      xp: 100,
-      sourceValidationId: "grant_initial_xp",
-    });
-  } else if (memory.name) {
+  if (memory.name) {
     syncArenaDisplayName(userId, memory.name, getUserArenaGroup(userId));
   }
   saveMemory(memory);
@@ -4013,10 +4279,9 @@ async function runFreeFieldsResolution(userId: string, memorySnapshot: GutoMemor
   saveMemory(latest);
 }
 
-app.post("/guto/memory", requireActiveUser, (req, res) => {
+app.post("/guto/memory", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
-  console.log(`[GUTO] Saving memory for user "${userId}":`, req.body);
-  const memory = applyPendingMissPenalties(grantInitialXp(getMemory(userId)));
+  const memory = applyPendingMissPenalties(getMemory(userId));
 
   const b = req.body;
   if (b.name) {
@@ -4031,7 +4296,9 @@ app.post("/guto/memory", requireActiveUser, (req, res) => {
   }
   memory.lastActiveAt = new Date().toISOString();
   if (typeof b.trainedToday === "boolean") memory.trainedToday = b.trainedToday;
-  if (b.xpEvent === "complete_daily_mission") {
+  if (b.xpEvent === "grant_initial_xp") {
+    grantInitialXp(memory);
+  } else if (b.xpEvent === "complete_daily_mission") {
     completeWorkout(memory);
   } else if (b.xpEvent === "accept_adapted_mission") {
     acceptAdaptedMission(memory);
@@ -4048,6 +4315,8 @@ app.post("/guto/memory", requireActiveUser, (req, res) => {
   if (b.preferredTrainingLocation) memory.preferredTrainingLocation = b.preferredTrainingLocation;
   if (b.trainingPathology) memory.trainingPathology = b.trainingPathology;
   if (b.country) memory.country = b.country;
+  if (b.countryCode) memory.countryCode = String(b.countryCode).trim().toUpperCase();
+  if (b.city) memory.city = b.city;
   if (typeof b.heightCm !== "undefined" && !isNaN(Number(b.heightCm)) && Number(b.heightCm) > 0) memory.heightCm = Number(b.heightCm);
   if (typeof b.weightKg !== "undefined" && !isNaN(Number(b.weightKg)) && Number(b.weightKg) > 0) memory.weightKg = Number(b.weightKg);
   if (typeof b.foodRestrictions === "string") memory.foodRestrictions = b.foodRestrictions;
@@ -4070,6 +4339,15 @@ app.post("/guto/memory", requireActiveUser, (req, res) => {
   }
 
   saveMemory(memory);
+  if (!memory.resolvedFields && (memory.trainingPathology || memory.trainingLimitations || memory.foodRestrictions)) {
+    memory.resolvedFields = await resolveProfileFreeFields({
+      country: memory.country,
+      pathology: memory.trainingPathology || memory.trainingLimitations,
+      foodRestriction: memory.foodRestrictions,
+      previous: memory.resolvedFields,
+    });
+    saveMemory(memory);
+  }
   if (memory.name) {
     syncArenaDisplayName(userId, memory.name, getUserArenaGroup(userId));
   }
@@ -4131,6 +4409,12 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
   }
 
   try {
+    await enrichPendingMemories(userId, memory.country || "", memory.countryCode, normalizeLanguage(language || memory.language)).catch(() => {});
+    const proactivityContext = await buildProactivityContextBlock(
+      userId,
+      operationalContext.weekday,
+      normalizeLanguage(language || memory.language)
+    ).catch(() => null);
     let result = await askGutoModel({
       input: buildProactiveInput(memory, slot, operationalContext),
       language,
@@ -4138,6 +4422,7 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
         ...memory,
       },
       history: [],
+      proactivityContext,
     });
 
     // FORCE COHERENCE FOR THE FIRST MESSAGE
@@ -4239,6 +4524,9 @@ app.post("/guto", requireActiveUser, async (req, res) => {
     trainingPathology: memory.trainingPathology,
     biologicalSex: memory.biologicalSex,
     userAge: memory.userAge,
+    country: memory.country,
+    countryCode: memory.countryCode,
+    city: memory.city,
   };
 
   // Run deterministic resolver in parallel with proactivity context build.
@@ -4249,15 +4537,13 @@ app.post("/guto", requireActiveUser, async (req, res) => {
   try {
     // Build proactivity context and run deterministic resolver concurrently.
     const opCtx = getOperationalContext(new Date(), selectedLanguage);
+    await enrichPendingMemories(userId, memory.country || "", memory.countryCode, selectedLanguage).catch(() => {});
     const [proactivityCtx, resolverResult] = await Promise.all([
       buildProactivityContextBlock(userId, opCtx.weekday, selectedLanguage).catch(() => null),
       resolveProactiveMemoryActionFromUserReply(userId, input || "", selectedLanguage),
     ]);
 
     resolverResultForRoute = resolverResult;
-    if (resolverResult.engaged) {
-      console.log(`[GUTO][proactivity] resolver engaged: ${resolverResult.reason}, action: ${resolverResult.action?.type ?? 'null'}`);
-    }
 
     const result = await askGutoModel({
       input: input || "",
@@ -4731,7 +5017,7 @@ app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
     const memory = getMemory(userId);
     const userCountry = memory.country || "";
     const selectedLanguage = normalizeLanguage(memory.language || "pt-BR");
-    enrichPendingMemories(userId, userCountry, selectedLanguage).catch(() => {});
+    enrichPendingMemories(userId, userCountry, memory.countryCode, selectedLanguage).catch(() => {});
 
     res.json({ ok: true, memory: updated });
   } catch (e) {
@@ -4772,6 +5058,52 @@ app.post("/guto/proactivity/discard", requireActiveUser, async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     console.error("[GUTO][proactivity] discard error:", e);
+    res.status(500).json({ error: "internal error" });
+  }
+});
+
+/**
+ * POST /guto/proactivity/update
+ * Applies a corrected detail to a pending memory, keeping it pending_confirmation
+ * so GUTO can confirm the corrected version before using it.
+ */
+app.post("/guto/proactivity/update", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
+  const { memoryId, patch } = req.body as {
+    memoryId?: string;
+    patch?: Partial<Pick<ProactiveMemory, "understood" | "dateText" | "dateParsed" | "location">>;
+  };
+
+  if (!memoryId || !patch || typeof patch !== "object") {
+    return res.status(400).json({ error: "memoryId and patch required" });
+  }
+
+  try {
+    const current = (await getProactiveMemories(userId)).find((m) => m.id === memoryId);
+    if (!current) {
+      return res.status(404).json({ error: "memory not found" });
+    }
+    if (current.status !== "pending_confirmation") {
+      return res.json({ ok: true, memory: current, ignored: true });
+    }
+
+    const safePatch: Partial<Pick<ProactiveMemory, "understood" | "dateText" | "dateParsed" | "location">> = {};
+    if (typeof patch.understood === "string" && patch.understood.trim()) safePatch.understood = patch.understood.trim().slice(0, 300);
+    if (typeof patch.dateText === "string" && patch.dateText.trim()) safePatch.dateText = patch.dateText.trim().slice(0, 80);
+    if (typeof patch.dateParsed === "string" && /^\d{4}-\d{2}-\d{2}$/.test(patch.dateParsed)) safePatch.dateParsed = patch.dateParsed;
+    if (typeof patch.location === "string" && patch.location.trim()) safePatch.location = patch.location.trim().slice(0, 120);
+
+    if (Object.keys(safePatch).length === 0) {
+      return res.status(400).json({ error: "empty patch" });
+    }
+
+    const updated = await updateProactiveMemory(userId, memoryId, {
+      ...safePatch,
+      status: "pending_confirmation",
+    });
+    res.json({ ok: true, memory: updated });
+  } catch (e) {
+    console.error("[GUTO][proactivity] update error:", e);
     res.status(500).json({ error: "internal error" });
   }
 });
@@ -4991,6 +5323,16 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
     return res.json(existingDiet);
   }
 
+  if ((memory.foodRestrictions || memory.foodIntolerances) && !memory.resolvedFields?.foodRestriction) {
+    memory.resolvedFields = await resolveProfileFreeFields({
+      country: memory.country,
+      pathology: memory.trainingPathology || memory.trainingLimitations,
+      foodRestriction: memory.foodRestrictions || memory.foodIntolerances,
+      previous: memory.resolvedFields,
+    });
+    saveMemory(memory);
+  }
+
   // Validate required fields - be lenient with trainingLevel/Status
   const missing: string[] = [];
   if (!memory.biologicalSex) missing.push("biologicalSex");
@@ -4999,6 +5341,9 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
   // Height and Weight must be present and > 0
   if (!memory.heightCm || memory.heightCm <= 0) missing.push("heightCm");
   if (!memory.weightKg || memory.weightKg <= 0) missing.push("weightKg");
+  if (!memory.country) missing.push("country");
+  if (!memory.countryCode) missing.push("countryCode");
+  if (!(memory.foodRestrictions || memory.foodIntolerances)) missing.push("foodRestrictions");
   
   // Level and Goal can have slightly different field names in memory
   const effectiveLevel = memory.trainingLevel || memory.trainingStatus;
@@ -5017,14 +5362,41 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
       trainingLevel: memory.trainingLevel,
       trainingStatus: memory.trainingStatus,
       trainingGoal: memory.trainingGoal,
+      country: memory.country,
+      countryCode: memory.countryCode,
+      city: memory.city,
+      foodRestrictions: memory.foodRestrictions,
+      foodIntolerances: memory.foodIntolerances,
     });
     return res.status(422).json({
       error: "missing_profile_fields",
       missing,
-      message: `GUTO ainda não tem todos os seus dados: ${missing.join(", ")}. Volte na Calibragem ou responda no chat.`,
+      message: missingDietProfileMessage(language, missing),
     });
   }
 
+  const pendingDietClarification = getPendingClarification(memory.resolvedFields, "diet");
+  const unresolvedFoodRestriction = getUnresolvedFoodRestriction(memory);
+  if (pendingDietClarification?.field === "foodRestriction" || unresolvedFoodRestriction) {
+    return res.status(422).json({
+      error: "needs_clarification",
+      code: "FOOD_RESTRICTION_NEEDS_CLARIFICATION",
+      field: "foodRestrictions",
+      rawValue: pendingDietClarification?.rawValue || unresolvedFoodRestriction,
+      message: dietClarificationMessage(
+        language,
+        pendingDietClarification?.rawValue || unresolvedFoodRestriction || "",
+        getGutoCallName(memory)
+      ),
+      expectedResponse: {
+        type: "text",
+        context: "food_restrictions",
+        instruction: pendingDietClarification?.hint || "Ask one short question to clarify the user's food restriction before generating diet.",
+      },
+    });
+  }
+
+  const userCountry = String(memory.country).trim();
   const nutritionProfile: NutritionProfile = {
     biologicalSex: (memory.biologicalSex as NutritionProfile["biologicalSex"]) || "male",
     userAge: Number(memory.userAge),
@@ -5032,7 +5404,9 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
     weightKg: Number(memory.weightKg),
     trainingLevel: (effectiveLevel as NutritionProfile["trainingLevel"]) || "beginner",
     trainingGoal: (effectiveGoal as NutritionProfile["trainingGoal"]) || "consistency",
-    country: memory.country || "Brasil",
+    country: userCountry,
+    countryCode: memory.countryCode,
+    city: memory.city,
     foodRestrictions: memory.foodRestrictions,
     foodIntolerances: memory.foodIntolerances,
   };
@@ -5128,7 +5502,24 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
         console.log("[GUTO] diet portion corrections:", issues);
       }
 
-      meals = correctedMeals;
+      const calorieCheckedMeals = normalizeMealCalories(correctedMeals);
+      const calorieValidation = validateDietCalories(calorieCheckedMeals, macros.targetKcal);
+      if (!calorieValidation.valid) {
+        console.warn(`[GUTO] diet calorie validation failed on attempt ${attempt}:`, calorieValidation.issues);
+        continue;
+      }
+
+      const restrictionIssues = validateDietAgainstRestrictions(
+        calorieCheckedMeals,
+        nutritionProfile.foodRestrictions,
+        nutritionProfile.foodIntolerances
+      );
+      if (restrictionIssues.length > 0) {
+        console.warn(`[GUTO] diet restriction validation failed on attempt ${attempt}:`, restrictionIssues);
+        continue;
+      }
+
+      meals = calorieCheckedMeals;
       console.log(`[GUTO] diet generated successfully on attempt ${attempt} using ${DIET_MODEL}`);
       break;
     } catch (err) {
@@ -5137,7 +5528,10 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
   }
 
   if (!meals.length) {
-    return res.status(500).json({ error: "Não foi possível gerar a dieta. Tente novamente." });
+    return res.status(500).json({
+      error: "diet_generation_failed",
+      message: dietGenerationFailedMessage(language),
+    });
   }
 
   const plan: DietPlan = {
@@ -5146,7 +5540,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
     lockedByCoach: false,
     planSource: "ai_generated",
     generatedAt: new Date().toISOString(),
-    country: nutritionProfile.country || "Brasil",
+    country: userCountry,
     macros,
     meals,
     foodRestrictions: nutritionProfile.foodRestrictions,

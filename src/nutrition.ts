@@ -24,6 +24,8 @@ export interface NutritionProfile {
   trainingLevel: TrainingLevel;
   trainingGoal: NutritionGoal;
   country?: string;
+  countryCode?: string;
+  city?: string;
   foodRestrictions?: string;
   foodIntolerances?: string;
 }
@@ -81,6 +83,14 @@ function calculateTargetKcal(tdee: number, goal: NutritionGoal): number {
   }
 }
 
+function applySafeCalorieFloor(profile: NutritionProfile, targetKcal: number, tdee: number): number {
+  // GUTO is not a medical/nutrition prescription. Avoid unsafe aggressive deficits,
+  // especially for teens and very light/older users.
+  if (profile.userAge < 18) return Math.max(targetKcal, tdee);
+  const floor = profile.biologicalSex === "female" ? 1200 : 1400;
+  return Math.max(targetKcal, floor);
+}
+
 // ─── Protein per kg ───────────────────────────────────────────────────────────
 
 const PROTEIN_PER_KG: Record<NutritionGoal, number> = {
@@ -101,7 +111,11 @@ export function calculateMacros(profile: NutritionProfile): DietMacros {
     profile.userAge
   );
   const tdee = calculateTDEE(bmr, profile.trainingLevel);
-  const targetKcal = calculateTargetKcal(tdee, profile.trainingGoal);
+  const targetKcal = applySafeCalorieFloor(
+    profile,
+    calculateTargetKcal(tdee, profile.trainingGoal),
+    tdee
+  );
 
   const proteinG = Math.round(profile.weightKg * PROTEIN_PER_KG[profile.trainingGoal]);
   const proteinKcal = proteinG * 4;
@@ -242,6 +256,67 @@ export interface DietPlan {
   updatedAt?: string;
 }
 
+function normalizeKey(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z]/g, "");
+}
+
+const COUNTRY_FOOD_HINTS_BY_CODE: Record<string, string> = {
+  BR: "Use foods commonly sold in Brazilian supermarkets and markets: arroz, feijão, frango, carne bovina, ovo, aveia, batata-doce, banana, mandioca, legumes, azeite. Regional Brazilian staples are allowed when the user lives in Brazil.",
+  IT: "Use foods commonly sold in Italian supermarkets and markets: pasta, risotto rice, mozzarella, ricotta, parmigiano, prosciutto, bresaola, eggs, seasonal vegetables, legumes, olive oil, tuna in oil, yogurt, bread. Avoid hard-to-find Brazilian staples in Italy: tapioca, açaí, cuscuz nordestino, feijão preto, queijo coalho, farinha de mandioca.",
+  US: "Use foods commonly sold in US supermarkets: chicken breast, eggs, oats, Greek yogurt, brown rice, whole wheat bread, broccoli, spinach, sweet potato, tuna, cottage cheese, peanut butter.",
+  ES: "Use foods commonly sold in Spanish supermarkets and markets: pollo, huevos, arroz, legumbres, pescado, aceite de oliva, verduras frescas, pan integral, jamón serrano, yogur.",
+  PT: "Use foods commonly sold in Portuguese supermarkets and markets: bacalhau, frango, arroz, leguminosas, azeite, ovos, pão, legumes, frutas da época, iogurte.",
+  DE: "Use foods commonly sold in German supermarkets: Hähnchen, Eier, Haferflocken, Vollkornbrot, Kartoffeln, Quark, Hüttenkäse, Gemüse, Lachs, Linsen.",
+  FR: "Use foods commonly sold in French supermarkets: poulet, œufs, riz, légumes, fromage blanc, yaourt, pain complet, légumineuses, poisson, huile d'olive.",
+  GB: "Use foods commonly sold in UK supermarkets: chicken breast, eggs, oats, Greek yogurt, potatoes, wholemeal bread, beans, tuna, salmon, vegetables.",
+  CA: "Use foods commonly sold in Canadian supermarkets: chicken breast, eggs, oats, Greek yogurt, rice, potatoes, whole grain bread, tuna, salmon, vegetables.",
+  AU: "Use foods commonly sold in Australian supermarkets: chicken breast, eggs, oats, Greek yogurt, rice, potatoes, wholemeal bread, tuna, lean beef, vegetables.",
+  MX: "Use foods commonly sold in Mexican supermarkets and markets: pollo, huevos, arroz, frijoles, tortillas de maíz, aguacate, queso fresco, verduras, atún.",
+  AR: "Use foods commonly sold in Argentine supermarkets: carne magra, pollo, huevos, arroz, lentejas, avena, papa, yogur, verduras, frutas.",
+  JP: "Use foods commonly sold in Japanese supermarkets: rice, eggs, tofu, fish, chicken, natto, miso soup, vegetables, seaweed, yogurt.",
+};
+
+function resolveCountryFoodHint(country: string, countryCode?: string): string {
+  const code = countryCode?.trim().toUpperCase();
+  if (code && COUNTRY_FOOD_HINTS_BY_CODE[code]) return COUNTRY_FOOD_HINTS_BY_CODE[code];
+
+  const countryKey = normalizeKey(country);
+  const legacyCountryToCode: Record<string, string> = {
+    brasil: "BR",
+    brazil: "BR",
+    italia: "IT",
+    italy: "IT",
+    statiunitidamerica: "US",
+    estadosunidos: "US",
+    unitedstates: "US",
+    usa: "US",
+    eua: "US",
+    espanha: "ES",
+    spain: "ES",
+    portugal: "PT",
+    alemanha: "DE",
+    germany: "DE",
+    franca: "FR",
+    france: "FR",
+    reinounido: "GB",
+    unitedkingdom: "GB",
+    canada: "CA",
+    australia: "AU",
+    mexico: "MX",
+    argentina: "AR",
+    japao: "JP",
+    japan: "JP",
+  };
+  const fallbackCode = legacyCountryToCode[countryKey];
+  if (fallbackCode && COUNTRY_FOOD_HINTS_BY_CODE[fallbackCode]) return COUNTRY_FOOD_HINTS_BY_CODE[fallbackCode];
+
+  return `Use foods that are easy to find in normal supermarkets and markets in ${country}. The residence country controls food availability; do not choose foods just because they are common in the app language or the user's native culture.`;
+}
+
 /**
  * Validates and optionally corrects portions in a list of meals.
  * Returns issues found and corrected foods.
@@ -280,6 +355,33 @@ export function validateAndCorrectPortions(meals: DietMeal[]): {
   }));
 
   return { correctedMeals, issues };
+}
+
+export function normalizeMealCalories(meals: DietMeal[]): DietMeal[] {
+  return meals.map((meal) => ({
+    ...meal,
+    totalKcal: meal.foods.reduce((sum, food) => sum + Math.round(Number(food.kcal) || 0), 0),
+  }));
+}
+
+export function validateDietCalories(meals: DietMeal[], targetKcal: number): { valid: boolean; dailyTotal: number; issues: string[] } {
+  const issues: string[] = [];
+  meals.forEach((meal) => {
+    const inputTotal = Math.round(Number(meal.totalKcal) || 0);
+    const foodTotal = meal.foods.reduce((sum, food) => sum + Math.round(Number(food.kcal) || 0), 0);
+    if (inputTotal !== foodTotal) {
+      issues.push(`${meal.id || meal.name}: totalKcal (${inputTotal}) diferente da soma dos alimentos (${foodTotal})`);
+    }
+  });
+
+  const normalizedMeals = normalizeMealCalories(meals);
+  const dailyTotal = normalizedMeals.reduce((sum, meal) => sum + meal.totalKcal, 0);
+  const targetDelta = Math.abs(dailyTotal - targetKcal);
+  if (targetDelta > 80) {
+    issues.push(`Total diário (${dailyTotal}) fora da meta (${targetKcal}) por ${targetDelta} kcal`);
+  }
+
+  return { valid: issues.length === 0, dailyTotal, issues };
 }
 
 // ─── Gemini prompt builder ─────────────────────────────────────────────────────
@@ -326,36 +428,26 @@ export function buildDietPrompt(
   const goalLabel = goalLabels[language]?.[profile.trainingGoal] ?? profile.trainingGoal;
 
   const country = profile.country || "Brasil";
+  const countryCode = profile.countryCode?.trim().toUpperCase();
+  const city = profile.city?.trim();
   const restrictionParts: string[] = [];
-  if (profile.foodRestrictions?.trim()) restrictionParts.push(profile.foodRestrictions.trim());
-  if (profile.foodIntolerances?.trim()) restrictionParts.push(`intolerances: ${profile.foodIntolerances.trim()}`);
+  const foodRestrictions = profile.foodRestrictions?.trim();
+  const foodIntolerances = profile.foodIntolerances?.trim();
+  if (foodRestrictions) restrictionParts.push(foodRestrictions);
+  if (foodIntolerances && foodIntolerances.toLowerCase() !== foodRestrictions?.toLowerCase()) {
+    restrictionParts.push(`intolerances: ${foodIntolerances}`);
+  }
   const restrictions = restrictionParts.length ? restrictionParts.join("; ") : "none";
 
-  // Country-specific food notes to guide local availability
-  const countryFoodHints: Record<string, string> = {
-    italia: "Use Italian supermarket staples: pasta, risotto rice, mozzarella, prosciutto, bresaola, eggs, seasonal vegetables, legumes, olive oil, tuna in oil, yogurt, bread. Avoid: tapioca, açaí, cuscuz nordestino, feijão preto, queijo coalho, farinha de mandioca.",
-    italy: "Use Italian supermarket staples: pasta, risotto rice, mozzarella, prosciutto, bresaola, eggs, seasonal vegetables, legumes, olive oil, tuna in oil, yogurt, bread. Avoid: tapioca, açaí, feijão preto, queijo coalho.",
-    brasil: "Use Brazilian supermarket staples: arroz, feijão, frango, carne bovina, ovo, aveia, batata-doce, banana, mandioca, legumes, azeite. Typical Brazilian diet.",
-    brazil: "Use Brazilian supermarket staples: rice, beans, chicken, beef, eggs, oats, sweet potato, banana, cassava, vegetables, olive oil.",
-    eua: "Use US supermarket staples: chicken breast, eggs, oats, Greek yogurt, brown rice, whole wheat bread, broccoli, spinach, sweet potato, tuna, cottage cheese, peanut butter.",
-    usa: "Use US supermarket staples: chicken breast, eggs, oats, Greek yogurt, brown rice, whole wheat bread, broccoli, spinach, sweet potato, tuna, cottage cheese.",
-    espanha: "Use Spanish supermarket staples: pollo, huevos, arroz, legumbres, pescado, aceite de oliva, verduras frescas, pan integral, jamón serrano, yogur.",
-    spain: "Use Spanish supermarket staples: chicken, eggs, rice, legumes, fish, olive oil, fresh vegetables, whole bread, serrano ham, yogurt.",
-    portugal: "Use Portuguese supermarket staples: bacalhau, frango, arroz, leguminosas, azeite, ovos, pão, legumes, frutas da época.",
-    alemanha: "Use German supermarket staples: Hühnchen, Eier, Haferflocken, Vollkornbrot, Kartoffeln, Hüttenkäse, Quark, Gemüse, Lachs, Linsen.",
-    germany: "Use German supermarket staples: chicken, eggs, oats, whole grain bread, potatoes, quark, cottage cheese, vegetables, salmon, lentils.",
-    franca: "Use French supermarket staples: poulet, œufs, riz, légumes, fromage blanc, yaourt, pain complet, légumineuses, poisson, huile d'olive.",
-    france: "Use French supermarket staples: chicken, eggs, rice, vegetables, fromage blanc, yogurt, whole bread, legumes, fish, olive oil.",
-  };
-
-  const countryKey = country.toLowerCase().replace(/[^a-záéíóúàèìòùãõâêîôûäëïöüç]/g, "");
-  const foodHint = countryFoodHints[countryKey] || `Use foods that are easy to find in local supermarkets in ${country}.`;
+  const foodHint = resolveCountryFoodHint(country, countryCode);
 
   return `You are the nutrition engine of GUTO. Generate a weekly meal plan (representative daily plan).
 
 USER:
 - Sex: ${profile.biologicalSex}, Age: ${profile.userAge}, Height: ${profile.heightCm}cm, Weight: ${profile.weightKg}kg
 - Country of residence: ${country}
+- Country code: ${countryCode || "unknown"}
+- City/region: ${city || "unknown"}
 - Goal: ${goalLabel}
 - Food restrictions/allergies: ${restrictions}
 
@@ -365,6 +457,7 @@ MACROS (pre-calculated — use exactly):
 
 FOOD SELECTION — CRITICAL:
 ${foodHint}
+Use the country code and city/region as structured location context. Do not infer food availability from the app language, user name, accent, slang, or native culture.
 Food restrictions must be strictly respected: ${restrictions}.
 
 OUTPUT LANGUAGE — CRITICAL:
@@ -377,6 +470,9 @@ STRUCTURE:
 Return a JSON object with a root key named exactly "meals" (NOT "mealPlan") containing an array of exactly 5 meal objects.
 IDs must be exactly: "cafe", "lanche1", "almoco", "lanche2", "jantar".
 Each meal: id (string), name (string), time (string), foods (array of 2-4 objects with name/quantity/kcal), totalKcal (number), gutoNote (string).
+CALORIE CONSISTENCY — CRITICAL:
+For every meal, totalKcal MUST equal the exact sum of foods[].kcal.
+The sum of all meal totalKcal values MUST be within ±80 kcal of ${macros.targetKcal}.
 gutoNote: max 12 words, direct friend tone, in ${langLabel}.
 Example structure: {"meals": [{"id":"cafe","name":"...","time":"08:00","foods":[{"name":"...","quantity":"...","kcal":0}],"totalKcal":0,"gutoNote":"..."}]}`;
 }

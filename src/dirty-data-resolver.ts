@@ -299,7 +299,8 @@ function buildAckKey(field: ResolvedField): string {
  * Rules:
  *   - one question at a time (priority: foodRestriction → pathology → country);
  *   - skip fields the user already acknowledged;
- *   - skip "clear" and "unknown" (we silently ignore unknown — never block);
+ *   - skip "clear";
+ *   - unknown only blocks fields that directly affect safety/action.
  *   - "needs_confirmation" always asks;
  *   - "risky_unclear" only asks if blocking the next action requested.
  */
@@ -318,7 +319,14 @@ export function getPendingClarification(
 
   for (const field of order) {
     if (ack.has(buildAckKey(field))) continue;
-    if (field.status === "clear" || field.status === "unknown") continue;
+    if (field.status === "clear") continue;
+    if (
+      field.status === "unknown" &&
+      !(
+        (context === "training" && field.field === "pathology") ||
+        (context === "diet" && field.field === "foodRestriction")
+      )
+    ) continue;
 
     // risky_unclear only asks if directly relevant
     if (field.status === "risky_unclear") {
@@ -345,6 +353,9 @@ function buildHint(field: ResolvedField): string {
       if (field.status === "risky_unclear") {
         return `The user's food restriction "${field.rawValue}" looks safety-sensitive but is not fully clear. Confirm gently in one sentence — never assume safety.`;
       }
+      if (field.status === "unknown") {
+        return `The user wrote "${field.rawValue}" as something they do not eat, but the system could not understand it. Ask one short question before generating any diet.`;
+      }
       return `The user wrote "${field.rawValue}" as a food they do not eat. ${
         field.possibleMeaning
           ? `It might mean "${field.possibleMeaning}" — ask in one short sentence to confirm.`
@@ -353,6 +364,9 @@ function buildHint(field: ResolvedField): string {
     case "pathology":
       if (field.status === "risky_unclear") {
         return `The user reported "${field.rawValue}" which looks physically sensitive (possibly cardiac/load-sensitive). Acknowledge it and ask one short clarifying question — pain? movement limitation? instability?`;
+      }
+      if (field.status === "unknown") {
+        return `The user reported "${field.rawValue}" as a body limitation, but the system could not understand it. Ask one short question before generating any workout.`;
       }
       return `The user reported "${field.rawValue}" as a body limitation. Ask one short clarifying question to understand whether it is pain, range-of-motion or instability before training.`;
     case "country":

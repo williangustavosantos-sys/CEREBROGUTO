@@ -27,6 +27,7 @@ export interface WeatherEnrichment {
   condition: string      // "sol", "chuva", "nublado", "parcialmente nublado"
   conditionEn: string    // English version for internal logic
   source: 'wttr.in'
+  fetchedAt?: string
 }
 
 export interface HolidayEnrichment {
@@ -48,6 +49,7 @@ export interface ProactiveMemory {
   location?: string          // cidade/local, se relevante
   weatherEnrichment?: WeatherEnrichment
   holidayEnrichment?: HolidayEnrichment[]
+  weatherFetchedAt?: string
   createdAt: string
   updatedAt: string
   // TTL: pending_confirmation expires after 24h; validated_postponed gets +7d new deadline

@@ -6,6 +6,7 @@
 import {
   getProactiveMemoriesByStatus,
   markPastActiveMemoriesPendingValidation,
+  updateProactiveMemory,
 } from './proactive-store'
 
 import { getWeeklyCheckResult } from './weekly-conversation'
@@ -34,6 +35,18 @@ function formatMemoryForPrompt(m: ProactiveMemory, language: string): string {
       lines.push(`  Weather in ${w.city}: ${w.condition}, ${w.tempMin}–${w.tempMax}°C on ${w.date}`)
     } else {
       lines.push(`  Clima em ${w.city}: ${w.condition}, ${w.tempMin}–${w.tempMax}°C em ${w.date}`)
+    }
+  }
+
+  if (m.weatherEnrichment && ['rain', 'drizzle', 'thunderstorm', 'snow', 'storm'].some((term) =>
+    (m.weatherEnrichment?.conditionEn || '').toLowerCase().includes(term)
+  )) {
+    if (language === 'it-IT') {
+      lines.push(`  Impatto sul treino: se dipende da strada/parco, preferisci casa o palestra.`)
+    } else if (language === 'en-US') {
+      lines.push(`  Training impact: if it depends on outdoors/park, prefer home or gym.`)
+    } else {
+      lines.push(`  Impacto no treino: se depender de rua/parque, prefira casa ou academia.`)
     }
   }
 
@@ -151,23 +164,23 @@ export async function buildProactivityContextBlock(
       if (language === 'it-IT') {
         sections.push(
           `[PROATTIVITÀ — APERTURA SETTIMANALE]\n` +
-          `Oggi è lunedì. Hai già pianificato l'allenamento della settimana.\n` +
-          `All'inizio di questa conversazione, chiedi casualmente come sarà la sua settimana — come un amico che vuole sapere se ci sono viaggi, impegni o cambiamenti di orario che potrebbero influenzare il programma.\n` +
-          `Sii naturale. Non usare frasi tipo "ora farò la mia domanda settimanale". Chiedilo come vengono le cose nella conversazione.`
+          `Questa settimana non è ancora stata aperta con l'utente.\n` +
+          `All'inizio di questa conversazione, chiedi casualmente com'è la settimana — come un amico che vuole sapere se ci sono viaggi, impegni o cambiamenti di orario che possono influenzare l'allenamento.\n` +
+          `Salverai solo ciò che cambia l'esecuzione del treino. Sii naturale, niente frase da sistema.`
         )
       } else if (language === 'en-US') {
         sections.push(
           `[PROACTIVITY — WEEKLY OPENING]\n` +
-          `Today is Monday. You've already planned this week's workout.\n` +
-          `Early in this conversation, casually ask how the week looks — like a friend checking if there are trips, commitments, or schedule changes that might affect the plan.\n` +
-          `Be natural. Don't say "I will now ask my weekly question." Just bring it up as it fits.`
+          `This week has not been opened with the user yet.\n` +
+          `Early in this conversation, casually ask how the week looks — like a friend checking if there are trips, commitments, or schedule changes that might affect training.\n` +
+          `Only remember what changes workout execution. Be natural, never system-like.`
         )
       } else {
         sections.push(
           `[PROATIVIDADE — ABERTURA SEMANAL]\n` +
-          `Hoje é segunda-feira. Você já montou o treino da semana.\n` +
-          `No início dessa conversa, pergunta casualmente como vai ser a semana — como amigo que quer saber se tem viagem, compromisso ou mudança de horário que pode afetar o plano.\n` +
-          `Seja natural. Não diga "agora vou fazer minha pergunta semanal". Traga como vem na conversa.`
+          `Esta semana ainda não foi aberta com o usuário.\n` +
+          `No início dessa conversa, pergunta casualmente como vai ser a semana — como amigo que quer saber se tem viagem, compromisso ou mudança de horário que pode afetar o treino.\n` +
+          `Só memorize o que muda a execução do treino. Seja natural, nada de frase de sistema.`
         )
       }
     }
@@ -228,22 +241,27 @@ export async function buildProactivityContextBlock(
       if (language === 'it-IT') {
         sections.push(
           `[PROATTIVITÀ — CONTESTO DELLA SETTIMANA]\n` +
-          `Sai già queste cose sulla sua settimana. Usale naturalmente quando ha senso — non forzarle, non elencarle tutte in una volta:\n` +
+          `Sai già queste cose sulla sua settimana. Usale solo quando aiutano allenamento, preparazione o continuità — non forzarle, non elencarle tutte:\n` +
           formattedMemories
         )
       } else if (language === 'en-US') {
         sections.push(
           `[PROACTIVITY — WEEK CONTEXT]\n` +
-          `You already know these things about this week. Use them naturally when it makes sense — don't force them, don't list them all at once:\n` +
+          `You already know these things about this week. Use them only when they help training, preparation or continuity — don't force them, don't list them all at once:\n` +
           formattedMemories
         )
       } else {
         sections.push(
           `[PROATIVIDADE — CONTEXTO DA SEMANA]\n` +
-          `Você já sabe essas coisas sobre a semana dele. Use naturalmente quando couber — não force, não liste tudo de vez:\n` +
+          `Você já sabe essas coisas sobre a semana dele. Use só quando ajudar treino, preparação ou continuidade — não force, não liste tudo de vez:\n` +
           formattedMemories
         )
       }
+
+      await Promise.all(activeMemories
+        .filter((memory) => memory.status !== 'surfaced')
+        .map((memory) => updateProactiveMemory(userId, memory.id, { status: 'surfaced' }).catch(() => null))
+      )
     }
 
     // ── Pending confirmation (one at a time) ──────────────────────────────────
@@ -260,7 +278,7 @@ export async function buildProactivityContextBlock(
           `Quando arriva il momento giusto, chiedi naturalmente se hai capito bene — solo questo, non altri.\n` +
           `Se CONFERMA (risponde "sì", "esatto" o equivalente chiaro): proactiveMemoryAction: { type: "confirm", memoryId: "${first.id}" }\n` +
           `Se NEGA e cancella l'evento: proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
-          `Se corregge dettagli (es: "no, è venerdì"): NON ritornare proactiveMemoryAction — chiedi conferma del dettaglio corretto.\n` +
+          `Se corregge dettagli (es: "no, è venerdì"): proactiveMemoryAction: { type: "update", memoryId: "${first.id}", patch: { "dateText": "...", "dateParsed": "YYYY-MM-DD", "location": "...", "understood": "..." } }. Aggiorna solo i campi chiari e chiedi conferma del dettaglio corretto.\n` +
           `Se AMBIGUO: NON ritornare proactiveMemoryAction — richiedi chiarezza.\n` +
           identityRule(language)
         )
@@ -273,7 +291,7 @@ export async function buildProactivityContextBlock(
           `When the moment is right, naturally check if you understood correctly — just this one.\n` +
           `If CONFIRMS ("yes", "that's right" or clear equivalent): proactiveMemoryAction: { type: "confirm", memoryId: "${first.id}" }\n` +
           `If DENIES and cancels the event: proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
-          `If corrects details ("no, Friday"): do NOT return proactiveMemoryAction — ask for the corrected detail.\n` +
+          `If corrects details ("no, Friday"): proactiveMemoryAction: { type: "update", memoryId: "${first.id}", patch: { "dateText": "...", "dateParsed": "YYYY-MM-DD", "location": "...", "understood": "..." } }. Update only clear fields and ask confirmation of the corrected detail.\n` +
           `If AMBIGUOUS: do NOT return proactiveMemoryAction — ask for clarity.\n` +
           identityRule(language)
         )
@@ -286,7 +304,7 @@ export async function buildProactivityContextBlock(
           `Quando o momento for certo, confira naturalmente se entendeu direito — só esse.\n` +
           `Se CONFIRMAR ("sim", "isso mesmo" ou equivalente claro): proactiveMemoryAction: { type: "confirm", memoryId: "${first.id}" }\n` +
           `Se NEGAR e cancelar o evento: proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
-          `Se corrigir detalhes ("não, é sexta"): NÃO retorne proactiveMemoryAction — peça confirmação do detalhe.\n` +
+          `Se corrigir detalhes ("não, é sexta"): proactiveMemoryAction: { type: "update", memoryId: "${first.id}", patch: { "dateText": "...", "dateParsed": "YYYY-MM-DD", "location": "...", "understood": "..." } }. Atualize só campos claros e peça confirmação do detalhe corrigido.\n` +
           `Se AMBÍGUO: NÃO retorne proactiveMemoryAction — peça clareza.\n` +
           identityRule(language)
         )

@@ -33,6 +33,16 @@ import crypto from "crypto";
 
 export const authRouter = express.Router();
 
+function inviteDisplayName(invite: { userId: string; name?: string }): string {
+  const access = getUserAccess(invite.userId);
+  const source = access?.firstName || invite.name || access?.name || "";
+  return source.replace(/\s+/g, " ").trim().split(/\s+/).find(Boolean) || source.trim();
+}
+
+function normalizeLoginEmail(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 function sendTeamPlanError(res: Response, error: unknown): boolean {
   if (error instanceof GutoTeamPlanLimitError || error instanceof GutoTeamNotFoundError) {
     res.status(error.status).json({
@@ -56,24 +66,57 @@ authRouter.post("/admin/login", async (req: Request, res: Response) => {
     return;
   }
 
-  if (!config.adminEmail || !config.adminPasswordHash) {
-    res.status(503).json({ message: "Admin não configurado no servidor." });
+  const normalizedEmail = normalizeLoginEmail(email);
+  const configuredAdminEmail = config.adminEmail?.trim().toLowerCase();
+
+  if (configuredAdminEmail && normalizedEmail === configuredAdminEmail) {
+    if (!config.adminPasswordHash) {
+      res.status(503).json({ message: "Admin não configurado no servidor." });
+      return;
+    }
+
+    const match = await bcrypt.compare(password, config.adminPasswordHash);
+    if (!match) {
+      res.status(401).json({ message: "Credenciais inválidas." });
+      return;
+    }
+
+    const token = signToken({ userId: "admin", role: "super_admin" });
+    res.json({ token, role: "super_admin", userId: "admin", teamId: GUTO_CORE_TEAM_ID });
     return;
   }
 
-  if (email !== config.adminEmail) {
+  const adminUser = getAllUserAccess().find(
+    (u) =>
+      (u.role === "admin" || u.role === "super_admin") &&
+      u.email?.trim().toLowerCase() === normalizedEmail &&
+      u.active &&
+      !u.archived
+  );
+
+  if (!adminUser || !adminUser.passwordHash) {
     res.status(401).json({ message: "Credenciais inválidas." });
     return;
   }
 
-  const match = await bcrypt.compare(password, config.adminPasswordHash);
+  const match = await bcrypt.compare(password, adminUser.passwordHash);
   if (!match) {
     res.status(401).json({ message: "Credenciais inválidas." });
     return;
   }
 
-  const token = signToken({ userId: "admin", role: "super_admin" });
-  res.json({ token, role: "super_admin", userId: "admin", teamId: GUTO_CORE_TEAM_ID });
+  const token = signToken({
+    userId: adminUser.userId,
+    role: adminUser.role === "super_admin" ? "super_admin" : "admin",
+    coachId: adminUser.coachId,
+  });
+  res.json({
+    token,
+    role: adminUser.role === "super_admin" ? "super_admin" : "admin",
+    userId: adminUser.userId,
+    email: adminUser.email,
+    teamId: normalizeAccessTeamId(adminUser.teamId),
+  });
 });
 
 // ─── POST /auth/coach/login ───────────────────────────────────────────────────
@@ -93,10 +136,12 @@ authRouter.post("/coach/login", async (req: Request, res: Response) => {
     return;
   }
 
+  const normalizedEmail = normalizeLoginEmail(email);
+
   // Find coach user by email
   const allUsers = getAllUserAccess();
   const coachUser = allUsers.find(
-    (u) => u.role === "coach" && u.email === email && u.active
+    (u) => u.role === "coach" && u.email?.trim().toLowerCase() === normalizedEmail && u.active
   );
 
   if (!coachUser || !coachUser.passwordHash) {
@@ -128,10 +173,12 @@ authRouter.post("/user/login", async (req: Request, res: Response) => {
   }
 
   const allUsers = getAllUserAccess();
+  const normalizedIdentifier = emailOrId.trim();
+  const normalizedEmail = normalizeLoginEmail(emailOrId);
   const user = allUsers.find(
     (u) =>
       u.role === "student" &&
-      (u.email === emailOrId || u.userId === emailOrId)
+      (u.email?.trim().toLowerCase() === normalizedEmail || u.userId === normalizedIdentifier)
   );
 
   if (!user || !user.passwordHash) {
@@ -206,14 +253,9 @@ authRouter.post("/logout", (_req: Request, res: Response) => {
 
 authRouter.get("/invite/:token", async (req: Request, res: Response) => {
   const token = String(req.params.token);
-  const tokenLen = token.length;
-  const safeToken = tokenLen > 8 ? `${token.slice(0, 4)}...${token.slice(-4)}` : "too-short";
-  
-  console.log(`[GET /auth/invite/:token] token length: ${tokenLen}, partial: ${safeToken}`);
 
   try {
     const invite = await findInviteByToken(token);
-    console.log(`[GET /auth/invite/:token] findInviteByToken returned:`, invite ? `Invite(id: ${invite.id})` : "null");
 
     if (!invite) {
       res.status(404).json({ message: "Convite não encontrado." });
@@ -231,7 +273,8 @@ authRouter.get("/invite/:token", async (req: Request, res: Response) => {
       res.status(410).json({ message: "Este convite expirou." });
       return;
     }
-    res.json({ name: invite.name, userId: invite.userId, coachId: invite.coachId });
+    const displayName = inviteDisplayName(invite);
+    res.json({ name: displayName, legalName: invite.name, userId: invite.userId, coachId: invite.coachId });
   } catch (error: any) {
     console.error(`[GET /auth/invite/:token] Error:`, error.message, error.stack);
     res.status(500).json({ message: "Erro interno ao validar convite. Tente novamente em alguns segundos." });
@@ -292,7 +335,7 @@ authRouter.post("/invite/:token/claim", async (req: Request, res: Response) => {
   res.json({
     token: jwtToken,
     userId: invite.userId,
-    name: invite.name,
+    name: inviteDisplayName(invite),
     subscriptionStatus: "active",
     subscriptionEndsAt: endsAt.toISOString(),
   });

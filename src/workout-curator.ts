@@ -11,7 +11,12 @@
  * feedback semanal e ajusta a dose.
  */
 
-import { ValidatedExerciseCatalog, type CatalogExercise, type CatalogMuscleGroup } from "../exercise-catalog.js";
+import {
+  getExerciseLocations,
+  ValidatedExerciseCatalog,
+  type CatalogExercise,
+  type CatalogMuscleGroup,
+} from "../exercise-catalog.js";
 import { config } from "./config.js";
 
 export type WorkoutFocus =
@@ -33,26 +38,27 @@ const FOCUS_TO_MUSCLES: Record<WorkoutFocus, CatalogMuscleGroup[]> = {
   full_body: ["peito", "costas", "ombro", "bracos", "pernas", "abdomen"],
 };
 
-// Equipamentos que NÃO existem no parque (filtra exercícios incompatíveis).
-const PARK_INCOMPATIBLE = new Set([
-  "halter", "haltere", "maquina", "polia", "barra-livre", "banco",
-  "bike", "esteira", "escada", "eliptico", "leg-press",
-  "dumbbell", "machine", "cable", "barbell", "bench",
-]);
-
-// Equipamentos que NÃO existem em casa (filtra exercícios incompatíveis).
-// Casa típica: corpo livre + alguma mochila/garrafa improvisada. Nada de máquina.
-const HOME_INCOMPATIBLE = new Set([
-  "maquina", "polia", "leg-press", "esteira", "escada", "eliptico",
-  "machine", "cable", "treadmill",
-]);
-
 function isCompatibleWithLocation(equipment: string | undefined, location: LocationMode): boolean {
-  if (!equipment) return true; // exercício sem equipamento (corpo livre) sempre passa
-  const eq = equipment.toLowerCase();
-  if (location === "park" && PARK_INCOMPATIBLE.has(eq)) return false;
-  if (location === "home" && HOME_INCOMPATIBLE.has(eq)) return false;
-  return true; // gym aceita tudo
+  const synthetic: CatalogExercise = {
+    id: "__location_check__",
+    canonicalNamePt: "__location_check__",
+    namesByLanguage: {
+      "pt-BR": "__location_check__",
+      "it-IT": "__location_check__",
+      "en-US": "__location_check__",
+    },
+    aliasesByLanguage: {
+      "pt-BR": [],
+      "it-IT": [],
+      "en-US": [],
+    },
+    muscleGroup: "aquecimento",
+    videoUrl: "/exercise/visuals/__location_check__.mp4",
+    sourceFileName: "__location_check__.mp4",
+    videoProvider: "local",
+    equipment,
+  };
+  return getExerciseLocations(synthetic).includes(location);
 }
 
 /**

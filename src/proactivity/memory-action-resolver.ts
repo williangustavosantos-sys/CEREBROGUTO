@@ -1,18 +1,25 @@
-// ─── GUTO Proactivity — Deterministic Action Resolver ────────────────────────
-// Resolves proactive memory actions from user replies WITHOUT relying on the
-// LLM. The model generates the natural fala; this module decides the action.
+// ─── GUTO Proactivity — Semantic Action Resolver ─────────────────────────────
+// Resolves proactive memory actions by semantic interpretation first, with
+// deterministic fallbacks when the model is unavailable.
 //
-// Why: Rate-limit / fallback from the model caused wrong or missing actions.
-// The model still generates the fala; this function decides the state transition.
+// Why: GUTO cannot save "if user says X then Y"; it must understand context,
+// but state transitions still need guardrails and memory-id validation.
 
 import { getProactiveMemoriesByStatus, getProactiveMemories } from './proactive-store'
 import type { ProactiveMemory } from './types'
+import { config } from '../config'
 
 // ─── Output types ──────────────────────────────────────────────────────────────
 
 export type ResolvedAction =
   | { type: 'confirm'; memoryId: string }
   | { type: 'discard'; memoryId: string }
+  | { type: 'request_discard'; memoryId: string }
+  | {
+      type: 'update'
+      memoryId: string
+      patch: Partial<Pick<ProactiveMemory, 'understood' | 'dateText' | 'dateParsed' | 'location'>>
+    }
   | { type: 'validate'; memoryId: string; outcome: 'happened' | 'postponed' | 'discarded' }
   | { type: 'cancel_discard_request'; memoryId: string }
 
@@ -196,6 +203,179 @@ function multiplePendingFallback(language: string): string {
   return `Tenho mais de uma coisa anotada. Qual você tá respondendo?`
 }
 
+function actionFallback(action: ResolvedAction, memory: ProactiveMemory, language: string): string | undefined {
+  const item = memory.understood
+  if (action.type === 'request_discard') {
+    if (language === 'it-IT') return `"${item}" — è saltato davvero? Se sì, libero quel blocco.`
+    if (language === 'en-US') return `"${item}" — is that really off? If yes, I free that block.`
+    return `"${item}" — caiu mesmo? Se caiu, eu libero esse bloco.`
+  }
+  return undefined
+}
+
+function relevantMemoriesForSemantic(all: ProactiveMemory[]): ProactiveMemory[] {
+  const active = new Set(['pending_confirmation', 'confirmed', 'enriched', 'surfaced', 'pending_validation'])
+  return all
+    .filter((memory) => active.has(memory.status))
+    .slice(0, 8)
+}
+
+function semanticPrompt(input: string, memories: ProactiveMemory[], language: string): string {
+  const memoryLines = memories.map((memory) => ({
+    id: memory.id,
+    type: memory.type,
+    status: memory.status,
+    understood: memory.understood,
+    dateText: memory.dateText,
+    dateParsed: memory.dateParsed,
+    location: memory.location,
+    discardRequestedAt: memory.discardRequestedAt,
+  }))
+
+  return `You are GUTO's proactive memory action resolver.
+
+Goal: understand the user's intent semantically across Portuguese, English, Italian, slang and typos. Do NOT use keyword matching.
+
+User language: ${language}
+User message: ${JSON.stringify(input)}
+
+Existing proactive memories:
+${JSON.stringify(memoryLines, null, 2)}
+
+Decide whether the user is answering, correcting, confirming, cancelling, postponing, or validating one of these memories.
+
+Rules:
+- A place mention is not a trip by itself. "jogo da Roma" is a football/team reference, not a trip to Rome.
+- If a confirmed/enriched/surfaced memory was cancelled/changed, do NOT discard immediately. Return request_discard so GUTO confirms before deletion.
+- If a pending_confirmation is clearly confirmed, return confirm. If clearly rejected/cancelled, return discard.
+- If a pending_validation is answered, return validate with outcome: happened, postponed, or discarded.
+- If the user is correcting a pending_confirmation detail and the corrected detail is clear, return update with patch. Keep it pending; GUTO will ask confirmation again.
+- If the user is correcting a detail but the corrected new detail is not enough to safely update, return null with a short clarification.
+- If the message is general research, weather curiosity, or not connected to a memory, return null with no clarification.
+- If uncertain, return null with a short clarification in the user's language.
+
+Return STRICT JSON only:
+{
+  "action": null | {"type":"confirm"|"discard"|"request_discard"|"cancel_discard_request","memoryId":"..."} | {"type":"update","memoryId":"...","patch":{"understood":"...","dateText":"...","dateParsed":"YYYY-MM-DD","location":"..."}} | {"type":"validate","memoryId":"...","outcome":"happened"|"postponed"|"discarded"},
+  "clarification": "short GUTO-style question if needed, otherwise empty string",
+  "reason": "short internal reason"
+}`
+}
+
+function sanitizeSemanticAction(raw: unknown, memories: ProactiveMemory[], language: string): ResolverResult | null {
+  if (!raw || typeof raw !== 'object') return null
+  const parsed = raw as { action?: unknown; clarification?: unknown; reason?: unknown }
+  const clarification = typeof parsed.clarification === 'string' ? parsed.clarification.trim().slice(0, 240) : ''
+  const reason = typeof parsed.reason === 'string' ? parsed.reason.slice(0, 120) : 'semantic'
+  if (!parsed.action || typeof parsed.action !== 'object') {
+    return clarification
+      ? { engaged: true, action: null, fallbackMessage: clarification, reason }
+      : null
+  }
+
+  const action = parsed.action as { type?: unknown; memoryId?: unknown; outcome?: unknown }
+  const memoryId = typeof action.memoryId === 'string' ? action.memoryId.trim() : ''
+  const memory = memories.find((item) => item.id === memoryId)
+  if (!memory || typeof action.type !== 'string') return null
+
+  if (action.type === 'confirm' && memory.status === 'pending_confirmation') {
+    return { engaged: true, action: { type: 'confirm', memoryId }, reason }
+  }
+  if (action.type === 'discard' && (memory.status === 'pending_confirmation' || memory.discardRequestedAt)) {
+    return { engaged: true, action: { type: 'discard', memoryId }, reason }
+  }
+  if (action.type === 'request_discard' && ['confirmed', 'enriched', 'surfaced'].includes(memory.status) && !memory.discardRequestedAt) {
+    const requestAction: ResolvedAction = { type: 'request_discard', memoryId }
+    return {
+      engaged: true,
+      action: requestAction,
+      fallbackMessage: clarification || actionFallback(requestAction, memory, language),
+      reason,
+    }
+  }
+  if (action.type === 'cancel_discard_request' && memory.discardRequestedAt) {
+    return { engaged: true, action: { type: 'cancel_discard_request', memoryId }, reason }
+  }
+  if (action.type === 'update' && memory.status === 'pending_confirmation') {
+    const rawPatch = action as { patch?: unknown }
+    const patchInput = rawPatch.patch && typeof rawPatch.patch === 'object'
+      ? rawPatch.patch as Record<string, unknown>
+      : {}
+    const patch: Partial<Pick<ProactiveMemory, 'understood' | 'dateText' | 'dateParsed' | 'location'>> = {}
+    if (typeof patchInput.understood === 'string' && patchInput.understood.trim()) {
+      patch.understood = patchInput.understood.trim().slice(0, 300)
+    }
+    if (typeof patchInput.dateText === 'string' && patchInput.dateText.trim()) {
+      patch.dateText = patchInput.dateText.trim().slice(0, 80)
+    }
+    if (typeof patchInput.dateParsed === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(patchInput.dateParsed)) {
+      patch.dateParsed = patchInput.dateParsed
+    }
+    if (typeof patchInput.location === 'string' && patchInput.location.trim()) {
+      patch.location = patchInput.location.trim().slice(0, 120)
+    }
+    if (Object.keys(patch).length === 0) return null
+    const updateAction: ResolvedAction = { type: 'update', memoryId, patch }
+    return {
+      engaged: true,
+      action: updateAction,
+      fallbackMessage: clarification || correctionFallback({ ...memory, ...patch }, language),
+      reason,
+    }
+  }
+  if (
+    action.type === 'validate' &&
+    memory.status === 'pending_validation' &&
+    (action.outcome === 'happened' || action.outcome === 'postponed' || action.outcome === 'discarded')
+  ) {
+    return {
+      engaged: true,
+      action: { type: 'validate', memoryId, outcome: action.outcome },
+      reason,
+    }
+  }
+
+  return clarification
+    ? { engaged: true, action: null, fallbackMessage: clarification, reason }
+    : null
+}
+
+async function resolveSemantically(
+  input: string,
+  memories: ProactiveMemory[],
+  language: string
+): Promise<ResolverResult | null> {
+  if (!config.geminiApiKey || memories.length === 0) return null
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${config.geminiModel}:generateContent?key=${config.geminiApiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: semanticPrompt(input, memories, language) }] }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 900,
+            responseMimeType: 'application/json',
+          },
+        }),
+        signal: AbortSignal.timeout(8000),
+      }
+    )
+    if (!res.ok) return null
+    const data = (await res.json()) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+    }
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text
+    if (!text) return null
+    return sanitizeSemanticAction(JSON.parse(text), memories, language)
+  } catch {
+    return null
+  }
+}
+
 // ─── Main resolver ─────────────────────────────────────────────────────────────
 
 export async function resolveProactiveMemoryActionFromUserReply(
@@ -214,6 +394,13 @@ export async function resolveProactiveMemoryActionFromUserReply(
       getProactiveMemoriesByStatus(userId, ['pending_confirmation']),
       getProactiveMemoriesByStatus(userId, ['pending_validation']),
     ])
+
+    const semantic = await resolveSemantically(
+      userInput,
+      relevantMemoriesForSemantic(allMemories),
+      language
+    )
+    if (semantic?.engaged) return semantic
 
     // ── 0. Awaiting discard confirmation — absolute priority ───────────────────
     // These are confirmed/enriched/surfaced memories where user said "cancelei X"

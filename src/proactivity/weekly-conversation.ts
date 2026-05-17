@@ -14,15 +14,6 @@ import type { WeeklyConversation } from './types'
 // ─── Checks ───────────────────────────────────────────────────────────────────
 
 /**
- * Returns true if today is Monday in the user's timezone context.
- * We compare using the operational context date passed from server.ts.
- */
-export function isMondayToday(weekday: string): boolean {
-  // weekday comes from getOperationalContext() — lowercase English
-  return weekday.toLowerCase() === 'monday'
-}
-
-/**
  * Returns true if the weekly opening conversation has already happened this week.
  */
 export async function hasWeeklyConversationThisWeek(userId: string): Promise<boolean> {
@@ -71,17 +62,18 @@ export interface WeeklyCheckResult {
 
 export async function getWeeklyCheckResult(
   userId: string,
-  weekday: string
+  _weekday: string
 ): Promise<WeeklyCheckResult> {
   const weekKey = getWeekKey()
   const wc = await getWeeklyConversation(userId, weekKey)
   const pendingValidation = await hasPendingValidation(userId)
 
-  const isMonday = isMondayToday(weekday)
   const weeklyDone = wc !== null
 
   return {
-    shouldOpenWeekly: isMonday && !weeklyDone,
+    // The weekly cycle opens the first time the user shows up in the week.
+    // It is not tied to Monday because a new user can start on any day.
+    shouldOpenWeekly: !weeklyDone,
     shouldValidate: pendingValidation,
     extractionPending: weeklyDone && !wc.extractionDone,
   }

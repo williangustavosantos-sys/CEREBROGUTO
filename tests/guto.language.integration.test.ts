@@ -178,7 +178,7 @@ function installGeminiMock() {
     const memory = extractFirstJsonObjectAfterMarker(prompt, ["Memória do usuário", "Memoria do usuario", "User memory", "MEMÓRIA"]);
 
     const inputMatch = prompt.match(/Mensagem atual do usuário: (.*)/);
-    const inputMsg = inputMatch ? inputMatch[1].trim().toLowerCase() : "";
+    const inputMsg = inputMatch ? inputMatch[1].trim().toLowerCase() : prompt.toLowerCase();
 
     // Check if it's a full workout request
     if (inputMsg.includes("30") && (inputMsg.includes("15") || inputMsg.includes("3 pm"))) {
@@ -269,7 +269,7 @@ function installGeminiMock() {
 async function postGuto(body: Record<string, unknown>) {
   const token = jwt.sign(
     { userId: (body.profile as any)?.userId || "test-user", role: "student" },
-    process.env.JWT_SECRET || "dev-secret-change-in-production"
+    process.env.JWT_SECRET!
   );
   const response = await originalFetch(`${baseUrl}/guto`, {
     method: "POST",

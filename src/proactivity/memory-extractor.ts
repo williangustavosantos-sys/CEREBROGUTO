@@ -26,22 +26,30 @@ function buildExtractorPrompt(
   userLanguage: string,
   todayISO: string
 ): string {
-  return `You are an event extraction assistant for GUTO, a fitness companion app.
+  return `You are the semantic event extractor for GUTO, a fitness companion app.
 
 Today is ${todayISO}.
 User language: ${userLanguage}
 
-Read this conversation and extract ONLY concrete future events that GUTO should remember:
+Read this conversation and extract ONLY concrete future events that affect workout execution.
 - Trips or travel to other cities/countries
-- Scheduled commitments (meetings, appointments, events)
+- Scheduled commitments that block or change training (meetings, appointments, events)
 - Training schedule changes (will train at different time/day)
-- Health events (planned procedure, doctor appointment, known recovery period)
+- Health events that affect training (planned procedure, doctor appointment, known recovery period)
 
 DO NOT extract:
 - Past events already happened
 - Vague mentions without a time reference ("someday I want to go to Paris")
 - Things the user expressed uncertainty about ("maybe I'll go")
 - Workout information (already handled by the main system)
+- General research questions, curiosity, trivia, weather questions, sports/team references or city mentions that are not an actual trip/commitment.
+- City/team ambiguity: "vou assistir o jogo da Roma" is about a football team, NOT a trip to Rome. "Roma é linda" is not a memory. "quinta viajo para Roma" is a trip.
+- Anything that does not change training execution, availability, location, safety, travel preparation or routine continuity.
+
+Rules:
+- Understand intent across Portuguese, English, Italian, slang and typos. Do NOT use keyword matching.
+- If a phrase could mean multiple things and there is not enough context, do not extract it.
+- Multiple events in one user message must become multiple array items.
 
 Return a JSON array. Each item must have:
 - type: "trip" | "commitment" | "schedule" | "health" | "other"
@@ -76,7 +84,7 @@ export async function extractEventsFromConversation(
       body: JSON.stringify({
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         generationConfig: {
-          response_mime_type: 'application/json',
+          responseMimeType: 'application/json',
           temperature: 0.1,
           maxOutputTokens: 800,
         },

@@ -18,7 +18,7 @@ let baseUrl = "";
 function signTestToken(role: "coach" | "admin" | "super_admin", userId = `${role}-test-user`) {
   return jwt.sign(
     { userId, role, coachId: role === "coach" ? userId : undefined },
-    process.env.JWT_SECRET || "dev-secret-change-in-production"
+    process.env.JWT_SECRET!
   );
 }
 

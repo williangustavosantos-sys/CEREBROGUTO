@@ -1108,7 +1108,7 @@ adminRouter.patch(["/students/:userId", "/users/:userId"], asyncHandler(async (r
   res.json({ student: buildStudentView(updated), user: updated });
 }));
 
-adminRouter.delete(["/students/:userId", "/users/:userId"], requireAdmin, asyncHandler(async (req, res) => {
+adminRouter.delete(["/students/:userId", "/users/:userId"], requireSuperAdmin, asyncHandler(async (req, res) => {
   const caller = req.gutoUser!;
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;

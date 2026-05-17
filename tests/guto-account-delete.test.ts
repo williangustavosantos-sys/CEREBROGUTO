@@ -42,7 +42,7 @@ function makeAccess(userId: string, role: UserAccess["role"], patch: Partial<Use
 function tokenFor(user: UserAccess): string {
   return jwt.sign(
     { userId: user.userId, role: user.role, coachId: user.coachId },
-    process.env.JWT_SECRET || "dev-secret-change-in-production"
+    process.env.JWT_SECRET!
   );
 }
 

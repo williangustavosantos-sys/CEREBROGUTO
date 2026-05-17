@@ -217,7 +217,7 @@ function installGeminiMock() {
 async function postGuto(body: Record<string, unknown>) {
   const token = jwt.sign(
     { userId: (body.profile as any)?.userId || "test-user", role: "student" },
-    process.env.JWT_SECRET || "dev-secret-change-in-production"
+    process.env.JWT_SECRET!
   );
   const response = await originalFetch(`${baseUrl}/guto`, {
     method: "POST",

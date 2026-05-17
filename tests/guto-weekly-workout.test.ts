@@ -57,11 +57,11 @@ function seedAccess(): void {
 }
 
 function token(user: UserAccess): string {
-  return jwt.sign({ userId: user.userId, role: user.role, coachId: user.coachId }, process.env.JWT_SECRET || "dev-secret-change-in-production");
+  return jwt.sign({ userId: user.userId, role: user.role, coachId: user.coachId }, config.jwtSecret);
 }
 
 function superToken(): string {
-  return jwt.sign({ userId: "super-weekly-test", role: "super_admin" }, process.env.JWT_SECRET || "dev-secret-change-in-production");
+  return jwt.sign({ userId: "super-weekly-test", role: "super_admin" }, config.jwtSecret);
 }
 
 async function req(path: string, options: RequestInit = {}) {
