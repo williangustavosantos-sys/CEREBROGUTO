@@ -5131,10 +5131,11 @@ async function askGutoModel({
       }
     }
 
+    const finalAction = parsedResponse.acao === "updateWorkout" && !workoutPlan ? "none" : parsedResponse.acao || "none";
     return finalize({
       fala: parsedResponse.fala,
-      acao: parsedResponse.acao === "updateWorkout" && !workoutPlan ? "none" : parsedResponse.acao || "none",
-      expectedResponse: parsedResponse.expectedResponse,
+      acao: finalAction,
+      expectedResponse: finalAction === "updateWorkout" ? null : parsedResponse.expectedResponse,
       avatarEmotion: parsedResponse.avatarEmotion,
       trainedReference: parsedResponse.trainedReference,
       memoryPatch: {
