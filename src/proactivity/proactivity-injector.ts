@@ -160,26 +160,32 @@ export async function buildProactivityContextBlock(
     }
 
     // ── Weekly conversation signal ─────────────────────────────────────────────
+    // Weekly opening is presence context, not an interruption. Pending
+    // confirmation/validation above can block the turn; a weekly check should
+    // ride along only after the current user intent is handled.
     if (weeklyCheck.shouldOpenWeekly) {
       if (language === 'it-IT') {
         sections.push(
           `[PROATTIVITÀ — APERTURA SETTIMANALE]\n` +
           `Questa settimana non è ancora stata aperta con l'utente.\n` +
-          `All'inizio di questa conversazione, chiedi casualmente com'è la settimana — come un amico che vuole sapere se ci sono viaggi, impegni o cambiamenti di orario che possono influenzare l'allenamento.\n` +
+          `Se l'utente ha chiesto un'azione esplicita (allenamento, dieta, dolore, tecnica o conferma), rispondi PRIMA a quell'intenzione. Poi, solo se resta naturale, aggiungi un check corto sulla settimana.\n` +
+          `Chiedi com'è la settimana come un amico che vuole sapere se ci sono viaggi, impegni o cambiamenti di orario che possono influenzare l'allenamento.\n` +
           `Salverai solo ciò che cambia l'esecuzione del treino. Sii naturale, niente frase da sistema.`
         )
       } else if (language === 'en-US') {
         sections.push(
           `[PROACTIVITY — WEEKLY OPENING]\n` +
           `This week has not been opened with the user yet.\n` +
-          `Early in this conversation, casually ask how the week looks — like a friend checking if there are trips, commitments, or schedule changes that might affect training.\n` +
+          `If the user asked for an explicit action (workout, diet, pain, technique, or confirmation), answer that intent FIRST. Then, only if natural, add one short weekly check.\n` +
+          `Ask how the week looks like a friend checking if there are trips, commitments, or schedule changes that might affect training.\n` +
           `Only remember what changes workout execution. Be natural, never system-like.`
         )
       } else {
         sections.push(
           `[PROATIVIDADE — ABERTURA SEMANAL]\n` +
           `Esta semana ainda não foi aberta com o usuário.\n` +
-          `No início dessa conversa, pergunta casualmente como vai ser a semana — como amigo que quer saber se tem viagem, compromisso ou mudança de horário que pode afetar o treino.\n` +
+          `Se o usuário pediu uma ação explícita (treino, dieta, dor, técnica ou confirmação), responda ESSA intenção primeiro. Depois, só se couber natural, acrescente um check curto da semana.\n` +
+          `Pergunta como vai ser a semana como amigo que quer saber se tem viagem, compromisso ou mudança de horário que pode afetar o treino.\n` +
           `Só memorize o que muda a execução do treino. Seja natural, nada de frase de sistema.`
         )
       }

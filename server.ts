@@ -2322,9 +2322,10 @@ function isWorkoutExecutionRequestFallback(value: string): boolean {
 
 function extractTrainingLocationFallback(value: string): string | undefined {
   const normalized = normalize(value).replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
-  if (/\b(academia|gym|palestra)\b/.test(normalized)) return "gym";
+  if (/\b(academia|gym|palestra|pales)\b/.test(normalized)) return "gym";
   if (/\b(casa|home)\b/.test(normalized)) return "home";
   if (/\b(parque|park|parco)\b/.test(normalized)) return "park";
+  if (/\b(piscina|pool)\b/.test(normalized)) return "piscina";
   return undefined;
 }
 
@@ -2809,9 +2810,9 @@ Usuário pede excluir conta:
     "",
     ...(proactivityContext
       ? [
-          "─── PRIORIDADE PROATIVA DESTE TURNO ───",
+          "─── CONTEXTO PROATIVO DESTE TURNO ───",
           proactivityContext,
-          "Se houver confirmação pendente ou validação pendente acima, resolva isso ANTES de montar treino, trocar foco ou responder sobre missão. Não retorne acao:updateWorkout enquanto essa confirmação/validação estiver aberta, salvo se o usuário falar claramente de treino e a proatividade não exigir resposta neste turno.",
+          "Confirmação pendente, descarte pendente ou validação pendente têm prioridade real. Abertura semanal é presença contextual: não substitui pedido explícito de treino, dieta, dor ou técnica. Nesses casos, responda a intenção atual primeiro e acrescente o check semanal só se couber em uma frase curta.",
           "",
         ]
       : []),
@@ -4394,6 +4395,7 @@ async function classifyContractIntent(input: {
     "For history_reference return dateLabel and muscleGroup if inferable. If user says 'that/isso/lho' use memory.lastSuggestedFocus.",
     "For clear_no_limitation or clear_limitation return age if present and limitationText/statusText if useful.",
     "For location_answer return locationText. For training_status_answer return statusText.",
+    "Short location answers are valid operational context. Examples: 'Gym.' -> location_answer gym; 'Pales.' -> location_answer palestra; 'Piscina.' -> location_answer piscina.",
     "",
     `USER_MESSAGE=${JSON.stringify(text)}`,
     "",
