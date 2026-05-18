@@ -346,6 +346,9 @@ describe("GUTO /guto integration", () => {
     assert.notEqual(memory.trainingAge, 15);
     assert.equal(memory.trainingLimitations, "sem dor");
     assert.ok(memory.lastWorkoutPlan);
+    assert.ok(Array.isArray(memory.memoryAudit));
+    assert.ok(memory.memoryAudit.some((entry: any) => entry.source === "chat_patch" && entry.fields.includes("trainingLocation")));
+    assert.ok(memory.memoryAudit.some((entry: any) => entry.fields.includes("lastWorkoutPlan")));
   });
 
   it("handles 'treinei isso ontem' as training history, not pain", async () => {
@@ -381,6 +384,8 @@ describe("GUTO /guto integration", () => {
     assert.equal(memory.recentTrainingHistory?.[0]?.dateLabel, "yesterday");
     assert.equal(memory.recentTrainingHistory?.[0]?.muscleGroup, "chest_triceps");
     assert.match(memory.recentTrainingHistory?.[0]?.raw || "", /treinei isso ontem/i);
+    assert.ok(memory.memoryAudit.some((entry: any) => entry.source === "trained_reference"));
+    assert.ok(memory.memoryAudit.some((entry: any) => entry.fields.includes("nextWorkoutFocus")));
   });
 
   it("continues from history and switches next focus to legs_core for 'treinei anteontem costas'", async () => {

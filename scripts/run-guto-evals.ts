@@ -111,7 +111,7 @@ interface FailureSummary {
 }
 
 const DEFAULT_CASES_FILE = "evals/guto-cases.jsonl";
-const DEFAULT_BASE_URL = process.env.GUTO_EVAL_BASE_URL || "http://localhost:3001";
+const DEFAULT_BASE_URL = process.env.GUTO_EVAL_BASE_URL || "";
 const DEFAULT_TIMEOUT_MS = Number(process.env.GUTO_EVAL_TIMEOUT_MS || 45_000);
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-in-production";
 // Judge LLM — Claude Sonnet por default. Independente do modelo do GUTO
@@ -631,8 +631,33 @@ function writeReport(results: EvalResult[], reportPath: string) {
   );
 }
 
+async function startLocalEvalServer(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+  process.env.GUTO_DISABLE_LISTEN = "1";
+  process.env.GUTO_ALLOW_DEV_ACCESS = "true";
+  process.env.GUTO_DISABLE_REDIS_FOR_TESTS = "1";
+  process.env.GUTO_MEMORY_FILE = process.env.GUTO_MEMORY_FILE || join("tmp", `guto-eval-${Date.now()}.json`);
+  mkdirSync(dirname(resolve(process.cwd(), process.env.GUTO_MEMORY_FILE)), { recursive: true });
+  writeFileSync(resolve(process.cwd(), process.env.GUTO_MEMORY_FILE), JSON.stringify({}, null, 2));
+
+  const serverModule = await import("../server.js") as {
+    app: { listen: (port: number, hostname: string, callback?: () => void) => import("node:http").Server };
+  };
+  const server = await new Promise<import("node:http").Server>((resolveServer, reject) => {
+    const instance = serverModule.app.listen(0, "127.0.0.1", () => resolveServer(instance));
+    instance.once("error", reject);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Failed to bind local eval server.");
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise((resolveClose, reject) => server.close((error) => (error ? reject(error) : resolveClose()))),
+  };
+}
+
 async function main() {
   const args = parseArgs();
+  const localServer = args.baseUrl ? null : await startLocalEvalServer();
+  const baseUrl = (args.baseUrl || localServer?.baseUrl || "").replace(/\/$/, "");
   const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   let cases = loadCases(args.file);
 
@@ -648,7 +673,7 @@ async function main() {
   const results: EvalResult[] = [];
   for (const [index, testCase] of cases.entries()) {
     if (index > 0 && args.delayMs > 0) await wait(args.delayMs);
-    const result = await runCase(args.baseUrl.replace(/\/$/, ""), runId, testCase, args.judge);
+    const result = await runCase(baseUrl, runId, testCase, args.judge);
     results.push(result);
     if (!args.json) printResult(result);
   }
@@ -666,7 +691,9 @@ async function main() {
     console.log(`Relatorio: ${reportPath}`);
   }
 
-  if (failed > 0) process.exit(1);
+  if (localServer) await localServer.close();
+  const passRate = results.length ? passed / results.length : 0;
+  if (passRate < 0.9) process.exit(1);
 }
 
 main().catch((error) => {

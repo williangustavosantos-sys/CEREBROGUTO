@@ -524,4 +524,57 @@ describe("workout catalog video gate", () => {
     const body = (await response.json()) as { error?: string };
     assert.equal(body.error, "INVALID_WORKOUT_EXERCISE_CATALOG_ID");
   });
+
+  it("keeps workout validation XP idempotent for the same GUTO day", async () => {
+    writeFileSync(testMemoryFile, JSON.stringify({
+      "student-video-gate": {
+        userId: "student-video-gate",
+        name: "Aluno",
+        language: "pt-BR",
+        totalXp: 0,
+        streak: 0,
+        trainedToday: false,
+        completedWorkoutDates: [],
+        adaptedMissionDates: [],
+        missedMissionDates: [],
+        xpEvents: [],
+        proactiveSent: {},
+        lastWorkoutPlan: workoutPlan(),
+      },
+    }, null, 2));
+
+    const payload = {
+      imageBase64: validImageBase64,
+      workoutFocus: "chest_triceps",
+      workoutLabel: "Peito e tríceps",
+      locationMode: "gym",
+      language: "pt-BR",
+    };
+
+    const first = await request("/guto/validate-workout", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${signToken("student", "student-video-gate")}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    assert.equal(first.status, 200);
+
+    const second = await request("/guto/validate-workout", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${signToken("student", "student-video-gate")}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    assert.equal(second.status, 409);
+
+    const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, any>;
+    const memory = store["student-video-gate"];
+    assert.equal(memory.validationHistory.length, 1);
+    assert.equal(memory.xpEvents.filter((event: any) => event.type === "complete_daily_mission").length, 1);
+    assert.ok(memory.memoryAudit.some((entry: any) => entry.source === "workout_validation"));
+  });
 });

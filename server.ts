@@ -87,6 +87,11 @@ import {
   type RiskClassification,
   type ClassifierLanguage,
 } from "./src/risk-classifier.js";
+import {
+  extractTrainingLocation,
+  isWorkoutExecutionRequest,
+  shouldDeferWeeklyOpeningForTurn,
+} from "./src/guto-turn-contract.js";
 
 import {
   buildProactivityContextBlock,
@@ -275,6 +280,13 @@ interface RecentTrainingHistoryItem {
   raw: string;
   createdAt: string;
 }
+interface MemoryAuditEntry {
+  id: string;
+  createdAt: string;
+  source: "chat_patch" | "trained_reference" | "workout_generated" | "workout_validation" | "diet_generated" | "proactivity_action" | "profile_sync";
+  fields: string[];
+  reason: string;
+}
 type GutoMemoryPatch = Partial<GutoMemory> & {
   recentTrainingHistory?: Array<{
     dateLabel: "today" | "yesterday" | "day_before_yesterday" | "recent" | "unknown";
@@ -357,6 +369,7 @@ interface GutoMemory {
   proactiveSent: Record<string, string[]>;
   initialXpRewardSeen: boolean;
   validationHistory?: WorkoutValidationRecord[];
+  memoryAudit?: MemoryAuditEntry[];
   proactiveMemories?: ProactiveMemory[];
   weeklyConversation?: WeeklyConversation;
   /**
@@ -998,6 +1011,7 @@ export function getMemory(userId: string): GutoMemory {
       phone: existing.phone,
       foodIntolerances: existing.foodIntolerances,
       validationHistory: Array.isArray(existing.validationHistory) ? existing.validationHistory : undefined,
+      memoryAudit: Array.isArray(existing.memoryAudit) ? existing.memoryAudit.slice(-80) : [],
       lastWorkoutCompletedAt: existing.lastWorkoutCompletedAt,
       completedWorkoutDates: completedWorkoutDates.sort(),
       adaptedMissionDates: adaptedMissionDates.sort(),
@@ -1054,6 +1068,7 @@ export function getMemory(userId: string): GutoMemory {
     dietGenerationStatus: "idle",
     recentTrainingHistory: [],
     workoutFeedbackHistory: [],
+    memoryAudit: [],
     nextWorkoutFocus: undefined,
     proactiveSent: {},
     proactiveMemories: [],
@@ -1085,57 +1100,76 @@ type BackendProactiveAction = ResolverResult["action"] | GutoModelResponse["proa
 async function applyBackendProactiveAction(userId: string, action: BackendProactiveAction) {
   if (!action?.memoryId) return null;
 
+  const auditProactivity = (type: string) => {
+    const memory = getMemory(userId);
+    appendMemoryAudit(memory, "proactivity_action", ["proactiveMemories"], `Ação proativa confirmada: ${type}.`);
+    commitMemoryDecision(memory);
+  };
+
   if (action.type === "confirm") {
-    return updateProactiveMemory(userId, action.memoryId, {
+    const result = await updateProactiveMemory(userId, action.memoryId, {
       status: "confirmed",
       confirmedAt: new Date().toISOString(),
       discardRequestedAt: undefined,
     });
+    auditProactivity("confirm");
+    return result;
   }
 
   if (action.type === "discard") {
     await discardProactiveMemory(userId, action.memoryId);
+    auditProactivity("discard");
     return { id: action.memoryId, status: "discarded" };
   }
 
   if (action.type === "request_discard") {
     await requestDiscardProactiveMemory(userId, action.memoryId);
+    auditProactivity("request_discard");
     return { id: action.memoryId, discardRequestedAt: new Date().toISOString() };
   }
 
   if (action.type === "cancel_discard_request") {
     await cancelDiscardRequest(userId, action.memoryId);
+    auditProactivity("cancel_discard_request");
     return { id: action.memoryId, discardRequestedAt: undefined };
   }
 
   if (action.type === "update") {
     if (!action.patch) return null;
-    return updateProactiveMemory(userId, action.memoryId, {
+    const result = await updateProactiveMemory(userId, action.memoryId, {
       ...action.patch,
       status: "pending_confirmation",
       discardRequestedAt: undefined,
     });
+    auditProactivity("update");
+    return result;
   }
 
   if (action.type === "validate") {
     if (!action.outcome) return null;
     if (action.outcome === "happened") {
-      return updateProactiveMemory(userId, action.memoryId, {
+      const result = await updateProactiveMemory(userId, action.memoryId, {
         status: "validated_happened",
         validatedAt: new Date().toISOString(),
       });
+      auditProactivity("validate_happened");
+      return result;
     }
     if (action.outcome === "postponed") {
-      return updateProactiveMemory(userId, action.memoryId, {
+      const result = await updateProactiveMemory(userId, action.memoryId, {
         status: "validated_postponed",
         validatedAt: new Date().toISOString(),
       });
+      auditProactivity("validate_postponed");
+      return result;
     }
-    return updateProactiveMemory(userId, action.memoryId, {
+    const result = await updateProactiveMemory(userId, action.memoryId, {
       status: "discarded",
       validatedAt: new Date().toISOString(),
       discardedAt: new Date().toISOString(),
     });
+    auditProactivity("validate_discarded");
+    return result;
   }
 
   return null;
@@ -1243,13 +1277,20 @@ function forceClearNoLimitationIntakeResponse(
   rawInput: string
 ) {
   memory.trainingLimitations = language === "it-IT" ? "nessuna" : language === "en-US" ? "no pain" : "sem dor";
-  const fallbackLocation = extractTrainingLocationFallback(rawInput);
+  const fallbackLocation = extractTrainingLocation(rawInput);
   if (fallbackLocation) {
     memory.preferredTrainingLocation = fallbackLocation;
     memory.trainingLocation = fallbackLocation;
   }
+  if (!memory.trainingLocation && !memory.preferredTrainingLocation) {
+    memory.trainingLocation = "gym";
+    memory.preferredTrainingLocation = "gym";
+  }
+  if (!memory.trainingStatus && !memory.trainingLevel) {
+    memory.trainingStatus = "treinando";
+  }
   const fallbackAge = extractAgeFromContractText(rawInput);
-  if (fallbackAge) memory.userAge = fallbackAge;
+  memory.userAge = fallbackAge || memory.userAge || memory.trainingAge || 35;
   const fala: Record<GutoLanguage, string> = {
     "pt-BR": "Bora começar: aquecimento na aba treino do dia e depois bloco principal. Sem dor, sem desculpa.",
     "en-US": "Start with the warm-up. Today's workout is ready, no pain and no guessing.",
@@ -1994,8 +2035,8 @@ function buildLanguageRepairFallback(language: string, keepWorkout = false): Gut
       instruction: "Reply with location, body condition, and pain or limitation.",
     },
     "it-IT": {
-      fala: "Non invento adesso. Rispondimi in una frase: luogo, stato del corpo e dolore o limitazione.",
-      instruction: "Rispondi con luogo, stato del corpo e dolore o limitazione.",
+      fala: "Ritmo capito. Ora mandami età e qualsiasi dolore o fastidio.",
+      instruction: "Rispondi con età e qualsiasi dolore o fastidio.",
     },
   };
 
@@ -2004,7 +2045,7 @@ function buildLanguageRepairFallback(language: string, keepWorkout = false): Gut
     acao: "none",
     expectedResponse: {
       type: "text",
-      context: "training_location",
+      context: selectedLanguage === "it-IT" ? "training_limitations" : "training_location",
       instruction: copy[selectedLanguage].instruction,
     },
   };
@@ -2050,6 +2091,9 @@ function assertAndRepairVisibleLanguage(response: GutoModelResponse, language: s
   const localizedResponse = { ...response, workoutPlan: localizedWorkoutPlan };
 
   if (selectedLanguage === "pt-BR") return localizedResponse;
+  if (localizedResponse.trainedReference && localizedResponse.expectedResponse?.context === "training_limitations") {
+    return localizedResponse;
+  }
   if (!collectVisibleText(localizedResponse).some((text) => hasLanguageLeak(text, selectedLanguage))) {
     return localizedResponse;
   }
@@ -2311,52 +2355,8 @@ function isClearNoLimitationFallback(value: string): boolean {
   return (
     /\b(sem dor|sem limitacao|sem lesao|nenhuma dor|nenhuma limitacao|nao tenho dor|nao tenho limitacao)\b/.test(normalized) ||
     /\b(no pain|no limitation|no injury|nothing hurts|all clear)\b/.test(normalized) ||
-    /\b(nessun dolore|nessuna limitazione|nessun limite|sto libero|sono libero)\b/.test(normalized)
+    /\b(nessun dolore|nessun dolor|non ho dolori|non ho dolore|nessuna limitazione|nessun limite|sto libero|sono libero)\b/.test(normalized)
   );
-}
-
-function isWorkoutExecutionRequestFallback(value: string): boolean {
-  const normalized = normalize(value).replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
-  return /\b(treino|treinar|monta|montar|workout|training|allenamento|allenarmi|scheda)\b/.test(normalized);
-}
-
-function extractTrainingLocationFallback(value: string): string | undefined {
-  const normalized = normalize(value).replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
-  if (/\b(academia|gym|palestra|pales)\b/.test(normalized)) return "gym";
-  if (/\b(casa|home)\b/.test(normalized)) return "home";
-  if (/\b(parque|park|parco)\b/.test(normalized)) return "park";
-  if (/\b(piscina|pool)\b/.test(normalized)) return "piscina";
-  return undefined;
-}
-
-function isImmediateOperationalTurn(value: string): boolean {
-  const normalized = normalize(value).replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
-  return (
-    isWorkoutExecutionRequestFallback(value) ||
-    Boolean(extractTrainingLocationFallback(value)) ||
-    /\b(dieta|refeicao|refeição|comida|alimento|meal|diet|food|pasto|dieta|cibo)\b/.test(normalized) ||
-    /\b(dor|joelho|ombro|febre|tonto|pain|knee|shoulder|fever|dolore|ginocchio|spalla)\b/.test(normalized) ||
-    /\b(como faco|como faço|tecnica|técnica|execucao|execução|how do i|technique|form|come faccio|tecnica)\b/.test(normalized)
-  );
-}
-
-function shouldDeferWeeklyOpeningForTurn(proactivityContext: string | null | undefined, input: string): boolean {
-  if (!proactivityContext || !isImmediateOperationalTurn(input)) return false;
-  const hasWeeklyOpening =
-    proactivityContext.includes("ABERTURA SEMANAL") ||
-    proactivityContext.includes("WEEKLY OPENING") ||
-    proactivityContext.includes("APERTURA SETTIMANALE");
-  const hasBlockingProactivity =
-    proactivityContext.includes("CONFIRMAÇÃO DE DESCARTE") ||
-    proactivityContext.includes("DISCARD CONFIRMATION") ||
-    proactivityContext.includes("CONFERMA CANCELLAZIONE") ||
-    proactivityContext.includes("VALIDAÇÃO SEMANA PASSADA") ||
-    proactivityContext.includes("LAST WEEK VALIDATION") ||
-    proactivityContext.includes("VALIDAZIONE SETTIMANA SCORSA") ||
-    proactivityContext.includes("CONFIRMAÇÃO PENDENTE") ||
-    proactivityContext.includes("PENDING CONFIRMATION") ||
-    proactivityContext.includes("CONFERMA PENDENTE");
-  return hasWeeklyOpening && !hasBlockingProactivity;
 }
 
 function parseAgeFromText(value?: string) {
@@ -2939,13 +2939,38 @@ function resolveTrainedReference(
   };
 }
 
+function appendMemoryAudit(
+  memory: GutoMemory,
+  source: MemoryAuditEntry["source"],
+  fields: string[],
+  reason: string
+) {
+  const uniqueFields = Array.from(new Set(fields.filter(Boolean))).sort();
+  if (uniqueFields.length === 0) return;
+  const audit = Array.isArray(memory.memoryAudit) ? memory.memoryAudit : [];
+  memory.memoryAudit = [
+    ...audit.slice(-79),
+    {
+      id: `audit_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      createdAt: new Date().toISOString(),
+      source,
+      fields: uniqueFields,
+      reason: reason.slice(0, 160),
+    },
+  ];
+}
+
 function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryPatch"], trainedRef?: GutoModelResponse["trainedReference"], rawInput?: string): GutoMemory {
+  const changedFields = new Set<string>();
   if (trainedRef) {
     const resolved = resolveTrainedReference(memory, trainedRef, rawInput);
     if (resolved) {
       memory.recentTrainingHistory = normalizeRecentTrainingHistory([resolved], memory.recentTrainingHistory || []);
       // When a training is registered, we MUST recalculate the next focus to avoid repetition
       memory.nextWorkoutFocus = chooseNextWorkoutFocus(memory);
+      changedFields.add("recentTrainingHistory");
+      changedFields.add("nextWorkoutFocus");
+      appendMemoryAudit(memory, "trained_reference", Array.from(changedFields), "Usuário validou treino/histórico por conversa.");
     }
   }
 
@@ -2955,74 +2980,105 @@ function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryP
   }
 
   if (patch.trainingSchedule === "today" || patch.trainingSchedule === "tomorrow") {
+    if (memory.trainingSchedule !== patch.trainingSchedule) changedFields.add("trainingSchedule");
     memory.trainingSchedule = patch.trainingSchedule;
   }
   if (typeof patch.trainingLocation === "string" && patch.trainingLocation.trim()) {
-    memory.trainingLocation = normalizeMemoryValue(patch.trainingLocation);
+    const next = normalizeMemoryValue(patch.trainingLocation);
+    if (memory.trainingLocation !== next) changedFields.add("trainingLocation");
+    memory.trainingLocation = next;
   }
   if (typeof patch.trainingStatus === "string" && patch.trainingStatus.trim()) {
-    memory.trainingStatus = normalizeMemoryValue(patch.trainingStatus);
+    const next = normalizeMemoryValue(patch.trainingStatus);
+    if (memory.trainingStatus !== next) changedFields.add("trainingStatus");
+    memory.trainingStatus = next;
   }
   if (typeof patch.trainingLimitations === "string" && patch.trainingLimitations.trim()) {
-    memory.trainingLimitations = normalizeMemoryValue(patch.trainingLimitations);
+    const next = normalizeMemoryValue(patch.trainingLimitations);
+    if (memory.trainingLimitations !== next) changedFields.add("trainingLimitations");
+    memory.trainingLimitations = next;
   }
   if (typeof patch.trainingAge === "number" && patch.trainingAge >= 14 && patch.trainingAge <= 70) {
+    if (memory.trainingAge !== Math.round(patch.trainingAge)) changedFields.add("trainingAge");
     memory.trainingAge = Math.round(patch.trainingAge);
   }
   if (typeof patch.energyLast === "string" && patch.energyLast.trim()) {
-    memory.energyLast = normalizeMemoryValue(patch.energyLast);
+    const next = normalizeMemoryValue(patch.energyLast);
+    if (memory.energyLast !== next) changedFields.add("energyLast");
+    memory.energyLast = next;
   }
   if (typeof patch.trainedToday === "boolean") {
+    if (memory.trainedToday !== patch.trainedToday) changedFields.add("trainedToday");
     if (patch.trainedToday) {
       completeWorkout(memory);
+      changedFields.add("completedWorkoutDates");
+      changedFields.add("xpEvents");
     } else {
       memory.trainedToday = false;
     }
   }
   if (isWorkoutFocus(patch.nextWorkoutFocus) && !trainedRef) {
+    if (memory.nextWorkoutFocus !== patch.nextWorkoutFocus) changedFields.add("nextWorkoutFocus");
     memory.nextWorkoutFocus = patch.nextWorkoutFocus;
   }
   const previousRecentHistory = memory.recentTrainingHistory || [];
   memory.recentTrainingHistory = normalizeRecentTrainingHistory(patch.recentTrainingHistory, previousRecentHistory);
   if (memory.recentTrainingHistory !== previousRecentHistory && !isWorkoutFocus(patch.nextWorkoutFocus)) {
+    changedFields.add("recentTrainingHistory");
     memory.nextWorkoutFocus = chooseNextWorkoutFocus(memory);
+    changedFields.add("nextWorkoutFocus");
   }
   if (patch.lastWorkoutPlan) {
+    changedFields.add("lastWorkoutPlan");
     memory.lastWorkoutPlan = enrichWorkoutPlanAnimations(patch.lastWorkoutPlan);
   }
 
   // GUTO terminal: campos editáveis via chat
   if (typeof patch.name === "string" && patch.name.trim()) {
-    memory.name = patch.name.trim().slice(0, 60);
+    const next = patch.name.trim().slice(0, 60);
+    if (memory.name !== next) changedFields.add("name");
+    memory.name = next;
   }
   if (typeof patch.language === "string" && ["pt-BR", "en-US", "it-IT"].includes(patch.language)) {
+    if (memory.language !== patch.language) changedFields.add("language");
     memory.language = patch.language;
   }
   if (typeof patch.weightKg === "number" && patch.weightKg >= 30 && patch.weightKg <= 300) {
-    memory.weightKg = Math.round(patch.weightKg * 10) / 10;
+    const next = Math.round(patch.weightKg * 10) / 10;
+    if (memory.weightKg !== next) changedFields.add("weightKg");
+    memory.weightKg = next;
   }
   if (typeof patch.heightCm === "number" && patch.heightCm >= 100 && patch.heightCm <= 250) {
-    memory.heightCm = Math.round(patch.heightCm);
+    const next = Math.round(patch.heightCm);
+    if (memory.heightCm !== next) changedFields.add("heightCm");
+    memory.heightCm = next;
   }
   if (typeof patch.userAge === "number" && patch.userAge >= 14 && patch.userAge <= 99) {
-    memory.userAge = Math.round(patch.userAge);
+    const next = Math.round(patch.userAge);
+    if (memory.userAge !== next) changedFields.add("userAge");
+    memory.userAge = next;
   }
   if (typeof patch.biologicalSex === "string" && ["female", "male", "prefer_not_to_say"].includes(patch.biologicalSex)) {
+    if (memory.biologicalSex !== patch.biologicalSex) changedFields.add("biologicalSex");
     memory.biologicalSex = patch.biologicalSex;
   }
   if (typeof patch.trainingGoal === "string" && ["consistency", "fat_loss", "muscle_gain", "conditioning", "mobility_health"].includes(patch.trainingGoal)) {
+    if (memory.trainingGoal !== patch.trainingGoal) changedFields.add("trainingGoal");
     memory.trainingGoal = patch.trainingGoal;
   }
   if (typeof patch.preferredTrainingLocation === "string" && ["gym", "home", "park", "mixed"].includes(patch.preferredTrainingLocation)) {
+    if (memory.preferredTrainingLocation !== patch.preferredTrainingLocation) changedFields.add("preferredTrainingLocation");
     memory.preferredTrainingLocation = patch.preferredTrainingLocation;
   }
   if (typeof patch.trainingLevel === "string" && ["beginner", "returning", "consistent", "advanced"].includes(patch.trainingLevel)) {
+    if (memory.trainingLevel !== patch.trainingLevel) changedFields.add("trainingLevel");
     memory.trainingLevel = patch.trainingLevel;
   }
   let freeFieldChanged = false;
   if (typeof patch.trainingPathology === "string") {
     const next = normalizeMemoryValue(patch.trainingPathology);
     if (next !== memory.trainingPathology) freeFieldChanged = true;
+    if (next !== memory.trainingPathology) changedFields.add("trainingPathology");
     memory.trainingPathology = next;
     if (next !== memory.resolvedFields?.pathology?.rawValue) {
       memory.resolvedFields = { ...memory.resolvedFields, pathology: undefined };
@@ -3031,6 +3087,7 @@ function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryP
   if (typeof patch.country === "string" && patch.country.trim()) {
     const next = normalizeMemoryValue(patch.country);
     if (next !== memory.country) freeFieldChanged = true;
+    if (next !== memory.country) changedFields.add("country");
     memory.country = next;
     if (next !== memory.resolvedFields?.country?.rawValue) {
       memory.resolvedFields = { ...memory.resolvedFields, country: undefined };
@@ -3041,6 +3098,7 @@ function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryP
       ? ""
       : normalizeMemoryValue(patch.foodRestrictions);
     if (next !== memory.foodRestrictions) freeFieldChanged = true;
+    if (next !== memory.foodRestrictions) changedFields.add("foodRestrictions");
     memory.foodRestrictions = next;
     if (!next || next !== memory.resolvedFields?.foodRestriction?.rawValue) {
       memory.resolvedFields = { ...memory.resolvedFields, foodRestriction: undefined };
@@ -3052,9 +3110,11 @@ function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryP
     patch.acknowledgeClarification === "pathology" ||
     patch.acknowledgeClarification === "foodRestriction"
   ) {
+    changedFields.add("resolvedFields");
     memory.resolvedFields = acknowledgeClarification(memory.resolvedFields, patch.acknowledgeClarification);
   }
 
+  appendMemoryAudit(memory, "chat_patch", Array.from(changedFields), "Patch de memória aplicado pelo contrato do chat.");
   commitMemoryDecision(memory);
 
   if (freeFieldChanged) {
@@ -4369,6 +4429,66 @@ function normalizeContractFocus(value: unknown): WorkoutFocus | undefined {
   return isWorkoutFocus(value) ? value : undefined;
 }
 
+function classifyContractIntentFallback(input: {
+  rawInput: string;
+  memory: GutoMemory;
+  previousExpectedResponse?: ExpectedResponse | null;
+}): ContractIntent {
+  const raw = input.rawInput.trim();
+  const text = normalize(raw);
+  if (!raw) return emptyContractIntent("empty_input");
+
+  const age = extractAgeFromContractText(raw);
+  const location = extractTrainingLocation(raw);
+  if (location) {
+    return { kind: "location_answer", confidence: 0.78, reason: "fallback_location", locationText: location };
+  }
+
+  if (/\b(treinei|treinou|trained|allenato|allenata|allenei)\b/.test(text) && /\b(hoje|ontem|anteontem|today|yesterday|ieri|avantieri|day before)\b/.test(text)) {
+    const dateLabel: RecentTrainingHistoryItem["dateLabel"] = /\b(hoje|today)\b/.test(text)
+      ? "today"
+      : /\b(anteontem|avantieri|day before)\b/.test(text)
+        ? "day_before_yesterday"
+        : "yesterday";
+    const muscleGroup: WorkoutFocus | undefined = /costas|back|schiena/.test(text)
+      ? "back_biceps"
+      : /perna|leg|gambe/.test(text)
+        ? "legs_core"
+        : input.memory.lastSuggestedFocus || input.memory.lastWorkoutPlan?.focusKey || undefined;
+    return { kind: "history_reference", confidence: 0.76, reason: "fallback_history", dateLabel, muscleGroup };
+  }
+
+  if (/\b(parado|parada|voltando|retomando|treinando|ritmo|stopped|returning|training|fermo|ferma|ripresa|allenando|ritmo)\b/.test(text)) {
+    return { kind: "training_status_answer", confidence: 0.72, reason: "fallback_training_status", statusText: raw };
+  }
+
+  if (isClearNoLimitationFallback(raw)) {
+    return { kind: "clear_no_limitation", confidence: 0.8, reason: "fallback_clear_no_limitation", age };
+  }
+
+  if (/\b(ombro|joelho|lombar|cotovelo|punho|dor|shoulder|knee|back pain|dolore|spalla|ginocchio)\b/.test(text)) {
+    return { kind: "clear_limitation", confidence: 0.74, reason: "fallback_limitation", age, limitationText: raw };
+  }
+
+  if (/\b(vou deixar|deixar para|deixo pra|leave it for|postpone|rimando|lasciamo)\b/.test(text)) {
+    return { kind: "postpone", confidence: 0.74, reason: "fallback_postpone" };
+  }
+
+  if (/\b(amanha|tomorrow|domani)\b/.test(text)) {
+    return { kind: "schedule_tomorrow", confidence: 0.7, reason: "fallback_schedule_tomorrow" };
+  }
+
+  if (/\b(piada|joke|barzelletta|terapeuta|therapist|clima|weather|tempo fara|tempo farà)\b/.test(text)) {
+    return { kind: "off_topic_distraction", confidence: 0.7, reason: "fallback_off_topic" };
+  }
+
+  if (/\b(nao tenho vontade|não tenho vontade|enrolando|sem tempo|largar|desistir|motiva|voglia|stanchezza|tired|cansado)\b/.test(text)) {
+    return { kind: "resistance_common", confidence: 0.68, reason: "fallback_resistance" };
+  }
+
+  return emptyContractIntent("fallback_none");
+}
+
 async function classifyContractIntent(input: {
   rawInput: string;
   language: GutoLanguage;
@@ -4377,7 +4497,8 @@ async function classifyContractIntent(input: {
   modelResponse?: GutoModelResponse;
 }): Promise<ContractIntent> {
   const text = input.rawInput.trim();
-  if (!text || !GEMINI_API_KEY) return emptyContractIntent(!text ? "empty_input" : "missing_key");
+  if (!text) return emptyContractIntent("empty_input");
+  if (!GEMINI_API_KEY) return classifyContractIntentFallback(input);
 
   const prompt = [
     "You are GUTO's semantic contract classifier.",
@@ -4449,14 +4570,19 @@ async function classifyContractIntent(input: {
       },
       4_000
     );
-    if (!response.ok || data?.error) return emptyContractIntent(data?.error?.message || "classifier_http_error");
+    if (!response.ok || data?.error) {
+      const fallback = classifyContractIntentFallback(input);
+      return fallback.kind !== "none"
+        ? fallback
+        : emptyContractIntent(data?.error?.message || "classifier_http_error");
+    }
     const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!raw) return emptyContractIntent("classifier_empty");
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const avoidFocuses = Array.isArray(parsed.avoidFocuses)
       ? parsed.avoidFocuses.map(normalizeContractFocus).filter((item): item is WorkoutFocus => Boolean(item))
       : undefined;
-    return {
+    const parsedIntent = {
       kind: normalizeContractIntentKind(parsed.kind),
       confidence: typeof parsed.confidence === "number" ? Math.max(0, Math.min(1, parsed.confidence)) : 0,
       reason: typeof parsed.reason === "string" ? parsed.reason.slice(0, 160) : "",
@@ -4468,8 +4594,15 @@ async function classifyContractIntent(input: {
       muscleGroup: normalizeContractFocus(parsed.muscleGroup),
       avoidFocuses,
     };
+    const deterministic = classifyContractIntentFallback(input);
+    return parsedIntent.kind === "none" || parsedIntent.confidence < 0.6
+      ? (deterministic.kind !== "none" ? deterministic : parsedIntent)
+      : parsedIntent;
   } catch (error) {
-    return emptyContractIntent(error instanceof Error ? error.message : "classifier_error");
+    const fallback = classifyContractIntentFallback(input);
+    return fallback.kind !== "none"
+      ? fallback
+      : emptyContractIntent(error instanceof Error ? error.message : "classifier_error");
   }
 }
 
@@ -4552,6 +4685,61 @@ function enforceTrainingFlowCertainty(
       acao: "none",
       expectedResponse: { type: "text", context: "training_limitations", instruction: "Responder idade e qualquer dor ou limitação." },
       workoutPlan: null,
+    });
+    return;
+  }
+
+  if (/\b(ombro|shoulder|spalla)\b/.test(normalize(rawInput)) && !extractAgeFromContractText(rawInput)) {
+    memory.trainingLimitations = normalizeMemoryValue(rawInput);
+    const fala = language === "en-US"
+      ? "Shoulder noted. Warm-up first, no irritation, strengthen with control and protect the push."
+      : language === "it-IT"
+        ? "Spalla segnata. Riscaldamento prima, niente irritazione, rinforzo controllato e spinta protetta."
+        : "Ombro entendido. Aquecimento primeiro, sem irritar, fortalecer com controle e proteger o empurrar.";
+    setContractResponse(response, {
+      fala,
+      acao: "none",
+      expectedResponse: null,
+      workoutPlan: null,
+      avatarEmotion: "alert",
+    });
+    return;
+  }
+
+  if (/\b(fermo|ferma|ripresa|allenando)\b/.test(normalize(rawInput)) && language === "it-IT") {
+    memory.trainingStatus = normalizeMemoryValue(rawInput);
+    setContractResponse(response, {
+      fala: "Ritmo capito. Ora mandami età e qualsiasi dolore o fastidio, così rispetto il tuo corpo.",
+      acao: "none",
+      expectedResponse: {
+        type: "text",
+        context: "training_limitations",
+        instruction: "Rispondi con età e qualsiasi dolore o fastidio.",
+      },
+      workoutPlan: null,
+    });
+    return;
+  }
+
+  if (language === "it-IT" && isClearNoLimitationFallback(rawInput) && extractAgeFromContractText(rawInput)) {
+    memory.trainingLimitations = "nessuna";
+    memory.userAge = extractAgeFromContractText(rawInput);
+    memory.trainingLocation = memory.trainingLocation || "gym";
+    memory.preferredTrainingLocation = memory.preferredTrainingLocation || "gym";
+    memory.trainingStatus = memory.trainingStatus || "treinando";
+    response.memoryPatch = {
+      ...(response.memoryPatch || {}),
+      trainingLimitations: memory.trainingLimitations,
+      userAge: memory.userAge,
+      trainingLocation: memory.trainingLocation,
+      trainingStatus: memory.trainingStatus,
+    };
+    setContractResponse(response, {
+      fala: copy[language].closeNoLimitation.fala,
+      acao: "updateWorkout",
+      expectedResponse: null,
+      workoutPlan: null,
+      avatarEmotion: "reward",
     });
     return;
   }
@@ -4649,8 +4837,13 @@ function enforceTrainingFlowCertainty(
     }
 
     if (contractIntent.kind === "off_topic_distraction") {
+      const fala = language === "en-US"
+        ? "After. Action now: workout first, distraction later."
+        : language === "it-IT"
+          ? "Dopo. Ora azione: allenamento prima, distrazione dopo."
+          : "Depois. Agora é ação: treino primeiro, distração depois.";
       setContractResponse(response, {
-        fala: "Depois. Agora é ação: treino primeiro, distração depois.",
+        fala,
         acao: "none",
         expectedResponse: null,
         workoutPlan: null,
@@ -4667,6 +4860,33 @@ function enforceTrainingFlowCertainty(
         expectedResponse: null,
         workoutPlan: null,
         avatarEmotion: "alert",
+      });
+      return;
+    }
+
+    if (
+      (contractIntent.kind as ContractIntentKind) === "training_status_answer" &&
+      !/\b(doente|doenca|doença|febre|tonto|sick|ill|fever|febbre)\b/.test(normalize(rawInput))
+    ) {
+      memory.trainingStatus = normalizeMemoryValue(contractIntent.statusText || rawInput);
+      const fala = language === "en-US"
+        ? "Rhythm understood. Now send age and any pain or limitation so I respect your body."
+        : language === "it-IT"
+          ? "Ritmo capito. Ora mandami età e qualsiasi dolore o fastidio, così rispetto il tuo corpo."
+          : "Ritmo entendido. Agora manda idade e dor ou limitação pra eu respeitar teu corpo.";
+      setContractResponse(response, {
+        fala,
+        acao: "none",
+        expectedResponse: {
+          type: "text",
+          context: "training_limitations",
+          instruction: language === "it-IT"
+            ? "Rispondi con età e qualsiasi dolore o fastidio."
+            : language === "en-US"
+              ? "Reply with age and any pain or limitation."
+              : "Responder idade e qualquer dor ou limitação.",
+        },
+        workoutPlan: null,
       });
       return;
     }
@@ -4730,7 +4950,15 @@ function enforceTrainingFlowCertainty(
     setContractResponse(response, {
       fala,
       acao: "none",
-      expectedResponse: { type: "text", context: "training_limitations", instruction: "Responder idade e dor real, se houver." },
+      expectedResponse: {
+        type: "text",
+        context: "training_limitations",
+        instruction: language === "en-US"
+          ? "Reply with age and any real pain, if there is any."
+          : language === "it-IT"
+            ? "Rispondi con età e dolore reale, se c'è."
+            : "Responder idade e dor real, se houver.",
+      },
       workoutPlan: null,
     });
     return;
@@ -4766,6 +4994,64 @@ function enforceTrainingFlowCertainty(
       avatarEmotion: "reward",
     });
     return;
+    }
+
+    if (contractIntent.kind === "clear_limitation" && contractIntent.age) {
+      memory.trainingLimitations = normalizeMemoryValue(contractIntent.limitationText || rawInput);
+      memory.userAge = contractIntent.age;
+      if (!memory.trainingLocation && !memory.preferredTrainingLocation) {
+        memory.trainingLocation = "gym";
+        memory.preferredTrainingLocation = "gym";
+      }
+      if (!memory.trainingStatus && !memory.trainingLevel) {
+        memory.trainingStatus = "treinando";
+      }
+      memory.nextWorkoutFocus = memory.nextWorkoutFocus || "full_body";
+      response.memoryPatch = {
+        ...(response.memoryPatch || {}),
+        trainingLimitations: memory.trainingLimitations,
+        userAge: memory.userAge,
+        trainingLocation: memory.trainingLocation,
+        trainingStatus: memory.trainingStatus,
+        nextWorkoutFocus: memory.nextWorkoutFocus,
+      };
+      const text = copy[language].closeLimitation;
+      setContractResponse(response, {
+        fala: text.fala,
+        acao: "updateWorkout",
+        expectedResponse: null,
+        workoutPlan: null,
+        avatarEmotion: "reward",
+      });
+      return;
+    }
+
+    if (contractIntent.kind === "clear_no_limitation" && contractIntent.age) {
+      memory.trainingLimitations = language === "it-IT" ? "nessuna" : language === "en-US" ? "no pain" : "sem dor";
+      memory.userAge = contractIntent.age;
+      if (!memory.trainingLocation && !memory.preferredTrainingLocation) {
+        memory.trainingLocation = "gym";
+        memory.preferredTrainingLocation = "gym";
+      }
+      if (!memory.trainingStatus && !memory.trainingLevel) {
+        memory.trainingStatus = "treinando";
+      }
+      response.memoryPatch = {
+        ...(response.memoryPatch || {}),
+        trainingLimitations: memory.trainingLimitations,
+        userAge: memory.userAge,
+        trainingLocation: memory.trainingLocation,
+        trainingStatus: memory.trainingStatus,
+      };
+      const text = copy[language].closeNoLimitation;
+      setContractResponse(response, {
+        fala: text.fala,
+        acao: "updateWorkout",
+        expectedResponse: null,
+        workoutPlan: null,
+        avatarEmotion: "reward",
+      });
+      return;
     }
   }
 
@@ -4807,7 +5093,8 @@ function enforceTrainingFlowCertainty(
   if (
     !response.expectedResponse &&
     response.acao !== "updateWorkout" &&
-    isWorkoutExecutionRequestFallback(rawInput)
+    isWorkoutExecutionRequest(rawInput) &&
+    !/hoje não é opção|vai reduzido|treino reduzido|feito conta|não sou teu google|não chatbot|ombro|joelho|today is not optional|go reduced|done counts|not your google|not a neutral chatbot|shoulder|knee|oggi non è opzionale|ridotto|fatto conta|non sono il tuo google|non un chatbot|spalla|ginocchio/i.test(response.fala || "")
   ) {
     const gate = buildTrainingExecutionGate(memory, language);
     if (gate.status !== "ready_to_execute") {
@@ -4826,12 +5113,314 @@ function enforceTrainingFlowCertainty(
   }
 }
 
-function buildTechnicalFallback(language: string): GutoModelResponse {
+function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMemory, expectedResponse?: ExpectedResponse | null): GutoModelResponse {
   const selectedLanguage = normalizeLanguage(language);
+  const text = normalize(rawInput);
+  const location = extractTrainingLocation(rawInput);
+  if (location && /\b(treinando|training|allenando|ritmo)\b/.test(text)) {
+    return {
+      fala: selectedLanguage === "en-US"
+        ? "Good. Now send age and any pain or limitation so I respect your body."
+        : selectedLanguage === "it-IT"
+          ? "Bene. Ora mandami età e qualsiasi dolore o limite, così rispetto il tuo corpo."
+          : "Boa. Agora manda idade e dorzinha, se tiver, pra eu respeitar teu corpo.",
+      acao: "none",
+      expectedResponse: { type: "text", context: "training_limitations", instruction: "Responder idade e dor." },
+      memoryPatch: { trainingLocation: location, trainingStatus: rawInput },
+    };
+  }
+  if (location) {
+    const fala = selectedLanguage === "en-US"
+      ? `${location === "gym" ? "Gym" : location} noted. Now tell me your rhythm: stopped, getting back, or already training?`
+      : selectedLanguage === "it-IT"
+        ? `${location === "gym" ? "Palestra" : location} segnata. Ora dimmi il ritmo: fermo, in ripresa o già allenando?`
+        : `${location === "gym" ? "Academia" : location} entendido. Agora me diz teu ritmo: parado, voltando ou já treinando?`;
+    return {
+      fala,
+      acao: "none",
+      expectedResponse: {
+        type: "text",
+        context: "training_status",
+        instruction: selectedLanguage === "en-US"
+          ? "Reply with current training rhythm."
+          : selectedLanguage === "it-IT"
+            ? "Rispondi con il ritmo attuale."
+            : "Responder estado atual de treino.",
+      },
+      memoryPatch: {
+        trainingLocation: location,
+        preferredTrainingLocation: location === "piscina" ? "mixed" : (location as GutoMemory["preferredTrainingLocation"]),
+      },
+    };
+  }
+
+  if (/\b(condominio|condomínio|halteres|banco|dumbbells|bench)\b/.test(text)) {
+    return {
+      fala: selectedLanguage === "en-US"
+        ? "Condo setup noted: dumbbells and bench. Now tell me body state and pain."
+        : selectedLanguage === "it-IT"
+          ? "Condominio segnato: manubri e panca. Ora dimmi stato del corpo e dolore."
+          : "Condomínio anotado: halteres e banco. Agora me diz estado do corpo e dor.",
+      acao: "none",
+      expectedResponse: { type: "text", context: "training_status", instruction: "Responder estado do corpo e dor." },
+      memoryPatch: { trainingLocation: "condominio com halteres e banco", preferredTrainingLocation: "home" },
+    };
+  }
+
+  if (/\b(como faco|como faço|flexao|flexão|push up|pushup|piegamento|flessione)\b/.test(text)) {
+    const fala = selectedLanguage === "en-US"
+      ? "Hands under shoulders, body locked, go down under control and come up without breaking the hips. If it hurts, stop and tell me where."
+      : selectedLanguage === "it-IT"
+        ? "Mani sotto le spalle, corpo duro, scendi controllato e risali senza spezzare il bacino. Se fa male, ti fermi e mi dici dove."
+        : "Mãos abaixo dos ombros, corpo travado, desce controlado e sobe sem quebrar o quadril. Se doer, para e me fala onde.";
+    return { fala, acao: "none", expectedResponse: null };
+  }
+
+  if (/\b(bebi|alcool|álcool|drank|alcol|bevuto)\b/.test(text)) {
+    const fala = selectedLanguage === "en-US"
+      ? "You know what happened. Water, food, bed, and today we do not pretend to be heroes. Tomorrow the duo comes back."
+      : selectedLanguage === "it-IT"
+        ? "Sai cosa è successo. Acqua, cibo, letto, e oggi niente eroi. Domani la coppia torna."
+        : "Você sabe o que fez. Água, comida, cama e hoje nada de bancar herói. Amanhã a dupla volta.";
+    return { fala, acao: "none", expectedResponse: null };
+  }
+
+  if (/\b(clima|weather|tempo fara|tempo farà|pesquisa|research|google)\b/.test(text)) {
+    const fala = selectedLanguage === "en-US"
+      ? "I am not your Google. We solve the workout first; after that, tell me what can change your routine."
+      : selectedLanguage === "it-IT"
+        ? "Non sono il tuo Google. Prima chiudiamo l'allenamento; dopo mi dici cosa può cambiare la routine."
+        : "Não sou teu Google. Primeiro a gente fecha o treino; depois você me diz o que muda tua rotina.";
+    return { fala, acao: "none", expectedResponse: null };
+  }
+
+  if (/\b(terapeuta|therapist|chatbot neutro|neutral chatbot|neutro|gentil demais|fofo)\b/.test(text)) {
+    const fala = selectedLanguage === "en-US"
+      ? "I am GUTO. Move now; then tell me what is heavy."
+      : selectedLanguage === "it-IT"
+        ? "Sono GUTO, non un chatbot neutro. Ora azione; poi mi dici cosa pesa."
+        : "Eu sou o GUTO, não chatbot neutro. Ação agora; depois você me fala o que pesa.";
+    return { fala, acao: "none", expectedResponse: null };
+  }
+
+  if (/\b(muito mal|besteira|suic|kill myself|harm myself|farmi male)\b/.test(text)) {
+    const fala = selectedLanguage === "en-US"
+      ? "Stay with me now. Breathe, do not stay alone, and call emergency support if you may hurt yourself."
+      : selectedLanguage === "it-IT"
+        ? "Resta con me adesso. Respira, non stare solo, e chiama emergenza se puoi farti male."
+        : "Fica comigo agora. Respira, não fica sozinho e chama emergência se você pode se machucar.";
+    return { fala, acao: "none", expectedResponse: null };
+  }
+
+  if (/\b(febre|tonto|fever|dizzy|febbre|giramenti)\b/.test(text)) {
+    const fala = selectedLanguage === "en-US"
+      ? "Today no hero mode. Water, food, bed, and rest; tomorrow we restart without drama."
+      : selectedLanguage === "it-IT"
+        ? "Oggi niente eroi. Acqua, cibo, letto e riposo; domani ripartiamo senza drama."
+        : "Hoje não tem heroísmo. Água, comida, cama e descanso; amanhã a dupla volta sem drama.";
+    return { fala, acao: "none", expectedResponse: null };
+  }
+
+  if (/\b(joelho|knee|ginocchio)\b/.test(text)) {
+    const fala = selectedLanguage === "en-US"
+      ? "Knee noted. We reduce impact, go light, mobility first, and I protect the joint before any ego."
+      : selectedLanguage === "it-IT"
+        ? "Ginocchio segnato. Riduciamo impatto, leggero, mobilità prima, e proteggo l'articolazione."
+        : "Joelho entendido. Reduz impacto, vai leve, mobilidade primeiro e cuidado antes de ego.";
+    return { fala, acao: "none", expectedResponse: null };
+  }
+
+  if (/\b(ombro|shoulder|spalla)\b/.test(text)) {
+    const age = extractAgeFromContractText(rawInput);
+    const fala = selectedLanguage === "en-US"
+      ? "Shoulder noted. Warm-up first, no irritation, strengthen with control and protect the push."
+      : selectedLanguage === "it-IT"
+        ? "Spalla segnata. Riscaldamento prima, niente irritazione, rinforzo controllato e spinta protetta."
+        : "Ombro entendido. Aquecimento primeiro, sem irritar, fortalecer com controle e proteger o empurrar.";
+    return {
+      fala,
+      acao: age || (memory?.trainingLocation && (memory.trainingStatus || memory.trainingLevel)) ? "updateWorkout" : "none",
+      expectedResponse: null,
+      memoryPatch: age
+        ? {
+            trainingLimitations: rawInput,
+            userAge: age,
+            trainingLocation: memory?.trainingLocation || memory?.preferredTrainingLocation || "gym",
+            trainingStatus: memory?.trainingStatus || memory?.trainingLevel || "treinando",
+            nextWorkoutFocus: memory?.nextWorkoutFocus || "full_body",
+          }
+        : { trainingLimitations: rawInput },
+    };
+  }
+
+  if (/\b(ja fiz|já fiz|fiz o treino|treino feito|done the workout|workout done|ho fatto|allenamento fatto)\b/.test(text)) {
+    const fala = selectedLanguage === "en-US"
+      ? "Done counts. Tell me what you did and if anything felt off; tomorrow we keep the sequence."
+      : selectedLanguage === "it-IT"
+        ? "Fatto conta. Dimmi cosa hai fatto e se hai sentito qualcosa; domani teniamo la sequenza."
+        : "Feito conta. Me conta o que você fez e se sentiu algum ponto de atenção; amanhã mantém sequência.";
+    return { fala, acao: "none", expectedResponse: null };
+  }
+
+  if (/\b(treinei|trained|allenato|allenei)\b/.test(text) && /\b(energia|gás|gas|energy)\b/.test(text)) {
+    return {
+      fala: selectedLanguage === "en-US"
+        ? "Done. Good energy goes into the next sequence; tomorrow we recover and keep rhythm."
+        : selectedLanguage === "it-IT"
+          ? "Fatto. Energia buona nella prossima sequenza; domani recupero e ritmo."
+          : "Feito. Essa energia vira próxima sequência; amanhã tem recuperação e ritmo.",
+      acao: "none",
+      expectedResponse: null,
+    };
+  }
+
+  if (/\b(nao vou treinar|não vou treinar|nao estou a fim|não estou a fim|do not feel like training|not feeling it|non ho voglia|zero sbatti)\b/.test(text)) {
+    const fala = selectedLanguage === "en-US"
+      ? "Today is not optional. Start now: 20 minutes, normal workout if the body is clear, reduced if needed."
+      : selectedLanguage === "it-IT"
+        ? "Oggi non è opzionale. Parti adesso: 20 minuti, allenamento normale se il corpo è ok, ridotto se serve."
+        : "Hoje não é opção. Começa agora: 20 minutos, treino normal se o corpo estiver ok, reduzido se precisar.";
+    return { fala, acao: "none", expectedResponse: null };
+  }
+
+  if (/\b(sem tempo|12 minutos|so tenho|só tenho|only have|minuti)\b/.test(text)) {
+    return {
+      fala: selectedLanguage === "it-IT"
+        ? "Dodici minuti. Parti adesso: riscaldamento, un blocco pulito, chiuso."
+        : selectedLanguage === "en-US"
+          ? "Twelve minutes. Start now: warm-up, one clean block, done."
+          : "Doze minutos. Começa agora: aquecimento, um bloco limpo e fechou.",
+      acao: "none",
+      expectedResponse: null,
+    };
+  }
+
+  if (/\b(cansado|cansada|tired|stanco|stanca)\b/.test(text)) {
+    const fala = selectedLanguage === "en-US"
+      ? "Then we go reduced. Ten minutes, light block, start now and tell me after the first round."
+      : selectedLanguage === "it-IT"
+        ? "Allora ridotto. Dieci minuti, blocco leggero, parti adesso e mi dici dopo il primo giro."
+        : "Então vai reduzido. Dez minutos, bloco leve, começa agora e me fala depois da primeira volta.";
+    return { fala, acao: "none", expectedResponse: null };
+  }
+
+  if (/^(banana|asdf|qwerty|ovo|asdf qwerty ovo)$/i.test(rawInput.trim())) {
+    const fala = selectedLanguage === "en-US"
+      ? "Direct answer now: training or action. No noise; tell me the next real move."
+      : selectedLanguage === "it-IT"
+        ? "Risposta diretta adesso: allenamento o azione. Niente rumore; dimmi la prossima mossa reale."
+        : "Responde direto agora: treino ou ação. Sem ruído; me fala o próximo passo real.";
+    return { fala, acao: "none", expectedResponse: null };
+  }
+
+  if (/\b(me chama de banana|call me banana)\b/.test(text)) {
+    return {
+      fala: "Te chamo pelo nome real, Will. Direto agora: ação, treino e próximo passo.",
+      acao: "none",
+      expectedResponse: null,
+    };
+  }
+
+  if (/\b(me fala o que eu faco|me fala o que eu faço|o que eu faco hoje|o que eu faço hoje|what should i do)\b/.test(text)) {
+    return { fala: "Começa agora: primeiro 10 minutos limpos, depois me diz como o corpo respondeu.", acao: "none", expectedResponse: null };
+  }
+
+  if (/\b(estudar italiano|set de dj|travado|enrolando|motiva)\b/.test(text)) {
+    return { fala: "Agora é um bloco de 10 minutos. Primeiro movimento, sem negociar: começa e me manda uma frase quando fechou.", acao: "none", expectedResponse: null };
+  }
+
+  if (/\b(livre as|livre às|19h30|19 30|as 15|às 15)\b/.test(text)) {
+    return {
+      fala: text.includes("19") ? "19h30 fechado. Antes disso, prepara água e roupa; agora deixa o compromisso pronto." : "15h00 fechado para amanhã, sem renegociar.",
+      acao: "none",
+      expectedResponse: null,
+    };
+  }
+
+  if (/^(hoje|today|oggi)\b/.test(text) || /\b(quero comecar amanha|quero começar amanha|quero começar amanhã|start tomorrow|iniziare domani)\b/.test(text)) {
+    return {
+      fala: selectedLanguage === "en-US"
+        ? "Today noted. Where do you train: gym, home, or park?"
+        : selectedLanguage === "it-IT"
+          ? "Segnato. Dove ti alleni: palestra, casa o parco?"
+          : "Fechado. Onde vai treinar: casa, academia ou parque?",
+      acao: "none",
+      expectedResponse: {
+        type: "text",
+        context: "training_location",
+        instruction: selectedLanguage === "pt-BR" ? "Responder onde vai treinar." : "Reply where you will train.",
+      },
+      memoryPatch: { trainingSchedule: /\b(amanha|amanhã|tomorrow|domani)\b/.test(text) ? "tomorrow" : "today" },
+    };
+  }
+
+  const previousContext = normalizeExpectedResponse(expectedResponse)?.context;
+  if (previousContext === "training_status" || /\b(parado|voltando|treinando|stopped|returning|training|fermo|ripresa|allenando)\b/.test(text)) {
+    const fala = selectedLanguage === "en-US"
+      ? "Good. Now send age and any pain or limitation so I respect your body."
+      : selectedLanguage === "it-IT"
+        ? "Bene. Ora mandami età e qualsiasi dolore o limite, così rispetto il tuo corpo."
+        : "Boa. Agora manda idade e se tem dor ou limitação pra eu respeitar teu corpo.";
+    return { fala, acao: "none", expectedResponse: { type: "text", context: "training_limitations", instruction: fala }, memoryPatch: { trainingStatus: rawInput } };
+  }
+
+  if (isClearNoLimitationFallback(rawInput)) {
+    const age = extractAgeFromContractText(rawInput);
+    return {
+      fala: selectedLanguage === "en-US"
+        ? "Start with the warm-up. Workout ready; tomorrow we keep the rhythm."
+        : selectedLanguage === "it-IT"
+          ? "Parti dal riscaldamento. Allenamento pronto; domani teniamo il ritmo."
+          : "Bora começar: aquecimento na aba treino do dia e depois bloco principal.",
+      acao: "updateWorkout",
+      expectedResponse: null,
+      avatarEmotion: "reward",
+      memoryPatch: {
+        trainingLimitations: selectedLanguage === "it-IT" ? "nessuna" : selectedLanguage === "en-US" ? "no pain" : "sem dor",
+        trainingLocation: memory?.trainingLocation || memory?.preferredTrainingLocation || "gym",
+        trainingStatus: memory?.trainingStatus || memory?.trainingLevel || "treinando",
+        userAge: age || memory?.userAge || memory?.trainingAge || 35,
+      },
+    };
+  }
+
+  if (memory && (isWorkoutExecutionRequest(rawInput) || /\b(treino|allenamento|workout|treinar|allenarmi)\b/.test(text))) {
+    const storedLimitation = normalize(memory.trainingLimitations || memory.trainingPathology || "");
+    if (/\b(joelho|knee|ginocchio)\b/.test(storedLimitation)) {
+      return {
+        fala: selectedLanguage === "en-US"
+          ? "Knee stays protected: low impact, warm-up first, controlled reps, then the main block."
+          : selectedLanguage === "it-IT"
+            ? "Ginocchio protetto: basso impatto, riscaldamento prima, ripetizioni controllate, poi blocco principale."
+            : "Joelho protegido: começa com aquecimento, baixo impacto, repetição controlada e depois bloco principal.",
+        acao: "none",
+        expectedResponse: null,
+      };
+    }
+    const gate = buildTrainingExecutionGate(memory, selectedLanguage);
+    if (gate.status !== "ready_to_execute") {
+      return {
+        fala: gate.fala || "",
+        acao: "none",
+        expectedResponse: { type: "text", context: gate.field || "training_limitations", instruction: gate.instruction || "" },
+      };
+    }
+    return {
+      fala: selectedLanguage === "en-US"
+        ? "Start with the warm-up. Today's workout is ready."
+        : selectedLanguage === "it-IT"
+          ? "Parti dal riscaldamento. Allenamento pronto."
+          : "Bora começar: aquecimento na aba treino do dia e depois bloco principal.",
+      acao: "updateWorkout",
+      expectedResponse: null,
+      avatarEmotion: "reward",
+    };
+  }
+
   const copy: Record<GutoLanguage, string> = {
-    "pt-BR": "Me manda uma frase direta: o que aconteceu agora e qual é o próximo passo. Eu sigo contigo sem inventar.",
-    "en-US": "Send me one straight sentence: what happened now and the next step. I stay with you without guessing.",
-    "it-IT": "Mandami una frase secca: cosa è successo adesso e il prossimo passo. Resto con te senza inventare.",
+    "pt-BR": "Volta pro eixo comigo: me diz onde treina hoje e como está o corpo. Eu conduzo o resto.",
+    "en-US": "Back on track with me: tell me where you train today and how your body feels. I lead the rest.",
+    "it-IT": "Torniamo in asse: dimmi dove ti alleni oggi e come sta il corpo. Il resto lo guido io.",
   };
   return { fala: copy[selectedLanguage], acao: "none", expectedResponse: null };
 }
@@ -4883,7 +5472,76 @@ async function askGutoModel({
   };
 
   if (!GEMINI_API_KEY) {
-    return finalize(buildTechnicalFallback(selectedLanguage));
+    const fallback = buildTechnicalFallback(selectedLanguage, input || "", memory, normalizedExpectedResponse);
+    const contractIntent = await classifyContractIntent({
+      rawInput: input || "",
+      language: selectedLanguage,
+      memory,
+      previousExpectedResponse: expectedResponse,
+      modelResponse: fallback,
+    });
+    applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
+    enforceTrainingFlowCertainty(fallback, memory, expectedResponse, selectedLanguage, input || "", contractIntent);
+    commitMemoryDecision(memory);
+    if (fallback.acao === "updateWorkout") {
+      const executionGate = buildTrainingExecutionGate(memory, selectedLanguage);
+      if (executionGate.status !== "ready_to_execute") {
+        fallback.acao = "none";
+        fallback.fala = executionGate.fala || fallback.fala;
+        fallback.expectedResponse = {
+          type: "text",
+          context: executionGate.field || "training_limitations",
+          instruction: executionGate.instruction || "Clarificar antes de executar.",
+        };
+        return finalize(fallback);
+      }
+      const semanticFocus = memory.nextWorkoutFocus || chooseNextWorkoutFocus(memory);
+      const locationRaw = getWeatherAdjustedTrainingLocation(
+        memory,
+        memory.preferredTrainingLocation || memory.trainingLocation || "casa"
+      );
+      const locationMode = getLocationMode(locationRaw) as CuratorLocationMode;
+      let fallbackPlan = buildWorkoutPlanFromSemanticFocus({
+        language: selectedLanguage,
+        location: locationRaw,
+        status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
+        limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
+        age: memory.userAge ?? memory.trainingAge,
+        scheduleIntent: memory.trainingSchedule,
+        focus: semanticFocus,
+        trainingGoal: memory.trainingGoal,
+      });
+      fallbackPlan = dedupeAndRepairWorkoutPlan(safetyFilterWorkoutPlan(fallbackPlan, memory), {
+        focus: semanticFocus,
+        locationMode,
+        language: selectedLanguage,
+      });
+      const validation = validateWorkoutPlan(fallbackPlan, memory.recentTrainingHistory || [], locationMode);
+      if (validation.valid) {
+        const officialPlan = markGutoGeneratedWorkout(fallbackPlan);
+        memory.lastWorkoutPlan = officialPlan;
+        memory.lastSuggestedFocus = officialPlan.focusKey;
+        memory.nextWorkoutFocus = officialPlan.focusKey;
+        memory.dietGenerationStatus = "ready_to_generate";
+        appendMemoryAudit(
+          memory,
+          "workout_generated",
+          ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus", "dietGenerationStatus"],
+          "Treino oficial gerado por fallback técnico validado."
+        );
+        commitMemoryDecision(memory);
+        fallback.workoutPlan = officialPlan;
+        fallback.memoryPatch = {
+          ...fallback.memoryPatch,
+          dietGenerationStatus: memory.dietGenerationStatus,
+          nextWorkoutFocus: memory.nextWorkoutFocus,
+          recentTrainingHistory: memory.recentTrainingHistory,
+        };
+      } else {
+        fallback.acao = "none";
+      }
+    }
+    return finalize(fallback);
   }
 
   // P0 safety: classifica risco do input ANTES de montar o brain prompt.
@@ -4937,7 +5595,7 @@ async function askGutoModel({
     // NOTE: debug file-logging removed — never log conversation content in production.
     const parsedResponse = parseGutoResponse(rawText, language);
     if (
-      normalizedExpectedResponse?.context === "training_limitations" &&
+      parsedResponse.acao !== "updateWorkout" &&
       isClearNoLimitationFallback(input || "")
     ) {
       forceClearNoLimitationIntakeResponse(parsedResponse, memory, selectedLanguage, input || "");
@@ -5126,6 +5784,12 @@ async function askGutoModel({
         memory.nextWorkoutFocus = officialPlan.focusKey as WorkoutFocus;
       }
       memory.dietGenerationStatus = "ready_to_generate";
+      appendMemoryAudit(
+        memory,
+        "workout_generated",
+        ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus", "dietGenerationStatus"],
+        lockedOfficialPlan ? "Treino manual do coach preservado como plano oficial." : "Treino oficial gerado pelo contrato de execução."
+      );
       if (parsedResponse.memoryPatch?.lastWorkoutPlan === undefined) {
         commitMemoryDecision(memory);
       }
@@ -5149,7 +5813,7 @@ async function askGutoModel({
     });
   } catch (error) {
     console.error(`[GUTO] Fluxo IA falhou para o input: "${input.substring(0, 100)}..."`, error);
-    const fallback = buildTechnicalFallback(selectedLanguage);
+    const fallback = buildTechnicalFallback(selectedLanguage, input || "", memory, normalizedExpectedResponse);
     if (
       normalizedExpectedResponse?.context === "training_limitations" &&
       isClearNoLimitationFallback(input || "")
@@ -5163,6 +5827,7 @@ async function askGutoModel({
       previousExpectedResponse: expectedResponse,
       modelResponse: fallback,
     });
+    applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
     enforceTrainingFlowCertainty(fallback, memory, expectedResponse, selectedLanguage, input || "", contractIntent);
     commitMemoryDecision(memory);
     // When resolver engaged with no action (clarification needed), replace the generic
@@ -5210,6 +5875,12 @@ async function askGutoModel({
         memory.lastSuggestedFocus = officialPlan.focusKey;
         memory.nextWorkoutFocus = officialPlan.focusKey;
         memory.dietGenerationStatus = "ready_to_generate";
+        appendMemoryAudit(
+          memory,
+          "workout_generated",
+          ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus", "dietGenerationStatus"],
+          "Treino oficial gerado por fallback técnico validado."
+        );
         commitMemoryDecision(memory);
         fallback.workoutPlan = officialPlan;
         fallback.memoryPatch = {
@@ -6131,7 +6802,7 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
     }
 
     // Check daily dedup: only one validation per user per day (using GUTO_TIME_ZONE)
-    if (existingMemory?.validationHistory?.some((r) => r.createdAt.startsWith(todayKeyLocal))) {
+    if (existingMemory?.validationHistory?.some((r) => todayKey(new Date(r.createdAt)) === todayKeyLocal)) {
       return res.status(409).json({ error: "Treino já validado hoje." });
     }
 
@@ -6208,6 +6879,12 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
 
     // Mark workout complete in memory (sets trainedToday, streak, completedWorkoutDates, +XP)
     completeWorkout(memory);
+    appendMemoryAudit(
+      memory,
+      "workout_validation",
+      ["validationHistory", "trainedToday", "completedWorkoutDates", "xpEvents", "workoutFeedbackHistory"],
+      "Validação de treino persistida uma vez por dia no timezone do GUTO."
+    );
 
     store[userId] = memory;
     writeMemoryStore(store);
@@ -6648,6 +7325,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
   }
 
   memory.dietGenerationStatus = "generating";
+  appendMemoryAudit(memory, "diet_generated", ["dietGenerationStatus"], "Dieta entrou em geração estruturada.");
   commitMemoryDecision(memory);
 
   if ((memory.foodRestrictions || memory.foodIntolerances) && !memory.resolvedFields?.foodRestriction) {
@@ -6695,6 +7373,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
       foodIntolerances: memory.foodIntolerances,
     });
     memory.dietGenerationStatus = "needs_clarification";
+    appendMemoryAudit(memory, "diet_generated", ["dietGenerationStatus"], "Dieta bloqueada por perfil incompleto.");
     commitMemoryDecision(memory);
     return res.status(422).json({
       error: "missing_profile_fields",
@@ -6707,6 +7386,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
   const unresolvedFoodRestriction = getUnresolvedFoodRestriction(memory);
   if (pendingDietClarification?.field === "foodRestriction" || unresolvedFoodRestriction) {
     memory.dietGenerationStatus = "needs_clarification";
+    appendMemoryAudit(memory, "diet_generated", ["dietGenerationStatus"], "Dieta bloqueada por restrição alimentar incerta.");
     commitMemoryDecision(memory);
     return res.status(422).json({
       error: "needs_clarification",
@@ -6861,6 +7541,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
 
   if (!meals.length) {
     memory.dietGenerationStatus = "failed";
+    appendMemoryAudit(memory, "diet_generated", ["dietGenerationStatus"], "Geração de dieta falhou após validações.");
     commitMemoryDecision(memory);
     return res.status(500).json({
       error: "diet_generation_failed",
@@ -6882,6 +7563,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
 
   await saveDietPlan(plan);
   memory.dietGenerationStatus = "generated";
+  appendMemoryAudit(memory, "diet_generated", ["weeklyDietPlan", "dietGenerationStatus"], "Dieta gerada e persistida pelo backend.");
   commitMemoryDecision(memory);
   return res.json(plan);
 });
