@@ -1,9 +1,12 @@
 import { join } from "path";
 
+/** Modelo Gemini padrão do ecossistema GUTO (chat, dieta, classificadores, proatividade). */
+export const GUTO_DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite";
+
 export const config = {
   port: Number(process.env.PORT || 3001),
   geminiApiKey: process.env.GEMINI_API_KEY || "",
-  geminiModel: process.env.GUTO_GEMINI_MODEL || "gemini-2.5-flash",
+  geminiModel: process.env.GUTO_GEMINI_MODEL || GUTO_DEFAULT_GEMINI_MODEL,
   modelTimeoutMs: Number(process.env.GUTO_MODEL_TIMEOUT_MS || 30_000),
   modelTemperature: Number(process.env.GUTO_MODEL_TEMPERATURE || 0.28),
   voiceApiKey: (process.env.VOICE_API_KEY || "").replace(/['"]/g, ""),

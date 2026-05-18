@@ -39,7 +39,6 @@ export interface RiskClassification {
 }
 
 const DEFAULT_TIMEOUT_MS = 1800;
-const DEFAULT_MODEL = "gemini-2.5-flash-lite";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -192,7 +191,7 @@ export async function classifyRisk(
   // economiza tokens e latência.
   if (trimmed.length < 4) return safeFallback("too_short");
 
-  const model = options.model || DEFAULT_MODEL;
+  const model = options.model || config.geminiModel;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   const result = (await callRiskModel(buildRiskPrompt(trimmed), model, timeoutMs)) as

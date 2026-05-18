@@ -19,8 +19,6 @@ export interface ExtractedEvent {
 
 // ─── Extraction via Gemini ────────────────────────────────────────────────────
 
-const EXTRACTOR_MODEL = 'gemini-2.5-flash-lite'
-
 function buildExtractorPrompt(
   conversationText: string,
   userLanguage: string,
@@ -75,7 +73,7 @@ export async function extractEventsFromConversation(
   if (!config.geminiApiKey || !conversationText.trim()) return []
 
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACTOR_MODEL}:generateContent?key=${config.geminiApiKey}`
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.geminiModel}:generateContent?key=${config.geminiApiKey}`
     const prompt = buildExtractorPrompt(conversationText, userLanguage, todayISO)
 
     const res = await fetch(url, {

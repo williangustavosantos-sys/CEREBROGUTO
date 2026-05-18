@@ -13,7 +13,7 @@ services:
       - key: GUTO_TIME_ZONE
         value: Europe/Rome
       - key: GUTO_GEMINI_MODEL
-        value: gemini-2.5-flash
+        value: gemini-3.1-flash-lite
       - key: GUTO_MODEL_TIMEOUT_MS
         value: 30000
       - key: GUTO_MODEL_TEMPERATURE
