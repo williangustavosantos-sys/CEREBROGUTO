@@ -2329,6 +2329,36 @@ function extractTrainingLocationFallback(value: string): string | undefined {
   return undefined;
 }
 
+function isImmediateOperationalTurn(value: string): boolean {
+  const normalized = normalize(value).replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+  return (
+    isWorkoutExecutionRequestFallback(value) ||
+    Boolean(extractTrainingLocationFallback(value)) ||
+    /\b(dieta|refeicao|refeição|comida|alimento|meal|diet|food|pasto|dieta|cibo)\b/.test(normalized) ||
+    /\b(dor|joelho|ombro|febre|tonto|pain|knee|shoulder|fever|dolore|ginocchio|spalla)\b/.test(normalized) ||
+    /\b(como faco|como faço|tecnica|técnica|execucao|execução|how do i|technique|form|come faccio|tecnica)\b/.test(normalized)
+  );
+}
+
+function shouldDeferWeeklyOpeningForTurn(proactivityContext: string | null | undefined, input: string): boolean {
+  if (!proactivityContext || !isImmediateOperationalTurn(input)) return false;
+  const hasWeeklyOpening =
+    proactivityContext.includes("ABERTURA SEMANAL") ||
+    proactivityContext.includes("WEEKLY OPENING") ||
+    proactivityContext.includes("APERTURA SETTIMANALE");
+  const hasBlockingProactivity =
+    proactivityContext.includes("CONFIRMAÇÃO DE DESCARTE") ||
+    proactivityContext.includes("DISCARD CONFIRMATION") ||
+    proactivityContext.includes("CONFERMA CANCELLAZIONE") ||
+    proactivityContext.includes("VALIDAÇÃO SEMANA PASSADA") ||
+    proactivityContext.includes("LAST WEEK VALIDATION") ||
+    proactivityContext.includes("VALIDAZIONE SETTIMANA SCORSA") ||
+    proactivityContext.includes("CONFIRMAÇÃO PENDENTE") ||
+    proactivityContext.includes("PENDING CONFIRMATION") ||
+    proactivityContext.includes("CONFERMA PENDENTE");
+  return hasWeeklyOpening && !hasBlockingProactivity;
+}
+
 function parseAgeFromText(value?: string) {
   const raw = value || "";
   const explicitAgeMatch =
@@ -5802,6 +5832,9 @@ app.post("/guto", requireActiveUser, async (req, res) => {
     ]);
 
     resolverResultForRoute = resolverResult;
+    const effectiveProactivityCtx = shouldDeferWeeklyOpeningForTurn(proactivityCtx, input || "")
+      ? null
+      : proactivityCtx;
 
     const result = await askGutoModel({
       input: input || "",
@@ -5809,7 +5842,7 @@ app.post("/guto", requireActiveUser, async (req, res) => {
       profile,
       history: history || [],
       expectedResponse: normalizeExpectedResponse(expectedResponse),
-      proactivityContext: proactivityCtx,
+      proactivityContext: effectiveProactivityCtx,
       resolverResult,
     });
     if (result.proactiveMemoryAction) {
