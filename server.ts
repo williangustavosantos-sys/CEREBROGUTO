@@ -548,6 +548,61 @@ app.get("/health", (_req, res) => {
   });
 });
 
+app.get("/health/gemini", async (_req, res) => {
+  if (!GEMINI_API_KEY) {
+    return res.json({
+      ok: false,
+      quota_ok: false,
+      geminiModel: GEMINI_MODEL,
+      reason: "missing_api_key",
+    });
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8_000);
+    const geminiRes = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: "ping" }] }],
+        generationConfig: { maxOutputTokens: 8, temperature: 0 },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+
+    const data = (await geminiRes.json().catch(() => ({}))) as {
+      error?: { message?: string; status?: string };
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    };
+    const errMsg = data?.error?.message || "";
+    const isQuota =
+      geminiRes.status === 429 ||
+      data?.error?.status === "RESOURCE_EXHAUSTED" ||
+      /quota|free_tier_requests/i.test(errMsg);
+    const retryMatch = errMsg.match(/retry in ([\d.]+)s/i);
+
+    return res.json({
+      ok: geminiRes.ok,
+      quota_ok: geminiRes.ok,
+      geminiModel: GEMINI_MODEL,
+      httpStatus: geminiRes.status,
+      reason: geminiRes.ok ? "ok" : isQuota ? "quota_exceeded" : "api_error",
+      retryAfterSec: retryMatch ? Number(retryMatch[1]) : undefined,
+    });
+  } catch (error) {
+    const reason = error instanceof Error && error.name === "AbortError" ? "timeout" : "network_error";
+    return res.status(503).json({
+      ok: false,
+      quota_ok: false,
+      geminiModel: GEMINI_MODEL,
+      reason,
+    });
+  }
+});
+
 app.get("/exercise-animations/workoutx/:animationId.gif", async (req, res) => {
   const animationId = String(req.params.animationId || "");
   if (!/^\d{4}$/.test(animationId)) {
