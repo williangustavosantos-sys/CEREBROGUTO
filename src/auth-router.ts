@@ -18,6 +18,7 @@ import {
 } from "./invite-store.js";
 import {
   getUserAccessAsync,
+  getAllUserAccessAsync,
   requireActiveUserAccessAsync,
   upsertUserAccessAsync,
   getUserAccess,
@@ -41,6 +42,15 @@ function inviteDisplayName(invite: { userId: string; name?: string }): string {
 
 function normalizeLoginEmail(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function logStudentLoginFailure(reason: string, identifier: string): void {
+  if (process.env.NODE_ENV === "production") return;
+  const normalized = identifier.trim().toLowerCase();
+  const safeIdentifier = normalized.includes("@")
+    ? `${normalized.slice(0, 2)}***@${normalized.split("@")[1] || "email"}`
+    : `${normalized.slice(0, 3)}***`;
+  console.warn(`[GUTO_AUTH] student_login_failed reason=${reason} identifier=${safeIdentifier}`);
 }
 
 function sendTeamPlanError(res: Response, error: unknown): boolean {
@@ -86,7 +96,7 @@ authRouter.post("/admin/login", async (req: Request, res: Response) => {
     return;
   }
 
-  const adminUser = getAllUserAccess().find(
+  const adminUser = (await getAllUserAccessAsync()).find(
     (u) =>
       (u.role === "admin" || u.role === "super_admin") &&
       u.email?.trim().toLowerCase() === normalizedEmail &&
@@ -139,7 +149,7 @@ authRouter.post("/coach/login", async (req: Request, res: Response) => {
   const normalizedEmail = normalizeLoginEmail(email);
 
   // Find coach user by email
-  const allUsers = getAllUserAccess();
+  const allUsers = await getAllUserAccessAsync();
   const coachUser = allUsers.find(
     (u) => u.role === "coach" && u.email?.trim().toLowerCase() === normalizedEmail && u.active
   );
@@ -172,7 +182,7 @@ authRouter.post("/user/login", async (req: Request, res: Response) => {
     return;
   }
 
-  const allUsers = getAllUserAccess();
+  const allUsers = await getAllUserAccessAsync();
   const normalizedIdentifier = emailOrId.trim();
   const normalizedEmail = normalizeLoginEmail(emailOrId);
   const user = allUsers.find(
@@ -181,7 +191,14 @@ authRouter.post("/user/login", async (req: Request, res: Response) => {
       (u.email?.trim().toLowerCase() === normalizedEmail || u.userId === normalizedIdentifier)
   );
 
-  if (!user || !user.passwordHash) {
+  if (!user) {
+    logStudentLoginFailure("student_not_found", emailOrId);
+    res.status(401).json({ message: "Credenciais inválidas.", code: "INVALID_CREDENTIALS" });
+    return;
+  }
+
+  if (!user.passwordHash) {
+    logStudentLoginFailure("password_not_set", emailOrId);
     res.status(401).json({ message: "Credenciais inválidas." });
     return;
   }
@@ -194,7 +211,8 @@ authRouter.post("/user/login", async (req: Request, res: Response) => {
 
   const match = await bcrypt.compare(password, user.passwordHash);
   if (!match) {
-    res.status(401).json({ message: "Credenciais inválidas." });
+    logStudentLoginFailure("password_mismatch", emailOrId);
+    res.status(401).json({ message: "Credenciais inválidas.", code: "INVALID_CREDENTIALS" });
     return;
   }
 

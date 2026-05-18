@@ -315,12 +315,11 @@ function sanitizeSemanticAction(raw: unknown, memories: ProactiveMemory[], langu
       patch.location = patchInput.location.trim().slice(0, 120)
     }
     if (Object.keys(patch).length === 0) return null
-    const updateAction: ResolvedAction = { type: 'update', memoryId, patch }
     return {
       engaged: true,
-      action: updateAction,
+      action: null,
       fallbackMessage: clarification || correctionFallback({ ...memory, ...patch }, language),
-      reason,
+      reason: 'correction_no_endpoint',
     }
   }
   if (
@@ -400,7 +399,21 @@ export async function resolveProactiveMemoryActionFromUserReply(
       relevantMemoriesForSemantic(allMemories),
       language
     )
-    if (semantic?.engaged) return semantic
+    if (semantic?.engaged) {
+      if (semantic.action === null && pendingValidation.length === 1) {
+        return {
+          ...semantic,
+          fallbackMessage: ambiguousValidateFallback(pendingValidation[0]!, language),
+        }
+      }
+      if (semantic.action === null && pendingConfirmation.length === 1) {
+        return {
+          ...semantic,
+          fallbackMessage: ambiguousConfirmFallback(pendingConfirmation[0]!, language),
+        }
+      }
+      return semantic
+    }
 
     // ── 0. Awaiting discard confirmation — absolute priority ───────────────────
     // These are confirmed/enriched/surfaced memories where user said "cancelei X"

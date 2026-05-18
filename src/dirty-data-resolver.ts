@@ -77,10 +77,124 @@ function isMeaningful(value: unknown): value is string {
   if (!trimmed) return false;
   // explicitly empty markers
   const lowered = trimmed.toLowerCase();
-  if (["sem dor", "nenhuma", "nada", "no", "none", "nessuno", "ninguna"].includes(lowered)) {
+  if (["sem dor", "nenhuma", "nada", "no", "none", "nessuno", "nessuna", "ninguna"].includes(lowered)) {
     return false;
   }
   return true;
+}
+
+function normalizeForLocalResolution(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function resolveKnownFoodRestrictionLocally(rawValue: string, now: string): ResolvedField | null {
+  const normalized = normalizeForLocalResolution(rawValue);
+  // Fallback técnico para restrições estruturadas e inequívocas quando o resolver IA
+  // estiver indisponível/quota. Não substitui o classificador semântico.
+  const lactosePatterns = [
+    "sem lactose",
+    "zero lactose",
+    "intolerancia a lactose",
+    "intolerante a lactose",
+    "lactose free",
+    "no lactose",
+    "lactose intolerant",
+    "lactose",
+    "lattosio",
+    "senza lattosio",
+    "intolleranza al lattosio",
+  ];
+
+  if (lactosePatterns.some((pattern) => normalized.includes(pattern))) {
+    return {
+      field: "foodRestriction",
+      rawValue,
+      rawValueHash: hashRaw(rawValue),
+      normalizedValue: "lactose_intolerance",
+      riskTags: ["intolerance"],
+      confidence: 0.95,
+      status: "clear",
+      resolvedAt: now,
+    };
+  }
+
+  return null;
+}
+
+function resolveKnownPathologyLocally(rawValue: string, now: string): ResolvedField | null {
+  const normalized = normalizeForLocalResolution(rawValue);
+  const noLimitationPatterns = [
+    "sem dor",
+    "sem dores",
+    "sem limitacao",
+    "sem limitacoes",
+    "estou livre",
+    "no pain",
+    "pain free",
+    "no limitations",
+    "non ho dolori",
+    "senza dolori",
+    "nessun dolore",
+    "nessuna",
+  ];
+
+  if (noLimitationPatterns.some((pattern) => normalized.includes(pattern))) {
+    return {
+      field: "pathology",
+      rawValue,
+      rawValueHash: hashRaw(rawValue),
+      normalizedValue: "no_limitation",
+      bodyRegion: "general",
+      riskTags: [],
+      confidence: 0.95,
+      status: "clear",
+      resolvedAt: now,
+    };
+  }
+
+  const shoulderPatterns = [
+    "ombro",
+    "shoulder",
+    "spalla",
+    "empurrar",
+    "push",
+    "spingere",
+  ];
+  if (shoulderPatterns.some((pattern) => normalized.includes(pattern))) {
+    return {
+      field: "pathology",
+      rawValue,
+      rawValueHash: hashRaw(rawValue),
+      normalizedValue: "shoulder_sensitive",
+      bodyRegion: "shoulder",
+      riskTags: ["physical_attention", "shoulder_sensitive", "load_sensitive"],
+      confidence: 0.9,
+      status: "clear",
+      resolvedAt: now,
+    };
+  }
+
+  const kneePatterns = ["joelho", "knee", "ginocchio"];
+  if (kneePatterns.some((pattern) => normalized.includes(pattern))) {
+    return {
+      field: "pathology",
+      rawValue,
+      rawValueHash: hashRaw(rawValue),
+      normalizedValue: "knee_sensitive",
+      bodyRegion: "knee",
+      riskTags: ["physical_attention", "knee_sensitive", "load_sensitive"],
+      confidence: 0.9,
+      status: "clear",
+      resolvedAt: now,
+    };
+  }
+
+  return null;
 }
 
 function buildResolverPrompt(input: {
@@ -209,6 +323,7 @@ export async function resolveProfileFreeFields(
     return merged;
   }
 
+  const now = new Date().toISOString();
   const result = (await callResolverModel(
     buildResolverPrompt({
       country: needsCountry ? country : null,
@@ -218,21 +333,31 @@ export async function resolveProfileFreeFields(
   )) as Record<string, unknown> | null;
 
   if (!result || typeof result !== "object") {
+    if (needsPathology && pathology) {
+      const localPathology = resolveKnownPathologyLocally(pathology, now);
+      if (localPathology) merged.pathology = localPathology;
+    }
+    if (needsFood && foodRestriction) {
+      const localFood = resolveKnownFoodRestrictionLocally(foodRestriction, now);
+      if (localFood) merged.foodRestriction = localFood;
+    }
     return merged;
   }
-
-  const now = new Date().toISOString();
 
   if (needsCountry) {
     const r = sanitizeField(result.country, "country", country!, now);
     if (r) merged.country = r;
   }
   if (needsPathology) {
-    const r = sanitizeField(result.pathology, "pathology", pathology!, now);
+    const r =
+      sanitizeField(result.pathology, "pathology", pathology!, now) ||
+      resolveKnownPathologyLocally(pathology!, now);
     if (r) merged.pathology = r;
   }
   if (needsFood) {
-    const r = sanitizeField(result.foodRestriction, "foodRestriction", foodRestriction!, now);
+    const r =
+      sanitizeField(result.foodRestriction, "foodRestriction", foodRestriction!, now) ||
+      resolveKnownFoodRestrictionLocally(foodRestriction!, now);
     if (r) merged.foodRestriction = r;
   }
 

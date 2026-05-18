@@ -982,7 +982,12 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
     }
   }
   if (!(await ensureTeamPlanCapacity(res, teamId, "student", userId))) return;
-  const passwordHash = body.password ? await bcrypt.hash(body.password, 10) : undefined;
+  const requestedPassword = body.password?.trim();
+  const temporaryPassword =
+    !requestedPassword && body.active === true ? `GUTO-${crypto.randomBytes(4).toString("hex")}` : undefined;
+  const passwordHash = requestedPassword || temporaryPassword
+    ? await bcrypt.hash(requestedPassword || temporaryPassword!, 10)
+    : undefined;
   const active = body.active ?? Boolean(passwordHash);
   const durationDays = body.accessDurationDays || 30;
   const subscriptionEndsAt = active ? (body.subscriptionEndsAt || setDaysFromNow(durationDays)) : (body.subscriptionEndsAt || null);
@@ -1017,7 +1022,7 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
     metadata: { role: "student", coachId, active },
   });
 
-  res.status(201).json({ user, student: buildStudentView(user), inviteLink });
+  res.status(201).json({ user, student: buildStudentView(user), inviteLink, temporaryPassword });
 }));
 
 adminRouter.get(["/students/:userId", "/users/:userId"], asyncHandler(async (req, res) => {
@@ -1181,7 +1186,15 @@ adminRouter.post("/students/:userId/reset-password", requireAdmin, asyncHandler(
     return;
   }
   const passwordHash = await bcrypt.hash(temporaryPassword, 10);
-  const updated = await upsertUserAccessAsync(student.userId, { passwordHash });
+  const subscriptionEndsAt = student.subscriptionEndsAt || setDaysFromNow(30);
+  const updated = await upsertUserAccessAsync(student.userId, {
+    passwordHash,
+    active: true,
+    archived: false,
+    subscriptionStatus: "active",
+    paymentStatus: "active",
+    subscriptionEndsAt,
+  });
   addLog({ action: "password_reset", actorUserId: caller.userId, actorRole: caller.role, targetUserId: student.userId });
   res.json({ user: updated, temporaryPassword: body.password ? undefined : temporaryPassword });
 }));
