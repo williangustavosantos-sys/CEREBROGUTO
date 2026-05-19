@@ -79,14 +79,34 @@ describe("workout progression feedback", () => {
 
   it("progresses volume after two easy sessions", () => {
     const history = [
-      feedback({ difficulty: "easy", createdAt: "2026-05-16T10:00:00.000Z" }),
-      feedback({ difficulty: "easy", createdAt: "2026-05-17T10:00:00.000Z" }),
+      feedback({ difficulty: "easy", locationMode: "gym", createdAt: "2026-05-16T10:00:00.000Z" }),
+      feedback({ difficulty: "easy", locationMode: "gym", createdAt: "2026-05-17T10:00:00.000Z" }),
     ];
 
     assert.equal(getProgressionSignal(history), "progress");
     const progressed = applyWorkoutProgression(plan(), history);
     assert.equal(progressed.exercises[1].sets, 4);
+    assert.match(progressed.exercises[1].note, /back-off seguro|15-20%/i);
     assert.equal(progressed.difficulty, "progressive");
+  });
+
+  it("progresses home and park without gym-only dropset language", () => {
+    const homeHistory = [
+      feedback({ difficulty: "easy", locationMode: "home", createdAt: "2026-05-16T10:00:00.000Z" }),
+      feedback({ difficulty: "easy", locationMode: "home", createdAt: "2026-05-17T10:00:00.000Z" }),
+    ];
+    const parkHistory = [
+      feedback({ difficulty: "easy", locationMode: "park", createdAt: "2026-05-16T10:00:00.000Z" }),
+      feedback({ difficulty: "easy", locationMode: "park", createdAt: "2026-05-17T10:00:00.000Z" }),
+    ];
+
+    const homeProgressed = applyWorkoutProgression(plan(), homeHistory);
+    const parkProgressed = applyWorkoutProgression(plan(), parkHistory);
+
+    assert.match(homeProgressed.exercises[1].note, /descida de 3s/i);
+    assert.doesNotMatch(homeProgressed.exercises[1].note, /back-off|15-20%/i);
+    assert.match(parkProgressed.exercises[1].note, /pausa isometrica/i);
+    assert.doesNotMatch(parkProgressed.exercises[1].note, /back-off|15-20%/i);
   });
 
   it("reduces volume when feedback reports pain", () => {

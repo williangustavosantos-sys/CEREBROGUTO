@@ -245,6 +245,7 @@ export interface DietPlan {
   coachNotes?: string;
   restrictions?: string;
   foodRestrictions?: string;
+  foodIntolerances?: string;
   manualOverride?: boolean;
   editedBy?: string;
   editedAt?: string;

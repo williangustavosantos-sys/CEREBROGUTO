@@ -29,6 +29,33 @@ test('contrato: lattosio resolve como lactose sem depender do modelo', async () 
   assert.equal(getPendingClarification(resolved, 'diet'), null)
 })
 
+test('contrato: "como de tudo" e "sem alergia" nao viram restricao incerta', async () => {
+  const { resolveProfileFreeFields, getPendingClarification } = await import('../src/dirty-data-resolver.js')
+
+  for (const foodRestriction of ['COMO DE TUDO', 'I EAT EVERYTHING', 'MANGIO TUTTO', 'SEM ALERGIA', 'NO ALLERGY', 'NESSUNA ALLERGIA']) {
+    const resolved = await resolveProfileFreeFields({
+      foodRestriction,
+      previous: {},
+    })
+
+    assert.equal(resolved.foodRestriction, undefined, foodRestriction)
+    assert.equal(getPendingClarification(resolved, 'diet'), null, foodRestriction)
+  }
+})
+
+test('contrato: alergia/intolerancia separada sobrevive quando restricao diz que come de tudo', async () => {
+  const { resolveProfileFreeFields, getPendingClarification } = await import('../src/dirty-data-resolver.js')
+
+  const resolved = await resolveProfileFreeFields({
+    foodRestriction: 'MANGIO TUTTO; Lattosio',
+    previous: {},
+  })
+
+  assert.equal(resolved.foodRestriction?.status, 'clear')
+  assert.equal(resolved.foodRestriction?.normalizedValue, 'lactose_intolerance')
+  assert.equal(getPendingClarification(resolved, 'diet'), null)
+})
+
 test('contrato: correcao proativa ambigua nao executa update direto', async () => {
   const { resolveProactiveMemoryActionFromUserReply } = await import('../src/proactivity/memory-action-resolver.js')
   const { writeMemoryStoreAsync } = await import('../src/memory-store.js')

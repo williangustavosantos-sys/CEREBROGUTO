@@ -148,6 +148,7 @@ export function applyWorkoutProgression<T extends ProgressionWorkoutPlan>(
 ): T {
   const signal = getProgressionSignal(history);
   if (signal === "hold") return plan;
+  const lastLocation = (history || []).slice(-1)[0]?.locationMode;
 
   let changed = false;
   const exercises = plan.exercises.map((exercise) => {
@@ -155,10 +156,14 @@ export function applyWorkoutProgression<T extends ProgressionWorkoutPlan>(
 
     if (signal === "progress" && !changed) {
       changed = true;
+      const currentSets = Math.max(1, Number(exercise.sets) || 3);
       return {
         ...exercise,
-        sets: Math.min(5, Math.max(1, Number(exercise.sets) || 3) + 1),
-        note: appendNote(exercise.note, "Progressao GUTO: hoje sobe uma serie porque o treino anterior ficou leve."),
+        sets: Math.min(5, currentSets + 1),
+        note: appendNote(
+          exercise.note,
+          `Progressao GUTO: hoje sobe uma serie porque os treinos validados ficaram leves. ${progressionTechnique(lastLocation)}`
+        ),
       };
     }
 
@@ -180,6 +185,19 @@ export function applyWorkoutProgression<T extends ProgressionWorkoutPlan>(
     difficulty: signal === "progress" ? "progressive" : "conservative",
     summary: appendSummary(plan.summary, signal),
   };
+}
+
+function progressionTechnique(locationMode?: WorkoutLocationMode) {
+  if (locationMode === "gym") {
+    return "Na ultima serie, back-off seguro: reduz 15-20% da carga e fecha 6-8 reps limpas. Se a forma cair, para.";
+  }
+  if (locationMode === "park") {
+    return "No parque, progride com pausa isometrica de 2s no ponto mais dificil, sem inventar carga.";
+  }
+  if (locationMode === "home") {
+    return "Em casa, progride com descida de 3s e pausa de 1s, mantendo controle total.";
+  }
+  return "Progressao tecnica liberada so se a execucao continuar limpa.";
 }
 
 export function applySafeExerciseSubstitutions<T extends ProgressionWorkoutPlan>(

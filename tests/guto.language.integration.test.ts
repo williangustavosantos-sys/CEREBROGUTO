@@ -373,13 +373,13 @@ describe("GUTO visible language guarantees", () => {
       language: "en-US",
       historyText: "Today the base is chest and triceps.",
       input: "I trained that yesterday",
-      expected: /not repeating chest and triceps/i,
+      expected: /history registered|will not repeat/i,
     },
     {
       language: "it-IT",
       historyText: "Oggi la base è petto e tricipiti.",
       input: "l'ho allenato ieri",
-      expected: /non ripeto petto e tricipiti/i,
+      expected: /storico registrato|non ripeto/i,
     },
   ];
 

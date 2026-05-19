@@ -577,4 +577,69 @@ describe("workout catalog video gate", () => {
     assert.equal(memory.xpEvents.filter((event: any) => event.type === "complete_daily_mission").length, 1);
     assert.ok(memory.memoryAudit.some((entry: any) => entry.source === "workout_validation"));
   });
+
+  it("records skip-camera validation as pending without XP and allows later selfie validation", async () => {
+    writeFileSync(testMemoryFile, JSON.stringify({
+      "student-video-gate": {
+        userId: "student-video-gate",
+        name: "Aluno",
+        language: "pt-BR",
+        totalXp: 0,
+        streak: 0,
+        trainedToday: false,
+        completedWorkoutDates: [],
+        adaptedMissionDates: [],
+        missedMissionDates: [],
+        xpEvents: [],
+        proactiveSent: {},
+        lastWorkoutPlan: workoutPlan(),
+      },
+    }, null, 2));
+
+    const basePayload = {
+      workoutFocus: "chest_triceps",
+      workoutLabel: "Peito e tríceps",
+      locationMode: "gym",
+      language: "pt-BR",
+    };
+
+    const pending = await request("/guto/validate-workout", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${signToken("student", "student-video-gate")}`,
+      },
+      body: JSON.stringify(basePayload),
+    });
+    assert.equal(pending.status, 200);
+    const pendingBody = await pending.json() as { validation: { status: string; xp: number }; arena?: unknown };
+    assert.equal(pendingBody.validation.status, "pending");
+    assert.equal(pendingBody.validation.xp, 0);
+    assert.equal(pendingBody.arena, null);
+
+    let store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, any>;
+    let memory = store["student-video-gate"];
+    assert.equal(memory.trainedToday, false);
+    assert.deepEqual(memory.completedWorkoutDates, []);
+    assert.equal(memory.xpEvents.filter((event: any) => event.type === "complete_daily_mission").length, 0);
+
+    const validated = await request("/guto/validate-workout", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${signToken("student", "student-video-gate")}`,
+      },
+      body: JSON.stringify({ ...basePayload, imageBase64: validImageBase64 }),
+    });
+    assert.equal(validated.status, 200);
+    const validatedBody = await validated.json() as { validation: { status: string; xp: number } };
+    assert.equal(validatedBody.validation.status, "validated");
+    assert.equal(validatedBody.validation.xp, 100);
+
+    store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, any>;
+    memory = store["student-video-gate"];
+    assert.equal(memory.trainedToday, true);
+    assert.equal(memory.validationHistory.length, 2);
+    assert.equal(memory.xpEvents.filter((event: any) => event.type === "complete_daily_mission").length, 1);
+  });
 });

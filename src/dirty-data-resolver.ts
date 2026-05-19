@@ -77,7 +77,35 @@ function isMeaningful(value: unknown): value is string {
   if (!trimmed) return false;
   // explicitly empty markers
   const lowered = trimmed.toLowerCase();
-  if (["sem dor", "nenhuma", "nada", "no", "none", "nessuno", "nessuna", "ninguna"].includes(lowered)) {
+  if ([
+    "sem dor",
+    "nenhuma",
+    "nada",
+    "como de tudo",
+    "sem alergia",
+    "sem alergias",
+    "sem intolerância",
+    "sem intolerancia",
+    "sem restrição",
+    "sem restricao",
+    "i eat everything",
+    "no allergy",
+    "no allergies",
+    "no intolerance",
+    "no intolerances",
+    "no food restriction",
+    "no food restrictions",
+    "mangio tutto",
+    "nessuna allergia",
+    "nessuna intolleranza",
+    "senza allergie",
+    "senza intolleranze",
+    "no",
+    "none",
+    "nessuno",
+    "nessuna",
+    "ninguna",
+  ].includes(lowered)) {
     return false;
   }
   return true;
@@ -124,6 +152,33 @@ function resolveKnownFoodRestrictionLocally(rawValue: string, now: string): Reso
   }
 
   return null;
+}
+
+/**
+ * Fallback `needs_confirmation` para patologia declarada na calibragem
+ * quando nem o classificador IA nem o resolver local conseguiram
+ * normalizar o texto.
+ *
+ * Princípios (Santo Graal §3):
+ *  - Regra 1 — GUTO não executa sem certeza: o gate continua bloqueando
+ *    treino até que o usuário CONFIRME no chat o que escreveu.
+ *  - Regra 3 — sem "se X então Y": não marcamos `clear` automático nem
+ *    inferimos região anatômica; deixamos o `pendingClarification`
+ *    gerar uma pergunta dirigida ("Confere comigo: 'X' está atual?").
+ *
+ * O `safetyFilterWorkoutPlan` continua aplicando precauções gerais
+ * enquanto o status fica `needs_confirmation` (tag `user_declared`).
+ */
+function buildUserDeclaredPathology(rawValue: string, now: string): ResolvedField {
+  return {
+    field: "pathology",
+    rawValue,
+    rawValueHash: hashRaw(rawValue),
+    riskTags: ["user_declared", "physical_attention"],
+    confidence: 0.4,
+    status: "needs_confirmation",
+    resolvedAt: now,
+  };
 }
 
 function resolveKnownPathologyLocally(rawValue: string, now: string): ResolvedField | null {
@@ -334,10 +389,19 @@ export async function resolveProfileFreeFields(
 
   if (!result || typeof result !== "object") {
     if (needsPathology && pathology) {
+      // Patologia: campo estrutural da calibragem. Se nem o IA nem o resolver
+      // local entenderam, registramos como `needs_confirmation` (Regra 1:
+      // GUTO pergunta antes de executar). Isso garante que o gate de treino
+      // emita uma pergunta dirigida ("Confere comigo: 'X' está atual?")
+      // em vez de travar mudo.
       const localPathology = resolveKnownPathologyLocally(pathology, now);
-      if (localPathology) merged.pathology = localPathology;
+      merged.pathology = localPathology || buildUserDeclaredPathology(pathology, now);
     }
     if (needsFood && foodRestriction) {
+      // foodRestriction: pode vir lixo (ex.: "nessun dolore" vazado).
+      // Só promovemos quando o resolver local reconhece um padrão alimentar
+      // estruturado. Caso contrário deixamos undefined — o gate de dieta
+      // usa `getUnresolvedFoodRestriction` no server.ts para perguntar.
       const localFood = resolveKnownFoodRestrictionLocally(foodRestriction, now);
       if (localFood) merged.foodRestriction = localFood;
     }
@@ -351,8 +415,9 @@ export async function resolveProfileFreeFields(
   if (needsPathology) {
     const r =
       sanitizeField(result.pathology, "pathology", pathology!, now) ||
-      resolveKnownPathologyLocally(pathology!, now);
-    if (r) merged.pathology = r;
+      resolveKnownPathologyLocally(pathology!, now) ||
+      buildUserDeclaredPathology(pathology!, now);
+    merged.pathology = r;
   }
   if (needsFood) {
     const r =

@@ -179,4 +179,124 @@ describe("diet generation contract", () => {
     assert.equal(memory.dietGenerationStatus, "generated");
     assert.ok(memory.memoryAudit.some((entry: any) => entry.source === "diet_generated"));
   });
+
+  it("respeita intolerancia quando foodRestrictions diz que come de tudo", async () => {
+    const userId = "diet-intolerance-separated-user";
+    writeMemory(userId, {
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      trainingLevel: "consistent",
+      trainingGoal: "muscle_gain",
+      country: "Italia",
+      countryCode: "IT",
+      foodRestrictions: "MANGIO TUTTO",
+      foodIntolerances: "Lattosio",
+      resolvedFields: {
+        foodRestriction: { rawValue: "Lattosio", status: "clear", normalizedValue: "lactose_intolerance" },
+      },
+    });
+
+    const res = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "it-IT" }),
+    });
+
+    assert.equal(res.status, 200);
+    const plan = await res.json() as {
+      meals: Array<{ foods: Array<{ name: string }> }>;
+      foodRestrictions: string;
+      foodIntolerances: string;
+    };
+    const foodText = JSON.stringify(plan.meals).toLowerCase();
+    assert.doesNotMatch(foodText, /latte|yogurt|mozzarella|ricotta|parmigiano/);
+    assert.equal(plan.foodRestrictions, "none");
+    assert.equal(plan.foodIntolerances, "Lattosio");
+  });
+
+  it("recusa gerar sem countryCode e peso (422) com mensagem em en-US", async () => {
+    const userId = "diet-missing-profile-en";
+    writeMemory(userId, {
+      biologicalSex: "female",
+      userAge: 28,
+      heightCm: 165,
+      trainingLevel: "beginner",
+      trainingGoal: "fat_loss",
+      country: "Brazil",
+      // countryCode, weightKg missing
+    });
+
+    const res = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "en-US" }),
+    });
+
+    assert.equal(res.status, 422);
+    const body = (await res.json()) as { error: string; missing: string[]; message: string };
+    assert.equal(body.error, "missing_profile_fields");
+    assert.ok(body.missing.includes("countryCode"));
+    assert.ok(body.missing.includes("weightKg"));
+    assert.match(body.message, /calibration/i);
+  });
+
+  it("recusa gerar sem perfil completo em pt-BR", async () => {
+    const userId = "diet-missing-profile-pt";
+    writeMemory(userId, {
+      biologicalSex: "male",
+      userAge: 30,
+      weightKg: 80,
+      heightCm: 180,
+      trainingGoal: "muscle_gain",
+      countryCode: "BR",
+      country: "Brasil",
+      // trainingLevel missing
+    });
+
+    const res = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "pt-BR" }),
+    });
+
+    assert.equal(res.status, 422);
+    const body = (await res.json()) as { message: string };
+    assert.match(body.message, /calibragem|montar tua dieta/i);
+  });
+
+  it("GET /guto/diet devolve plano após generate", async () => {
+    const userId = "diet-get-after-generate";
+    writeMemory(userId, {
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      trainingLevel: "consistent",
+      trainingGoal: "muscle_gain",
+      country: "Italia",
+      countryCode: "IT",
+      foodRestrictions: "none",
+      foodIntolerances: "none",
+      resolvedFields: {
+        foodRestriction: { rawValue: "none", status: "clear", normalizedValue: "none" },
+      },
+    });
+
+    const generate = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "it-IT" }),
+    });
+    assert.equal(generate.status, 200);
+
+    const getRes = await originalFetch(`${baseUrl}/guto/diet`, {
+      method: "GET",
+      headers: authHeaders(userId),
+    });
+    assert.equal(getRes.status, 200);
+    const plan = (await getRes.json()) as { meals: unknown[] };
+    assert.ok(Array.isArray(plan.meals) && plan.meals.length > 0);
+  });
 });

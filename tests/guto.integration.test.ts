@@ -212,7 +212,37 @@ function installGeminiMock() {
       }))), { status: 200, headers: { "Content-Type": "application/json" } });
     }
 
-    // 4. Usuário doente
+    // 4. Pedido de treino sem local soberano (modelo tenta executar cedo)
+    if (inputMsg.includes("monta meu treino")) {
+      return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
+        fala: "Treino montado, bora!",
+        acao: "updateWorkout",
+        expectedResponse: null,
+        memoryPatch: {},
+      }))), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+
+    // 5. IT sem dor sem local
+    if (inputMsg.includes("nessun dolore") && inputMsg.includes("libero")) {
+      return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
+        fala: "Perfetto, scheda pronta!",
+        acao: "updateWorkout",
+        expectedResponse: null,
+        memoryPatch: { trainingLimitations: "nessuna" },
+      }))), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+
+    // 6. Chat tenta marcar treino feito
+    if (inputMsg.includes("terminei o treino")) {
+      return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
+        fala: "Boa! Fechou.",
+        acao: "updateWorkout",
+        expectedResponse: null,
+        memoryPatch: { trainedToday: true },
+      }))), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+
+    // 7. Usuário doente
     if (inputMsg.includes("doente") || inputMsg.includes("não tô muito bem")) {
       return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
         fala: "Sem heroísmo, vamos leve pra recuperar ritmo. Vai treinar em casa, academia ou parque?",
@@ -340,7 +370,7 @@ describe("GUTO /guto integration", () => {
 
     const memory = readUserMemory(userId);
     assert.equal(memory.trainingSchedule, "tomorrow");
-    assert.equal(memory.trainingLocation, "academia");
+    assert.equal(memory.trainingLocation, "gym");
     assert.match(memory.trainingStatus, /voltando agora/i);
     assert.equal(memory.trainingAge, 30);
     assert.notEqual(memory.trainingAge, 15);
@@ -449,6 +479,82 @@ describe("GUTO /guto integration", () => {
     assert.equal(memory.recentTrainingHistory?.[0]?.dateLabel, "day_before_yesterday");
     assert.equal(memory.recentTrainingHistory?.[0]?.muscleGroup, "back_biceps");
     assert.match(memory.recentTrainingHistory?.[0]?.raw || "", /treinei anteontem costas/i);
+  });
+
+  it("does not execute workout without sovereign training location", async () => {
+    const userId = "test-gate-sem-local";
+    const response = await postGuto({
+      language: "pt-BR",
+      profile: {
+        userId,
+        name: "Will",
+        trainingStatus: "treinando",
+        trainingLimitations: "sem dor",
+        userAge: 35,
+      },
+      history: [],
+      input: "Monta meu treino agora.",
+    });
+
+    assert.equal(response.acao, "none");
+    assert.equal(response.expectedResponse?.context, "training_location");
+    assert.match(response.fala || "", /academia|casa|parque|onde/i);
+    assert.ok(!response.workoutPlan);
+
+    const memory = readUserMemory(userId);
+    assert.equal(memory.trainingLocation, undefined);
+    assert.equal(memory.preferredTrainingLocation, undefined);
+  });
+
+  it("IT clear no pain without location asks before workout", async () => {
+    const userId = "test-it-nessun-dolore";
+    const response = await postGuto({
+      language: "it-IT",
+      profile: {
+        userId,
+        name: "Luca",
+        language: "it-IT",
+        trainingStatus: "sto tornando ad allenarmi",
+        trainingLevel: "returning",
+        userAge: 35,
+      },
+      history: [],
+      input: "Nessun dolore, sono libero.",
+    });
+
+    assert.equal(response.acao, "none");
+    assert.equal(response.expectedResponse?.context, "training_location");
+    assert.match(response.fala || "", /palestra|casa|parco|luogo/i);
+    assert.ok(!response.workoutPlan);
+    assert.equal(response.memoryPatch?.foodRestrictions, undefined);
+
+    const memory = readUserMemory(userId);
+    assert.equal(memory.trainingLimitations, "nessuna");
+  });
+
+  it("ignores trainedToday coming from chat memoryPatch", async () => {
+    const userId = "test-chat-trained-today";
+    const response = await postGuto({
+      language: "pt-BR",
+      profile: {
+        userId,
+        name: "Will",
+        preferredTrainingLocation: "gym",
+        trainingStatus: "treinando",
+        trainingLimitations: "sem dor",
+        userAge: 30,
+      },
+      history: [],
+      input: "terminei o treino agora",
+    });
+
+    const memory = readUserMemory(userId);
+    assert.notEqual(memory.trainedToday, true);
+    assert.ok(
+      memory.memoryAudit?.some((entry: any) =>
+        String(entry.reason || "").includes("trainedToday vindo do chat foi ignorado")
+      )
+    );
   });
 
   it("keeps a sick user on a light route and asks for a simple location", async () => {
