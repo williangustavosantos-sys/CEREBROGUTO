@@ -4806,6 +4806,36 @@ async function classifyContractIntent(input: {
   }
 }
 
+/**
+ * Calibragem soberana — o GUTO **nunca** re-pergunta dado que já existe na memória.
+ *
+ * Princípios (GUTO_ESTRUTURA_INTERNA §3 + §6):
+ *  - Regra 1 (não executa sem certeza): se TODOS os campos abaixo estão
+ *    presentes, a certeza está pronta. Não há mais o que perguntar — só
+ *    executar o treino e respeitar a calibragem.
+ *  - Regra 2 (não descarta memória validada): a calibragem é a memória
+ *    operacional inicial. Qualquer ramo que ignore `preferredTrainingLocation`
+ *    ou `userAge` está descartando memória validada.
+ *  - Regra 3 (sem "se X então Y"): não usamos keyword list para decidir.
+ *    Só perguntamos quando a memória estruturada está vazia.
+ *
+ * Campos mínimos para o gate liberar treino:
+ *   1. local (preferredTrainingLocation OU trainingLocation)
+ *   2. ritmo (trainingLevel OU trainingStatus)
+ *   3. idade (userAge OU trainingAge)
+ *   4. patologia/limitação (trainingPathology OU trainingLimitations)
+ */
+function hasSovereignCalibrationForTraining(memory: GutoMemory): boolean {
+  const hasLocation = Boolean(memory.preferredTrainingLocation || memory.trainingLocation);
+  const hasRhythm = Boolean(memory.trainingLevel || memory.trainingStatus);
+  const hasAge = Boolean(memory.userAge || memory.trainingAge);
+  const hasPathology = Boolean(
+    (memory.trainingPathology && memory.trainingPathology.trim()) ||
+    (memory.trainingLimitations && memory.trainingLimitations.trim())
+  );
+  return hasLocation && hasRhythm && hasAge && hasPathology;
+}
+
 function enforceTrainingFlowCertainty(
   response: GutoModelResponse,
   memory: GutoMemory,
@@ -4815,6 +4845,7 @@ function enforceTrainingFlowCertainty(
   contractIntent: ContractIntent = emptyContractIntent("not_run")
 ) {
   const previousContext = normalizeExpectedResponse(previousExpectedResponse)?.context;
+  const hasSovereign = hasSovereignCalibrationForTraining(memory);
   const copy: Record<GutoLanguage, Record<"askStatus" | "askLimitations" | "closeNoLimitation" | "closeLimitation", { fala: string; instruction?: string }>> = {
     "pt-BR": {
       askStatus: {
@@ -5101,6 +5132,13 @@ function enforceTrainingFlowCertainty(
       !/\b(doente|doenca|doença|febre|tonto|sick|ill|fever|febbre)\b/.test(normalize(rawInput))
     ) {
       memory.trainingStatus = normalizeMemoryValue(contractIntent.statusText || rawInput);
+      // REGRA 2 — não pergunta idade/limitação que já vieram da calibragem.
+      if (hasSovereignCalibrationForTraining(memory)) {
+        enforceExecutionGateBeforeWorkout(response, memory, language, {
+          promoteWorkoutFala: getCloseNoLimitationFala(memory, language),
+        });
+        return;
+      }
       const fala = language === "en-US"
         ? "Rhythm understood. Now send age and any pain or limitation so I respect your body."
         : language === "it-IT"
@@ -5125,6 +5163,14 @@ function enforceTrainingFlowCertainty(
 
     if (contractIntent.kind === "schedule_today") {
       memory.trainingSchedule = "today";
+      // REGRA 2 — memória validada não pode ser ignorada.
+      // Se já tem local declarado na calibragem, NUNCA pergunta de novo.
+      if (hasSovereign) {
+        enforceExecutionGateBeforeWorkout(response, memory, language, {
+          promoteWorkoutFala: getCloseNoLimitationFala(memory, language),
+        });
+        return;
+      }
       const fala = language === "en-US"
         ? "Today it is. Where will you train: gym, home, or park?"
         : language === "it-IT"
@@ -5149,6 +5195,14 @@ function enforceTrainingFlowCertainty(
 
     if (contractIntent.kind === "schedule_tomorrow") {
       memory.trainingSchedule = "tomorrow";
+      // REGRA 2 — memória validada não pode ser ignorada.
+      // Se calibragem está fechada, agendou amanhã = confirmação, não pergunta.
+      if (hasSovereign) {
+        enforceExecutionGateBeforeWorkout(response, memory, language, {
+          promoteWorkoutFala: getCloseNoLimitationFala(memory, language),
+        });
+        return;
+      }
       const fala = language === "en-US"
         ? "Tomorrow stays alive. Where will you train: home, gym, or park?"
         : language === "it-IT"
