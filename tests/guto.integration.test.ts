@@ -481,6 +481,35 @@ describe("GUTO /guto integration", () => {
     assert.match(memory.recentTrainingHistory?.[0]?.raw || "", /treinei anteontem costas/i);
   });
 
+  it("executes workout when calibration profile is already locked", async () => {
+    const userId = "test-gate-calibrado";
+    // Simula o fluxo real: calibragem salva os dados em memória antes do chat abrir.
+    // O servidor ignora req.body.profile — só lê da memória persistida.
+    writeUserMemory(userId, {
+      name: "Will",
+      language: "pt-BR",
+      preferredTrainingLocation: "gym",
+      trainingLevel: "consistent",
+      trainingStatus: "consistent",
+      trainingGoal: "muscle_gain",
+      biologicalSex: "male",
+      trainingPathology: "sem dor",
+      trainingLimitations: "sem dor",
+      userAge: 35,
+    });
+    clearMemoryStoreCache();
+
+    const response = await postGuto({
+      language: "pt-BR",
+      profile: { userId },
+      history: [],
+      input: "Monta meu treino agora.",
+    });
+
+    assert.notEqual(response.expectedResponse?.context, "training_location");
+    assert.ok(response.fala?.trim());
+  });
+
   it("does not execute workout without sovereign training location", async () => {
     const userId = "test-gate-sem-local";
     const response = await postGuto({

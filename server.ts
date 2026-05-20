@@ -1188,6 +1188,24 @@ interface ExecutionGateResult {
   instruction?: string;
 }
 
+function hasCalibrationProfileLocked(memory: GutoMemory): boolean {
+  const hasLocation = Boolean(memory.preferredTrainingLocation || memory.trainingLocation);
+  const hasRhythm = Boolean(memory.trainingLevel || memory.trainingStatus);
+  const hasAge = typeof memory.userAge === "number" && memory.userAge > 0;
+  const hasBodyContext = Boolean(
+    (memory.trainingPathology && String(memory.trainingPathology).trim()) ||
+      (memory.trainingLimitations && String(memory.trainingLimitations).trim())
+  );
+  return Boolean(
+    hasLocation &&
+      hasRhythm &&
+      hasAge &&
+      hasBodyContext &&
+      memory.trainingGoal &&
+      memory.biologicalSex
+  );
+}
+
 function buildTrainingExecutionGate(memory: GutoMemory, language: GutoLanguage): ExecutionGateResult {
   const pendingTrainingClarification = getPendingClarification(memory.resolvedFields, "training");
   const unresolvedTrainingPathology = getUnresolvedTrainingPathology(memory);
@@ -1202,6 +1220,11 @@ function buildTrainingExecutionGate(memory: GutoMemory, language: GutoLanguage):
       ),
       instruction: pendingTrainingClarification?.hint || "Clarificar a limitação corporal antes de gerar treino.",
     };
+  }
+
+  // Calibragem completa = memória soberana; não reabrir intake de local/idade/ritmo.
+  if (hasCalibrationProfileLocked(memory)) {
+    return { status: "ready_to_execute" };
   }
 
   if (!(memory.preferredTrainingLocation || memory.trainingLocation)) {
@@ -5442,8 +5465,37 @@ function enforceTrainingFlowCertainty(
 function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMemory, expectedResponse?: ExpectedResponse | null): GutoModelResponse {
   const selectedLanguage = normalizeLanguage(language);
   const text = normalize(rawInput);
+
+  // SAFETY ABSOLUTA: crise de saúde mental roda antes de qualquer outra coisa.
+  if (/\b(muito mal|besteira|suic|kill myself|harm myself|farmi male)\b/.test(text)) {
+    const fala = selectedLanguage === "en-US"
+      ? "Stay with me now. Breathe, do not stay alone, and call emergency support if you may hurt yourself."
+      : selectedLanguage === "it-IT"
+        ? "Resta con me adesso. Respira, non stare solo, e chiama emergenza se puoi farti male."
+        : "Fica comigo agora. Respira, não fica sozinho e chama emergência se você pode se machucar.";
+    return { fala, acao: "none", expectedResponse: null };
+  }
+
+  // Santo Graal §1.4 P2 + §17 Bug Crítico #1 — memória calibrada é soberana.
+  // Quando a calibragem está fechada (local, ritmo, idade, limitação, objetivo,
+  // sexo), o fallback técnico NUNCA pode regredir para perguntas de intake.
+  // Mas também NÃO pode transformar toda pergunta em "vai treinar": só promove
+  // treino quando o input realmente pede treino/execução. Para qualquer outra
+  // pergunta (ex.: "quais são meus dados"), o Gemini caiu e a resposta honesta
+  // é admitir a falha técnica — sem empurrar treino nem re-perguntar o que já
+  // está na memória.
+  const calibrationLocked = Boolean(memory && hasCalibrationProfileLocked(memory));
+  if (calibrationLocked && isWorkoutExecutionRequest(rawInput)) {
+    return {
+      fala: getCloseNoLimitationFala(memory!, selectedLanguage),
+      acao: "updateWorkout",
+      expectedResponse: null,
+      avatarEmotion: "reward",
+    };
+  }
+
   const location = extractTrainingLocation(rawInput);
-  if (location && /\b(treinando|training|allenando|ritmo)\b/.test(text)) {
+  if (!calibrationLocked && location && /\b(treinando|training|allenando|ritmo)\b/.test(text)) {
     return {
       fala: selectedLanguage === "en-US"
         ? "Good. Now send age and any pain or limitation so I respect your body."
@@ -5455,7 +5507,7 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
       memoryPatch: { trainingLocation: location, trainingStatus: rawInput },
     };
   }
-  if (location) {
+  if (!calibrationLocked && location) {
     const fala = selectedLanguage === "en-US"
       ? `${location === "gym" ? "Gym" : location} noted. Now tell me your rhythm: stopped, getting back, or already training?`
       : selectedLanguage === "it-IT"
@@ -5480,7 +5532,7 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
     };
   }
 
-  if (/\b(condominio|condomínio|halteres|banco|dumbbells|bench)\b/.test(text)) {
+  if (!calibrationLocked && /\b(condominio|condomínio|halteres|banco|dumbbells|bench)\b/.test(text)) {
     return {
       fala: selectedLanguage === "en-US"
         ? "Condo setup noted: dumbbells and bench. Now tell me body state and pain."
@@ -5526,15 +5578,6 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
       : selectedLanguage === "it-IT"
         ? "Sono GUTO, non un chatbot neutro. Ora azione; poi mi dici cosa pesa."
         : "Eu sou o GUTO, não chatbot neutro. Ação agora; depois você me fala o que pesa.";
-    return { fala, acao: "none", expectedResponse: null };
-  }
-
-  if (/\b(muito mal|besteira|suic|kill myself|harm myself|farmi male)\b/.test(text)) {
-    const fala = selectedLanguage === "en-US"
-      ? "Stay with me now. Breathe, do not stay alone, and call emergency support if you may hurt yourself."
-      : selectedLanguage === "it-IT"
-        ? "Resta con me adesso. Respira, non stare solo, e chiama emergenza se puoi farti male."
-        : "Fica comigo agora. Respira, não fica sozinho e chama emergência se você pode se machucar.";
     return { fala, acao: "none", expectedResponse: null };
   }
 
@@ -5678,7 +5721,7 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
     };
   }
 
-  if (/^(hoje|today|oggi)\b/.test(text) || /\b(quero comecar amanha|quero começar amanha|quero começar amanhã|start tomorrow|iniziare domani)\b/.test(text)) {
+  if (!calibrationLocked && (/^(hoje|today|oggi)\b/.test(text) || /\b(quero comecar amanha|quero começar amanha|quero começar amanhã|start tomorrow|iniziare domani)\b/.test(text))) {
     return {
       fala: selectedLanguage === "en-US"
         ? "Today noted. Where do you train: gym, home, or park?"
@@ -5696,7 +5739,7 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
   }
 
   const previousContext = normalizeExpectedResponse(expectedResponse)?.context;
-  if (previousContext === "training_status" || /\b(parado|voltando|treinando|stopped|returning|training|fermo|ripresa|allenando)\b/.test(text)) {
+  if (!calibrationLocked && (previousContext === "training_status" || /\b(parado|voltando|treinando|stopped|returning|training|fermo|ripresa|allenando)\b/.test(text))) {
     const fala = selectedLanguage === "en-US"
       ? "Good. Now send age and any pain or limitation so I respect your body."
       : selectedLanguage === "it-IT"
@@ -5771,6 +5814,21 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
       acao: "updateWorkout",
       expectedResponse: null,
       avatarEmotion: "reward",
+    };
+  }
+
+  // Calibragem fechada e nenhum ramo específico combinou: o Gemini caiu e não
+  // dá pra responder a pergunta com o fallback determinístico. Honesto, sem
+  // regredir intake (não pergunta local/ritmo que já estão na memória).
+  if (calibrationLocked) {
+    return {
+      fala: selectedLanguage === "en-US"
+        ? "My system glitched for a second here. Send that again in one line and I'll handle it."
+        : selectedLanguage === "it-IT"
+          ? "Mi si è inceppato il sistema un attimo. Rimandamelo in una frase e ci penso io."
+          : "Deu um curto rápido no meu sistema aqui. Manda de novo em uma frase que eu resolvo.",
+      acao: "none",
+      expectedResponse: null,
     };
   }
 
@@ -6600,10 +6658,17 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
   if (b.trainingLimitations) memory.trainingLimitations = normalizeMemoryValue(b.trainingLimitations);
   if (typeof b.userAge !== "undefined" && !isNaN(Number(b.userAge))) memory.userAge = Number(b.userAge);
   if (b.biologicalSex) memory.biologicalSex = b.biologicalSex;
-  if (b.trainingLevel) memory.trainingLevel = b.trainingLevel;
+  if (b.trainingLevel) {
+    memory.trainingLevel = b.trainingLevel;
+    if (!b.trainingStatus) memory.trainingStatus = b.trainingLevel;
+  }
+  if (b.trainingStatus) memory.trainingStatus = b.trainingStatus;
   if (b.trainingGoal) memory.trainingGoal = b.trainingGoal;
   if (b.preferredTrainingLocation) memory.preferredTrainingLocation = b.preferredTrainingLocation;
-  if (b.trainingPathology) memory.trainingPathology = b.trainingPathology;
+  if (b.trainingPathology) {
+    memory.trainingPathology = b.trainingPathology;
+    if (!b.trainingLimitations) memory.trainingLimitations = b.trainingPathology;
+  }
   if (b.country) memory.country = b.country;
   if (b.countryCode) memory.countryCode = String(b.countryCode).trim().toUpperCase();
   if (b.city) memory.city = b.city;
@@ -6729,19 +6794,37 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
     if (slot === "arrival" && !memory.hasSeenChatOpening) {
       const safeName = sanitizeDisplayName(memory.name ?? "");
       const selectedLang = normalizeLanguage(language);
-      const greeting: Record<GutoLanguage, string> = {
-        "pt-BR": safeName
-          ? `${safeName}, finalmente chegou, estava te esperando, enquanto isso já analisei tudo e já montei um treino para a gente evoluir junto. Bora?`
-          : `Chegou. Estava te esperando. Treino já montado. Bora?`,
-        "en-US": safeName
-          ? `${safeName}, you finally arrived, I was waiting for you. Meanwhile I analyzed everything and put together a workout so we can evolve together. Let's go?`
-          : `You finally arrived. Workout is ready. Let's go?`,
-        "it-IT": safeName
-          ? `${safeName}, finalmente sei arrivato, ti stavo aspettando, nel frattempo ho analizzato tutto e ho preparato un allenamento per farci evolvere insieme. Andiamo?`
-          : `Sei arrivato. Ti stavo aspettando. Allenamento pronto. Andiamo?`,
-      };
-      result.fala = greeting[selectedLang] || greeting["pt-BR"];
-      result.acao = "updateWorkout";
+      if (result.workoutPlan) {
+        // Gate passed — workout was generated: greet + announce workout ready
+        const greeting: Record<GutoLanguage, string> = {
+          "pt-BR": safeName
+            ? `${safeName}, finalmente chegou, estava te esperando, enquanto isso já analisei tudo e já montei um treino para a gente evoluir junto. Bora?`
+            : `Chegou. Estava te esperando. Treino já montado. Bora?`,
+          "en-US": safeName
+            ? `${safeName}, you finally arrived, I was waiting for you. Meanwhile I analyzed everything and put together a workout so we can evolve together. Let's go?`
+            : `You finally arrived. Workout is ready. Let's go?`,
+          "it-IT": safeName
+            ? `${safeName}, finalmente sei arrivato, ti stavo aspettando, nel frattempo ho analizzato tutto e ho preparato un allenamento per farci evolvere insieme. Andiamo?`
+            : `Sei arrivato. Ti stavo aspettando. Allenamento pronto. Andiamo?`,
+        };
+        result.fala = greeting[selectedLang] || greeting["pt-BR"];
+        result.acao = "updateWorkout";
+      } else {
+        // Gate blocked (pending clarification): greet + surface the clarification question
+        const prefix: Record<GutoLanguage, string> = {
+          "pt-BR": safeName ? `${safeName}, cheguei. ` : `Cheguei. `,
+          "en-US": safeName ? `${safeName}, I'm here. ` : `I'm here. `,
+          "it-IT": safeName ? `${safeName}, sono qui. ` : `Sono qui. `,
+        };
+        const clarification = result.fala?.trim() || (
+          selectedLang === "en-US" ? "Before I build your workout, I need one more piece of information." :
+          selectedLang === "it-IT" ? "Prima di preparare il tuo allenamento, ho bisogno di un'altra informazione." :
+          "Antes de montar teu treino, preciso de mais uma informação."
+        );
+        const p = prefix[selectedLang] || prefix["pt-BR"];
+        result.fala = `${p}${clarification.charAt(0).toLocaleLowerCase()}${clarification.slice(1)}`;
+        // acao and expectedResponse stay as set by the training gate inside askGutoModel
+      }
     }
 
     const freshMemory = getMemory(userId);
