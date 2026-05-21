@@ -178,7 +178,6 @@ interface Profile {
   heightCm?: number;
   weightKg?: number;
   foodRestrictions?: string;
-  foodIntolerances?: string;
 }
 interface GutoHistoryItem { role: "user" | "model"; parts: { text: string }[]; }
 interface ExpectedResponse {
@@ -352,7 +351,6 @@ interface GutoMemory {
   weightKg?: number;
   foodRestrictions?: string;
   phone?: string;
-  foodIntolerances?: string;
   lastWorkoutCompletedAt?: string;
   completedWorkoutDates: string[];
   adaptedMissionDates: string[];
@@ -980,6 +978,22 @@ export function getMemory(userId: string): GutoMemory {
     const completedToday = completedWorkoutDates.includes(todayKey());
     const adaptedMissionToday = adaptedMissionDates.includes(todayKey());
 
+    // Migração silenciosa: foodIntolerances era campo legacy. Spec exige um
+    // único campo "NÃO COMO" (= foodRestrictions). Se memória antiga tem
+    // intolerâncias separadas, mesclar com restrições no read path. O cast
+    // permite ler o campo legacy do JSON sem que o TS exija que ele esteja
+    // no tipo soberano.
+    const legacyExisting = existing as unknown as Record<string, unknown>;
+    const legacyIntoleranceRaw = legacyExisting.foodIntolerances;
+    const legacyIntolerances = typeof legacyIntoleranceRaw === "string" ? legacyIntoleranceRaw.trim() : "";
+    const existingRestrictions = typeof existing.foodRestrictions === "string" ? existing.foodRestrictions.trim() : "";
+    const mergedFoodRestrictions = (() => {
+      if (!legacyIntolerances) return existingRestrictions || undefined;
+      if (!existingRestrictions) return legacyIntolerances;
+      if (existingRestrictions.toLowerCase().includes(legacyIntolerances.toLowerCase())) return existingRestrictions;
+      return `${existingRestrictions}; ${legacyIntolerances}`;
+    })();
+
     return sanitizeOperationalMemory({
       userId,
       name: existing.name || "Operador",
@@ -1008,9 +1022,8 @@ export function getMemory(userId: string): GutoMemory {
       city: existing.city,
       heightCm: (typeof existing.heightCm === "number" && existing.heightCm > 0) ? existing.heightCm : (typeof existing.heightCm === "string" && !isNaN(Number(existing.heightCm)) ? Number(existing.heightCm) : undefined),
       weightKg: (typeof existing.weightKg === "number" && existing.weightKg > 0) ? existing.weightKg : (typeof existing.weightKg === "string" && !isNaN(Number(existing.weightKg)) ? Number(existing.weightKg) : undefined),
-      foodRestrictions: existing.foodRestrictions,
+      foodRestrictions: mergedFoodRestrictions,
       phone: existing.phone,
-      foodIntolerances: existing.foodIntolerances,
       validationHistory: Array.isArray(existing.validationHistory) ? existing.validationHistory : undefined,
       memoryAudit: Array.isArray(existing.memoryAudit) ? existing.memoryAudit.slice(-80) : [],
       lastWorkoutCompletedAt: existing.lastWorkoutCompletedAt,
@@ -1530,7 +1543,6 @@ function mergeMemory(profile: Profile, language?: string) {
     heightCm: typeof profile?.heightCm === "number" ? profile.heightCm : memory.heightCm,
     weightKg: typeof profile?.weightKg === "number" ? profile.weightKg : memory.weightKg,
     foodRestrictions: profile?.foodRestrictions || memory.foodRestrictions,
-    foodIntolerances: profile?.foodIntolerances || memory.foodIntolerances,
     recentTrainingHistory: memory.recentTrainingHistory || [],
     nextWorkoutFocus: memory.nextWorkoutFocus,
   };
@@ -3257,16 +3269,7 @@ function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryP
       memory.resolvedFields = { ...memory.resolvedFields, foodRestriction: undefined };
     }
   }
-  if (typeof patch.foodIntolerances === "string") {
-    const next = normalizeMemoryValue(patch.foodIntolerances);
-    if (next !== memory.foodIntolerances) freeFieldChanged = true;
-    if (next !== memory.foodIntolerances) changedFields.add("foodIntolerances");
-    memory.foodIntolerances = next;
-    const meaningfulFood = collectMeaningfulFoodRestrictionTexts(memory).join("; ");
-    if (!meaningfulFood || meaningfulFood !== memory.resolvedFields?.foodRestriction?.rawValue) {
-      memory.resolvedFields = { ...memory.resolvedFields, foodRestriction: undefined };
-    }
-  }
+  // foodIntolerances é legacy; chat só atualiza foodRestrictions (spec: "NÃO COMO" único).
 
   if (
     patch.acknowledgeClarification === "country" ||
@@ -3447,18 +3450,18 @@ function isNoFoodRestrictionText(raw: string | undefined) {
 }
 
 function collectMeaningfulFoodRestrictionTexts(memory: GutoMemory): string[] {
-  return [memory.foodRestrictions, memory.foodIntolerances]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .map((value) => value.trim())
-    .filter((value) => !isNoFoodRestrictionText(value));
+  const value = memory.foodRestrictions;
+  if (typeof value !== "string") return [];
+  const trimmed = value.trim();
+  if (!trimmed || isNoFoodRestrictionText(trimmed)) return [];
+  return [trimmed];
 }
 
 function validateDietAgainstRestrictions(
   meals: DietMeal[],
-  restrictionsRaw?: string,
-  intolerancesRaw?: string
+  restrictionsRaw?: string
 ): string[] {
-  const declared = normalize([restrictionsRaw, intolerancesRaw].filter(Boolean).join(" "));
+  const declared = normalize(restrictionsRaw || "");
   if (!declared || isNoFoodRestrictionText(declared)) return [];
 
   const issues: string[] = [];
@@ -6479,7 +6482,6 @@ app.post("/guto/consent/revoke", requireActiveUser, async (req, res) => {
       heightCm: null,
       weightKg: null,
       foodRestrictions: null,
-      foodIntolerances: null,
       trainingPathology: null,
     };
     store[userId] = cleared;
@@ -6757,7 +6759,8 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
   }
   if (typeof b.foodRestrictions === "string") memory.foodRestrictions = b.foodRestrictions;
   if (typeof b.phone === "string") memory.phone = b.phone;
-  if (typeof b.foodIntolerances === "string") memory.foodIntolerances = b.foodIntolerances;
+  // foodIntolerances legacy: ignorado na escrita. Migração silenciosa em getMemory()
+  // já mescla qualquer valor antigo em foodRestrictions.
   if (typeof b.initialXpRewardSeen === "boolean") memory.initialXpRewardSeen = b.initialXpRewardSeen;
   if (b.lastWorkoutPlan && Array.isArray(b.lastWorkoutPlan.exercises)) {
     if (!isCoachLockedWorkout(memory.lastWorkoutPlan)) {
@@ -6999,7 +7002,6 @@ app.post("/guto", requireActiveUser, async (req, res) => {
     countryCode: memory.countryCode,
     city: memory.city,
     foodRestrictions: memory.foodRestrictions,
-    foodIntolerances: memory.foodIntolerances,
   };
 
   // Run deterministic resolver in parallel with proactivity context build.
@@ -7196,7 +7198,6 @@ app.post("/guto-audio", requireActiveUser, upload.single("audio"), async (req, r
       countryCode: memory.countryCode,
       city: memory.city,
       foodRestrictions: memory.foodRestrictions,
-      foodIntolerances: memory.foodIntolerances,
     };
 
     const history = req.body.history ? JSON.parse(String(req.body.history)) : [];
@@ -7920,7 +7921,6 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
       countryCode: memory.countryCode,
       city: memory.city,
       foodRestrictions: memory.foodRestrictions,
-      foodIntolerances: memory.foodIntolerances,
     });
     memory.dietGenerationStatus = "needs_clarification";
     appendMemoryAudit(memory, "diet_generated", ["dietGenerationStatus"], "Dieta bloqueada por perfil incompleto.");
@@ -7994,9 +7994,6 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
   const effectiveFoodRestrictions = isNoFoodRestrictionText(memory.foodRestrictions || "")
     ? "none"
     : memory.foodRestrictions || "none";
-  const effectiveFoodIntolerances = isNoFoodRestrictionText(memory.foodIntolerances || "")
-    ? "none"
-    : memory.foodIntolerances || "none";
   const nutritionProfile: NutritionProfile = {
     biologicalSex: (memory.biologicalSex as NutritionProfile["biologicalSex"]) || "male",
     userAge: Number(memory.userAge),
@@ -8008,7 +8005,6 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
     countryCode: memory.countryCode,
     city: memory.city,
     foodRestrictions: effectiveFoodRestrictions,
-    foodIntolerances: effectiveFoodIntolerances,
   };
 
   const macros = calculateMacros(nutritionProfile);
@@ -8110,8 +8106,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
 
       const restrictionIssues = validateDietAgainstRestrictions(
         calorieCheckedMeals,
-        nutritionProfile.foodRestrictions,
-        nutritionProfile.foodIntolerances
+        nutritionProfile.foodRestrictions
       );
       if (restrictionIssues.length > 0) {
         console.warn(`[GUTO] diet restriction validation failed on attempt ${attempt}:`, restrictionIssues);
@@ -8146,7 +8141,6 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
     macros,
     meals,
     foodRestrictions: nutritionProfile.foodRestrictions,
-    foodIntolerances: nutritionProfile.foodIntolerances,
   };
 
   await saveDietPlan(plan);

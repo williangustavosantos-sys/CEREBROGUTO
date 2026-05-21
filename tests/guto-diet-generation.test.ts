@@ -180,8 +180,10 @@ describe("diet generation contract", () => {
     assert.ok(memory.memoryAudit.some((entry: any) => entry.source === "diet_generated"));
   });
 
-  it("respeita intolerancia quando foodRestrictions diz que come de tudo", async () => {
-    const userId = "diet-intolerance-separated-user";
+  it("migra silenciosamente foodIntolerances legacy para foodRestrictions e respeita a restrição", async () => {
+    const userId = "diet-legacy-intolerance-user";
+    // Cenário legacy: memória antiga ainda tem o campo separado foodIntolerances.
+    // getMemory() faz a migração silenciosa mesclando em foodRestrictions.
     writeMemory(userId, {
       biologicalSex: "male",
       userAge: 35,
@@ -208,12 +210,44 @@ describe("diet generation contract", () => {
     const plan = await res.json() as {
       meals: Array<{ foods: Array<{ name: string }> }>;
       foodRestrictions: string;
-      foodIntolerances: string;
     };
     const foodText = JSON.stringify(plan.meals).toLowerCase();
     assert.doesNotMatch(foodText, /latte|yogurt|mozzarella|ricotta|parmigiano/);
-    assert.equal(plan.foodRestrictions, "none");
-    assert.equal(plan.foodIntolerances, "Lattosio");
+    // Após migração, foodRestrictions absorve "Lattosio" — dieta evita lactose.
+    assert.match(plan.foodRestrictions.toLowerCase(), /lattosio/);
+  });
+
+  it("recusa gerar dieta enquanto patologia corporal (ex.: lombar) não está clara", async () => {
+    const userId = "diet-lombar-blocked";
+    writeMemory(userId, {
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      trainingLevel: "consistent",
+      trainingGoal: "muscle_gain",
+      country: "Brasil",
+      countryCode: "BR",
+      city: "São Paulo",
+      trainingPathology: "lombar",
+      trainingLimitations: "lombar",
+      foodRestrictions: "lactose",
+      resolvedFields: {
+        foodRestriction: { rawValue: "lactose", status: "clear", normalizedValue: "lactose_intolerance" },
+        pathology: { rawValue: "lombar", status: "needs_confirmation" },
+      },
+    });
+
+    const res = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "pt-BR" }),
+    });
+
+    assert.equal(res.status, 422);
+    const body = (await res.json()) as { code?: string; field?: string };
+    assert.equal(body.code, "TRAINING_PATHOLOGY_NEEDS_CLARIFICATION");
+    assert.equal(body.field, "trainingPathology");
   });
 
   it("recusa gerar sem countryCode e peso (422) com mensagem em en-US", async () => {
@@ -278,7 +312,6 @@ describe("diet generation contract", () => {
       country: "Italia",
       countryCode: "IT",
       foodRestrictions: "none",
-      foodIntolerances: "none",
       resolvedFields: {
         foodRestriction: { rawValue: "none", status: "clear", normalizedValue: "none" },
       },

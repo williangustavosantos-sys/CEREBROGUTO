@@ -14,7 +14,7 @@ export type NutritionGoal =
   | "consistency";
 
 export type TrainingLevel = "beginner" | "returning" | "consistent" | "advanced";
-export type BiologicalSex = "male" | "female" | "prefer_not_to_say";
+export type BiologicalSex = "male" | "female";
 
 export interface NutritionProfile {
   biologicalSex: BiologicalSex;
@@ -27,7 +27,6 @@ export interface NutritionProfile {
   countryCode?: string;
   city?: string;
   foodRestrictions?: string;
-  foodIntolerances?: string;
 }
 
 export interface DietMacros {
@@ -245,7 +244,6 @@ export interface DietPlan {
   coachNotes?: string;
   restrictions?: string;
   foodRestrictions?: string;
-  foodIntolerances?: string;
   manualOverride?: boolean;
   editedBy?: string;
   editedAt?: string;
@@ -431,14 +429,8 @@ export function buildDietPrompt(
   const country = profile.country || "Brasil";
   const countryCode = profile.countryCode?.trim().toUpperCase();
   const city = profile.city?.trim();
-  const restrictionParts: string[] = [];
   const foodRestrictions = profile.foodRestrictions?.trim();
-  const foodIntolerances = profile.foodIntolerances?.trim();
-  if (foodRestrictions) restrictionParts.push(foodRestrictions);
-  if (foodIntolerances && foodIntolerances.toLowerCase() !== foodRestrictions?.toLowerCase()) {
-    restrictionParts.push(`intolerances: ${foodIntolerances}`);
-  }
-  const restrictions = restrictionParts.length ? restrictionParts.join("; ") : "none";
+  const restrictions = foodRestrictions || "none";
 
   const foodHint = resolveCountryFoodHint(country, countryCode);
 
