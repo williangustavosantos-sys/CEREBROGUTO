@@ -492,6 +492,7 @@ async function updateMemoryFromStudentPatch(userId: string, patch: Partial<UserA
   if (typeof merged.preferredTrainingLocation === "string") memory.preferredTrainingLocation = merged.preferredTrainingLocation;
   if (typeof merged.trainingPathology === "string") memory.trainingPathology = merged.trainingPathology;
   if (typeof merged.country === "string") memory.country = merged.country;
+  if (typeof merged.city === "string") memory.city = merged.city;
   if (typeof merged.heightCm !== "undefined" && !Number.isNaN(Number(merged.heightCm)) && Number(merged.heightCm) > 0) memory.heightCm = Number(merged.heightCm);
   if (typeof merged.weightKg !== "undefined" && !Number.isNaN(Number(merged.weightKg)) && Number(merged.weightKg) > 0) memory.weightKg = Number(merged.weightKg);
   if (typeof merged.foodRestrictions === "string") memory.foodRestrictions = merged.foodRestrictions;

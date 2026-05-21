@@ -3201,7 +3201,7 @@ function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryP
     if (memory.userAge !== next) changedFields.add("userAge");
     memory.userAge = next;
   }
-  if (typeof patch.biologicalSex === "string" && ["female", "male", "prefer_not_to_say"].includes(patch.biologicalSex)) {
+  if (typeof patch.biologicalSex === "string" && ["female", "male"].includes(patch.biologicalSex)) {
     if (memory.biologicalSex !== patch.biologicalSex) changedFields.add("biologicalSex");
     memory.biologicalSex = patch.biologicalSex;
   }
@@ -3235,6 +3235,18 @@ function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryP
     if (next !== memory.resolvedFields?.country?.rawValue) {
       memory.resolvedFields = { ...memory.resolvedFields, country: undefined };
     }
+  }
+  if (typeof patch.countryCode === "string") {
+    const next = patch.countryCode.trim().toUpperCase();
+    if (/^[A-Z]{2}$/.test(next) && memory.countryCode !== next) {
+      changedFields.add("countryCode");
+      memory.countryCode = next;
+    }
+  }
+  if (typeof patch.city === "string" && patch.city.trim()) {
+    const next = normalizeMemoryValue(patch.city);
+    if (next !== memory.city) changedFields.add("city");
+    memory.city = next;
   }
   if (typeof patch.foodRestrictions === "string") {
     const next = normalizeMemoryValue(patch.foodRestrictions);
@@ -3499,39 +3511,49 @@ function validateDietAgainstRestrictions(
   return issues;
 }
 
+const NO_TRAINING_LIMITATION_EXACT = new Set([
+  "nao",
+  "não",
+  "nenhuma",
+  "nada",
+  "no",
+  "none",
+  "nessuno",
+  "nessuna",
+  "libero",
+]);
+
+const NO_TRAINING_LIMITATION_PHRASES = [
+  "sem dor",
+  "sem dores",
+  "sem limitacao",
+  "sem limitação",
+  "no pain",
+  "pain free",
+  "no limitation",
+  "all clear",
+  "senza dolore",
+  "senza dolori",
+  "nessun dolore",
+  "nessuna limitazione",
+  "non ho dolore",
+  "non ho dolori",
+  "sono libero",
+];
+
+function isDeclaredNoTrainingLimitation(normalized: string): boolean {
+  if (NO_TRAINING_LIMITATION_EXACT.has(normalized)) return true;
+  return NO_TRAINING_LIMITATION_PHRASES.some((phrase) => {
+    const token = normalize(phrase);
+    return normalized === token || normalized.includes(token);
+  });
+}
+
 function getUnresolvedTrainingPathology(memory: GutoMemory): string | null {
   const raw = memory.trainingPathology || memory.trainingLimitations;
   if (typeof raw !== "string" || !raw.trim()) return null;
   const normalized = normalize(raw);
-  const noLimitation = [
-    "sem dor",
-    "sem dores",
-    "sem limitacao",
-    "sem limitação",
-    "no pain",
-    "pain free",
-    "no limitation",
-    "all clear",
-    "senza dolore",
-    "senza dolori",
-    "nessun dolore",
-    "nessuna limitazione",
-    "non ho dolore",
-    "non ho dolori",
-    "sono libero",
-    "libero",
-    "nao",
-    "não",
-    "nenhuma",
-    "nada",
-    "no",
-    "none",
-    "nessuno",
-    "nessuna",
-  ].some((term) =>
-    normalized === normalize(term) || normalized.includes(normalize(term))
-  );
-  if (noLimitation) return null;
+  if (isDeclaredNoTrainingLimitation(normalized)) return null;
   if (hasAnyNormalized(normalized, ["joelho", "knee", "ombro", "shoulder", "spalla", "empurrar", "push", "spingere"])) return null;
   if (memory.resolvedFields?.pathology?.status === "clear") return null;
   return raw.trim();
@@ -6697,8 +6719,15 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
   if (b.trainingLocation) memory.trainingLocation = normalizeMemoryValue(b.trainingLocation);
   if (b.trainingStatus) memory.trainingStatus = normalizeMemoryValue(b.trainingStatus);
   if (b.trainingLimitations) memory.trainingLimitations = normalizeMemoryValue(b.trainingLimitations);
-  if (typeof b.userAge !== "undefined" && !isNaN(Number(b.userAge))) memory.userAge = Number(b.userAge);
-  if (b.biologicalSex) memory.biologicalSex = b.biologicalSex;
+  if (typeof b.userAge !== "undefined" && !isNaN(Number(b.userAge))) {
+    const age = Math.round(Number(b.userAge));
+    // Spec: idade 14–99. Rejeita silenciosamente fora do range pra não persistir lixo.
+    if (age >= 14 && age <= 99) memory.userAge = age;
+  }
+  // Spec: biologicalSex aceita só "female" | "male" (sem "prefer_not_to_say").
+  if (typeof b.biologicalSex === "string" && ["female", "male"].includes(b.biologicalSex)) {
+    memory.biologicalSex = b.biologicalSex;
+  }
   if (b.trainingLevel) {
     memory.trainingLevel = b.trainingLevel;
     if (!b.trainingStatus) memory.trainingStatus = b.trainingLevel;
@@ -6711,10 +6740,21 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
     if (!b.trainingLimitations) memory.trainingLimitations = b.trainingPathology;
   }
   if (b.country) memory.country = b.country;
-  if (b.countryCode) memory.countryCode = String(b.countryCode).trim().toUpperCase();
+  if (b.countryCode) {
+    const code = String(b.countryCode).trim().toUpperCase();
+    if (/^[A-Z]{2}$/.test(code)) memory.countryCode = code;
+  }
   if (b.city) memory.city = b.city;
-  if (typeof b.heightCm !== "undefined" && !isNaN(Number(b.heightCm)) && Number(b.heightCm) > 0) memory.heightCm = Number(b.heightCm);
-  if (typeof b.weightKg !== "undefined" && !isNaN(Number(b.weightKg)) && Number(b.weightKg) > 0) memory.weightKg = Number(b.weightKg);
+  if (typeof b.heightCm !== "undefined" && !isNaN(Number(b.heightCm))) {
+    const h = Math.round(Number(b.heightCm));
+    // Spec: altura 100–250 cm.
+    if (h >= 100 && h <= 250) memory.heightCm = h;
+  }
+  if (typeof b.weightKg !== "undefined" && !isNaN(Number(b.weightKg))) {
+    const w = Math.round(Number(b.weightKg) * 10) / 10;
+    // Spec: peso 30–300 kg.
+    if (w >= 30 && w <= 300) memory.weightKg = w;
+  }
   if (typeof b.foodRestrictions === "string") memory.foodRestrictions = b.foodRestrictions;
   if (typeof b.phone === "string") memory.phone = b.phone;
   if (typeof b.foodIntolerances === "string") memory.foodIntolerances = b.foodIntolerances;
@@ -7889,6 +7929,40 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
       error: "missing_profile_fields",
       missing,
       message: missingDietProfileMessage(language, missing),
+    });
+  }
+
+  const pendingTrainingClarification = getPendingClarification(memory.resolvedFields, "training");
+  const unresolvedTrainingPathology = getUnresolvedTrainingPathology(memory);
+  if (
+    pendingTrainingClarification?.field === "pathology" ||
+    unresolvedTrainingPathology
+  ) {
+    memory.dietGenerationStatus = "needs_clarification";
+    appendMemoryAudit(
+      memory,
+      "diet_generated",
+      ["dietGenerationStatus"],
+      "Dieta bloqueada até esclarecer limitação corporal."
+    );
+    commitMemoryDecision(memory);
+    return res.status(422).json({
+      error: "needs_clarification",
+      code: "TRAINING_PATHOLOGY_NEEDS_CLARIFICATION",
+      field: "trainingPathology",
+      rawValue: pendingTrainingClarification?.rawValue || unresolvedTrainingPathology,
+      message: trainingClarificationMessage(
+        language,
+        pendingTrainingClarification?.rawValue || unresolvedTrainingPathology || "",
+        getGutoCallName(memory)
+      ),
+      expectedResponse: {
+        type: "text",
+        context: "training_limitations",
+        instruction:
+          pendingTrainingClarification?.hint ||
+          "Clarificar a limitação corporal antes de gerar dieta.",
+      },
     });
   }
 
