@@ -180,43 +180,6 @@ describe("diet generation contract", () => {
     assert.ok(memory.memoryAudit.some((entry: any) => entry.source === "diet_generated"));
   });
 
-  it("migra silenciosamente foodIntolerances legacy para foodRestrictions e respeita a restrição", async () => {
-    const userId = "diet-legacy-intolerance-user";
-    // Cenário legacy: memória antiga ainda tem o campo separado foodIntolerances.
-    // getMemory() faz a migração silenciosa mesclando em foodRestrictions.
-    writeMemory(userId, {
-      biologicalSex: "male",
-      userAge: 35,
-      heightCm: 178,
-      weightKg: 82,
-      trainingLevel: "consistent",
-      trainingGoal: "muscle_gain",
-      country: "Italia",
-      countryCode: "IT",
-      foodRestrictions: "MANGIO TUTTO",
-      foodIntolerances: "Lattosio",
-      resolvedFields: {
-        foodRestriction: { rawValue: "Lattosio", status: "clear", normalizedValue: "lactose_intolerance" },
-      },
-    });
-
-    const res = await originalFetch(`${baseUrl}/guto/diet/generate`, {
-      method: "POST",
-      headers: authHeaders(userId),
-      body: JSON.stringify({ language: "it-IT" }),
-    });
-
-    assert.equal(res.status, 200);
-    const plan = await res.json() as {
-      meals: Array<{ foods: Array<{ name: string }> }>;
-      foodRestrictions: string;
-    };
-    const foodText = JSON.stringify(plan.meals).toLowerCase();
-    assert.doesNotMatch(foodText, /latte|yogurt|mozzarella|ricotta|parmigiano/);
-    // Após migração, foodRestrictions absorve "Lattosio" — dieta evita lactose.
-    assert.match(plan.foodRestrictions.toLowerCase(), /lattosio/);
-  });
-
   it("recusa gerar dieta enquanto patologia corporal (ex.: lombar) não está clara", async () => {
     const userId = "diet-lombar-blocked";
     writeMemory(userId, {

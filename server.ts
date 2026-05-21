@@ -978,22 +978,6 @@ export function getMemory(userId: string): GutoMemory {
     const completedToday = completedWorkoutDates.includes(todayKey());
     const adaptedMissionToday = adaptedMissionDates.includes(todayKey());
 
-    // Migração silenciosa: foodIntolerances era campo legacy. Spec exige um
-    // único campo "NÃO COMO" (= foodRestrictions). Se memória antiga tem
-    // intolerâncias separadas, mesclar com restrições no read path. O cast
-    // permite ler o campo legacy do JSON sem que o TS exija que ele esteja
-    // no tipo soberano.
-    const legacyExisting = existing as unknown as Record<string, unknown>;
-    const legacyIntoleranceRaw = legacyExisting.foodIntolerances;
-    const legacyIntolerances = typeof legacyIntoleranceRaw === "string" ? legacyIntoleranceRaw.trim() : "";
-    const existingRestrictions = typeof existing.foodRestrictions === "string" ? existing.foodRestrictions.trim() : "";
-    const mergedFoodRestrictions = (() => {
-      if (!legacyIntolerances) return existingRestrictions || undefined;
-      if (!existingRestrictions) return legacyIntolerances;
-      if (existingRestrictions.toLowerCase().includes(legacyIntolerances.toLowerCase())) return existingRestrictions;
-      return `${existingRestrictions}; ${legacyIntolerances}`;
-    })();
-
     return sanitizeOperationalMemory({
       userId,
       name: existing.name || "Operador",
@@ -1022,7 +1006,7 @@ export function getMemory(userId: string): GutoMemory {
       city: existing.city,
       heightCm: (typeof existing.heightCm === "number" && existing.heightCm > 0) ? existing.heightCm : (typeof existing.heightCm === "string" && !isNaN(Number(existing.heightCm)) ? Number(existing.heightCm) : undefined),
       weightKg: (typeof existing.weightKg === "number" && existing.weightKg > 0) ? existing.weightKg : (typeof existing.weightKg === "string" && !isNaN(Number(existing.weightKg)) ? Number(existing.weightKg) : undefined),
-      foodRestrictions: mergedFoodRestrictions,
+      foodRestrictions: existing.foodRestrictions,
       phone: existing.phone,
       validationHistory: Array.isArray(existing.validationHistory) ? existing.validationHistory : undefined,
       memoryAudit: Array.isArray(existing.memoryAudit) ? existing.memoryAudit.slice(-80) : [],
@@ -3269,7 +3253,6 @@ function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryP
       memory.resolvedFields = { ...memory.resolvedFields, foodRestriction: undefined };
     }
   }
-  // foodIntolerances é legacy; chat só atualiza foodRestrictions (spec: "NÃO COMO" único).
 
   if (
     patch.acknowledgeClarification === "country" ||
@@ -6759,8 +6742,6 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
   }
   if (typeof b.foodRestrictions === "string") memory.foodRestrictions = b.foodRestrictions;
   if (typeof b.phone === "string") memory.phone = b.phone;
-  // foodIntolerances legacy: ignorado na escrita. Migração silenciosa em getMemory()
-  // já mescla qualquer valor antigo em foodRestrictions.
   if (typeof b.initialXpRewardSeen === "boolean") memory.initialXpRewardSeen = b.initialXpRewardSeen;
   if (b.lastWorkoutPlan && Array.isArray(b.lastWorkoutPlan.exercises)) {
     if (!isCoachLockedWorkout(memory.lastWorkoutPlan)) {
