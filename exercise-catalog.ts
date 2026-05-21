@@ -89,7 +89,10 @@ export const ValidatedExerciseCatalog: CatalogExercise[] = [
     videoProvider: "local",
     movementPattern: "cardio",
     equipment: "bodyweight",
-    tags: ["aquecimento", "cardio", "corpo-livre"],
+    tags: ["aquecimento", "cardio", "corpo-livre", "high_impact", "salto"],
+    // Salto + agachamento + flexão: alto impacto. Contraindicado para
+    // joelho, tornozelo e lombar (Regra Soberana 1 — proteger o corpo).
+    avoidIfTags: ["knee", "ankle", "lower_back", "knee_sensitive"],
   },
   {
     id: "caminhada_esteira_inclinada",
@@ -194,7 +197,9 @@ export const ValidatedExerciseCatalog: CatalogExercise[] = [
     videoProvider: "local",
     movementPattern: "cardio",
     equipment: "bodyweight",
-    tags: ["aquecimento", "cardio", "corpo-livre"],
+    tags: ["aquecimento", "cardio", "corpo-livre", "high_impact", "salto"],
+    // Salto repetido = impacto no joelho/tornozelo (Regra Soberana 1).
+    avoidIfTags: ["knee", "ankle", "knee_sensitive"],
   },
 
   // ─── ABDÔMEN / CORE ────────────────────────────────────────────────────────
@@ -1467,7 +1472,9 @@ export const ValidatedExerciseCatalog: CatalogExercise[] = [
     videoProvider: "local",
     movementPattern: "unilateral",
     equipment: "halter",
-    tags: ["pernas", "gluteos"],
+    tags: ["pernas", "gluteos", "lunge_loaded"],
+    // Afundo com carga estressa o joelho da perna da frente (Regra Soberana 1).
+    avoidIfTags: ["knee", "knee_sensitive"],
   },
   {
     id: "afundo_smith",
@@ -1488,7 +1495,9 @@ export const ValidatedExerciseCatalog: CatalogExercise[] = [
     videoProvider: "local",
     movementPattern: "unilateral",
     equipment: "smith",
-    tags: ["pernas", "gluteos"],
+    tags: ["pernas", "gluteos", "lunge_loaded"],
+    // Afundo com carga estressa o joelho da perna da frente (Regra Soberana 1).
+    avoidIfTags: ["knee", "knee_sensitive"],
   },
   {
     id: "agachamento_halter_abaixo",

@@ -3031,7 +3031,7 @@ function normalizeRecentTrainingHistory(
   return merged.slice(0, 12);
 }
 
-function chooseNextWorkoutFocus(memory: GutoMemory): WorkoutFocus {
+function chooseNextWorkoutFocus(memory: GutoMemory, preferred?: WorkoutFocus | null): WorkoutFocus {
   const recent = memory.recentTrainingHistory || [];
 
   // Consider recent training as blocked; "recent" is used when the user reports
@@ -3042,6 +3042,13 @@ function chooseNextWorkoutFocus(memory: GutoMemory): WorkoutFocus {
       .map((item: RecentTrainingHistoryItem) => item.muscleGroup)
       .filter(isWorkoutFocus)
   );
+
+  // Regra Soberana 2 — não repetir treino recente. Um foco preferido (sugerido
+  // pelo modelo ou herdado de nextWorkoutFocus) só é respeitado se NÃO foi
+  // treinado recentemente; caso contrário a rotação determinística manda.
+  if (preferred && isWorkoutFocus(preferred) && !blocked.has(preferred)) {
+    return preferred;
+  }
 
   const rotation: WorkoutFocus[] = [
     "chest_triceps",
@@ -3538,10 +3545,34 @@ function getUnresolvedFoodRestriction(memory: GutoMemory): string | null {
   return raw;
 }
 
+/**
+ * Deriva a região corporal de risco direto do texto bruto da patologia.
+ * Regra Soberana 1: a segurança do corpo NÃO pode depender de a classificação
+ * IA (resolvedFields) estar pronta — ela roda async e o treino pode ser gerado
+ * antes. Este fallback determinístico garante proteção imediata. É uma lista de
+ * termos usada APENAS como rede de segurança (permitido pela Regra 3).
+ */
+function deriveBodyRegionFromPathology(memory: GutoMemory): string | undefined {
+  const text = normalize(`${memory.trainingPathology || ""} ${memory.trainingLimitations || ""}`);
+  if (!text.trim()) return undefined;
+  if (/\b(joelho|knee|ginocchio|menisco|patela|ligamento|lca|acl)\b/.test(text)) return "knee";
+  if (/\b(ombro|shoulder|spalla|manguito|rotador)\b/.test(text)) return "shoulder";
+  if (/\b(lombar|coluna|hernia|hérnia|lower back|schiena|disco)\b/.test(text)) return "lower_back";
+  if (/\b(tornozelo|ankle|caviglia)\b/.test(text)) return "ankle";
+  if (/\b(quadril|hip|anca|fianco)\b/.test(text)) return "hip";
+  if (/\b(punho|wrist|polso)\b/.test(text)) return "wrist";
+  if (/\b(cotovelo|elbow|gomito)\b/.test(text)) return "elbow";
+  return undefined;
+}
+
 function safetyFilterWorkoutPlan(plan: WorkoutPlan, memory: GutoMemory): WorkoutPlan {
   const pathology = memory.resolvedFields?.pathology;
   const riskTags = pathology?.status === "clear" ? pathology.riskTags : [];
-  const bodyRegion = pathology?.status === "clear" ? pathology.bodyRegion : undefined;
+  // bodyRegion: prioriza a classificação resolvida; se ainda não pronta
+  // (async), cai no fallback determinístico a partir da patologia bruta.
+  const bodyRegion =
+    (pathology?.status === "clear" ? pathology.bodyRegion : undefined) ||
+    deriveBodyRegionFromPathology(memory);
   if (!riskTags.length && !bodyRegion) return plan;
 
   const location = getLocationMode(plan.location || memory.preferredTrainingLocation || memory.trainingLocation) as CatalogLocation;
@@ -5910,7 +5941,7 @@ async function askGutoModel({
         };
         return finalize(fallback);
       }
-      const semanticFocus = memory.nextWorkoutFocus || chooseNextWorkoutFocus(memory);
+      const semanticFocus = chooseNextWorkoutFocus(memory, memory.nextWorkoutFocus);
       const locationRaw = getWeatherAdjustedTrainingLocation(
         memory,
         memory.preferredTrainingLocation || memory.trainingLocation || "casa"
@@ -6071,10 +6102,10 @@ async function askGutoModel({
         });
       }
 
-      const semanticFocus: WorkoutFocus =
-        parsedResponse.memoryPatch?.nextWorkoutFocus ||
-        memory.nextWorkoutFocus ||
-        chooseNextWorkoutFocus(memory);
+      const semanticFocus: WorkoutFocus = chooseNextWorkoutFocus(
+        memory,
+        parsedResponse.memoryPatch?.nextWorkoutFocus || memory.nextWorkoutFocus
+      );
       const baseLocationRaw = memory.preferredTrainingLocation || memory.trainingLocation || "casa";
       const locationRaw = getWeatherAdjustedTrainingLocation(memory, baseLocationRaw);
       const locationMode = getLocationMode(locationRaw) as CuratorLocationMode;
@@ -6184,6 +6215,16 @@ async function askGutoModel({
     }
 
     if (workoutPlan) {
+      // Rede de segurança final (Regra Soberana 1 — proteger o corpo):
+      // todo plano passa pelo filtro de patologia aqui, independente de ter
+      // vindo do modelo (JSON direto), do curator ou do template. O modelo
+      // pode devolver workoutPlan inline sem passar pelo bloco do curator.
+      const beforeIds = workoutPlan.exercises.map((e) => e.id);
+      workoutPlan = safetyFilterWorkoutPlan(workoutPlan, memory);
+      const removed = beforeIds.filter((id) => !workoutPlan!.exercises.some((e) => e.id === id));
+      if (removed.length) {
+        console.info(`[GUTO][safety] removidos por patologia: ${removed.join(", ")}`);
+      }
       const lockedOfficialPlan = isCoachLockedWorkout(memory.lastWorkoutPlan) ? memory.lastWorkoutPlan : null;
       const officialPlan = lockedOfficialPlan || markGutoGeneratedWorkout(workoutPlan);
       memory.lastWorkoutPlan = officialPlan;
@@ -6250,7 +6291,7 @@ async function askGutoModel({
         };
         return finalize(fallback);
       }
-      const semanticFocus = memory.nextWorkoutFocus || chooseNextWorkoutFocus(memory);
+      const semanticFocus = chooseNextWorkoutFocus(memory, memory.nextWorkoutFocus);
       const locationRaw = getWeatherAdjustedTrainingLocation(
         memory,
         memory.preferredTrainingLocation || memory.trainingLocation || "casa"
