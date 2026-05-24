@@ -350,7 +350,6 @@ interface GutoMemory {
   heightCm?: number;
   weightKg?: number;
   foodRestrictions?: string;
-  phone?: string;
   lastWorkoutCompletedAt?: string;
   completedWorkoutDates: string[];
   adaptedMissionDates: string[];
@@ -812,17 +811,19 @@ function isOperationalNoise(value?: string) {
 }
 
 function sanitizeOperationalMemory(memory: GutoMemory): GutoMemory {
+  const sanitized: GutoMemory & { phone?: string } = { ...memory };
+  delete sanitized.phone;
   return {
-    ...memory,
-    energyLast: isOperationalNoise(memory.energyLast) ? undefined : memory.energyLast,
-    trainingSchedule: memory.trainingSchedule === "today" || memory.trainingSchedule === "tomorrow" ? memory.trainingSchedule : undefined,
-    trainingLocation: isOperationalNoise(memory.trainingLocation) ? undefined : memory.trainingLocation,
-    trainingStatus: isOperationalNoise(memory.trainingStatus) ? undefined : memory.trainingStatus,
-    trainingLimitations: isOperationalNoise(memory.trainingLimitations) ? undefined : memory.trainingLimitations,
-    lastWorkoutPlan: memory.lastWorkoutPlan || null,
-    weeklyWorkoutPlan: memory.weeklyWorkoutPlan || null,
-    weeklyDietPlan: memory.weeklyDietPlan || null,
-    recentTrainingHistory: Array.isArray(memory.recentTrainingHistory) ? memory.recentTrainingHistory.slice(0, 12) : [],
+    ...sanitized,
+    energyLast: isOperationalNoise(sanitized.energyLast) ? undefined : sanitized.energyLast,
+    trainingSchedule: sanitized.trainingSchedule === "today" || sanitized.trainingSchedule === "tomorrow" ? sanitized.trainingSchedule : undefined,
+    trainingLocation: isOperationalNoise(sanitized.trainingLocation) ? undefined : sanitized.trainingLocation,
+    trainingStatus: isOperationalNoise(sanitized.trainingStatus) ? undefined : sanitized.trainingStatus,
+    trainingLimitations: isOperationalNoise(sanitized.trainingLimitations) ? undefined : sanitized.trainingLimitations,
+    lastWorkoutPlan: sanitized.lastWorkoutPlan || null,
+    weeklyWorkoutPlan: sanitized.weeklyWorkoutPlan || null,
+    weeklyDietPlan: sanitized.weeklyDietPlan || null,
+    recentTrainingHistory: Array.isArray(sanitized.recentTrainingHistory) ? sanitized.recentTrainingHistory.slice(0, 12) : [],
   };
 }
 
@@ -1007,7 +1008,6 @@ export function getMemory(userId: string): GutoMemory {
       heightCm: (typeof existing.heightCm === "number" && existing.heightCm > 0) ? existing.heightCm : (typeof existing.heightCm === "string" && !isNaN(Number(existing.heightCm)) ? Number(existing.heightCm) : undefined),
       weightKg: (typeof existing.weightKg === "number" && existing.weightKg > 0) ? existing.weightKg : (typeof existing.weightKg === "string" && !isNaN(Number(existing.weightKg)) ? Number(existing.weightKg) : undefined),
       foodRestrictions: existing.foodRestrictions,
-      phone: existing.phone,
       validationHistory: Array.isArray(existing.validationHistory) ? existing.validationHistory : undefined,
       memoryAudit: Array.isArray(existing.memoryAudit) ? existing.memoryAudit.slice(-80) : [],
       lastWorkoutCompletedAt: existing.lastWorkoutCompletedAt,
@@ -1076,7 +1076,7 @@ export function getMemory(userId: string): GutoMemory {
 export function saveMemory(memory: GutoMemory) {
   const store = readMemoryStore();
   const existing = store[memory.userId];
-  store[memory.userId] = {
+  const nextMemory: GutoMemory & { phone?: string } = {
     ...existing,
     ...memory,
     proactiveMemories: Array.isArray(memory.proactiveMemories)
@@ -1084,6 +1084,8 @@ export function saveMemory(memory: GutoMemory) {
       : existing?.proactiveMemories,
     weeklyConversation: memory.weeklyConversation ?? existing?.weeklyConversation,
   };
+  delete nextMemory.phone;
+  store[memory.userId] = nextMemory;
   writeMemoryStore(store);
 }
 
@@ -6820,7 +6822,6 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
     if (memory.foodRestrictions !== b.foodRestrictions) changedFields.add("foodRestrictions");
     memory.foodRestrictions = b.foodRestrictions;
   }
-  if (typeof b.phone === "string") memory.phone = b.phone;
   if (typeof b.initialXpRewardSeen === "boolean") memory.initialXpRewardSeen = b.initialXpRewardSeen;
   if (b.lastWorkoutPlan && Array.isArray(b.lastWorkoutPlan.exercises)) {
     if (!isCoachLockedWorkout(memory.lastWorkoutPlan)) {
