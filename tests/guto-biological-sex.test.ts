@@ -64,7 +64,7 @@ function authHeaders(userId: string) {
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 }
 
-describe("GutoMemory biologicalSex validation", () => {
+describe("GutoMemory calibration validation", () => {
   before(async () => {
     process.env.GUTO_MEMORY_FILE = testMemoryFile;
     process.env.GUTO_DISABLE_LISTEN = "1";
@@ -149,5 +149,63 @@ describe("GutoMemory biologicalSex validation", () => {
     const saved = readMemory(userId);
     assert.equal(body.biologicalSex, "female");
     assert.equal(saved.biologicalSex, "female");
+  });
+
+  it("nao devolve numeros legados fora dos ranges oficiais", async () => {
+    const userId = "calibration-ranges-legacy-invalid";
+    writeRawMemory(userId, { userAge: 13, heightCm: 99, weightKg: 301 });
+
+    const res = await fetch(`${baseUrl}/guto/memory`, {
+      method: "GET",
+      headers: authHeaders(userId),
+    });
+
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, any>;
+    assert.equal(Object.prototype.hasOwnProperty.call(body, "userAge"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(body, "heightCm"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(body, "weightKg"), false);
+  });
+
+  it("ignora numeros fora dos ranges oficiais no payload publico", async () => {
+    const userId = "calibration-ranges-post-invalid";
+    writeRawMemory(userId, { userAge: 35, heightCm: 178, weightKg: 82 });
+
+    const res = await fetch(`${baseUrl}/guto/memory`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ userAge: 12, heightCm: 251, weightKg: 301 }),
+    });
+
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, any>;
+    const saved = readMemory(userId);
+    assert.equal(body.userAge, 35);
+    assert.equal(body.heightCm, 178);
+    assert.equal(body.weightKg, 82);
+    assert.equal(saved.userAge, 35);
+    assert.equal(saved.heightCm, 178);
+    assert.equal(saved.weightKg, 82);
+  });
+
+  it("normaliza numeros validos dentro dos ranges oficiais", async () => {
+    const userId = "calibration-ranges-post-valid";
+    writeRawMemory(userId, {});
+
+    const res = await fetch(`${baseUrl}/guto/memory`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ userAge: 35.6, heightCm: 178.4, weightKg: 82.44 }),
+    });
+
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, any>;
+    const saved = readMemory(userId);
+    assert.equal(body.userAge, 36);
+    assert.equal(body.heightCm, 178);
+    assert.equal(body.weightKg, 82.4);
+    assert.equal(saved.userAge, 36);
+    assert.equal(saved.heightCm, 178);
+    assert.equal(saved.weightKg, 82.4);
   });
 });

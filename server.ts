@@ -708,6 +708,33 @@ function normalizeBiologicalSex(value: unknown): BiologicalSex | undefined {
   return value === "female" || value === "male" ? value : undefined;
 }
 
+function normalizeIntegerInRange(value: unknown, min: number, max: number): number | undefined {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return undefined;
+  const rounded = Math.round(numberValue);
+  return rounded >= min && rounded <= max ? rounded : undefined;
+}
+
+function normalizeDecimalInRange(value: unknown, min: number, max: number, decimals = 1): number | undefined {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return undefined;
+  const factor = 10 ** decimals;
+  const rounded = Math.round(numberValue * factor) / factor;
+  return rounded >= min && rounded <= max ? rounded : undefined;
+}
+
+function normalizeUserAge(value: unknown): number | undefined {
+  return normalizeIntegerInRange(value, 14, 99);
+}
+
+function normalizeHeightCm(value: unknown): number | undefined {
+  return normalizeIntegerInRange(value, 100, 250);
+}
+
+function normalizeWeightKg(value: unknown): number | undefined {
+  return normalizeDecimalInRange(value, 30, 300);
+}
+
 function normalize(value: string) {
   return value
     .normalize("NFD")
@@ -1001,7 +1028,7 @@ export function getMemory(userId: string): GutoMemory {
       trainingStatus: existing.trainingStatus,
       trainingLimitations: existing.trainingLimitations,
       trainingAge: typeof existing.trainingAge === "number" ? existing.trainingAge : undefined,
-      userAge: typeof existing.userAge === "number" ? existing.userAge : undefined,
+      userAge: normalizeUserAge(existing.userAge),
       biologicalSex: normalizeBiologicalSex(existing.biologicalSex),
       trainingLevel: existing.trainingLevel,
       trainingGoal: existing.trainingGoal,
@@ -1010,8 +1037,8 @@ export function getMemory(userId: string): GutoMemory {
       country: existing.country,
       countryCode: existing.countryCode,
       city: existing.city,
-      heightCm: (typeof existing.heightCm === "number" && existing.heightCm > 0) ? existing.heightCm : (typeof existing.heightCm === "string" && !isNaN(Number(existing.heightCm)) ? Number(existing.heightCm) : undefined),
-      weightKg: (typeof existing.weightKg === "number" && existing.weightKg > 0) ? existing.weightKg : (typeof existing.weightKg === "string" && !isNaN(Number(existing.weightKg)) ? Number(existing.weightKg) : undefined),
+      heightCm: normalizeHeightCm(existing.heightCm),
+      weightKg: normalizeWeightKg(existing.weightKg),
       foodRestrictions: existing.foodRestrictions,
       validationHistory: Array.isArray(existing.validationHistory) ? existing.validationHistory : undefined,
       memoryAudit: Array.isArray(existing.memoryAudit) ? existing.memoryAudit.slice(-80) : [],
@@ -1090,7 +1117,10 @@ export function saveMemory(memory: GutoMemory) {
     weeklyConversation: memory.weeklyConversation ?? existing?.weeklyConversation,
   };
   delete nextMemory.phone;
+  nextMemory.userAge = normalizeUserAge(nextMemory.userAge);
   nextMemory.biologicalSex = normalizeBiologicalSex(nextMemory.biologicalSex);
+  nextMemory.heightCm = normalizeHeightCm(nextMemory.heightCm);
+  nextMemory.weightKg = normalizeWeightKg(nextMemory.weightKg);
   store[memory.userId] = nextMemory;
   writeMemoryStore(store);
 }
@@ -1523,7 +1553,7 @@ function mergeMemory(profile: Profile, language?: string) {
     trainingStatus: profile?.trainingStatus ? normalizeMemoryValue(profile.trainingStatus) : memory.trainingStatus,
     trainingLimitations: profile?.trainingLimitations ? normalizeMemoryValue(profile.trainingLimitations) : memory.trainingLimitations,
     trainingAge: typeof profile?.trainingAge === "number" ? profile.trainingAge : memory.trainingAge,
-    userAge: typeof profile?.userAge === "number" ? profile.userAge : memory.userAge,
+    userAge: normalizeUserAge(profile?.userAge) ?? memory.userAge,
     biologicalSex: normalizeBiologicalSex(profile?.biologicalSex) || memory.biologicalSex,
     trainingLevel: profile?.trainingLevel || memory.trainingLevel,
     trainingGoal: profile?.trainingGoal || memory.trainingGoal,
@@ -1532,8 +1562,8 @@ function mergeMemory(profile: Profile, language?: string) {
     country: profile?.country || memory.country,
     countryCode: profile?.countryCode || memory.countryCode,
     city: profile?.city || memory.city,
-    heightCm: typeof profile?.heightCm === "number" ? profile.heightCm : memory.heightCm,
-    weightKg: typeof profile?.weightKg === "number" ? profile.weightKg : memory.weightKg,
+    heightCm: normalizeHeightCm(profile?.heightCm) ?? memory.heightCm,
+    weightKg: normalizeWeightKg(profile?.weightKg) ?? memory.weightKg,
     foodRestrictions: profile?.foodRestrictions || memory.foodRestrictions,
     recentTrainingHistory: memory.recentTrainingHistory || [],
     nextWorkoutFocus: memory.nextWorkoutFocus,
@@ -3235,18 +3265,21 @@ async function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["m
     if (memory.language !== patch.language) changedFields.add("language");
     memory.language = patch.language;
   }
-  if (typeof patch.weightKg === "number" && patch.weightKg >= 30 && patch.weightKg <= 300) {
-    const next = Math.round(patch.weightKg * 10) / 10;
+  const nextWeightKg = normalizeWeightKg(patch.weightKg);
+  if (nextWeightKg !== undefined) {
+    const next = nextWeightKg;
     if (memory.weightKg !== next) changedFields.add("weightKg");
     memory.weightKg = next;
   }
-  if (typeof patch.heightCm === "number" && patch.heightCm >= 100 && patch.heightCm <= 250) {
-    const next = Math.round(patch.heightCm);
+  const nextHeightCm = normalizeHeightCm(patch.heightCm);
+  if (nextHeightCm !== undefined) {
+    const next = nextHeightCm;
     if (memory.heightCm !== next) changedFields.add("heightCm");
     memory.heightCm = next;
   }
-  if (typeof patch.userAge === "number" && patch.userAge >= 14 && patch.userAge <= 99) {
-    const next = Math.round(patch.userAge);
+  const nextUserAge = normalizeUserAge(patch.userAge);
+  if (nextUserAge !== undefined) {
+    const next = nextUserAge;
     if (memory.userAge !== next) changedFields.add("userAge");
     memory.userAge = next;
   }
@@ -6760,13 +6793,10 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
   if (b.trainingLocation) memory.trainingLocation = normalizeMemoryValue(b.trainingLocation);
   if (b.trainingStatus) memory.trainingStatus = normalizeMemoryValue(b.trainingStatus);
   if (b.trainingLimitations) memory.trainingLimitations = normalizeMemoryValue(b.trainingLimitations);
-  if (typeof b.userAge !== "undefined" && !isNaN(Number(b.userAge))) {
-    const age = Math.round(Number(b.userAge));
-    // Spec: idade 14–99. Rejeita silenciosamente fora do range pra não persistir lixo.
-    if (age >= 14 && age <= 99) {
-      if (memory.userAge !== age) changedFields.add("userAge");
-      memory.userAge = age;
-    }
+  const nextUserAge = normalizeUserAge(b.userAge);
+  if (nextUserAge !== undefined) {
+    if (memory.userAge !== nextUserAge) changedFields.add("userAge");
+    memory.userAge = nextUserAge;
   }
   // Spec: biologicalSex aceita só "female" | "male"; valores indefinidos são ignorados.
   const nextBiologicalSex = normalizeBiologicalSex(b.biologicalSex);
@@ -6810,21 +6840,15 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
     if (memory.city !== b.city) changedFields.add("city");
     memory.city = b.city;
   }
-  if (typeof b.heightCm !== "undefined" && !isNaN(Number(b.heightCm))) {
-    const h = Math.round(Number(b.heightCm));
-    // Spec: altura 100–250 cm.
-    if (h >= 100 && h <= 250) {
-      if (memory.heightCm !== h) changedFields.add("heightCm");
-      memory.heightCm = h;
-    }
+  const nextHeightCm = normalizeHeightCm(b.heightCm);
+  if (nextHeightCm !== undefined) {
+    if (memory.heightCm !== nextHeightCm) changedFields.add("heightCm");
+    memory.heightCm = nextHeightCm;
   }
-  if (typeof b.weightKg !== "undefined" && !isNaN(Number(b.weightKg))) {
-    const w = Math.round(Number(b.weightKg) * 10) / 10;
-    // Spec: peso 30–300 kg.
-    if (w >= 30 && w <= 300) {
-      if (memory.weightKg !== w) changedFields.add("weightKg");
-      memory.weightKg = w;
-    }
+  const nextWeightKg = normalizeWeightKg(b.weightKg);
+  if (nextWeightKg !== undefined) {
+    if (memory.weightKg !== nextWeightKg) changedFields.add("weightKg");
+    memory.weightKg = nextWeightKg;
   }
   if (typeof b.foodRestrictions === "string") {
     if (memory.foodRestrictions !== b.foodRestrictions) changedFields.add("foodRestrictions");

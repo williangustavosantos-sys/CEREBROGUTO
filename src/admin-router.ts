@@ -484,13 +484,29 @@ function normalizeBiologicalSex(value: unknown): BiologicalSex | undefined {
   return value === "female" || value === "male" ? value : undefined;
 }
 
+function normalizeIntegerInRange(value: unknown, min: number, max: number): number | undefined {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return undefined;
+  const rounded = Math.round(numberValue);
+  return rounded >= min && rounded <= max ? rounded : undefined;
+}
+
+function normalizeDecimalInRange(value: unknown, min: number, max: number, decimals = 1): number | undefined {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return undefined;
+  const factor = 10 ** decimals;
+  const rounded = Math.round(numberValue * factor) / factor;
+  return rounded >= min && rounded <= max ? rounded : undefined;
+}
+
 async function updateMemoryFromStudentPatch(userId: string, patch: Partial<UserAccess> & LooseRecord): Promise<void> {
   const memory = getMemory(userId);
   if (typeof patch.firstName === "string" && patch.firstName.trim()) memory.name = patch.firstName.trim();
   else if (typeof patch.name === "string" && patch.name.trim()) memory.name = patch.name.trim();
   const calibration = asRecord(patch.calibration);
   const merged = { ...patch, ...calibration };
-  if (typeof merged.userAge !== "undefined" && !Number.isNaN(Number(merged.userAge))) memory.userAge = Number(merged.userAge);
+  const nextUserAge = normalizeIntegerInRange(merged.userAge, 14, 99);
+  if (nextUserAge !== undefined) memory.userAge = nextUserAge;
   const nextBiologicalSex = normalizeBiologicalSex(merged.biologicalSex);
   if (nextBiologicalSex) memory.biologicalSex = nextBiologicalSex;
   if (typeof merged.trainingLevel === "string") memory.trainingLevel = merged.trainingLevel;
@@ -499,8 +515,10 @@ async function updateMemoryFromStudentPatch(userId: string, patch: Partial<UserA
   if (typeof merged.trainingPathology === "string") memory.trainingPathology = merged.trainingPathology;
   if (typeof merged.country === "string") memory.country = merged.country;
   if (typeof merged.city === "string") memory.city = merged.city;
-  if (typeof merged.heightCm !== "undefined" && !Number.isNaN(Number(merged.heightCm)) && Number(merged.heightCm) > 0) memory.heightCm = Number(merged.heightCm);
-  if (typeof merged.weightKg !== "undefined" && !Number.isNaN(Number(merged.weightKg)) && Number(merged.weightKg) > 0) memory.weightKg = Number(merged.weightKg);
+  const nextHeightCm = normalizeIntegerInRange(merged.heightCm, 100, 250);
+  if (nextHeightCm !== undefined) memory.heightCm = nextHeightCm;
+  const nextWeightKg = normalizeDecimalInRange(merged.weightKg, 30, 300);
+  if (nextWeightKg !== undefined) memory.weightKg = nextWeightKg;
   if (typeof merged.foodRestrictions === "string") memory.foodRestrictions = merged.foodRestrictions;
   saveMemory(memory);
 }
