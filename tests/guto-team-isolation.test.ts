@@ -30,6 +30,7 @@ const auditLogFile = join(tmpDir, "audit-logs.json");
 const testMemoryFile = join(tmpDir, "guto-memory.team-isolation-test.json");
 
 let app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
+let getMemory: (userId: string) => Record<string, any>;
 let server: Server;
 let baseUrl = "";
 let originalUserAccess: string | null = null;
@@ -153,8 +154,10 @@ before(async () => {
 
   const serverModule = (await import(pathToFileURL(join(process.cwd(), "server.ts")).href)) as {
     app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
+    getMemory: (userId: string) => Record<string, any>;
   };
   app = serverModule.app;
+  getMemory = serverModule.getMemory;
 
   await new Promise<void>((resolve, reject) => {
     server = app.listen(0, "127.0.0.1", () => resolve());
@@ -627,10 +630,35 @@ describe("GUTO Phase 5 – admin team operations", () => {
     const response = await request(`/admin/students/${studentA.userId}`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${token(coachA)}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ calibration: { trainingGoal: "ganhar massa" } }),
+      body: JSON.stringify({ calibration: { trainingGoal: "ganhar massa", userAge: 35, heightCm: 178, weightKg: 82.4 } }),
     });
 
     assert.equal(response.status, 200);
+    const memory = getMemory(studentA.userId);
+    assert.equal(memory.userAge, 35);
+    assert.equal(memory.heightCm, 178);
+    assert.equal(memory.weightKg, 82.4);
+  });
+
+  it("ignores admin calibration numbers outside official ranges", async () => {
+    const valid = await request(`/admin/students/${studentA.userId}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ calibration: { userAge: 35, heightCm: 178, weightKg: 82 } }),
+    });
+    assert.equal(valid.status, 200);
+
+    const invalid = await request(`/admin/students/${studentA.userId}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ calibration: { userAge: 12, heightCm: 251, weightKg: 301 } }),
+    });
+    assert.equal(invalid.status, 200);
+
+    const memory = getMemory(studentA.userId);
+    assert.equal(memory.userAge, 35);
+    assert.equal(memory.heightCm, 178);
+    assert.equal(memory.weightKg, 82);
   });
 
   it("allows admin to run own-team bureaucratic actions and blocks another team", async () => {
