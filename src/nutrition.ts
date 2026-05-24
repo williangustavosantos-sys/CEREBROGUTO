@@ -50,7 +50,7 @@ function calculateBMR(
   // Mifflin-St Jeor
   const base = 10 * weightKg + 6.25 * heightCm - 5 * age;
   if (sex === "female") return Math.round(base - 161);
-  return Math.round(base + 5); // male and prefer_not_to_say use male formula
+  return Math.round(base + 5);
 }
 
 const ACTIVITY_FACTOR: Record<TrainingLevel, number> = {
