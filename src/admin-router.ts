@@ -86,6 +86,7 @@ adminRouter.use(requireCoachOrAdmin);
 
 type PlanSource = "guto_generated" | "coach_manual" | "mixed";
 type LooseRecord = Record<string, any>;
+type BiologicalSex = "female" | "male";
 type ResetScope = "weekly" | "monthly" | "individual" | "validationHistory" | "all";
 
 const PLAN_SOURCES: PlanSource[] = ["guto_generated", "coach_manual", "mixed"];
@@ -479,6 +480,10 @@ function hasBodyField(body: LooseRecord, field: string): boolean {
   return Object.prototype.hasOwnProperty.call(body, field) && body[field] !== undefined;
 }
 
+function normalizeBiologicalSex(value: unknown): BiologicalSex | undefined {
+  return value === "female" || value === "male" ? value : undefined;
+}
+
 async function updateMemoryFromStudentPatch(userId: string, patch: Partial<UserAccess> & LooseRecord): Promise<void> {
   const memory = getMemory(userId);
   if (typeof patch.firstName === "string" && patch.firstName.trim()) memory.name = patch.firstName.trim();
@@ -486,7 +491,8 @@ async function updateMemoryFromStudentPatch(userId: string, patch: Partial<UserA
   const calibration = asRecord(patch.calibration);
   const merged = { ...patch, ...calibration };
   if (typeof merged.userAge !== "undefined" && !Number.isNaN(Number(merged.userAge))) memory.userAge = Number(merged.userAge);
-  if (typeof merged.biologicalSex === "string") memory.biologicalSex = merged.biologicalSex;
+  const nextBiologicalSex = normalizeBiologicalSex(merged.biologicalSex);
+  if (nextBiologicalSex) memory.biologicalSex = nextBiologicalSex;
   if (typeof merged.trainingLevel === "string") memory.trainingLevel = merged.trainingLevel;
   if (typeof merged.trainingGoal === "string") memory.trainingGoal = merged.trainingGoal;
   if (typeof merged.preferredTrainingLocation === "string") memory.preferredTrainingLocation = merged.preferredTrainingLocation;

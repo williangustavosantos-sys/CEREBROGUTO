@@ -115,6 +115,7 @@ import type { ResolverResult } from "./src/proactivity/memory-action-resolver.js
 
 type Acao = "none" | "updateWorkout" | "lock" | "changeLanguage" | "requestDeleteAccount" | "showProfile";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT";
+type BiologicalSex = NutritionProfile["biologicalSex"];
 type GutoAvatarEmotion = "default" | "alert" | "critical" | "reward";
 type TrainingScheduleIntent = "today" | "tomorrow";
 type FallbackLineKey = "system_key" | "parse" | "internal_error" | "speech_short";
@@ -167,7 +168,7 @@ interface Profile {
   trainingLimitations?: string;
   trainingAge?: number;
   userAge?: number;
-  biologicalSex?: string;
+  biologicalSex?: BiologicalSex;
   trainingLevel?: string;
   trainingGoal?: string;
   preferredTrainingLocation?: string;
@@ -339,7 +340,7 @@ interface GutoMemory {
   trainingLimitations?: string;
   trainingAge?: number;
   userAge?: number;
-  biologicalSex?: string;
+  biologicalSex?: BiologicalSex;
   trainingLevel?: string;
   trainingGoal?: string;
   preferredTrainingLocation?: string;
@@ -703,6 +704,10 @@ function normalizeLanguage(language?: string): GutoLanguage {
   return "pt-BR";
 }
 
+function normalizeBiologicalSex(value: unknown): BiologicalSex | undefined {
+  return value === "female" || value === "male" ? value : undefined;
+}
+
 function normalize(value: string) {
   return value
     .normalize("NFD")
@@ -997,7 +1002,7 @@ export function getMemory(userId: string): GutoMemory {
       trainingLimitations: existing.trainingLimitations,
       trainingAge: typeof existing.trainingAge === "number" ? existing.trainingAge : undefined,
       userAge: typeof existing.userAge === "number" ? existing.userAge : undefined,
-      biologicalSex: existing.biologicalSex,
+      biologicalSex: normalizeBiologicalSex(existing.biologicalSex),
       trainingLevel: existing.trainingLevel,
       trainingGoal: existing.trainingGoal,
       preferredTrainingLocation: existing.preferredTrainingLocation,
@@ -1085,6 +1090,7 @@ export function saveMemory(memory: GutoMemory) {
     weeklyConversation: memory.weeklyConversation ?? existing?.weeklyConversation,
   };
   delete nextMemory.phone;
+  nextMemory.biologicalSex = normalizeBiologicalSex(nextMemory.biologicalSex);
   store[memory.userId] = nextMemory;
   writeMemoryStore(store);
 }
@@ -1518,7 +1524,7 @@ function mergeMemory(profile: Profile, language?: string) {
     trainingLimitations: profile?.trainingLimitations ? normalizeMemoryValue(profile.trainingLimitations) : memory.trainingLimitations,
     trainingAge: typeof profile?.trainingAge === "number" ? profile.trainingAge : memory.trainingAge,
     userAge: typeof profile?.userAge === "number" ? profile.userAge : memory.userAge,
-    biologicalSex: profile?.biologicalSex || memory.biologicalSex,
+    biologicalSex: normalizeBiologicalSex(profile?.biologicalSex) || memory.biologicalSex,
     trainingLevel: profile?.trainingLevel || memory.trainingLevel,
     trainingGoal: profile?.trainingGoal || memory.trainingGoal,
     preferredTrainingLocation: profile?.preferredTrainingLocation || memory.preferredTrainingLocation,
@@ -2774,7 +2780,7 @@ CAMPOS EDITÁVEIS PELO CHAT (você é o terminal do app, pode atualizar via memo
 - weightKg (30-300): peso em kg
 - heightCm (100-250): altura em cm
 - userAge (14-99): idade
-- biologicalSex ("female" | "male" | "prefer_not_to_say"): sexo biológico
+- biologicalSex ("female" | "male"): sexo biológico
 - trainingGoal ("consistency" | "fat_loss" | "muscle_gain" | "conditioning" | "mobility_health"): objetivo
 - preferredTrainingLocation ("gym" | "home" | "park" | "mixed"): local preferido
 - trainingLevel ("beginner" | "returning" | "consistent" | "advanced"): nível
@@ -3244,9 +3250,10 @@ async function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["m
     if (memory.userAge !== next) changedFields.add("userAge");
     memory.userAge = next;
   }
-  if (typeof patch.biologicalSex === "string" && ["female", "male"].includes(patch.biologicalSex)) {
-    if (memory.biologicalSex !== patch.biologicalSex) changedFields.add("biologicalSex");
-    memory.biologicalSex = patch.biologicalSex;
+  const nextBiologicalSex = normalizeBiologicalSex(patch.biologicalSex);
+  if (nextBiologicalSex) {
+    if (memory.biologicalSex !== nextBiologicalSex) changedFields.add("biologicalSex");
+    memory.biologicalSex = nextBiologicalSex;
   }
   if (typeof patch.trainingGoal === "string" && ["consistency", "fat_loss", "muscle_gain", "conditioning", "mobility_health"].includes(patch.trainingGoal)) {
     if (memory.trainingGoal !== patch.trainingGoal) changedFields.add("trainingGoal");
@@ -6761,10 +6768,11 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
       memory.userAge = age;
     }
   }
-  // Spec: biologicalSex aceita só "female" | "male" (sem "prefer_not_to_say").
-  if (typeof b.biologicalSex === "string" && ["female", "male"].includes(b.biologicalSex)) {
-    if (memory.biologicalSex !== b.biologicalSex) changedFields.add("biologicalSex");
-    memory.biologicalSex = b.biologicalSex;
+  // Spec: biologicalSex aceita só "female" | "male"; valores indefinidos são ignorados.
+  const nextBiologicalSex = normalizeBiologicalSex(b.biologicalSex);
+  if (nextBiologicalSex) {
+    if (memory.biologicalSex !== nextBiologicalSex) changedFields.add("biologicalSex");
+    memory.biologicalSex = nextBiologicalSex;
   }
   if (b.trainingLevel) {
     if (memory.trainingLevel !== b.trainingLevel) changedFields.add("trainingLevel");
@@ -8057,7 +8065,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
     ? "none"
     : memory.foodRestrictions || "none";
   const nutritionProfile: NutritionProfile = {
-    biologicalSex: (memory.biologicalSex as NutritionProfile["biologicalSex"]) || "male",
+    biologicalSex: memory.biologicalSex || "male",
     userAge: Number(memory.userAge),
     heightCm: Number(memory.heightCm),
     weightKg: Number(memory.weightKg),
