@@ -3101,7 +3101,52 @@ function appendMemoryAudit(
   ];
 }
 
-function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryPatch"], trainedRef?: GutoModelResponse["trainedReference"], rawInput?: string): GutoMemory {
+const DIET_INVALIDATION_FIELDS = new Set([
+  "userAge",
+  "biologicalSex",
+  "heightCm",
+  "weightKg",
+  "trainingGoal",
+  "trainingLevel",
+  "trainingStatus",
+  "country",
+  "countryCode",
+  "city",
+  "foodRestrictions",
+]);
+
+async function invalidateDietIfNeeded(memory: GutoMemory, changedFields: Iterable<string>) {
+  const impactedFields = Array.from(
+    new Set(Array.from(changedFields).filter((field) => DIET_INVALIDATION_FIELDS.has(field)))
+  ).sort();
+  if (impactedFields.length === 0) return;
+
+  const existingDiet = await getDietPlan(memory.userId);
+  const hasPersistedDiet = Boolean(existingDiet || memory.weeklyDietPlan || memory.dietGenerationStatus === "generated");
+  if (!hasPersistedDiet) return;
+
+  if (existingDiet?.lockedByCoach) {
+    appendMemoryAudit(
+      memory,
+      "profile_sync",
+      impactedFields,
+      "Mudança de calibragem detectada; dieta preservada porque lockedByCoach=true."
+    );
+    return;
+  }
+
+  if (memory.dietGenerationStatus !== "needs_clarification") {
+    memory.dietGenerationStatus = "needs_clarification";
+  }
+  appendMemoryAudit(
+    memory,
+    "profile_sync",
+    ["dietGenerationStatus", ...impactedFields],
+    "Dieta marcada para revisão por mudança em dados que impactam nutrição."
+  );
+}
+
+async function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryPatch"], trainedRef?: GutoModelResponse["trainedReference"], rawInput?: string): Promise<GutoMemory> {
   const changedFields = new Set<string>();
   if (trainedRef) {
     const resolved = resolveTrainedReference(memory, trainedRef, rawInput);
@@ -3264,6 +3309,7 @@ function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryP
   }
 
   appendMemoryAudit(memory, "chat_patch", Array.from(changedFields), "Patch de memória aplicado pelo contrato do chat.");
+  await invalidateDietIfNeeded(memory, changedFields);
   commitMemoryDecision(memory);
 
   if (freeFieldChanged) {
@@ -5934,7 +5980,7 @@ async function askGutoModel({
       previousExpectedResponse: expectedResponse,
       modelResponse: fallback,
     });
-    applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
+    await applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
     enforceTrainingFlowCertainty(fallback, memory, expectedResponse, selectedLanguage, input || "", contractIntent);
     commitMemoryDecision(memory);
     if (fallback.acao === "updateWorkout") {
@@ -6072,7 +6118,7 @@ async function askGutoModel({
       modelResponse: parsedResponse,
     });
 
-    applyMemoryPatch(memory, parsedResponse.memoryPatch, parsedResponse.trainedReference, input);
+    await applyMemoryPatch(memory, parsedResponse.memoryPatch, parsedResponse.trainedReference, input);
     enforceTrainingFlowCertainty(parsedResponse, memory, expectedResponse, selectedLanguage, input || "", contractIntent);
     commitMemoryDecision(memory);
 
@@ -6279,7 +6325,7 @@ async function askGutoModel({
       previousExpectedResponse: expectedResponse,
       modelResponse: fallback,
     });
-    applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
+    await applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
     enforceTrainingFlowCertainty(fallback, memory, expectedResponse, selectedLanguage, input || "", contractIntent);
     commitMemoryDecision(memory);
     // When resolver engaged with no action (clarification needed), replace the generic
@@ -6673,6 +6719,7 @@ async function runFreeFieldsResolution(userId: string, memorySnapshot: GutoMemor
 app.post("/guto/memory", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
   const memory = applyPendingMissPenalties(getMemory(userId));
+  const changedFields = new Set<string>();
 
   const b = req.body;
   if (b.name) {
@@ -6707,40 +6754,72 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
   if (typeof b.userAge !== "undefined" && !isNaN(Number(b.userAge))) {
     const age = Math.round(Number(b.userAge));
     // Spec: idade 14–99. Rejeita silenciosamente fora do range pra não persistir lixo.
-    if (age >= 14 && age <= 99) memory.userAge = age;
+    if (age >= 14 && age <= 99) {
+      if (memory.userAge !== age) changedFields.add("userAge");
+      memory.userAge = age;
+    }
   }
   // Spec: biologicalSex aceita só "female" | "male" (sem "prefer_not_to_say").
   if (typeof b.biologicalSex === "string" && ["female", "male"].includes(b.biologicalSex)) {
+    if (memory.biologicalSex !== b.biologicalSex) changedFields.add("biologicalSex");
     memory.biologicalSex = b.biologicalSex;
   }
   if (b.trainingLevel) {
+    if (memory.trainingLevel !== b.trainingLevel) changedFields.add("trainingLevel");
     memory.trainingLevel = b.trainingLevel;
-    if (!b.trainingStatus) memory.trainingStatus = b.trainingLevel;
+    if (!b.trainingStatus) {
+      if (memory.trainingStatus !== b.trainingLevel) changedFields.add("trainingStatus");
+      memory.trainingStatus = b.trainingLevel;
+    }
   }
-  if (b.trainingStatus) memory.trainingStatus = b.trainingStatus;
-  if (b.trainingGoal) memory.trainingGoal = b.trainingGoal;
+  if (b.trainingStatus) {
+    if (memory.trainingStatus !== b.trainingStatus) changedFields.add("trainingStatus");
+    memory.trainingStatus = b.trainingStatus;
+  }
+  if (b.trainingGoal) {
+    if (memory.trainingGoal !== b.trainingGoal) changedFields.add("trainingGoal");
+    memory.trainingGoal = b.trainingGoal;
+  }
   if (b.preferredTrainingLocation) memory.preferredTrainingLocation = b.preferredTrainingLocation;
   if (b.trainingPathology) {
     memory.trainingPathology = b.trainingPathology;
     if (!b.trainingLimitations) memory.trainingLimitations = b.trainingPathology;
   }
-  if (b.country) memory.country = b.country;
+  if (b.country) {
+    if (memory.country !== b.country) changedFields.add("country");
+    memory.country = b.country;
+  }
   if (b.countryCode) {
     const code = String(b.countryCode).trim().toUpperCase();
-    if (/^[A-Z]{2}$/.test(code)) memory.countryCode = code;
+    if (/^[A-Z]{2}$/.test(code)) {
+      if (memory.countryCode !== code) changedFields.add("countryCode");
+      memory.countryCode = code;
+    }
   }
-  if (b.city) memory.city = b.city;
+  if (b.city) {
+    if (memory.city !== b.city) changedFields.add("city");
+    memory.city = b.city;
+  }
   if (typeof b.heightCm !== "undefined" && !isNaN(Number(b.heightCm))) {
     const h = Math.round(Number(b.heightCm));
     // Spec: altura 100–250 cm.
-    if (h >= 100 && h <= 250) memory.heightCm = h;
+    if (h >= 100 && h <= 250) {
+      if (memory.heightCm !== h) changedFields.add("heightCm");
+      memory.heightCm = h;
+    }
   }
   if (typeof b.weightKg !== "undefined" && !isNaN(Number(b.weightKg))) {
     const w = Math.round(Number(b.weightKg) * 10) / 10;
     // Spec: peso 30–300 kg.
-    if (w >= 30 && w <= 300) memory.weightKg = w;
+    if (w >= 30 && w <= 300) {
+      if (memory.weightKg !== w) changedFields.add("weightKg");
+      memory.weightKg = w;
+    }
   }
-  if (typeof b.foodRestrictions === "string") memory.foodRestrictions = b.foodRestrictions;
+  if (typeof b.foodRestrictions === "string") {
+    if (memory.foodRestrictions !== b.foodRestrictions) changedFields.add("foodRestrictions");
+    memory.foodRestrictions = b.foodRestrictions;
+  }
   if (typeof b.phone === "string") memory.phone = b.phone;
   if (typeof b.initialXpRewardSeen === "boolean") memory.initialXpRewardSeen = b.initialXpRewardSeen;
   if (b.lastWorkoutPlan && Array.isArray(b.lastWorkoutPlan.exercises)) {
@@ -6758,6 +6837,7 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
     }
   }
 
+  await invalidateDietIfNeeded(memory, changedFields);
   saveMemory(memory);
   const meaningfulFoodLimits = collectMeaningfulFoodRestrictionTexts(memory);
   const declaredPathology = memory.trainingPathology || memory.trainingLimitations;
@@ -8288,7 +8368,7 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   res.status(500).json({ error: fallbackLine(language, "internal_error"), acao: "none", fala: fallbackLine(language, "internal_error") });
 });
 
-export { app, askGutoModel };
+export { app, askGutoModel, applyMemoryPatch, invalidateDietIfNeeded };
 
 if (process.env.GUTO_DISABLE_LISTEN !== "1") {
   app.listen(PORT, () => console.log(`🦾 GUTO ONLINE NA PORTA ${PORT}`));
