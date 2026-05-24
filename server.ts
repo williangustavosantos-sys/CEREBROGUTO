@@ -350,7 +350,6 @@ interface GutoMemory {
   heightCm?: number;
   weightKg?: number;
   foodRestrictions?: string;
-  phone?: string;
   lastWorkoutCompletedAt?: string;
   completedWorkoutDates: string[];
   adaptedMissionDates: string[];
@@ -812,8 +811,10 @@ function isOperationalNoise(value?: string) {
 }
 
 function sanitizeOperationalMemory(memory: GutoMemory): GutoMemory {
+  const sanitized = { ...memory };
+  delete (sanitized as any).phone;
   return {
-    ...memory,
+    ...sanitized,
     energyLast: isOperationalNoise(memory.energyLast) ? undefined : memory.energyLast,
     trainingSchedule: memory.trainingSchedule === "today" || memory.trainingSchedule === "tomorrow" ? memory.trainingSchedule : undefined,
     trainingLocation: isOperationalNoise(memory.trainingLocation) ? undefined : memory.trainingLocation,
@@ -1007,7 +1008,6 @@ export function getMemory(userId: string): GutoMemory {
       heightCm: (typeof existing.heightCm === "number" && existing.heightCm > 0) ? existing.heightCm : (typeof existing.heightCm === "string" && !isNaN(Number(existing.heightCm)) ? Number(existing.heightCm) : undefined),
       weightKg: (typeof existing.weightKg === "number" && existing.weightKg > 0) ? existing.weightKg : (typeof existing.weightKg === "string" && !isNaN(Number(existing.weightKg)) ? Number(existing.weightKg) : undefined),
       foodRestrictions: existing.foodRestrictions,
-      phone: existing.phone,
       validationHistory: Array.isArray(existing.validationHistory) ? existing.validationHistory : undefined,
       memoryAudit: Array.isArray(existing.memoryAudit) ? existing.memoryAudit.slice(-80) : [],
       lastWorkoutCompletedAt: existing.lastWorkoutCompletedAt,
@@ -3101,7 +3101,32 @@ function appendMemoryAudit(
   ];
 }
 
-function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryPatch"], trainedRef?: GutoModelResponse["trainedReference"], rawInput?: string): GutoMemory {
+
+const DIET_INVALIDATION_FIELDS = new Set([
+  "userAge", "biologicalSex", "heightCm", "weightKg",
+  "trainingGoal", "trainingLevel", "trainingStatus",
+  "country", "city", "foodRestrictions"
+]);
+
+export async function invalidateDietIfNeeded(memory: GutoMemory, changedFields: Set<string>): Promise<void> {
+  const hasDietImpact = Array.from(changedFields).some(field => DIET_INVALIDATION_FIELDS.has(field));
+  if (!hasDietImpact) return;
+
+  const existingDiet = await getDietPlan(memory.userId);
+  if (existingDiet?.lockedByCoach) {
+    // If locked by coach, do not destroy generation status or plan, just record audit
+    appendMemoryAudit(memory, "profile_sync", Array.from(changedFields), "Mudança de calibragem detectada, mas dieta preservada pois lockedByCoach=true.");
+    return;
+  }
+
+  // Mark for review
+  if (memory.dietGenerationStatus === "generated" || memory.dietGenerationStatus === "ready_to_generate" || memory.dietGenerationStatus === "failed") {
+    memory.dietGenerationStatus = "needs_clarification";
+    appendMemoryAudit(memory, "profile_sync", Array.from(changedFields), "Mudança de calibragem invalidou a dieta atual.");
+  }
+}
+
+async function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryPatch"], trainedRef?: GutoModelResponse["trainedReference"], rawInput?: string): Promise<GutoMemory> {
   const changedFields = new Set<string>();
   if (trainedRef) {
     const resolved = resolveTrainedReference(memory, trainedRef, rawInput);
@@ -5934,7 +5959,7 @@ async function askGutoModel({
       previousExpectedResponse: expectedResponse,
       modelResponse: fallback,
     });
-    applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
+    await applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
     enforceTrainingFlowCertainty(fallback, memory, expectedResponse, selectedLanguage, input || "", contractIntent);
     commitMemoryDecision(memory);
     if (fallback.acao === "updateWorkout") {
@@ -6072,7 +6097,7 @@ async function askGutoModel({
       modelResponse: parsedResponse,
     });
 
-    applyMemoryPatch(memory, parsedResponse.memoryPatch, parsedResponse.trainedReference, input);
+    await applyMemoryPatch(memory, parsedResponse.memoryPatch, parsedResponse.trainedReference, input);
     enforceTrainingFlowCertainty(parsedResponse, memory, expectedResponse, selectedLanguage, input || "", contractIntent);
     commitMemoryDecision(memory);
 
@@ -6279,7 +6304,7 @@ async function askGutoModel({
       previousExpectedResponse: expectedResponse,
       modelResponse: fallback,
     });
-    applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
+    await applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
     enforceTrainingFlowCertainty(fallback, memory, expectedResponse, selectedLanguage, input || "", contractIntent);
     commitMemoryDecision(memory);
     // When resolver engaged with no action (clarification needed), replace the generic
@@ -6671,6 +6696,7 @@ async function runFreeFieldsResolution(userId: string, memorySnapshot: GutoMemor
 }
 
 app.post("/guto/memory", requireActiveUser, async (req, res) => {
+  const changedFields = new Set<string>();
   const userId = req.gutoUser!.userId;
   const memory = applyPendingMissPenalties(getMemory(userId));
 
@@ -6717,31 +6743,30 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
     memory.trainingLevel = b.trainingLevel;
     if (!b.trainingStatus) memory.trainingStatus = b.trainingLevel;
   }
-  if (b.trainingStatus) memory.trainingStatus = b.trainingStatus;
-  if (b.trainingGoal) memory.trainingGoal = b.trainingGoal;
+  if (b.trainingStatus && memory.trainingStatus !== b.trainingStatus) { memory.trainingStatus = b.trainingStatus; changedFields.add("trainingStatus"); }
+  if (b.trainingGoal && memory.trainingGoal !== b.trainingGoal) { memory.trainingGoal = b.trainingGoal; changedFields.add("trainingGoal"); }
   if (b.preferredTrainingLocation) memory.preferredTrainingLocation = b.preferredTrainingLocation;
   if (b.trainingPathology) {
     memory.trainingPathology = b.trainingPathology;
     if (!b.trainingLimitations) memory.trainingLimitations = b.trainingPathology;
   }
-  if (b.country) memory.country = b.country;
+  if (b.country && memory.country !== b.country) { memory.country = b.country; changedFields.add("country"); }
   if (b.countryCode) {
     const code = String(b.countryCode).trim().toUpperCase();
     if (/^[A-Z]{2}$/.test(code)) memory.countryCode = code;
   }
-  if (b.city) memory.city = b.city;
+  if (b.city && memory.city !== b.city) { memory.city = b.city; changedFields.add("city"); }
   if (typeof b.heightCm !== "undefined" && !isNaN(Number(b.heightCm))) {
     const h = Math.round(Number(b.heightCm));
     // Spec: altura 100–250 cm.
-    if (h >= 100 && h <= 250) memory.heightCm = h;
+    if (h >= 100 && h <= 250 && memory.heightCm !== h) { memory.heightCm = h; changedFields.add("heightCm"); }
   }
   if (typeof b.weightKg !== "undefined" && !isNaN(Number(b.weightKg))) {
     const w = Math.round(Number(b.weightKg) * 10) / 10;
     // Spec: peso 30–300 kg.
-    if (w >= 30 && w <= 300) memory.weightKg = w;
+    if (w >= 30 && w <= 300 && memory.weightKg !== w) { memory.weightKg = w; changedFields.add("weightKg"); }
   }
-  if (typeof b.foodRestrictions === "string") memory.foodRestrictions = b.foodRestrictions;
-  if (typeof b.phone === "string") memory.phone = b.phone;
+  if (typeof b.foodRestrictions === "string" && memory.foodRestrictions !== b.foodRestrictions) { memory.foodRestrictions = b.foodRestrictions; changedFields.add("foodRestrictions"); }
   if (typeof b.initialXpRewardSeen === "boolean") memory.initialXpRewardSeen = b.initialXpRewardSeen;
   if (b.lastWorkoutPlan && Array.isArray(b.lastWorkoutPlan.exercises)) {
     if (!isCoachLockedWorkout(memory.lastWorkoutPlan)) {
