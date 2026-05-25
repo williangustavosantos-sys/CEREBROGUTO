@@ -151,6 +151,42 @@ function resolveKnownFoodRestrictionLocally(rawValue: string, now: string): Reso
     };
   }
 
+  const fishAndSeafoodPatterns = [
+    "nao como peixe",
+    "não como peixe",
+    "sem peixe",
+    "alergia a peixe",
+    "alergico a peixe",
+    "alérgico a peixe",
+    "peixe",
+    "fish",
+    "no fish",
+    "senza pesce",
+    "pesce",
+    "frutos do mar",
+    "marisco",
+    "camarão",
+    "camarao",
+    "shrimp",
+    "seafood",
+    "shellfish",
+    "frutti di mare",
+    "gamberi",
+  ];
+
+  if (fishAndSeafoodPatterns.some((pattern) => normalized.includes(pattern))) {
+    return {
+      field: "foodRestriction",
+      rawValue,
+      rawValueHash: hashRaw(rawValue),
+      normalizedValue: "fish_seafood_restriction",
+      riskTags: ["food_restriction"],
+      confidence: 0.9,
+      status: "clear",
+      resolvedAt: now,
+    };
+  }
+
   return null;
 }
 

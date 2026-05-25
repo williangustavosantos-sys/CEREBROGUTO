@@ -309,6 +309,34 @@ describe("diet generation contract", () => {
     assert.equal(memory.dietGenerationStatus, "failed");
   });
 
+  it("recusa peixe quando NÃO COMO declara peixe ou frutos do mar", async () => {
+    const userId = "diet-no-fish-user";
+    writeMemory(userId, {
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      trainingLevel: "consistent",
+      trainingGoal: "muscle_gain",
+      country: "Italia",
+      countryCode: "IT",
+      city: "Roma",
+      foodRestrictions: "não como peixe",
+    });
+
+    const res = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "pt-BR" }),
+    });
+
+    assert.equal(res.status, 500);
+    const body = (await res.json()) as { error?: string };
+    assert.equal(body.error, "diet_generation_failed");
+    const memory = readMemory(userId);
+    assert.equal(memory.dietGenerationStatus, "failed");
+  });
+
   it("GET /guto/diet devolve plano após generate", async () => {
     const userId = "diet-get-after-generate";
     writeMemory(userId, {
