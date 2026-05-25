@@ -131,6 +131,26 @@ async function request(path: string, options: RequestInit = {}) {
   return fetch(`${baseUrl}${path}`, options);
 }
 
+function seedMemory(userId: string, patch: Record<string, unknown>): void {
+  writeFileSync(testMemoryFile, JSON.stringify({
+    [userId]: {
+      userId,
+      name: userId,
+      language: "pt-BR",
+      memoryAudit: [],
+      ...patch,
+    },
+  }, null, 2));
+}
+
+function hasMemoryAudit(memory: Record<string, any>, ...fields: string[]): boolean {
+  const audit = Array.isArray(memory.memoryAudit) ? memory.memoryAudit : [];
+  return audit.some((entry) => {
+    const entryFields = Array.isArray(entry.fields) ? entry.fields : [];
+    return fields.every((field) => entryFields.includes(field));
+  });
+}
+
 function studentCreatePayload(userId: string, firstName: string, lastName: string, patch: Record<string, unknown> = {}) {
   return {
     userId,
@@ -630,14 +650,39 @@ describe("GUTO Phase 5 – admin team operations", () => {
     const response = await request(`/admin/students/${studentA.userId}`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${token(coachA)}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ calibration: { trainingGoal: "ganhar massa", userAge: 35, heightCm: 178, weightKg: 82.4 } }),
+      body: JSON.stringify({ calibration: { trainingGoal: "ganhar massa", trainingLevel: "consistent", userAge: 35, heightCm: 178, weightKg: 82.4 } }),
     });
 
     assert.equal(response.status, 200);
     const memory = getMemory(studentA.userId);
+    assert.equal(memory.trainingLevel, "consistent");
+    assert.equal(memory.trainingStatus, "consistent");
     assert.equal(memory.userAge, 35);
     assert.equal(memory.heightCm, 178);
     assert.equal(memory.weightKg, 82.4);
+  });
+
+  it("marks diet for review and clears stale countryCode after admin calibration changes", async () => {
+    seedMemory(studentA.userId, {
+      country: "Brasil",
+      countryCode: "BR",
+      weightKg: 82,
+      dietGenerationStatus: "generated",
+    });
+
+    const response = await request(`/admin/students/${studentA.userId}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token(adminA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ calibration: { country: "Italia", weightKg: 84 } }),
+    });
+
+    assert.equal(response.status, 200);
+    const memory = getMemory(studentA.userId);
+    assert.equal(memory.country, "Italia");
+    assert.equal(memory.countryCode, undefined);
+    assert.equal(memory.weightKg, 84);
+    assert.equal(memory.dietGenerationStatus, "needs_clarification");
+    assert.equal(hasMemoryAudit(memory, "country", "countryCode", "weightKg"), true);
   });
 
   it("ignores admin calibration numbers outside official ranges", async () => {

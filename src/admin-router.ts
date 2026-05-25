@@ -51,7 +51,16 @@ import {
   readMemoryStoreAsync,
   writeMemoryStoreAsync,
 } from "./memory-store.js";
-import { getMemory, saveMemory, buildWorkoutPlanFromSemanticFocus, type WeekDayKey, type WeeklyWorkoutPlan, type WeeklyDietDay, type WeeklyDietPlan } from "../server.js";
+import {
+  getMemory,
+  saveMemory,
+  buildWorkoutPlanFromSemanticFocus,
+  invalidateDietIfNeeded,
+  type WeekDayKey,
+  type WeeklyWorkoutPlan,
+  type WeeklyDietDay,
+  type WeeklyDietPlan,
+} from "../server.js";
 import { getDietPlan, saveDietPlan, deleteDietPlan } from "./diet-store.js";
 import { addLog, getLogs } from "./log-store.js";
 import { config } from "./config.js";
@@ -505,21 +514,52 @@ async function updateMemoryFromStudentPatch(userId: string, patch: Partial<UserA
   else if (typeof patch.name === "string" && patch.name.trim()) memory.name = patch.name.trim();
   const calibration = asRecord(patch.calibration);
   const merged = { ...patch, ...calibration };
+  const changedFields = new Set<string>();
+  const setStringField = (field: keyof typeof memory, value: string): void => {
+    if (memory[field] !== value) changedFields.add(String(field));
+    (memory as LooseRecord)[field] = value;
+  };
+
   const nextUserAge = normalizeIntegerInRange(merged.userAge, 14, 99);
-  if (nextUserAge !== undefined) memory.userAge = nextUserAge;
+  if (nextUserAge !== undefined) {
+    if (memory.userAge !== nextUserAge) changedFields.add("userAge");
+    memory.userAge = nextUserAge;
+  }
   const nextBiologicalSex = normalizeBiologicalSex(merged.biologicalSex);
-  if (nextBiologicalSex) memory.biologicalSex = nextBiologicalSex;
-  if (typeof merged.trainingLevel === "string") memory.trainingLevel = merged.trainingLevel;
-  if (typeof merged.trainingGoal === "string") memory.trainingGoal = merged.trainingGoal;
-  if (typeof merged.preferredTrainingLocation === "string") memory.preferredTrainingLocation = merged.preferredTrainingLocation;
-  if (typeof merged.trainingPathology === "string") memory.trainingPathology = merged.trainingPathology;
-  if (typeof merged.country === "string") memory.country = merged.country;
-  if (typeof merged.city === "string") memory.city = merged.city;
+  if (nextBiologicalSex) {
+    if (memory.biologicalSex !== nextBiologicalSex) changedFields.add("biologicalSex");
+    memory.biologicalSex = nextBiologicalSex;
+  }
+  if (typeof merged.trainingLevel === "string") {
+    setStringField("trainingLevel", merged.trainingLevel);
+    if (typeof merged.trainingStatus !== "string") setStringField("trainingStatus", merged.trainingLevel);
+  }
+  if (typeof merged.trainingStatus === "string") setStringField("trainingStatus", merged.trainingStatus);
+  if (typeof merged.trainingGoal === "string") setStringField("trainingGoal", merged.trainingGoal);
+  if (typeof merged.preferredTrainingLocation === "string") setStringField("preferredTrainingLocation", merged.preferredTrainingLocation);
+  if (typeof merged.trainingPathology === "string") setStringField("trainingPathology", merged.trainingPathology);
+  const countryChanged = typeof merged.country === "string" && memory.country !== merged.country;
+  if (typeof merged.country === "string") setStringField("country", merged.country);
+  if (typeof merged.countryCode === "string") {
+    const nextCountryCode = merged.countryCode.trim().toUpperCase();
+    if (/^[A-Z]{2}$/.test(nextCountryCode)) setStringField("countryCode", nextCountryCode);
+  } else if (countryChanged && memory.countryCode) {
+    memory.countryCode = undefined;
+    changedFields.add("countryCode");
+  }
+  if (typeof merged.city === "string") setStringField("city", merged.city);
   const nextHeightCm = normalizeIntegerInRange(merged.heightCm, 100, 250);
-  if (nextHeightCm !== undefined) memory.heightCm = nextHeightCm;
+  if (nextHeightCm !== undefined) {
+    if (memory.heightCm !== nextHeightCm) changedFields.add("heightCm");
+    memory.heightCm = nextHeightCm;
+  }
   const nextWeightKg = normalizeDecimalInRange(merged.weightKg, 30, 300);
-  if (nextWeightKg !== undefined) memory.weightKg = nextWeightKg;
-  if (typeof merged.foodRestrictions === "string") memory.foodRestrictions = merged.foodRestrictions;
+  if (nextWeightKg !== undefined) {
+    if (memory.weightKg !== nextWeightKg) changedFields.add("weightKg");
+    memory.weightKg = nextWeightKg;
+  }
+  if (typeof merged.foodRestrictions === "string") setStringField("foodRestrictions", merged.foodRestrictions);
+  await invalidateDietIfNeeded(memory, changedFields);
   saveMemory(memory);
 }
 
