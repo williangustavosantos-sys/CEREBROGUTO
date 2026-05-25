@@ -3569,6 +3569,11 @@ function validateDietAgainstRestrictions(
       issues.push("contains peanut despite peanut restriction");
     }
   }
+  if (hasRestriction(["ovo", "egg", "uovo", "uova"])) {
+    if (hasFood(["ovo", "ovos", "egg", "eggs", "uovo", "uova", "frittata", "omelete", "omelet"])) {
+      issues.push("contains egg despite egg restriction");
+    }
+  }
   if (hasRestriction(["peixe", "fish", "pesce", "frutos do mar", "frutti di mare", "marisco", "camarão", "camarao", "shrimp", "seafood", "shellfish", "gamberi", "salmão", "salmao", "salmon", "atum", "tuna", "tonno"])) {
     if (hasFood(["peixe", "fish", "pesce", "camarão", "camarao", "shrimp", "gamberi", "marisco", "seafood", "shellfish", "salmão", "salmao", "salmon", "atum", "tuna", "tonno", "bacalhau", "cod", "merluzzo", "tilapia", "tilápia"])) {
       issues.push("contains seafood/fish despite seafood restriction");
