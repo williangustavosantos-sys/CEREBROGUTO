@@ -122,6 +122,13 @@ function normalizeForLocalResolution(value: string): string {
 
 function resolveKnownFoodRestrictionLocally(rawValue: string, now: string): ResolvedField | null {
   const normalized = normalizeForLocalResolution(rawValue);
+  const normalizedWords = normalized.split(/\s+/).filter(Boolean);
+  const hasPattern = (patterns: string[]) =>
+    patterns.some((pattern) =>
+      pattern.includes(" ")
+        ? normalized.includes(pattern)
+        : normalizedWords.includes(pattern)
+    );
   // Fallback técnico para restrições estruturadas e inequívocas quando o resolver IA
   // estiver indisponível/quota. Não substitui o classificador semântico.
   const lactosePatterns = [
@@ -138,7 +145,7 @@ function resolveKnownFoodRestrictionLocally(rawValue: string, now: string): Reso
     "intolleranza al lattosio",
   ];
 
-  if (lactosePatterns.some((pattern) => normalized.includes(pattern))) {
+  if (hasPattern(lactosePatterns)) {
     return {
       field: "foodRestriction",
       rawValue,
@@ -174,12 +181,41 @@ function resolveKnownFoodRestrictionLocally(rawValue: string, now: string): Reso
     "gamberi",
   ];
 
-  if (fishAndSeafoodPatterns.some((pattern) => normalized.includes(pattern))) {
+  if (hasPattern(fishAndSeafoodPatterns)) {
     return {
       field: "foodRestriction",
       rawValue,
       rawValueHash: hashRaw(rawValue),
       normalizedValue: "fish_seafood_restriction",
+      riskTags: ["food_restriction"],
+      confidence: 0.9,
+      status: "clear",
+      resolvedAt: now,
+    };
+  }
+
+  const eggPatterns = [
+    "nao como ovo",
+    "não como ovo",
+    "sem ovo",
+    "alergia a ovo",
+    "alergico a ovo",
+    "alérgico a ovo",
+    "ovo",
+    "egg",
+    "no egg",
+    "uovo",
+    "uova",
+    "senza uovo",
+    "senza uova",
+  ];
+
+  if (hasPattern(eggPatterns)) {
+    return {
+      field: "foodRestriction",
+      rawValue,
+      rawValueHash: hashRaw(rawValue),
+      normalizedValue: "egg_restriction",
       riskTags: ["food_restriction"],
       confidence: 0.9,
       status: "clear",
