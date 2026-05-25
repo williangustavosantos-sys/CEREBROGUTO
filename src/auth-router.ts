@@ -6,6 +6,7 @@ import {
   getRequestActorAccess,
   normalizeAccessTeamId,
   requireAuth,
+  resolveBlockedAccessCode,
   signToken,
   verifyToken,
 } from "./auth-middleware.js";
@@ -205,7 +206,14 @@ authRouter.post("/user/login", async (req: Request, res: Response) => {
 
   const activeAccess = await requireActiveUserAccessAsync(user.userId);
   if (!activeAccess) {
-    res.status(403).json({ message: "Acesso pausado ou expirado.", code: "ACCESS_PAUSED" });
+    const code = resolveBlockedAccessCode(user);
+    res.status(403).json({
+      message:
+        code === "SUBSCRIPTION_EXPIRED"
+          ? "Assinatura expirada ou cancelada."
+          : "Acesso pausado ou inativo.",
+      code,
+    });
     return;
   }
 

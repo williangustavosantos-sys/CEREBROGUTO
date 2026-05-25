@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { GUTO_CORE_TEAM_ID } from "./team-store.js";
 import {
   getAllUserAccess,
+  getEffectiveUserAccess,
   getUserAccess,
   requireActiveUserAccess,
   type UserAccess,
@@ -167,6 +168,21 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   next();
 }
 
+// Distingue o motivo do bloqueio de acesso para o frontend rotear a copy certa.
+// Assinatura expirada/cancelada/vencida → SUBSCRIPTION_EXPIRED; demais (inativo,
+// pausado, arquivado, pendente) → ACCESS_PAUSED. NÃO trata morte do GUTO.
+export function resolveBlockedAccessCode(
+  access: Pick<UserAccess, "subscriptionStatus" | "subscriptionEndsAt"> | null | undefined
+): "ACCESS_PAUSED" | "SUBSCRIPTION_EXPIRED" {
+  if (!access) return "ACCESS_PAUSED";
+  const expiredStatus =
+    access.subscriptionStatus === "expired" || access.subscriptionStatus === "cancelled";
+  const endedInPast =
+    access.subscriptionEndsAt != null &&
+    new Date(access.subscriptionEndsAt).getTime() < Date.now();
+  return expiredStatus || endedInPast ? "SUBSCRIPTION_EXPIRED" : "ACCESS_PAUSED";
+}
+
 // Requires valid JWT AND active subscription.
 export function requireActiveUser(req: Request, res: Response, next: NextFunction): void {
   if (!req.gutoUser) {
@@ -176,9 +192,13 @@ export function requireActiveUser(req: Request, res: Response, next: NextFunctio
 
   const access = requireActiveUserAccess(req.gutoUser.userId);
   if (!access) {
+    const code = resolveBlockedAccessCode(getEffectiveUserAccess(req.gutoUser.userId));
     res.status(403).json({
-      message: "Acesso pausado ou expirado.",
-      code: "ACCESS_PAUSED",
+      message:
+        code === "SUBSCRIPTION_EXPIRED"
+          ? "Assinatura expirada ou cancelada."
+          : "Acesso pausado ou inativo.",
+      code,
     });
     return;
   }
