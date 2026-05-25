@@ -3408,7 +3408,35 @@ function missingDietProfileMessage(language: GutoLanguage, missing: string[]): s
   return `Ainda não tenho tudo pra montar tua dieta direito: ${fields}. Ajusta isso na calibragem e eu fecho o plano sem chute.`;
 }
 
-function dietGenerationFailedMessage(language: GutoLanguage): string {
+type DietGenerationFailureReason =
+  | "model_unavailable"
+  | "model_response_invalid"
+  | "calorie_validation"
+  | "food_restriction"
+  | "location"
+  | "internal";
+
+interface DietGenerationFailure {
+  reason: DietGenerationFailureReason;
+  issues: string[];
+}
+
+function dietGenerationFailedMessage(language: GutoLanguage, reason?: DietGenerationFailureReason): string {
+  if (reason === "food_restriction") {
+    if (language === "en-US") return "I blocked this diet because it included something you said you do not eat. Generate it again so I can rebuild it clean.";
+    if (language === "it-IT") return "Ho bloccato questa dieta perché includeva qualcosa che hai detto di non mangiare. Rigenerala così la rifaccio pulita.";
+    return "Bloqueei essa dieta porque ela trouxe algo que você disse que não come. Gera de novo que eu refaço limpo.";
+  }
+  if (reason === "location") {
+    if (language === "en-US") return "I blocked this diet because it used food that does not match where you live. Generate it again and I will keep it local.";
+    if (language === "it-IT") return "Ho bloccato questa dieta perché usava alimenti che non battono con dove vivi. Rigenerala e la tengo locale.";
+    return "Bloqueei essa dieta porque ela usou alimento que não bate com onde você mora. Gera de novo que eu mantenho local.";
+  }
+  if (reason === "calorie_validation") {
+    if (language === "en-US") return "I blocked this diet because the calories and macros did not close safely. Generate it again.";
+    if (language === "it-IT") return "Ho bloccato questa dieta perché calorie e macro non tornavano in sicurezza. Rigenerala.";
+    return "Bloqueei essa dieta porque calorias e macros não fecharam com segurança. Gera de novo.";
+  }
   if (language === "en-US") {
     return "My system shorted out while building your diet. Hold on and try again in a few seconds.";
   }
@@ -8166,6 +8194,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
   const DIET_ATTEMPT_TIMEOUT_MS = 20_000;
   const maxRetries = 3;
   let meals: DietMeal[] = [];
+  let lastFailure: DietGenerationFailure | null = null;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
@@ -8197,12 +8226,14 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
       } catch (fetchErr: any) {
         clearTimeout(abortTimer);
         console.warn(`[GUTO] diet fetch failed on attempt ${attempt}: ${fetchErr?.message || fetchErr}`);
+        lastFailure = { reason: "model_unavailable", issues: [String(fetchErr?.message || fetchErr || "fetch failed")] };
         continue;
       }
 
       if (!geminiRes.ok) {
         const errBody = await geminiRes.text().catch(() => "");
         console.error(`[GUTO] diet HTTP error on attempt ${attempt}: ${geminiRes.status} — ${errBody.slice(0, 300)}`);
+        lastFailure = { reason: "model_unavailable", issues: [`HTTP ${geminiRes.status}`] };
         continue;
       }
 
@@ -8215,6 +8246,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
 
       if (!rawText) {
         console.warn(`[GUTO] diet: empty response on attempt ${attempt}. finishReason=${finishReason}`);
+        lastFailure = { reason: "model_response_invalid", issues: ["empty model response"] };
         continue;
       }
 
@@ -8228,10 +8260,12 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
             parsed = JSON.parse(tryCleanJson(jsonMatch[0]));
           } catch {
             console.warn(`[GUTO] diet JSON parse failed on attempt ${attempt}: ${(parseErr as Error).message}. head: ${rawText.slice(0, 300)}`);
+            lastFailure = { reason: "model_response_invalid", issues: ["invalid diet JSON"] };
             continue;
           }
         } else {
           console.warn(`[GUTO] diet JSON parse failed on attempt ${attempt}: ${(parseErr as Error).message}. head: ${rawText.slice(0, 300)}`);
+          lastFailure = { reason: "model_response_invalid", issues: ["invalid diet JSON"] };
           continue;
         }
       }
@@ -8240,6 +8274,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
       const mealsArray = Array.isArray(parsed.meals) ? parsed.meals : Array.isArray(parsed.mealPlan) ? parsed.mealPlan : [];
       if (mealsArray.length === 0) {
         console.warn(`[GUTO] diet: empty meals array on attempt ${attempt}. finishReason=${finishReason}. keys: ${Object.keys(parsed).join(",")}`);
+        lastFailure = { reason: "model_response_invalid", issues: ["empty meals array"] };
         continue;
       }
 
@@ -8252,6 +8287,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
       const calorieValidation = validateDietCalories(calorieCheckedMeals, macros.targetKcal);
       if (!calorieValidation.valid) {
         console.warn(`[GUTO] diet calorie validation failed on attempt ${attempt}:`, calorieValidation.issues);
+        lastFailure = { reason: "calorie_validation", issues: calorieValidation.issues };
         continue;
       }
 
@@ -8261,6 +8297,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
       );
       if (restrictionIssues.length > 0) {
         console.warn(`[GUTO] diet restriction validation failed on attempt ${attempt}:`, restrictionIssues);
+        lastFailure = { reason: "food_restriction", issues: restrictionIssues };
         continue;
       }
 
@@ -8271,6 +8308,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
       );
       if (locationIssues.length > 0) {
         console.warn(`[GUTO] diet location validation failed on attempt ${attempt}:`, locationIssues);
+        lastFailure = { reason: "location", issues: locationIssues };
         continue;
       }
 
@@ -8279,16 +8317,24 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
       break;
     } catch (err) {
       console.error(`[GUTO] diet attempt ${attempt} error:`, err);
+      lastFailure = { reason: "internal", issues: [err instanceof Error ? err.message : String(err)] };
     }
   }
 
   if (!meals.length) {
     memory.dietGenerationStatus = "failed";
-    appendMemoryAudit(memory, "diet_generated", ["dietGenerationStatus"], "Geração de dieta falhou após validações.");
+    appendMemoryAudit(
+      memory,
+      "diet_generated",
+      ["dietGenerationStatus"],
+      `Geração de dieta falhou após validações${lastFailure ? `: ${lastFailure.reason}.` : "."}`
+    );
     commitMemoryDecision(memory);
     return res.status(500).json({
       error: "diet_generation_failed",
-      message: dietGenerationFailedMessage(language),
+      reason: lastFailure?.reason || "internal",
+      issues: lastFailure?.issues || [],
+      message: dietGenerationFailedMessage(language, lastFailure?.reason),
     });
   }
 
