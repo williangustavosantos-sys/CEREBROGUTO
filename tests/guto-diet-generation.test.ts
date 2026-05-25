@@ -34,7 +34,7 @@ function authHeaders(userId: string) {
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 }
 
-function dietModelResponse() {
+function defaultDietModelResponse() {
   return {
     candidates: [
       {
@@ -105,6 +105,21 @@ function dietModelResponse() {
   };
 }
 
+let dietModelResponse = defaultDietModelResponse;
+
+function dietModelResponseWithBrazilianStapleOutsideBrazil() {
+  const response = defaultDietModelResponse();
+  const part = response.candidates[0]?.content.parts[0];
+  assert.ok(part);
+  const parsed = JSON.parse(part.text) as {
+    meals: Array<{ foods: Array<{ name: string; quantity: string; kcal: number }> }>;
+  };
+  parsed.meals[0].foods[0].name = "Tapioca";
+  parsed.meals[0].foods[0].quantity = "100g";
+  part.text = JSON.stringify(parsed);
+  return response;
+}
+
 describe("diet generation contract", () => {
   before(async () => {
     process.env.GUTO_MEMORY_FILE = testMemoryFile;
@@ -135,6 +150,7 @@ describe("diet generation contract", () => {
   });
 
   beforeEach(() => {
+    dietModelResponse = defaultDietModelResponse;
     writeFileSync(testMemoryFile, JSON.stringify({}, null, 2));
     rmSync(testDietFile, { force: true });
   });
@@ -261,6 +277,36 @@ describe("diet generation contract", () => {
     assert.equal(res.status, 422);
     const body = (await res.json()) as { message: string };
     assert.match(body.message, /calibragem|montar tua dieta/i);
+  });
+
+  it("recusa comida brasileira difícil de achar quando país é Itália mesmo com app em português", async () => {
+    const userId = "diet-italy-portuguese-no-tapioca";
+    dietModelResponse = dietModelResponseWithBrazilianStapleOutsideBrazil;
+    writeMemory(userId, {
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      trainingLevel: "consistent",
+      trainingGoal: "muscle_gain",
+      country: "Italia",
+      countryCode: "IT",
+      city: "Roma",
+      foodRestrictions: "none",
+      resolvedFields: {
+        foodRestriction: { rawValue: "none", status: "clear", normalizedValue: "none" },
+      },
+    });
+
+    const res = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "pt-BR" }),
+    });
+
+    assert.equal(res.status, 500);
+    const memory = readMemory(userId);
+    assert.equal(memory.dietGenerationStatus, "failed");
   });
 
   it("GET /guto/diet devolve plano após generate", async () => {

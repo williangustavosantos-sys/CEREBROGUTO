@@ -3585,6 +3585,44 @@ function validateDietAgainstRestrictions(
   return issues;
 }
 
+function validateDietAgainstLocation(
+  meals: DietMeal[],
+  country: string,
+  countryCode?: string
+): string[] {
+  const code = countryCode?.trim().toUpperCase();
+  const countryKey = normalize(country || "");
+  const isBrazil = code === "BR" || countryKey === "brasil" || countryKey === "brazil";
+  if (isBrazil) return [];
+
+  const blockedBrazilianStaples = [
+    "tapioca",
+    "acai",
+    "açaí",
+    "farofa",
+    "cupuacu",
+    "cupuaçu",
+    "queijo coalho",
+    "farinha de mandioca",
+    "cuscuz nordestino",
+    "feijao preto",
+    "feijão preto",
+  ];
+
+  const issues: string[] = [];
+  meals.forEach((meal) => {
+    meal.foods.forEach((food) => {
+      const text = normalize(`${food.name} ${food.quantity}`);
+      const matched = blockedBrazilianStaples.find((term) => text.includes(normalize(term)));
+      if (matched) {
+        issues.push(`contains hard-to-find Brazilian staple outside Brazil: ${matched}`);
+      }
+    });
+  });
+
+  return issues;
+}
+
 const NO_TRAINING_LIMITATION_EXACT = new Set([
   "nao",
   "não",
@@ -8204,6 +8242,16 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
       );
       if (restrictionIssues.length > 0) {
         console.warn(`[GUTO] diet restriction validation failed on attempt ${attempt}:`, restrictionIssues);
+        continue;
+      }
+
+      const locationIssues = validateDietAgainstLocation(
+        calorieCheckedMeals,
+        userCountry,
+        memory.countryCode
+      );
+      if (locationIssues.length > 0) {
+        console.warn(`[GUTO] diet location validation failed on attempt ${attempt}:`, locationIssues);
         continue;
       }
 
