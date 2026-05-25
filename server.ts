@@ -3313,7 +3313,14 @@ async function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["m
   if (typeof patch.country === "string" && patch.country.trim()) {
     const next = normalizeMemoryValue(patch.country);
     if (next !== memory.country) freeFieldChanged = true;
-    if (next !== memory.country) changedFields.add("country");
+    if (next !== memory.country) {
+      changedFields.add("country");
+      const nextCountryCode = typeof patch.countryCode === "string" ? patch.countryCode.trim().toUpperCase() : "";
+      if (!/^[A-Z]{2}$/.test(nextCountryCode) && memory.countryCode) {
+        changedFields.add("countryCode");
+        memory.countryCode = undefined;
+      }
+    }
     memory.country = next;
     if (next !== memory.resolvedFields?.country?.rawValue) {
       memory.resolvedFields = { ...memory.resolvedFields, country: undefined };
@@ -6864,7 +6871,14 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
     if (!b.trainingLimitations) memory.trainingLimitations = b.trainingPathology;
   }
   if (b.country) {
-    if (memory.country !== b.country) changedFields.add("country");
+    if (memory.country !== b.country) {
+      changedFields.add("country");
+      const nextCountryCode = typeof b.countryCode === "string" ? b.countryCode.trim().toUpperCase() : "";
+      if (!/^[A-Z]{2}$/.test(nextCountryCode) && memory.countryCode) {
+        changedFields.add("countryCode");
+        memory.countryCode = undefined;
+      }
+    }
     memory.country = b.country;
   }
   if (b.countryCode) {
