@@ -305,6 +305,10 @@ describe("diet generation contract", () => {
     });
 
     assert.equal(res.status, 500);
+    const body = (await res.json()) as { reason?: string; issues?: string[]; message?: string };
+    assert.equal(body.reason, "location");
+    assert.ok(body.issues?.some((issue) => issue.includes("tapioca")));
+    assert.match(body.message || "", /onde você mora|local/i);
     const memory = readMemory(userId);
     assert.equal(memory.dietGenerationStatus, "failed");
   });
@@ -331,8 +335,11 @@ describe("diet generation contract", () => {
     });
 
     assert.equal(res.status, 500);
-    const body = (await res.json()) as { error?: string };
+    const body = (await res.json()) as { error?: string; reason?: string; issues?: string[]; message?: string };
     assert.equal(body.error, "diet_generation_failed");
+    assert.equal(body.reason, "food_restriction");
+    assert.ok(body.issues?.some((issue) => issue.includes("seafood/fish")));
+    assert.match(body.message || "", /não come|do not eat/i);
     const memory = readMemory(userId);
     assert.equal(memory.dietGenerationStatus, "failed");
   });
@@ -359,8 +366,11 @@ describe("diet generation contract", () => {
     });
 
     assert.equal(res.status, 500);
-    const body = (await res.json()) as { error?: string };
+    const body = (await res.json()) as { error?: string; reason?: string; issues?: string[]; message?: string };
     assert.equal(body.error, "diet_generation_failed");
+    assert.equal(body.reason, "food_restriction");
+    assert.ok(body.issues?.some((issue) => issue.includes("egg")));
+    assert.match(body.message || "", /não come|do not eat/i);
     const memory = readMemory(userId);
     assert.equal(memory.dietGenerationStatus, "failed");
   });
