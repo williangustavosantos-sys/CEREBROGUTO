@@ -189,6 +189,21 @@ describe("diet invalidation when calibration changes", () => {
     assert.equal(hasProfileSyncAudit(memory, "countryCode"), true);
   });
 
+  it("limpa countryCode antigo quando país muda sem novo código técnico via /guto/memory", async () => {
+    const userId = "diet-invalidation-country-clears-code";
+    writeMemory(userId, { country: "Brasil", countryCode: "BR", dietGenerationStatus: "generated" });
+
+    const res = await postMemory(userId, { country: "Italia" });
+
+    assert.equal(res.status, 200);
+    const memory = readMemory(userId);
+    assert.equal(memory.country, "Italia");
+    assert.equal(memory.countryCode, undefined);
+    assert.equal(memory.dietGenerationStatus, "needs_clarification");
+    assert.equal(hasProfileSyncAudit(memory, "country"), true);
+    assert.equal(hasProfileSyncAudit(memory, "countryCode"), true);
+  });
+
   it("não invalida dieta quando muda campo fora da lista nutricional", async () => {
     const userId = "diet-invalidation-name";
     writeMemory(userId, { name: "Will", language: "pt-BR", dietGenerationStatus: "generated" });
@@ -232,5 +247,20 @@ describe("diet invalidation when calibration changes", () => {
     assert.equal(saved.weightKg, 83);
     assert.equal(saved.dietGenerationStatus, "needs_clarification");
     assert.equal(hasProfileSyncAudit(saved, "weightKg"), true);
+  });
+
+  it("limpa countryCode antigo quando país muda sem novo código técnico pelo chat", async () => {
+    const userId = "diet-invalidation-chat-country-clears-code";
+    writeMemory(userId, { country: "Brasil", countryCode: "BR", dietGenerationStatus: "generated" });
+    const memory = backend.getMemory(userId);
+
+    await backend.applyMemoryPatch(memory, { country: "Italia" });
+
+    const saved = readMemory(userId);
+    assert.equal(saved.country, "Italia");
+    assert.equal(saved.countryCode, undefined);
+    assert.equal(saved.dietGenerationStatus, "needs_clarification");
+    assert.equal(hasProfileSyncAudit(saved, "country"), true);
+    assert.equal(hasProfileSyncAudit(saved, "countryCode"), true);
   });
 });
