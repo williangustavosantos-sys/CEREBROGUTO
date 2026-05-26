@@ -3849,6 +3849,35 @@ function findLastExerciseDoubt(history: GutoHistoryItem[] = [], plan?: WorkoutPl
   );
 }
 
+/**
+ * Resolve o exercício atual a partir do MARCADOR DE CONTEXTO que o app injeta
+ * quando o usuário entra pelo "?" do exercício (`Exercise: "X" (canonical PT: Y)`).
+ * É o caminho confiável: o front manda o gatilho como "Tenho uma dúvida sobre X"
+ * (que não casa o formato "Dúvida:" do findLastExerciseDoubt), mas SEMPRE embute
+ * o marcador. Sem isto, "equipamento ocupado" não acha o exercício e não substitui.
+ */
+function findExerciseFromContextMarker(input: string | undefined, plan?: WorkoutPlan | null): WorkoutExercise | null {
+  if (!plan?.exercises?.length || !input || !input.includes(EXERCISE_CONTEXT_MARKER)) return null;
+  const nameMatch = input.match(/Exercise:\s*"([^"]+)"/i);
+  const canonicalMatch = input.match(/canonical PT:\s*([^)]+)\)/i);
+  const candidates = [nameMatch?.[1], canonicalMatch?.[1]]
+    .filter((value): value is string => Boolean(value && value.trim()))
+    .map((value) => normalize(value));
+  if (candidates.length === 0) return null;
+  for (const candidate of candidates) {
+    const exact = plan.exercises.find((exercise) => normalize(exercise.name) === candidate);
+    if (exact) return exact;
+  }
+  for (const candidate of candidates) {
+    const fuzzy = plan.exercises.find((exercise) => {
+      const exName = normalize(exercise.name);
+      return candidate.includes(exName) || exName.includes(candidate);
+    });
+    if (fuzzy) return fuzzy;
+  }
+  return null;
+}
+
 function buildEquipmentBusyFallbackResponse({
   input,
   history,
@@ -3862,7 +3891,7 @@ function buildEquipmentBusyFallbackResponse({
 }): GutoModelResponse | null {
   if (!isEquipmentBusyMessage(input)) return null;
   const plan = memory.lastWorkoutPlan;
-  const exercise = findLastExerciseDoubt(history, plan);
+  const exercise = findLastExerciseDoubt(history, plan) || findExerciseFromContextMarker(input, plan);
   if (!exercise) {
     const copy: Record<GutoLanguage, string> = {
       "pt-BR": "Fechado. Me diz qual aparelho travou que eu te dou a troca agora, sem perder o treino.",
