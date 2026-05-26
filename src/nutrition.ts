@@ -383,6 +383,59 @@ export function validateDietCalories(meals: DietMeal[], targetKcal: number): { v
   return { valid: issues.length === 0, dailyTotal, issues };
 }
 
+/**
+ * Reparo determinístico de calorias (Fase 3 — estabilização da dieta).
+ *
+ * O cérebro escolhe os alimentos certos, mas erra a ARITMÉTICA do total diário.
+ * Em vez de bloquear o aluno num loop de "regenerar", escalamos o plano inteiro
+ * proporcionalmente (kcal + macros + porção) para fechar a meta calórica. Mantém
+ * o plano COERENTE — a porção acompanha a kcal, então o aluno vê números reais.
+ *
+ * Retorna `null` apenas quando o desvio é grande demais para ser arredondamento
+ * (fator de escala fora de [0.6, 1.7]), ou seja, estruturalmente inseguro/impossível.
+ * Aí sim a falha é honesta. Não inventa alimento, não esconde erro.
+ */
+export function scaleDietToTarget(meals: DietMeal[], targetKcal: number): DietMeal[] | null {
+  if (!Array.isArray(meals) || meals.length === 0 || targetKcal <= 0) return null;
+
+  const dailyTotal = meals.reduce(
+    (sum, meal) => sum + meal.foods.reduce((acc, food) => acc + Math.round(Number(food.kcal) || 0), 0),
+    0
+  );
+  if (dailyTotal <= 0) return null;
+
+  // Já dentro da margem segura (±80 kcal) → nada a reparar.
+  if (Math.abs(dailyTotal - targetKcal) <= 80) return meals;
+
+  const factor = targetKcal / dailyTotal;
+  // Fator absurdo = não é arredondamento; é plano estruturalmente fora. Falha honesta.
+  if (factor < 0.6 || factor > 1.7) return null;
+
+  const scaleQuantity = (quantity: string): string => {
+    const parsed = parseQuantityValue(quantity);
+    if (!parsed || parsed.value <= 0) return quantity;
+    const isUnit = /^(un|unit|unidade|pcs?)/i.test(parsed.unit);
+    const scaled = parsed.value * factor;
+    if (isUnit) {
+      return `${Math.max(1, Math.round(scaled))} ${parsed.unit}`;
+    }
+    // gramas/ml: arredonda para múltiplo de 5, mínimo 5
+    return `${Math.max(5, Math.round(scaled / 5) * 5)}${parsed.unit}`;
+  };
+
+  return meals.map((meal) => {
+    const foods = meal.foods.map((food) => ({
+      ...food,
+      kcal: Math.round((Number(food.kcal) || 0) * factor),
+      proteinG: typeof food.proteinG === "number" ? Math.round(food.proteinG * factor) : food.proteinG,
+      carbsG: typeof food.carbsG === "number" ? Math.round(food.carbsG * factor) : food.carbsG,
+      fatG: typeof food.fatG === "number" ? Math.round(food.fatG * factor) : food.fatG,
+      quantity: scaleQuantity(food.quantity),
+    }));
+    return { ...meal, foods, totalKcal: foods.reduce((acc, food) => acc + food.kcal, 0) };
+  });
+}
+
 // ─── Gemini prompt builder ─────────────────────────────────────────────────────
 
 export function buildDietPrompt(
