@@ -3671,6 +3671,11 @@ function validateDietAgainstLocation(
   const isBrazil = code === "BR" || countryKey === "brasil" || countryKey === "brazil";
   if (isBrazil) return [];
 
+  // Lista realista: só alimentos GENUINAMENTE difíceis de achar fora do Brasil.
+  // Feijão (preto inclusive) saiu da lista — é vendido normalmente na Europa
+  // (fagioli neri) e na maioria dos mercados, então bloqueá-lo gerava falso
+  // bloqueio de localidade. Reparáveis (ver repairDietLocation) x irrecuperáveis
+  // (ex.: cupuaçu, sem equivalente local de confiança) são tratados depois.
   const blockedBrazilianStaples = [
     "tapioca",
     "acai",
@@ -3681,8 +3686,6 @@ function validateDietAgainstLocation(
     "queijo coalho",
     "farinha de mandioca",
     "cuscuz nordestino",
-    "feijao preto",
-    "feijão preto",
   ];
 
   const issues: string[] = [];
@@ -3697,6 +3700,140 @@ function validateDietAgainstLocation(
   });
 
   return issues;
+}
+
+// ─── Reparo determinístico de localidade (Fase 3J) ────────────────────────────
+// Regra de produto (DIETA canônica): alimento fora da localidade deve ser
+// SUBSTITUÍDO por um equivalente local seguro ANTES de bloquear. O bloqueio é o
+// último recurso, reservado a itens genuinamente exóticos sem equivalente local
+// de confiança (ex.: cupuaçu). O reparo preserva a refeição, as kcal/macros do
+// alimento (só troca o nome por um equivalente da mesma função nutricional) e
+// NUNCA introduz alimento proibido pelo NÃO COMO.
+
+type LocalSubCategory = "starch" | "fruit" | "cheese";
+
+// Staple brasileiro (texto normalizado) → categoria de substituição. Itens que
+// o validador de localidade bloqueia mas que NÃO têm entrada aqui são exóticos
+// reais (sem equivalente local confiável) e seguem para bloqueio honesto.
+const BRAZILIAN_STAPLE_SUBSTITUTION: Record<string, LocalSubCategory> = {
+  tapioca: "starch",
+  "farinha de mandioca": "starch",
+  "cuscuz nordestino": "starch",
+  farofa: "starch",
+  acai: "fruit",
+  "açaí": "fruit",
+  "queijo coalho": "cheese",
+};
+
+// Equivalentes locais por categoria, em ordem de preferência. São alimentos
+// fáceis de achar em qualquer mercado normal. O safe-pick escolhe o primeiro
+// que passa pela validação de restrição do usuário, então a ordem cobre do mais
+// comum (laticínio/animal) ao mais inclusivo (tofu, vegano-seguro).
+const LOCAL_SUBSTITUTES: Record<LocalSubCategory, Array<Record<GutoLanguage, string>>> = {
+  starch: [
+    { "pt-BR": "Batata cozida", "en-US": "Boiled potato", "it-IT": "Patate lesse" },
+    { "pt-BR": "Arroz", "en-US": "Rice", "it-IT": "Riso" },
+  ],
+  fruit: [
+    { "pt-BR": "Banana", "en-US": "Banana", "it-IT": "Banana" },
+    { "pt-BR": "Frutas vermelhas", "en-US": "Mixed berries", "it-IT": "Frutti di bosco" },
+  ],
+  cheese: [
+    { "pt-BR": "Queijo local", "en-US": "Local cheese", "it-IT": "Formaggio locale" },
+    { "pt-BR": "Ovos cozidos", "en-US": "Boiled eggs", "it-IT": "Uova sode" },
+    { "pt-BR": "Tofu", "en-US": "Tofu", "it-IT": "Tofu" },
+  ],
+};
+
+// Reusa o validador de restrição como fonte única de verdade: um nome de
+// alimento é seguro se um plano sintético contendo só ele não dispara nenhuma
+// violação do NÃO COMO do usuário.
+function isFoodNameSafeForRestrictions(name: string, restrictionsRaw?: string): boolean {
+  const probe: DietMeal = {
+    id: "probe",
+    name: "probe",
+    time: "",
+    foods: [{ name, quantity: "", kcal: 0 }],
+    totalKcal: 0,
+    gutoNote: "",
+  };
+  return validateDietAgainstRestrictions([probe], restrictionsRaw).length === 0;
+}
+
+function pickLocalSubstituteName(
+  category: LocalSubCategory,
+  language: GutoLanguage,
+  restrictionsRaw?: string
+): string | null {
+  for (const candidate of LOCAL_SUBSTITUTES[category]) {
+    const name = candidate[language] ?? candidate["pt-BR"];
+    if (isFoodNameSafeForRestrictions(name, restrictionsRaw)) return name;
+  }
+  return null;
+}
+
+interface DietLocationRepairResult {
+  meals: DietMeal[];
+  repaired: boolean;
+  unresolved: string[];
+}
+
+function repairDietLocation(
+  meals: DietMeal[],
+  country: string,
+  countryCode: string | undefined,
+  restrictionsRaw: string | undefined,
+  language: GutoLanguage
+): DietLocationRepairResult {
+  const code = countryCode?.trim().toUpperCase();
+  const countryKey = normalize(country || "");
+  const isBrazil = code === "BR" || countryKey === "brasil" || countryKey === "brazil";
+  if (isBrazil) return { meals, repaired: false, unresolved: [] };
+
+  const stapleTerms = Object.keys(BRAZILIAN_STAPLE_SUBSTITUTION);
+  let repaired = false;
+  const unresolved: string[] = [];
+
+  const newMeals = meals.map((meal) => ({
+    ...meal,
+    foods: meal.foods.map((food) => {
+      const text = normalize(`${food.name} ${food.quantity}`);
+      const matched = stapleTerms.find((term) => text.includes(normalize(term)));
+      if (!matched) return food;
+      const subName = pickLocalSubstituteName(
+        BRAZILIAN_STAPLE_SUBSTITUTION[matched],
+        language,
+        restrictionsRaw
+      );
+      if (!subName) {
+        unresolved.push(`no safe local substitute for "${matched}"`);
+        return food;
+      }
+      repaired = true;
+      // Preserva kcal/macros/quantidade — só troca o alimento pelo equivalente
+      // local da mesma função nutricional, mantendo o fechamento calórico.
+      return { ...food, name: subName };
+    }),
+  }));
+
+  return { meals: newMeals, repaired, unresolved };
+}
+
+// Reforço de retry: em vez de repetir o mesmo prompt após uma rejeição por
+// localidade/restrição, regeneramos uma vez com instruções mais restritas.
+function buildDietRetryReinforcement(
+  failure: DietGenerationFailure | null,
+  profile: NutritionProfile
+): string | undefined {
+  if (!failure) return undefined;
+  if (failure.reason === "location") {
+    const where = `${profile.country}${profile.countryCode ? `, ${profile.countryCode}` : ""}`;
+    return `LOCATION: the previous plan used food that is not easily available in ${where}. Use ONLY foods sold in normal local supermarkets/markets there. Do NOT use hard-to-find foreign or native staples (outside Brazil, never use: tapioca, açaí, farofa, cupuaçu, queijo coalho, farinha de mandioca, cuscuz nordestino).`;
+  }
+  if (failure.reason === "food_restriction") {
+    return `RESTRICTION: the previous plan included a food the user does not eat. Food restrictions: ${profile.foodRestrictions || "none"}. Strictly exclude every conflicting food and its derivatives.`;
+  }
+  return undefined;
 }
 
 const NO_TRAINING_LIMITATION_EXACT = new Set([
@@ -8387,7 +8524,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
   };
 
   const macros = calculateMacros(nutritionProfile);
-  const prompt = buildDietPrompt(nutritionProfile, macros, language);
+  const basePrompt = buildDietPrompt(nutritionProfile, macros, language);
 
   // Use the same configured model that passed the live API check.
   const DIET_MODEL = GEMINI_MODEL;
@@ -8398,6 +8535,13 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
+      // Regenera com prompt mais restrito quando a tentativa anterior caiu por
+      // localidade/restrição, em vez de repetir o mesmo prompt (item 3 do fix).
+      const reinforcement = buildDietRetryReinforcement(lastFailure, nutritionProfile);
+      const prompt = reinforcement
+        ? buildDietPrompt(nutritionProfile, macros, language, reinforcement)
+        : basePrompt;
+
       const controller = new AbortController();
       const abortTimer = setTimeout(() => {
         controller.abort();
@@ -8512,18 +8656,45 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
         continue;
       }
 
-      const locationIssues = validateDietAgainstLocation(
-        calorieCheckedMeals,
-        userCountry,
-        memory.countryCode
-      );
+      // LOCALIDADE — reparo ANTES do bloqueio (Fase 3J): se o plano trouxe
+      // alimento fora da localidade, tentamos substituir por equivalente local
+      // seguro antes de falhar. Bloqueio só é último recurso (item irrecuperável,
+      // ex.: cupuaçu). O reparo nunca pode introduzir alimento proibido.
+      let localizedMeals = calorieCheckedMeals;
+      const locationIssues = validateDietAgainstLocation(localizedMeals, userCountry, memory.countryCode);
       if (locationIssues.length > 0) {
-        console.warn(`[GUTO] diet location validation failed on attempt ${attempt}:`, locationIssues);
-        lastFailure = { reason: "location", issues: locationIssues };
-        continue;
+        const repair = repairDietLocation(
+          localizedMeals,
+          userCountry,
+          memory.countryCode,
+          nutritionProfile.foodRestrictions,
+          language
+        );
+        if (repair.repaired) {
+          localizedMeals = repair.meals;
+          console.log(`[GUTO] diet location repaired on attempt ${attempt}:`, locationIssues);
+        }
+        const remainingLocation = validateDietAgainstLocation(localizedMeals, userCountry, memory.countryCode);
+        const restrictionAfterRepair = validateDietAgainstRestrictions(
+          localizedMeals,
+          nutritionProfile.foodRestrictions
+        );
+        if (remainingLocation.length > 0) {
+          console.warn(`[GUTO] diet location still invalid after repair on attempt ${attempt}:`, remainingLocation);
+          lastFailure = {
+            reason: "location",
+            issues: [...remainingLocation, ...repair.unresolved],
+          };
+          continue;
+        }
+        if (restrictionAfterRepair.length > 0) {
+          console.warn(`[GUTO] diet location repair introduced restriction issue on attempt ${attempt}:`, restrictionAfterRepair);
+          lastFailure = { reason: "food_restriction", issues: restrictionAfterRepair };
+          continue;
+        }
       }
 
-      meals = calorieCheckedMeals;
+      meals = localizedMeals;
       console.log(`[GUTO] diet generated successfully on attempt ${attempt} using ${DIET_MODEL}`);
       break;
     } catch (err) {

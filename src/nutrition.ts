@@ -265,7 +265,7 @@ function normalizeKey(value: string): string {
 
 const COUNTRY_FOOD_HINTS_BY_CODE: Record<string, string> = {
   BR: "Use foods commonly sold in Brazilian supermarkets and markets: arroz, feijão, frango, carne bovina, ovo, aveia, batata-doce, banana, mandioca, legumes, azeite. Regional Brazilian staples are allowed when the user lives in Brazil.",
-  IT: "Use foods commonly sold in Italian supermarkets and markets: pasta, risotto rice, mozzarella, ricotta, parmigiano, prosciutto, bresaola, eggs, seasonal vegetables, legumes, olive oil, tuna in oil, yogurt, bread. Avoid hard-to-find Brazilian staples in Italy: tapioca, açaí, cuscuz nordestino, feijão preto, queijo coalho, farinha de mandioca.",
+  IT: "Use foods commonly sold in Italian supermarkets and markets: pasta, risotto rice, mozzarella, ricotta, parmigiano, prosciutto, bresaola, eggs, seasonal vegetables, legumes (incl. beans/fagioli), olive oil, tuna in oil, yogurt, bread. Avoid hard-to-find Brazilian staples in Italy: tapioca, açaí, cuscuz nordestino, queijo coalho, farinha de mandioca, cupuaçu.",
   US: "Use foods commonly sold in US supermarkets: chicken breast, eggs, oats, Greek yogurt, brown rice, whole wheat bread, broccoli, spinach, sweet potato, tuna, cottage cheese, peanut butter.",
   ES: "Use foods commonly sold in Spanish supermarkets and markets: pollo, huevos, arroz, legumbres, pescado, aceite de oliva, verduras frescas, pan integral, jamón serrano, yogur.",
   PT: "Use foods commonly sold in Portuguese supermarkets and markets: bacalhau, frango, arroz, leguminosas, azeite, ovos, pão, legumes, frutas da época, iogurte.",
@@ -441,7 +441,13 @@ export function scaleDietToTarget(meals: DietMeal[], targetKcal: number): DietMe
 export function buildDietPrompt(
   profile: NutritionProfile,
   macros: DietMacros,
-  language: string
+  language: string,
+  /**
+   * Reforço de retry (Fase 3J): quando a tentativa anterior foi rejeitada por
+   * localidade ou restrição, regeneramos com instruções mais restritas em vez
+   * de repetir o mesmo prompt. Anexado ao final do prompt base.
+   */
+  reinforcement?: string
 ): string {
   // App language — all text output must be in this language
   const langLabel =
@@ -520,5 +526,9 @@ CALORIE CONSISTENCY — CRITICAL:
 For every meal, totalKcal MUST equal the exact sum of foods[].kcal.
 The sum of all meal totalKcal values MUST be within ±80 kcal of ${macros.targetKcal}.
 gutoNote: max 12 words, direct friend tone, in ${langLabel}.
-Example structure: {"meals": [{"id":"cafe","name":"...","time":"08:00","foods":[{"name":"...","quantity":"...","kcal":0}],"totalKcal":0,"gutoNote":"..."}]}`;
+Example structure: {"meals": [{"id":"cafe","name":"...","time":"08:00","foods":[{"name":"...","quantity":"...","kcal":0}],"totalKcal":0,"gutoNote":"..."}]}${
+    reinforcement
+      ? `\n\nRETRY REINFORCEMENT — the previous attempt was rejected. Fix exactly this before answering:\n${reinforcement}`
+      : ""
+  }`;
 }
