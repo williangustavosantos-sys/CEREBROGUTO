@@ -54,6 +54,7 @@ import {
   validateAndCorrectPortions,
   normalizeMealCalories,
   validateDietCalories,
+  scaleDietToTarget,
   buildDietPrompt,
   type NutritionProfile,
   type DietMeal,
@@ -8453,10 +8454,21 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
         console.log("[GUTO] diet portion corrections:", issues);
       }
 
-      const calorieCheckedMeals = normalizeMealCalories(correctedMeals);
+      let calorieCheckedMeals = normalizeMealCalories(correctedMeals);
+      // Reparo determinístico ANTES de bloquear (regra de produto): o cérebro
+      // acerta os alimentos mas erra a aritmética do total. Escalamos o plano
+      // proporcionalmente para fechar a meta, em vez de cair em loop de "gere de
+      // novo". Só falha quando o desvio é estruturalmente fora (fator absurdo).
+      const repairedMeals = scaleDietToTarget(calorieCheckedMeals, macros.targetKcal);
+      if (!repairedMeals) {
+        console.warn(`[GUTO] diet calorie out of safe range on attempt ${attempt} (escala inviável)`);
+        lastFailure = { reason: "calorie_validation", issues: ["plano calórico fora da faixa segura para reparo"] };
+        continue;
+      }
+      calorieCheckedMeals = normalizeMealCalories(repairedMeals);
       const calorieValidation = validateDietCalories(calorieCheckedMeals, macros.targetKcal);
       if (!calorieValidation.valid) {
-        console.warn(`[GUTO] diet calorie validation failed on attempt ${attempt}:`, calorieValidation.issues);
+        console.warn(`[GUTO] diet calorie validation failed AFTER repair on attempt ${attempt}:`, calorieValidation.issues);
         lastFailure = { reason: "calorie_validation", issues: calorieValidation.issues };
         continue;
       }

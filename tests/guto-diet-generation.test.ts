@@ -120,6 +120,22 @@ function dietModelResponseWithBrazilianStapleOutsideBrazil() {
   return response;
 }
 
+// Modelo devolve um plano levemente fora da meta calórica (infla ~450 kcal num
+// alimento). Sem reparo, isto bloqueava em "calorie_validation"; com o reparo
+// determinístico, o backend escala e gera (200).
+function dietModelResponseOffByCalories() {
+  const response = defaultDietModelResponse();
+  const part = response.candidates[0]?.content.parts[0];
+  assert.ok(part);
+  const parsed = JSON.parse(part.text) as {
+    meals: Array<{ totalKcal: number; foods: Array<{ name: string; quantity: string; kcal: number }> }>;
+  };
+  parsed.meals[0].foods[0].kcal += 450;
+  parsed.meals[0].totalKcal = parsed.meals[0].foods.reduce((s, f) => s + f.kcal, 0);
+  part.text = JSON.stringify(parsed);
+  return response;
+}
+
 describe("diet generation contract", () => {
   before(async () => {
     process.env.GUTO_MEMORY_FILE = testMemoryFile;
@@ -212,6 +228,41 @@ describe("diet generation contract", () => {
     const memory = readMemory(userId);
     assert.equal(memory.dietGenerationStatus, "generated");
     assert.ok(memory.memoryAudit.some((entry: any) => entry.source === "diet_generated"));
+  });
+
+  it("repara plano levemente fora da meta calórica em vez de bloquear", async () => {
+    const userId = "diet-calorie-repair";
+    dietModelResponse = dietModelResponseOffByCalories;
+    writeMemory(userId, {
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      trainingLevel: "consistent",
+      trainingGoal: "muscle_gain",
+      country: "Italia",
+      countryCode: "IT",
+      foodRestrictions: "none",
+      resolvedFields: {
+        foodRestriction: { rawValue: "none", status: "clear", normalizedValue: "none" },
+      },
+    });
+
+    const res = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "it-IT" }),
+    });
+
+    // NÃO pode bloquear por calorias — o backend repara e gera.
+    assert.equal(res.status, 200);
+    const plan = await res.json() as { meals: Array<{ totalKcal: number; foods: Array<{ kcal: number }> }>; macros: { targetKcal: number } };
+    const dailyTotal = plan.meals.reduce((s, m) => s + m.totalKcal, 0);
+    assert.ok(
+      Math.abs(dailyTotal - plan.macros.targetKcal) <= 80,
+      `após reparo, total (${dailyTotal}) deve fechar com ±80 da meta (${plan.macros.targetKcal})`
+    );
+    assert.equal(readMemory(userId).dietGenerationStatus, "generated");
   });
 
   it("gera dieta mesmo com patologia física ambígua: patologia NÃO bloqueia nem aparece na dieta", async () => {
