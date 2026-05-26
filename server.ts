@@ -333,6 +333,10 @@ interface GutoMemory {
   trainedToday: boolean;
   adaptedMissionToday: boolean;
   lastActiveAt: string;
+  consentHealthFitness?: boolean;
+  acceptedTerms?: boolean;
+  consentAcceptedAt?: string;
+  consentRevokedAt?: string;
   energyLast?: string;
   trainingSchedule?: TrainingScheduleIntent;
   trainingLocation?: string;
@@ -1022,6 +1026,10 @@ export function getMemory(userId: string): GutoMemory {
       trainedToday: completedToday,
       adaptedMissionToday,
       lastActiveAt: existing.lastActiveAt || new Date().toISOString(),
+      consentHealthFitness: Boolean(existing.consentHealthFitness),
+      acceptedTerms: Boolean(existing.acceptedTerms),
+      consentAcceptedAt: typeof existing.consentAcceptedAt === "string" ? existing.consentAcceptedAt : undefined,
+      consentRevokedAt: typeof existing.consentRevokedAt === "string" ? existing.consentRevokedAt : undefined,
       energyLast: existing.energyLast,
       trainingSchedule: existing.trainingSchedule,
       trainingLocation: existing.trainingLocation,
@@ -1087,6 +1095,8 @@ export function getMemory(userId: string): GutoMemory {
     trainedToday: false,
     adaptedMissionToday: false,
     lastActiveAt: new Date().toISOString(),
+    consentHealthFitness: false,
+    acceptedTerms: false,
     trainingSchedule: undefined,
     completedWorkoutDates: [],
     adaptedMissionDates: [],
@@ -6648,6 +6658,43 @@ app.post("/guto/consent/revoke", requireActiveUser, async (req, res) => {
     res.status(500).json({
       message: "Falha ao revogar consentimento. Tente novamente em alguns minutos.",
       code: "GUTO_REVOKE_FAILED",
+    });
+  }
+});
+
+// ─── Consent — Accept (Fase 2A) ──────────────────────────────────────────────
+// Persiste o ACEITE de consentimento no backend, para que o GutoMemory (e o
+// stage router do app) seja a fonte de verdade — não o localStorage. Espelha o
+// /revoke; NÃO toca em calibragem nem em dados físicos. Idempotente.
+app.post("/guto/consent/accept", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
+  try {
+    const store = await readMemoryStoreAsync();
+    const existing = (store[userId] && typeof store[userId] === "object" && !Array.isArray(store[userId]))
+      ? (store[userId] as Record<string, unknown>)
+      : {};
+    const next: Record<string, unknown> = {
+      ...existing,
+      consentHealthFitness: true,
+      acceptedTerms: true,
+      consentAcceptedAt: new Date().toISOString(),
+    };
+    delete next.consentRevokedAt;
+    store[userId] = next;
+    await writeMemoryStoreAsync(store);
+    addLog({
+      action: "consent_accepted",
+      actorUserId: userId,
+      actorRole: req.gutoUser!.role,
+      targetUserId: userId,
+      metadata: {},
+    });
+    res.status(200).json(getMemory(userId));
+  } catch (error) {
+    console.error("[GUTO] consent accept failed", error);
+    res.status(500).json({
+      message: "Falha ao salvar consentimento. Tente novamente em alguns minutos.",
+      code: "GUTO_CONSENT_FAILED",
     });
   }
 });

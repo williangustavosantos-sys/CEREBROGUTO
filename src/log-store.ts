@@ -40,6 +40,7 @@ export type LogAction =
   | "user_deleted"
   | "account_self_deleted"
   | "consent_revoked"
+  | "consent_accepted"
   | "push_dispatch"
   | "billing_checkout_completed"
   | "billing_subscription_updated"
