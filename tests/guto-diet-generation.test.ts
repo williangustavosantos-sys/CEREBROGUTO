@@ -107,17 +107,30 @@ function defaultDietModelResponse() {
 
 let dietModelResponse = defaultDietModelResponse;
 
-function dietModelResponseWithBrazilianStapleOutsideBrazil() {
+function dietModelResponseWithFoodInjected(foodName: string) {
   const response = defaultDietModelResponse();
   const part = response.candidates[0]?.content.parts[0];
   assert.ok(part);
   const parsed = JSON.parse(part.text) as {
     meals: Array<{ foods: Array<{ name: string; quantity: string; kcal: number }> }>;
   };
-  parsed.meals[0].foods[0].name = "Tapioca";
+  // Mantém kcal do slot (300) — só troca o alimento por um staple fora da
+  // localidade, para exercitar a validação/reparo de localidade sem mexer no
+  // fechamento calórico do plano.
+  parsed.meals[0].foods[0].name = foodName;
   parsed.meals[0].foods[0].quantity = "100g";
   part.text = JSON.stringify(parsed);
   return response;
+}
+
+// Staple brasileiro REPARÁVEL fora do Brasil (tem equivalente local seguro).
+function dietModelResponseWithBrazilianStapleOutsideBrazil() {
+  return dietModelResponseWithFoodInjected("Tapioca");
+}
+
+// Item GENUINAMENTE exótico, sem equivalente local de confiança → irrecuperável.
+function dietModelResponseWithUnrepairableExoticOutsideBrazil() {
+  return dietModelResponseWithFoodInjected("Cupuaçu");
 }
 
 // Modelo devolve um plano levemente fora da meta calórica (infla ~450 kcal num
@@ -304,6 +317,9 @@ describe("diet generation contract", () => {
     // Não pode vazar lactose (restrição alimentar real).
     const foodText = JSON.stringify(body.meals).toLowerCase();
     assert.doesNotMatch(foodText, /latte|yogurt|mozzarella|ricotta|parmigiano|leite|queijo/);
+    // Não pode aparecer texto de treino/patologia/limitação dentro da dieta.
+    const wholeBody = JSON.stringify(body).toLowerCase();
+    assert.doesNotMatch(wholeBody, /gambia|patolog|limita(c|ç|z)|limitation|joelho|dor\b/);
 
     const memory = readMemory(userId);
     assert.equal(memory.dietGenerationStatus, "generated");
@@ -359,9 +375,125 @@ describe("diet generation contract", () => {
     assert.match(body.message, /calibragem|montar tua dieta/i);
   });
 
-  it("recusa comida brasileira difícil de achar quando país é Itália mesmo com app em português", async () => {
-    const userId = "diet-italy-portuguese-no-tapioca";
+  it("REPARA comida brasileira fora da localidade (tapioca na Itália) e gera 200 em vez de bloquear", async () => {
+    // Regressão do bug reportado: "Bloqueei essa dieta porque ela usou alimento
+    // que não bate com onde você mora". O comportamento correto agora é REPARAR
+    // (substituir por equivalente local seguro) e devolver plano 200.
+    const userId = "diet-italy-portuguese-tapioca-repair";
     dietModelResponse = dietModelResponseWithBrazilianStapleOutsideBrazil;
+    writeMemory(userId, {
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      trainingLevel: "consistent",
+      trainingGoal: "muscle_gain",
+      country: "Italia",
+      countryCode: "IT",
+      city: "Roma",
+      foodRestrictions: "none",
+      resolvedFields: {
+        foodRestriction: { rawValue: "none", status: "clear", normalizedValue: "none" },
+      },
+    });
+
+    const res = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "pt-BR" }),
+    });
+
+    assert.equal(res.status, 200);
+    const plan = (await res.json()) as {
+      meals: Array<{ totalKcal: number; foods: Array<{ name: string; kcal: number }> }>;
+      macros: { targetKcal: number };
+    };
+    const foodText = JSON.stringify(plan.meals).toLowerCase();
+    // O staple fora da localidade foi removido e trocado por equivalente local.
+    assert.doesNotMatch(foodText, /tapioca|açaí|acai|farofa|cupua|queijo coalho|farinha de mandioca/);
+    assert.match(foodText, /batata|arroz/);
+    // Macros/calorias seguem dentro da margem aceita após o reparo.
+    const dailyTotal = plan.meals.reduce((sum, meal) => sum + meal.totalKcal, 0);
+    assert.ok(
+      Math.abs(dailyTotal - plan.macros.targetKcal) <= 80,
+      `após reparo de localidade, total (${dailyTotal}) deve fechar com ±80 da meta (${plan.macros.targetKcal})`
+    );
+    const memory = readMemory(userId);
+    assert.equal(memory.dietGenerationStatus, "generated");
+  });
+
+  it("REPARA staple fora da localidade respeitando lactose: troca local sem introduzir laticínio", async () => {
+    const userId = "diet-italy-lactose-tapioca-repair";
+    dietModelResponse = dietModelResponseWithBrazilianStapleOutsideBrazil;
+    writeMemory(userId, {
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      trainingLevel: "consistent",
+      trainingGoal: "muscle_gain",
+      country: "Italia",
+      countryCode: "IT",
+      city: "Roma",
+      foodRestrictions: "Lattosio",
+      resolvedFields: {
+        foodRestriction: { rawValue: "Lattosio", status: "clear", normalizedValue: "lactose_intolerance" },
+      },
+    });
+
+    const res = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "pt-BR" }),
+    });
+
+    assert.equal(res.status, 200);
+    const plan = (await res.json()) as { meals: unknown[] };
+    const foodText = JSON.stringify(plan.meals).toLowerCase();
+    assert.doesNotMatch(foodText, /tapioca/);
+    // O reparo não pode introduzir laticínio para quem tem lactose.
+    assert.doesNotMatch(foodText, /latte|yogurt|mozzarella|ricotta|parmigiano|leite|queijo/);
+    assert.equal(readMemory(userId).dietGenerationStatus, "generated");
+  });
+
+  it("regenerar não repete erro por estado/cache: dois generate seguidos retornam 200 (staple reparável)", async () => {
+    const userId = "diet-regenerate-no-stale";
+    dietModelResponse = dietModelResponseWithBrazilianStapleOutsideBrazil;
+    writeMemory(userId, {
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      trainingLevel: "consistent",
+      trainingGoal: "muscle_gain",
+      country: "Italia",
+      countryCode: "IT",
+      city: "Roma",
+      foodRestrictions: "none",
+      resolvedFields: {
+        foodRestriction: { rawValue: "none", status: "clear", normalizedValue: "none" },
+      },
+    });
+
+    const first = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "pt-BR" }),
+    });
+    assert.equal(first.status, 200);
+
+    const second = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "pt-BR" }),
+    });
+    assert.equal(second.status, 200, "regenerar deve voltar 200, não ficar preso no erro anterior");
+    assert.equal(readMemory(userId).dietGenerationStatus, "generated");
+  });
+
+  it("bloqueia (último recurso) só quando o item é genuinamente exótico e irreparável (cupuaçu)", async () => {
+    const userId = "diet-italy-unrepairable-exotic";
+    dietModelResponse = dietModelResponseWithUnrepairableExoticOutsideBrazil;
     writeMemory(userId, {
       biologicalSex: "male",
       userAge: 35,
@@ -387,10 +519,9 @@ describe("diet generation contract", () => {
     assert.equal(res.status, 500);
     const body = (await res.json()) as { reason?: string; issues?: string[]; message?: string };
     assert.equal(body.reason, "location");
-    assert.ok(body.issues?.some((issue) => issue.includes("tapioca")));
+    assert.ok(body.issues?.some((issue) => issue.includes("cupua")));
     assert.match(body.message || "", /onde você mora|local/i);
-    const memory = readMemory(userId);
-    assert.equal(memory.dietGenerationStatus, "failed");
+    assert.equal(readMemory(userId).dietGenerationStatus, "failed");
   });
 
   it("recusa peixe quando NÃO COMO declara peixe ou frutos do mar", async () => {
