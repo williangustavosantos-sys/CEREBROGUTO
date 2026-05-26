@@ -2052,57 +2052,178 @@ export function getExerciseLocations(exercise: CatalogExercise): CatalogLocation
   return ["gym"];
 }
 
+// ─── Camada determinística de segurança (patologia / lesão / limitação) ─────────
+//
+// Regra Soberana 1: a segurança do corpo NÃO pode depender só do prompt do LLM.
+// Antes de o treino ser entregue, exercícios de alto estresse para a região
+// lesionada são REMOVIDOS (ou substituídos por `applySafeExerciseSubstitutions`)
+// de forma determinística.
+//
+// O catálogo carrega `movementPattern`, `tags`, `equipment` e (em poucos casos)
+// `avoidIfTags`. Como a maioria dos exercícios não traz `avoidIfTags` explícito,
+// `getExerciseRiskTags` deriva as regiões de risco a partir desses metadados +
+// id/nome canônico. É uma rede de segurança baseada em termos (permitida pela
+// Regra 3), nunca a única proteção — o LLM curador continua orientado a evitar.
+
+/** Regiões canônicas de risco (alinhadas ao bodyRegion do dirty-data-resolver). */
+export type SafetyRegion =
+  | "knee"
+  | "lower_back"
+  | "shoulder"
+  | "wrist"
+  | "elbow"
+  | "ankle"
+  | "hip";
+
+function stripCatalogAccents(value: string): string {
+  return value.normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
 /**
- * Filters a list of exercise IDs by the user's resolved pathology riskTags
- * and bodyRegion. Pure function — no side-effects, no Gemini calls.
+ * Converte um token livre (bodyRegion resolvido, riskTag ou avoidIfTag) numa
+ * região canônica de risco. Aceita PT/IT/EN e tags do tipo "knee_sensitive".
+ */
+export function toSafetyRegion(token: string): SafetyRegion | undefined {
+  const t = stripCatalogAccents(token.toLowerCase()).trim();
+  if (!t) return undefined;
+  if (/(joelho|knee|ginocchio|patela|menisco)/.test(t)) return "knee";
+  if (/(lombar|coluna|hernia|lower.?back|schiena|disco)/.test(t) || t.startsWith("lower_back") || t.startsWith("lower-back")) return "lower_back";
+  if (/(ombro|shoulder|spalla|manguito|rotador)/.test(t)) return "shoulder";
+  if (/(punho|wrist|polso)/.test(t)) return "wrist";
+  if (/(cotovelo|elbow|gomito)/.test(t)) return "elbow";
+  if (/(tornozelo|ankle|caviglia)/.test(t)) return "ankle";
+  if (/(quadril|\bhip\b|anca|fianco)/.test(t)) return "hip";
+  return undefined;
+}
+
+/**
+ * Regiões corporais de alto estresse que um exercício impõe, derivadas de forma
+ * determinística do catálogo (movementPattern + tags + equipment + id/nome).
+ * Exportada para teste e reuso. NUNCA chama IA.
+ */
+export function getExerciseRiskTags(exercise: CatalogExercise): SafetyRegion[] {
+  const regions = new Set<SafetyRegion>();
+
+  // 1. avoidIfTags explícito é autoritativo.
+  for (const tag of exercise.avoidIfTags ?? []) {
+    const region = toSafetyRegion(tag);
+    if (region) regions.add(region);
+  }
+
+  const hay = stripCatalogAccents(`${exercise.id} ${exercise.canonicalNamePt}`).toLowerCase();
+  const mp = stripCatalogAccents((exercise.movementPattern ?? "").toLowerCase());
+  const tags = (exercise.tags ?? []).map((t) => t.toLowerCase());
+  const equip = (exercise.equipment ?? "").toLowerCase();
+  const group = exercise.muscleGroup;
+  const has = (re: RegExp) => re.test(hay);
+  const tagHas = (...wanted: string[]) => wanted.some((w) => tags.includes(w));
+
+  // Impacto / pliometria / corrida → joelho + tornozelo.
+  if (tagHas("high_impact", "salto") || has(/salto|jump|burpee|polichinelo|corrida|sprint|pliometr/)) {
+    regions.add("knee");
+    regions.add("ankle");
+  }
+  // Agachamento → joelho + quadril (+ lombar se carga axial em barra/smith).
+  if (mp === "agachamento" || has(/agachament|\bsquat\b/)) {
+    regions.add("knee");
+    regions.add("hip");
+    if (equip === "barra" || equip === "smith") regions.add("lower_back");
+  }
+  // Avanço / afundo / búlgaro / step-up → joelho + quadril.
+  if (mp === "unilateral" || has(/afundo|\blunge\b|bulgaro|avanco|sobe_desce|step.?up/)) {
+    regions.add("knee");
+    regions.add("hip");
+  }
+  // Cadeira extensora (leg extension) → joelho.
+  if (has(/extensora|leg.?extension/) || (group === "pernas" && mp === "extensao")) {
+    regions.add("knee");
+  }
+  // Leg press / prensa → joelho.
+  if (has(/legpress|leg.?press|prensa/)) {
+    regions.add("knee");
+  }
+  // Levantamento terra / stiff / good morning / hiperextensão → lombar + quadril.
+  if (has(/terra|deadlift|stiff|good.?morning|levantamento|hiperexten|peso.?morto/)) {
+    regions.add("lower_back");
+    regions.add("hip");
+  }
+  // Remada curvada / cavalinho (tronco fletido, livre) → lombar.
+  if (has(/cavalinho|remada.?curvada/)) {
+    regions.add("lower_back");
+  }
+  // Desenvolvimento / militar / arnold (acima da cabeça) → ombro.
+  if (has(/desenvolvimento|overhead|militar|arnold/)) {
+    regions.add("shoulder");
+  }
+  // Elevações (lateral/frontal) e remada alta / upright row → ombro.
+  if (mp === "elevacao" || has(/remada.?alta|upright/)) {
+    regions.add("shoulder");
+  }
+  // Paralelas / mergulho / dips / gravitron → ombro + punho + cotovelo.
+  if (has(/paralelas|mergulho|\bdips\b|gravitron/)) {
+    regions.add("shoulder");
+    regions.add("wrist");
+    regions.add("elbow");
+  }
+  // Flexão de braço (push-up, apoio nas mãos) → punho + cotovelo.
+  if (exercise.id === "flexao" || has(/push.?up|flexao de braco/)) {
+    regions.add("wrist");
+    regions.add("elbow");
+  }
+  // Tríceps testa (skullcrusher) → cotovelo.
+  if (has(/triceps.?testa|skull/)) {
+    regions.add("elbow");
+  }
+
+  return [...regions];
+}
+
+/**
+ * Filtra IDs de exercício pela região lesionada / riskTags do usuário.
+ * Função pura, determinística — sem efeitos colaterais, sem Gemini.
  *
- * Rules:
- *   - If the exercise declares `avoidIfTags`, exclude when ANY tag is in
- *     userRiskTags OR matches userBodyRegion.
- *   - When the user has a clear bodyRegion (e.g. "knee"), we also avoid
- *     exercises whose movementPattern is heavy load on that region (squat /
- *     lunge / jump for "knee"; deadlift / bridge for "lower_back"; overhead
- *     press / pulldown behind for "shoulder").
+ * Um exercício é REMOVIDO quando:
+ *   - declara `avoidIfTags` que casa com um riskTag bruto OU a região do usuário; ou
+ *   - `getExerciseRiskTags` indica que ele estressa a região lesionada.
  */
 export function filterExercisesBySafety(
   ids: string[],
   options: { userRiskTags?: string[]; userBodyRegion?: string }
 ): string[] {
-  const tags = new Set((options.userRiskTags ?? []).map((t) => t.toLowerCase()));
-  const region = (options.userBodyRegion ?? "").toLowerCase();
-  if (tags.size === 0 && !region) return ids;
+  const rawTags = (options.userRiskTags ?? []).map((t) => t.toLowerCase());
+  const userRegions = new Set<SafetyRegion>();
+  const regionFromBody = options.userBodyRegion ? toSafetyRegion(options.userBodyRegion) : undefined;
+  if (regionFromBody) userRegions.add(regionFromBody);
+  for (const tag of rawTags) {
+    const region = toSafetyRegion(tag);
+    if (region) userRegions.add(region);
+  }
+  const tagSet = new Set(rawTags);
 
-  const dangerByRegion: Record<string, Set<string>> = {
-    knee: new Set([
-      "jump", "deep_squat", "lunge_loaded", "sprint", "high_impact",
-      "agachamento", "afundo", "salto", "corrida", "cardio_intenso",
-    ]),
-    lower_back: new Set([
-      "deadlift", "good_morning", "loaded_bend", "high_impact",
-      "terra", "levantamento", "remada_curvada", "flexao_lombar", "ponte_carregada",
-    ]),
-    shoulder: new Set([
-      "overhead_press", "behind_neck", "upright_row_high",
-      "desenvolvimento", "elevacao", "remada_alta", "ombro_acima_cabeca",
-    ]),
-    ankle: new Set(["jump", "sprint", "high_impact", "salto", "corrida", "polichinelo"]),
-    chest: new Set(["sprint", "max_intensity", "high_impact", "cardio", "hiit"]),
-  };
+  // Sem região e sem riskTag → comportamento normal (nada filtrado).
+  if (userRegions.size === 0 && tagSet.size === 0) return ids;
 
   return ids.filter((id) => {
     const ex = getCatalogById(id);
     if (!ex) return true;
 
+    // 1. avoidIfTags explícito casando com riskTag bruto ou região do usuário.
     const avoid = (ex.avoidIfTags ?? []).map((t) => t.toLowerCase());
-    if (avoid.some((t) => tags.has(t) || t === region)) return false;
-
-    if (region && dangerByRegion[region]) {
-      const danger = dangerByRegion[region];
-      const pattern = (ex.movementPattern ?? "").toLowerCase();
-      const exerciseTags = (ex.tags ?? []).map((tag) => tag.toLowerCase());
-      if (pattern && danger.has(pattern)) return false;
-      if (exerciseTags.some((tag) => danger.has(tag))) return false;
+    if (
+      avoid.some((t) => {
+        if (tagSet.has(t)) return true;
+        const r = toSafetyRegion(t);
+        return r !== undefined && userRegions.has(r);
+      })
+    ) {
+      return false;
     }
+
+    // 2. risco derivado do catálogo casando com a região lesionada.
+    if (getExerciseRiskTags(ex).some((region) => userRegions.has(region))) {
+      return false;
+    }
+
     return true;
   });
 }
