@@ -186,10 +186,28 @@ describe("diet generation contract", () => {
     });
 
     assert.equal(res.status, 200);
-    const plan = await res.json() as { meals: Array<{ foods: Array<{ name: string }> }>; foodRestrictions: string };
+    const plan = await res.json() as {
+      meals: Array<{ totalKcal: number; foods: Array<{ name: string; kcal: number }> }>;
+      foodRestrictions: string;
+      macros: { targetKcal: number };
+    };
     const foodText = JSON.stringify(plan.meals).toLowerCase();
     assert.doesNotMatch(foodText, /latte|yogurt|mozzarella|ricotta|parmigiano/);
     assert.equal(plan.foodRestrictions, "Lattosio");
+
+    // BUG 1 (contrato que o frontend passa a confiar): o backend é a fonte de
+    // verdade. O plano gerado deve respeitar ±80 kcal/dia e soma exata por
+    // refeição — exatamente o que o sanitizeDietPlan do app agora aceita sem
+    // re-rejeitar. Isto prova que dieta válida não cai mais em "checagem final".
+    const dailyTotal = plan.meals.reduce((sum, meal) => sum + meal.totalKcal, 0);
+    assert.ok(
+      Math.abs(dailyTotal - plan.macros.targetKcal) <= 80,
+      `total diário (${dailyTotal}) deve ficar a ±80 kcal da meta (${plan.macros.targetKcal})`
+    );
+    for (const meal of plan.meals) {
+      const foodsKcal = meal.foods.reduce((sum, food) => sum + Math.round(food.kcal), 0);
+      assert.equal(Math.round(meal.totalKcal), foodsKcal, "totalKcal da refeição deve bater com a soma dos alimentos");
+    }
 
     const memory = readMemory(userId);
     assert.equal(memory.dietGenerationStatus, "generated");

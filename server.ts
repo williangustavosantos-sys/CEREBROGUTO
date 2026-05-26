@@ -186,7 +186,7 @@ interface ExpectedResponse {
   type: "text";
   options?: string[];
   instruction?: string;
-  context?: "training_schedule" | "training_location" | "training_status" | "training_limitations" | "limitation_check";
+  context?: "training_schedule" | "training_location" | "training_status" | "training_limitations" | "limitation_check" | "exercise_swap";
 }
 export type WeekDayKey = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
 
@@ -788,6 +788,7 @@ function expectedInstruction(context: NonNullable<ExpectedResponse["context"]>, 
       training_status: "Responder nível ou estado atual de treino.",
       training_limitations: "Responder idade e dor, limitação ou dizer que está livre.",
       limitation_check: "Responder como a limitação reagiu ao treino.",
+      exercise_swap: "Responder o motivo da troca: dor, equipamento ocupado ou dificuldade de execução.",
     },
     "en-US": {
       training_schedule: "start with something small now, or lock a time for tomorrow",
@@ -795,6 +796,7 @@ function expectedInstruction(context: NonNullable<ExpectedResponse["context"]>, 
       training_status: "Reply with current training level or state.",
       training_limitations: "Reply with age and any pain, limitation, or say you are clear.",
       limitation_check: "Reply how the limitation reacted during training.",
+      exercise_swap: "Reply the reason for the swap: pain, busy equipment, or trouble doing it.",
     },
     "it-IT": {
       training_schedule: "parti adesso con qualcosa di breve o fissiamo un orario preciso per domani",
@@ -802,6 +804,7 @@ function expectedInstruction(context: NonNullable<ExpectedResponse["context"]>, 
       training_status: "Dimmi se riparti da zero o se sei già in ritmo.",
       training_limitations: "Dimmi la tua età e se c'è qualche fastidio.",
       limitation_check: "Dimmi se ti ha dato fastidio o è rimasto tranquillo.",
+      exercise_swap: "Dimmi il motivo del cambio: dolore, attrezzo occupato o difficoltà di esecuzione.",
     },
   };
   return copy[selectedLanguage][context];
@@ -3895,6 +3898,122 @@ function buildEquipmentBusyFallbackResponse({
     "it-IT": `${exercise.name} occupato? Cambia con ${substituteName}: tieni ${exercise.sets} serie, ${exercise.reps}, recupero ${exercise.rest}. Stessa missione, senza fermarti.`,
   };
   return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
+}
+
+// ─── Fase 3 — Intenção de troca / dúvida de exercício (determinístico) ────────
+// Regra Soberana 1: o GUTO nunca finge que entendeu e nunca executa sem validar.
+// Em contexto de exercício, "troca" é pedido de SUBSTITUIÇÃO — jamais dica de
+// execução. Sem motivo claro, o GUTO pergunta objetivamente antes de agir.
+// Rede determinística por termos (permitida pela Regra 3 como gate, não motor).
+export type ExerciseDoubtIntent =
+  | "swap_needs_reason"
+  | "swap_pain"
+  | "swap_no_context"
+  | "execution_help"
+  | "none";
+
+const EXERCISE_CONTEXT_MARKER = "[WORKOUT EXERCISE CONTEXT";
+
+function extractUserMessageFromContext(rawInput: string): string {
+  const match = rawInput.match(/User message:\s*([\s\S]*)$/i);
+  return (match ? match[1] : rawInput).trim();
+}
+
+export function classifyExerciseDoubtMessage(rawInput: string): ExerciseDoubtIntent {
+  const hasContext = rawInput.includes(EXERCISE_CONTEXT_MARKER);
+  const userMsg = normalize(extractUserMessageFromContext(rawInput));
+  if (!userMsg) return "none";
+
+  const swap = hasAnyTerm(userMsg, [
+    "troca", "trocar", "troco", "substitui", "substituir", "muda", "mudar",
+    "nao quero esse", "nao quero esta", "nao consigo fazer", "nao consigo esse",
+    "outro exercicio", "swap", "change this", "replace", "another exercise",
+    "dont want this", "cant do", "cambia", "cambiare", "sostitui", "sostituire",
+    "un altro esercizio", "non riesco a far",
+  ]);
+  const pain = hasAnyTerm(userMsg, [
+    "dor", "doi", "doendo", "machuca", "machucando", "lesao",
+    "pain", "hurt", "injury", "dolore", "fa male",
+  ]);
+  const execution = hasAnyTerm(userMsg, [
+    "como faz", "como faco", "como executa", "como execu", "execucao",
+    "tecnica", "postura", "forma certa", "how do i", "how to", "technique",
+    "come si fa", "come faccio", "esecuzione",
+  ]);
+
+  if (hasContext) {
+    if (pain) return "swap_pain";          // segurança tem prioridade
+    if (swap) return "swap_needs_reason";  // valida o motivo antes de trocar
+    if (execution) return "execution_help"; // execução segue no modelo (com contexto)
+    return "none";
+  }
+  // Sem contexto de exercício: só tratamos como troca ambígua quando a mensagem
+  // é CURTA e dominada pelo termo de troca (ex.: "troca", "quero trocar"). Frases
+  // com outro objeto ("muda meu idioma", "troca meu peso pra 80") NÃO são troca de
+  // exercício — seguem o fluxo normal (modelo/contrato).
+  const wordCount = userMsg.split(/\s+/).filter(Boolean).length;
+  if (swap && wordCount <= 2) return "swap_no_context";
+  return "none";
+}
+
+function buildExerciseSwapClarityResponse({
+  input,
+  language,
+}: {
+  input?: string;
+  language: GutoLanguage;
+}): GutoModelResponse | null {
+  const intent = classifyExerciseDoubtMessage(input || "");
+  if (intent === "none" || intent === "execution_help") return null;
+
+  if (intent === "swap_needs_reason") {
+    const copy: Record<GutoLanguage, string> = {
+      "pt-BR": "Dá pra trocar, sim. Trocar por quê: dor, equipamento ocupado ou dificuldade de execução?",
+      "en-US": "We can swap it. Swap because of what: pain, busy equipment, or trouble doing it?",
+      "it-IT": "Si può cambiare. Cambiare perché: dolore, attrezzo occupato o difficoltà di esecuzione?",
+    };
+    return {
+      fala: copy[language],
+      acao: "none",
+      expectedResponse: {
+        type: "text",
+        context: "exercise_swap",
+        instruction: "Responder o motivo da troca: dor, equipamento ocupado ou dificuldade de execução.",
+      },
+      avatarEmotion: "default",
+    };
+  }
+
+  if (intent === "swap_pain") {
+    const copy: Record<GutoLanguage, string> = {
+      "pt-BR": "Para. Dor não negocia. É dor durante o movimento ou antes dele? Me diz onde dói que eu ajusto pra proteger teu corpo.",
+      "en-US": "Stop. Pain is not negotiable. Is it during the movement or before it? Tell me where it hurts and I'll adjust to protect your body.",
+      "it-IT": "Fermati. Il dolore non si negozia. È durante il movimento o prima? Dimmi dove fa male e adatto per proteggere il tuo corpo.",
+    };
+    return {
+      fala: copy[language],
+      acao: "none",
+      expectedResponse: {
+        type: "text",
+        context: "training_limitations",
+        instruction: "Clarificar a dor (onde e quando dói) antes de seguir.",
+      },
+      avatarEmotion: "alert",
+    };
+  }
+
+  // swap_no_context
+  const copy: Record<GutoLanguage, string> = {
+    "pt-BR": "Trocar o quê? Me diz qual exercício você quer trocar que eu resolvo.",
+    "en-US": "Swap what? Tell me which exercise you want to change and I'll handle it.",
+    "it-IT": "Cambiare cosa? Dimmi quale esercizio vuoi cambiare e ci penso io.",
+  };
+  return {
+    fala: copy[language],
+    acao: "none",
+    expectedResponse: { type: "text", instruction: "Dizer qual exercício quer trocar." },
+    avatarEmotion: "default",
+  };
 }
 
 function addDaysToDateKey(dateKey: string, days: number): string {
@@ -7268,6 +7387,19 @@ app.post("/guto", requireActiveUser, async (req, res) => {
       const context = getOperationalContext(new Date(), selectedLanguage);
       return res.json(attachAvatarEmotion({
         response: equipmentBusyResponse,
+        memory,
+        context,
+        input: input || "",
+      }));
+    }
+
+    // Fase 3 — intenção de troca/dor em contexto de exercício: valida o motivo
+    // de forma determinística ANTES do modelo. "Troca" nunca vira dica de execução.
+    const swapClarityResponse = buildExerciseSwapClarityResponse({ input, language: selectedLanguage });
+    if (swapClarityResponse) {
+      const context = getOperationalContext(new Date(), selectedLanguage);
+      return res.json(attachAvatarEmotion({
+        response: swapClarityResponse,
         memory,
         context,
         input: input || "",
