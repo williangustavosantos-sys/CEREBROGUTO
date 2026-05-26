@@ -89,3 +89,61 @@ test('contrato: correcao proativa ambigua nao executa update direto', async () =
   assert.equal(result.action, null)
   assert.match(result.fallbackMessage || '', /mudou|exato|confirma|certeza/i)
 })
+
+// ─── Fase 3 — esclarecimento de limitação física (dor) ──────────────────────
+// Bug 2: "Tenho dor nas pernas" é esclarecimento SUFICIENTE. Tem que normalizar
+// conservador (lower body) e liberar o gate de treino — sem depender de IA.
+
+test('contrato: "Tenho dor nas pernas" normaliza como lower body e libera o gate', async () => {
+  const { resolveProfileFreeFields, getPendingClarification } = await import('../src/dirty-data-resolver.js')
+
+  const resolved = await resolveProfileFreeFields({ pathology: 'Tenho dor nas pernas', previous: {} })
+
+  assert.equal(resolved.pathology?.status, 'clear')
+  assert.equal(resolved.pathology?.normalizedValue, 'lower_body_sensitive')
+  assert.equal(resolved.pathology?.bodyRegion, 'knee')
+  for (const tag of ['knee', 'hip', 'ankle']) {
+    assert.ok(resolved.pathology?.riskTags.includes(tag), `riskTags deve cobrir ${tag}`)
+  }
+  // Gate de treino liberado: nenhuma pergunta de patologia pendente.
+  assert.equal(getPendingClarification(resolved, 'training'), null)
+})
+
+test('contrato: "no joelho" e "na coluna" também são esclarecimentos válidos', async () => {
+  const { resolveProfileFreeFields, getPendingClarification } = await import('../src/dirty-data-resolver.js')
+
+  const joelho = await resolveProfileFreeFields({ pathology: 'dor no joelho direito', previous: {} })
+  assert.equal(joelho.pathology?.status, 'clear')
+  assert.equal(joelho.pathology?.bodyRegion, 'knee')
+  assert.equal(getPendingClarification(joelho, 'training'), null)
+
+  const coluna = await resolveProfileFreeFields({ pathology: 'dor na coluna', previous: {} })
+  assert.equal(coluna.pathology?.status, 'clear')
+  assert.equal(coluna.pathology?.bodyRegion, 'lower_back')
+  assert.equal(getPendingClarification(coluna, 'training'), null)
+})
+
+test('contrato: patologia ambígua ("Gambia") NÃO vira clear e mantém a pergunta', async () => {
+  const { resolveProfileFreeFields, getPendingClarification } = await import('../src/dirty-data-resolver.js')
+
+  const resolved = await resolveProfileFreeFields({ pathology: 'Gambia', previous: {} })
+
+  assert.notEqual(resolved.pathology?.status, 'clear')
+  const pending = getPendingClarification(resolved, 'training')
+  assert.ok(pending, 'patologia ambígua deve gerar pergunta')
+  assert.equal(pending?.field, 'pathology')
+})
+
+test('contrato: limitação física e restrição alimentar ficam separadas', async () => {
+  const { resolveProfileFreeFields } = await import('../src/dirty-data-resolver.js')
+
+  // "não como lactose" → restrição alimentar, nunca patologia.
+  const food = await resolveProfileFreeFields({ foodRestriction: 'não como lactose', previous: {} })
+  assert.equal(food.foodRestriction?.normalizedValue, 'lactose_intolerance')
+  assert.equal(food.pathology, undefined)
+
+  // "dor nas pernas" → patologia, nunca restrição alimentar.
+  const pathology = await resolveProfileFreeFields({ pathology: 'dor nas pernas', previous: {} })
+  assert.equal(pathology.pathology?.field, 'pathology')
+  assert.equal(pathology.foodRestriction, undefined)
+})

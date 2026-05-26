@@ -253,7 +253,7 @@ function buildUserDeclaredPathology(rawValue: string, now: string): ResolvedFiel
   };
 }
 
-function resolveKnownPathologyLocally(rawValue: string, now: string): ResolvedField | null {
+export function resolveKnownPathologyLocally(rawValue: string, now: string): ResolvedField | null {
   const normalized = normalizeForLocalResolution(rawValue);
   const noLimitationPatterns = [
     "sem dor",
@@ -316,6 +316,48 @@ function resolveKnownPathologyLocally(rawValue: string, now: string): ResolvedFi
       bodyRegion: "knee",
       riskTags: ["physical_attention", "knee_sensitive", "load_sensitive"],
       confidence: 0.9,
+      status: "clear",
+      resolvedAt: now,
+    };
+  }
+
+  // Dor genérica de perna / lower body: esclarecimento VÁLIDO (ex.: "tenho dor
+  // nas pernas"). Normaliza conservadoramente protegendo as articulações de
+  // carga da perna — joelho + quadril + tornozelo. filterExercisesBySafety
+  // deriva a região canônica de cada riskTag, então cobrimos as três.
+  const lowerBodyPatterns = [
+    "perna", "pernas", "leg", "legs", "gamba", "gambe",
+    "coxa", "coxas", "quadriceps", "posterior de coxa",
+    "panturrilha", "panturrilhas", "membros inferiores", "lower body",
+  ];
+  if (lowerBodyPatterns.some((pattern) => normalized.includes(pattern))) {
+    return {
+      field: "pathology",
+      rawValue,
+      rawValueHash: hashRaw(rawValue),
+      normalizedValue: "lower_body_sensitive",
+      bodyRegion: "knee",
+      riskTags: ["physical_attention", "load_sensitive", "knee", "hip", "ankle"],
+      confidence: 0.85,
+      status: "clear",
+      resolvedAt: now,
+    };
+  }
+
+  // Coluna / lombar: protege carga axial e quadril.
+  const lowerBackPatterns = [
+    "coluna", "lombar", "lombalgia", "hernia de disco", "hernia",
+    "lower back", "schiena", "spine",
+  ];
+  if (lowerBackPatterns.some((pattern) => normalized.includes(pattern))) {
+    return {
+      field: "pathology",
+      rawValue,
+      rawValueHash: hashRaw(rawValue),
+      normalizedValue: "lower_back_sensitive",
+      bodyRegion: "lower_back",
+      riskTags: ["physical_attention", "load_sensitive", "lower_back", "hip"],
+      confidence: 0.85,
       status: "clear",
       resolvedAt: now,
     };
