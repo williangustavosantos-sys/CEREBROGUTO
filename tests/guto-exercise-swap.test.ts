@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Server } from "node:http";
 import jwt from "jsonwebtoken";
+import { getCatalogById, suggestExerciseSubstitutes } from "../exercise-catalog";
 
 // Fase 3 — BUG 3: "Troca" em contexto de exercício nunca pode virar dica de
 // execução. Tem que ser pedido de substituição OU pergunta objetiva de validação.
@@ -165,5 +166,40 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     const res = await postGuto(userId, "troca");
     assert.equal(res.acao, "none");
     assert.match(res.fala || "", /trocar o que|qual exerc/i);
+  });
+
+  it("HTTP contexto + 'equipamento ocupado' → substitui o exercício resolvido do contexto", async () => {
+    // Escolhe um exercício do catálogo que tenha substituto na academia.
+    const candidateId = ["supino_reto", "agachamento_livre", "puxada_frente", "desenvolvimento_sentado"]
+      .find((id) => getCatalogById(id) && suggestExerciseSubstitutes(id, { location: "gym" }).length > 0);
+    assert.ok(candidateId, "precisa de um exercício do catálogo com substituto na academia");
+    const ex = getCatalogById(candidateId!)!;
+
+    const userId = "swap-equip-context";
+    writeUserMemory(userId, {
+      trainingGoal: "muscle_gain",
+      trainingLevel: "consistent",
+      preferredTrainingLocation: "gym",
+      lastWorkoutPlan: {
+        focus: "Treino", focusKey: "chest_triceps", dateLabel: "Hoje",
+        scheduledFor: new Date().toISOString(), summary: "", location: "academia",
+        exercises: [{
+          id: ex.id, name: ex.canonicalNamePt, canonicalNamePt: ex.canonicalNamePt,
+          muscleGroup: ex.muscleGroup, sets: 3, reps: "10", rest: "60s", cue: "", note: "",
+          videoUrl: ex.videoUrl, videoProvider: "local", sourceFileName: ex.sourceFileName,
+        }],
+      },
+    });
+    clearMemoryStoreCache();
+
+    // O front entra pelo "?" (gatilho "Tenho uma dúvida sobre X", que NÃO casa o
+    // formato "Dúvida:") e depois manda "equipamento ocupado" com o marcador.
+    const ctx = `[WORKOUT EXERCISE CONTEXT — language: pt-BR] Exercise: "${ex.canonicalNamePt}". Muscle group: ${ex.muscleGroup}.`;
+    const res = await postGuto(userId, `${ctx} User message: equipamento ocupado`);
+
+    assert.equal(res.acao, "none");
+    // Tem que SUBSTITUIR (não cair na resposta genérica "me diz qual aparelho").
+    assert.match(res.fala || "", /troca por|swap to|cambia con/i);
+    assert.doesNotMatch(res.fala || "", /qual aparelho|qual m[áa]quina|which machine|quale attrezzo/i);
   });
 });
