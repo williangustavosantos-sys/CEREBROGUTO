@@ -75,6 +75,7 @@ import {
 } from "./src/workout-progression.js";
 import {
   resolveProfileFreeFields,
+  resolveKnownPathologyLocally,
   getPendingClarification,
   shouldEnterConservativeMode,
   acknowledgeClarification,
@@ -1048,6 +1049,10 @@ export function getMemory(userId: string): GutoMemory {
       heightCm: normalizeHeightCm(existing.heightCm),
       weightKg: normalizeWeightKg(existing.weightKg),
       foodRestrictions: existing.foodRestrictions,
+      // resolvedFields (classificação semântica de país/patologia/restrição) é
+      // memória operacional: precisa sobreviver ao reload. Sem isto o gate
+      // re-pergunta a limitação a cada turno (Regra Soberana 2).
+      resolvedFields: existing.resolvedFields,
       validationHistory: Array.isArray(existing.validationHistory) ? existing.validationHistory : undefined,
       memoryAudit: Array.isArray(existing.memoryAudit) ? existing.memoryAudit.slice(-80) : [],
       lastWorkoutCompletedAt: existing.lastWorkoutCompletedAt,
@@ -3355,6 +3360,23 @@ async function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["m
     memory.foodRestrictions = next;
     if (!next || next !== memory.resolvedFields?.foodRestriction?.rawValue) {
       memory.resolvedFields = { ...memory.resolvedFields, foodRestriction: undefined };
+    }
+  }
+
+  // Esclarecimento de limitação física no chat (Regra Soberana 1): quando o
+  // usuário responde "tenho dor nas pernas" / "no joelho" / "na coluna", essa é
+  // resposta SUFICIENTE. Resolvemos de forma conservadora e DETERMINÍSTICA aqui,
+  // de forma síncrona, para liberar o gate de treino no mesmo turno — sem
+  // depender da resolução IA async (que não estaria pronta). Só fica pendente
+  // quando o texto é realmente impossível de interpretar (ex.: "Gambia").
+  if (changedFields.has("trainingPathology") || changedFields.has("trainingLimitations")) {
+    const pathologyText = memory.trainingPathology || memory.trainingLimitations;
+    if (typeof pathologyText === "string" && pathologyText.trim()) {
+      const localPathology = resolveKnownPathologyLocally(pathologyText, new Date().toISOString());
+      if (localPathology) {
+        memory.resolvedFields = { ...memory.resolvedFields, pathology: localPathology };
+        changedFields.add("resolvedFields");
+      }
     }
   }
 
@@ -8158,40 +8180,9 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
     });
   }
 
-  const pendingTrainingClarification = getPendingClarification(memory.resolvedFields, "training");
-  const unresolvedTrainingPathology = getUnresolvedTrainingPathology(memory);
-  if (
-    pendingTrainingClarification?.field === "pathology" ||
-    unresolvedTrainingPathology
-  ) {
-    memory.dietGenerationStatus = "needs_clarification";
-    appendMemoryAudit(
-      memory,
-      "diet_generated",
-      ["dietGenerationStatus"],
-      "Dieta bloqueada até esclarecer limitação corporal."
-    );
-    commitMemoryDecision(memory);
-    return res.status(422).json({
-      error: "needs_clarification",
-      code: "TRAINING_PATHOLOGY_NEEDS_CLARIFICATION",
-      field: "trainingPathology",
-      rawValue: pendingTrainingClarification?.rawValue || unresolvedTrainingPathology,
-      message: trainingClarificationMessage(
-        language,
-        pendingTrainingClarification?.rawValue || unresolvedTrainingPathology || "",
-        getGutoCallName(memory)
-      ),
-      expectedResponse: {
-        type: "text",
-        context: "training_limitations",
-        instruction:
-          pendingTrainingClarification?.hint ||
-          "Clarificar a limitação corporal antes de gerar dieta.",
-      },
-    });
-  }
-
+  // Limitação física / patologia NÃO bloqueia nem aparece na dieta. Ela afeta o
+  // treino (ver buildTrainingExecutionGate). A dieta depende só de perfil
+  // nutricional (acima) e de restrição alimentar (abaixo).
   const pendingDietClarification = getPendingClarification(memory.resolvedFields, "diet");
   const unresolvedFoodRestriction = getUnresolvedFoodRestriction(memory);
   if (pendingDietClarification?.field === "foodRestriction" || unresolvedFoodRestriction) {

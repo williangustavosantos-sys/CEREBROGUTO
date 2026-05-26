@@ -196,8 +196,11 @@ describe("diet generation contract", () => {
     assert.ok(memory.memoryAudit.some((entry: any) => entry.source === "diet_generated"));
   });
 
-  it("recusa gerar dieta enquanto patologia corporal (ex.: lombar) não está clara", async () => {
-    const userId = "diet-lombar-blocked";
+  it("gera dieta mesmo com patologia física ambígua: patologia NÃO bloqueia nem aparece na dieta", async () => {
+    // Bug 3: limitação física (treino) estava contaminando a dieta. A dieta só
+    // pode depender de perfil nutricional + restrição alimentar. Mesmo com uma
+    // patologia incerta pendente, a dieta deve ser gerada normalmente.
+    const userId = "diet-pathology-decoupled";
     writeMemory(userId, {
       biologicalSex: "male",
       userAge: 35,
@@ -208,12 +211,12 @@ describe("diet generation contract", () => {
       country: "Brasil",
       countryCode: "BR",
       city: "São Paulo",
-      trainingPathology: "lombar",
-      trainingLimitations: "lombar",
+      trainingPathology: "Gambia",
+      trainingLimitations: "Gambia",
       foodRestrictions: "lactose",
       resolvedFields: {
         foodRestriction: { rawValue: "lactose", status: "clear", normalizedValue: "lactose_intolerance" },
-        pathology: { rawValue: "lombar", status: "needs_confirmation" },
+        pathology: { rawValue: "Gambia", status: "needs_confirmation" },
       },
     });
 
@@ -223,10 +226,18 @@ describe("diet generation contract", () => {
       body: JSON.stringify({ language: "pt-BR" }),
     });
 
-    assert.equal(res.status, 422);
-    const body = (await res.json()) as { code?: string; field?: string };
-    assert.equal(body.code, "TRAINING_PATHOLOGY_NEEDS_CLARIFICATION");
-    assert.equal(body.field, "trainingPathology");
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { meals?: unknown[]; code?: string; message?: string };
+    // Nunca pode retornar o código/mensagem de patologia na dieta.
+    assert.notEqual(body.code, "TRAINING_PATHOLOGY_NEEDS_CLARIFICATION");
+    assert.equal(body.message, undefined);
+    assert.ok(Array.isArray(body.meals) && body.meals.length > 0);
+    // Não pode vazar lactose (restrição alimentar real).
+    const foodText = JSON.stringify(body.meals).toLowerCase();
+    assert.doesNotMatch(foodText, /latte|yogurt|mozzarella|ricotta|parmigiano|leite|queijo/);
+
+    const memory = readMemory(userId);
+    assert.equal(memory.dietGenerationStatus, "generated");
   });
 
   it("recusa gerar sem countryCode e peso (422) com mensagem em en-US", async () => {

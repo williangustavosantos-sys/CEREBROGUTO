@@ -15,6 +15,7 @@ import {
   type ProgressionWorkoutPlan,
   type WorkoutFeedbackRecord,
 } from "../src/workout-progression";
+import { resolveKnownPathologyLocally } from "../src/dirty-data-resolver";
 
 // Fase 3C — Filtro determinístico de dor / patologia / limitação.
 // A raiz (GUTO_SISTEMA_DE_TREINO_E_MISSAO_DETALHADA.md) exige que dor/lesão
@@ -254,6 +255,44 @@ describe("Fase 3C — applySafeExerciseSubstitutions (substituição segura)", (
       const entry = getCatalogById(item.id);
       assert.ok(entry);
       assert.ok(!getExerciseRiskTags(entry!).includes("shoulder"), `${item.id} não pode estressar ombro`);
+    }
+  });
+});
+
+describe("Fase 3 — 'dor nas pernas' (lower body) é esclarecimento válido e protege a perna", () => {
+  it("resolveKnownPathologyLocally normaliza 'dor nas pernas' como lower body (clear) com tags de carga", () => {
+    const resolved = resolveKnownPathologyLocally("tenho dor nas pernas", new Date().toISOString());
+    assert.ok(resolved, "deve resolver de forma determinística");
+    assert.equal(resolved!.status, "clear");
+    assert.equal(resolved!.normalizedValue, "lower_body_sensitive");
+    assert.equal(resolved!.bodyRegion, "knee");
+    for (const tag of ["knee", "hip", "ankle"]) {
+      assert.ok(resolved!.riskTags.includes(tag), `riskTags deve cobrir ${tag}`);
+    }
+  });
+
+  it("remove agressivos de joelho/quadril/tornozelo e mantém isolados/upper seguros (com vídeo local)", () => {
+    const resolved = resolveKnownPathologyLocally("dor nas pernas", new Date().toISOString())!;
+    const aggressive = [
+      "agachamento_livre", "afundo_halter", "bulgaro_halter",
+      "legpress_45", "burpee", "sobe_desce_caixote_unilateral",
+    ];
+    const safeInput = ["posterior_maquina", "elevacao_quadril_barra_banco", "supino_reto_maquina", "puxada_frente"];
+    const filtered = filterExercisesBySafety([...aggressive, ...safeInput], {
+      userRiskTags: resolved.riskTags,
+      userBodyRegion: resolved.bodyRegion,
+    });
+    for (const id of aggressive) {
+      assert.ok(!filtered.includes(id), `${id} deveria ter sido removido (estresse de perna)`);
+    }
+    assert.ok(filtered.includes("posterior_maquina"));
+    assert.ok(filtered.includes("supino_reto_maquina"));
+    assert.ok(filtered.includes("puxada_frente"));
+    // gate de vídeo local: o que sobra continua no catálogo com vídeo validado
+    for (const id of filtered) {
+      const entry = getCatalogById(id);
+      assert.ok(entry, `${id} deve existir no catálogo`);
+      assert.ok(typeof entry!.videoUrl === "string" && entry!.videoUrl.length > 0, `${id} deve ter vídeo local`);
     }
   });
 });
