@@ -202,4 +202,73 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     assert.match(res.fala || "", /troca por|swap to|cambia con/i);
     assert.doesNotMatch(res.fala || "", /qual aparelho|qual m[áa]quina|which machine|quale attrezzo/i);
   });
+
+  it("HTTP contexto de exercício + 'não tenho' → troca equipamento/exercício, sem cair no modelo", async () => {
+    const candidateId = ["supino_reto", "agachamento_livre", "puxada_frente", "desenvolvimento_sentado"]
+      .find((id) => getCatalogById(id) && suggestExerciseSubstitutes(id, { location: "gym" }).length > 0);
+    assert.ok(candidateId, "precisa de um exercício do catálogo com substituto na academia");
+    const ex = getCatalogById(candidateId!)!;
+
+    const userId = "swap-nao-tenho-context";
+    writeUserMemory(userId, {
+      trainingGoal: "muscle_gain",
+      trainingLevel: "consistent",
+      preferredTrainingLocation: "gym",
+      lastWorkoutPlan: {
+        focus: "Treino", focusKey: "chest_triceps", dateLabel: "Hoje",
+        scheduledFor: new Date().toISOString(), summary: "", location: "academia",
+        exercises: [{
+          id: ex.id, name: ex.canonicalNamePt, canonicalNamePt: ex.canonicalNamePt,
+          muscleGroup: ex.muscleGroup, sets: 3, reps: "10", rest: "60s", cue: "", note: "",
+          videoUrl: ex.videoUrl, videoProvider: "local", sourceFileName: ex.sourceFileName,
+        }],
+      },
+    });
+    clearMemoryStoreCache();
+
+    const ctx = `[WORKOUT EXERCISE CONTEXT — language: pt-BR] Exercise: "${ex.canonicalNamePt}". Muscle group: ${ex.muscleGroup}.`;
+    const res = await postGuto(userId, `${ctx} User message: não tenho`);
+
+    assert.equal(res.acao, "none");
+    assert.match(res.fala || "", /troca por|swap to|cambia con/i);
+    assert.doesNotMatch(res.fala || "", EXECUTION_CUE_RE);
+  });
+
+  it("HTTP contexto de alimento + 'não tenho' → falta/substituição alimentar, nunca patologia", async () => {
+    const userId = "food-nao-tenho-context";
+    writeUserMemory(userId, {
+      trainingGoal: "fat_loss",
+      trainingLevel: "beginner",
+      trainingPathology: "ombro direito",
+      foodRestrictions: "sem lactose",
+    });
+    clearMemoryStoreCache();
+
+    const input = [
+      "[DIET CONTEXT — language: pt-BR — nutrition only]",
+      'Food in question: "Azeite de oliva" (1 colher, 90 kcal).',
+      'Meal: "Almoço" (13:00).',
+      "Limitations/pathology: ombro direito.",
+      "User question: não tenho",
+    ].join(" ");
+    const res = await postGuto(userId, input);
+
+    assert.equal(res.acao, "none");
+    assert.match(res.fala || "", /alimento|equivalente local/i);
+    assert.doesNotMatch(res.fala || "", /ombro entendido|joelho entendido/i);
+    assert.doesNotMatch(res.fala || "", EXECUTION_CUE_RE);
+  });
+
+  it("HTTP sem contexto + 'não tenho' → pede esclarecimento curto", async () => {
+    const userId = "nao-tenho-sem-contexto";
+    writeUserMemory(userId, { trainingGoal: "fat_loss", trainingLevel: "beginner" });
+    clearMemoryStoreCache();
+
+    const res = await postGuto(userId, "não tenho");
+
+    assert.equal(res.acao, "none");
+    assert.match(res.fala || "", /alimento|aparelho/i);
+    assert.doesNotMatch(res.fala || "", /ombro entendido|joelho entendido/i);
+    assert.doesNotMatch(res.fala || "", EXECUTION_CUE_RE);
+  });
 });

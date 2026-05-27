@@ -3951,6 +3951,9 @@ function safetyFilterWorkoutPlan(plan: WorkoutPlan, memory: GutoMemory): Workout
 }
 
 function isEquipmentBusyMessage(input?: string) {
+  const shortIntent = classifyShortContextIntent({ rawInput: input || "" });
+  if (shortIntent.intent === "equipment_unavailable") return true;
+
   const normalized = normalize(input || "");
   if (!normalized) return false;
   const hasEquipmentContext = hasAnyTerm(normalized, [
@@ -3977,6 +3980,35 @@ function isEquipmentBusyMessage(input?: string) {
     "não consigo",
   ]);
   return hasEquipmentContext && hasBusyContext;
+}
+
+function buildShortContextFallbackResponse(input: string | undefined, language: GutoLanguage): GutoModelResponse | null {
+  const shortIntent = classifyShortContextIntent({ rawInput: input || "" });
+  if (shortIntent.intent === "food_unavailable") {
+    return {
+      fala: foodUnavailableReply(language as ShortIntentLanguage),
+      acao: "none",
+      expectedResponse: null,
+      avatarEmotion: "default",
+    };
+  }
+  if (shortIntent.intent === "needs_clarification") {
+    return {
+      fala: clarificationReply(language as ShortIntentLanguage),
+      acao: "none",
+      expectedResponse: null,
+      avatarEmotion: "default",
+    };
+  }
+  if (shortIntent.intent === "equipment_unavailable") {
+    return {
+      fala: equipmentUnavailableReply(language as ShortIntentLanguage),
+      acao: "none",
+      expectedResponse: null,
+      avatarEmotion: "default",
+    };
+  }
+  return null;
 }
 
 function findLastExerciseDoubt(history: GutoHistoryItem[] = [], plan?: WorkoutPlan | null): WorkoutExercise | null {
@@ -7602,6 +7634,17 @@ app.post("/guto", requireActiveUser, async (req, res) => {
       const context = getOperationalContext(new Date(), selectedLanguage);
       return res.json(attachAvatarEmotion({
         response: equipmentBusyResponse,
+        memory,
+        context,
+        input: input || "",
+      }));
+    }
+
+    const shortContextResponse = buildShortContextFallbackResponse(input, selectedLanguage);
+    if (shortContextResponse) {
+      const context = getOperationalContext(new Date(), selectedLanguage);
+      return res.json(attachAvatarEmotion({
+        response: shortContextResponse,
         memory,
         context,
         input: input || "",

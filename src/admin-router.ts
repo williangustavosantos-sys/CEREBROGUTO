@@ -82,6 +82,21 @@ import {
   suggestSafeExerciseVideoFileName,
 } from "./exercise-video-validation.js";
 import {
+  calculateMacros,
+  type DietMeal,
+  type DietPlan,
+  type NutritionProfile,
+} from "./nutrition.js";
+import {
+  buildBaseDietSkeleton,
+  type UserFoodConstraints,
+} from "./food-availability.js";
+import type { FoodCountry, FoodLanguage } from "./food-catalog.js";
+import {
+  getPendingClarification,
+  resolveProfileFreeFields,
+} from "./dirty-data-resolver.js";
+import {
   buildAliasMap,
   buildLanguageMap,
   getCustomExerciseRequest,
@@ -781,6 +796,381 @@ function normalizeDietPlan(rawValue: unknown, existing: LooseRecord | null, req:
     planSource: caller.role === "coach" ? "coach_override" : source === "guto_generated" ? "ai_generated" : "admin_override",
     updatedBy: caller.userId,
     updatedAt,
+  };
+}
+
+const ADMIN_DIET_COUNTRY_BY_CODE: Record<string, FoodCountry> = {
+  BR: "brazil",
+  IT: "italy",
+  ES: "spain",
+  PT: "portugal",
+  US: "usa",
+  GB: "uk",
+  UK: "uk",
+  DE: "germany",
+  FR: "france",
+  AR: "argentina",
+};
+
+const ADMIN_DIET_COUNTRY_BY_NAME: Record<string, FoodCountry> = {
+  brasil: "brazil",
+  brazil: "brazil",
+  italia: "italy",
+  italy: "italy",
+  espanha: "spain",
+  spain: "spain",
+  portugal: "portugal",
+  estadosunidos: "usa",
+  eua: "usa",
+  usa: "usa",
+  unitedstates: "usa",
+  reinounido: "uk",
+  unitedkingdom: "uk",
+  uk: "uk",
+  alemanha: "germany",
+  germany: "germany",
+  franca: "france",
+  france: "france",
+  argentina: "argentina",
+};
+
+const ADMIN_DIET_GOALS: NutritionProfile["trainingGoal"][] = [
+  "fat_loss",
+  "muscle_gain",
+  "conditioning",
+  "mobility_health",
+  "consistency",
+];
+
+const ADMIN_DIET_LEVELS: NutritionProfile["trainingLevel"][] = [
+  "beginner",
+  "returning",
+  "consistent",
+  "advanced",
+];
+
+function normalizeAdminDietKey(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
+}
+
+function normalizeAdminDietLanguage(value: unknown): FoodLanguage {
+  if (value === "en-US" || value === "it-IT" || value === "pt-BR") return value;
+  const lower = asString(value, "").toLowerCase();
+  if (lower.startsWith("en")) return "en-US";
+  if (lower.startsWith("it")) return "it-IT";
+  return "pt-BR";
+}
+
+function normalizeAdminDietGoal(value: unknown): NutritionProfile["trainingGoal"] | null {
+  return ADMIN_DIET_GOALS.includes(value as NutritionProfile["trainingGoal"])
+    ? value as NutritionProfile["trainingGoal"]
+    : null;
+}
+
+function normalizeAdminDietLevel(value: unknown): NutritionProfile["trainingLevel"] | null {
+  const raw = asString(value, "");
+  if (ADMIN_DIET_LEVELS.includes(raw as NutritionProfile["trainingLevel"])) {
+    return raw as NutritionProfile["trainingLevel"];
+  }
+  const key = normalizeAdminDietKey(raw);
+  if (["iniciante", "beginner"].includes(key)) return "beginner";
+  if (["intermediario", "intermediate", "returning"].includes(key)) return "returning";
+  if (["consistente", "consistent"].includes(key)) return "consistent";
+  if (["avancado", "advanced"].includes(key)) return "advanced";
+  return null;
+}
+
+function isNoAdminFoodRestrictionText(value: unknown): boolean {
+  const raw = asString(value, "").trim();
+  if (!raw) return true;
+  const key = normalizeAdminDietKey(raw);
+  return [
+    "none",
+    "no",
+    "nada",
+    "nenhuma",
+    "semrestricao",
+    "semrestricoes",
+    "semrestricaoalimentar",
+    "semalergia",
+    "semalergias",
+    "semintolerancia",
+    "semintolerancias",
+    "comodetudo",
+    "ieateverything",
+    "nofoodrestriction",
+    "nofoodrestrictions",
+    "noallergy",
+    "noallergies",
+    "mangiotutto",
+    "nessuna",
+    "nessuno",
+    "nessunaallergia",
+    "nessunaintolleranza",
+  ].includes(key);
+}
+
+function resolveAdminDietCountry(memory: LooseRecord): FoodCountry | null {
+  const code = asString(memory.countryCode, "").trim().toUpperCase();
+  if (ADMIN_DIET_COUNTRY_BY_CODE[code]) return ADMIN_DIET_COUNTRY_BY_CODE[code];
+
+  const resolvedCountry = asRecord(asRecord(memory.resolvedFields).country);
+  const normalizedResolved = normalizeAdminDietKey(asString(resolvedCountry.normalizedValue, ""));
+  if (ADMIN_DIET_COUNTRY_BY_NAME[normalizedResolved]) return ADMIN_DIET_COUNTRY_BY_NAME[normalizedResolved];
+
+  const countryKey = normalizeAdminDietKey(asString(memory.country, ""));
+  return ADMIN_DIET_COUNTRY_BY_NAME[countryKey] || null;
+}
+
+function buildAdminDietRestrictionConstraints(normalizedValue: string | undefined, rawValue: string): UserFoodConstraints | null {
+  const normalized = normalizeAdminDietKey(normalizedValue || "");
+  const raw = normalizeAdminDietKey(rawValue);
+  const restrictions = new Set<string>();
+  const allergens = new Set<string>();
+
+  if (normalized === "lactoseintolerance" || raw.includes("lactose") || raw.includes("lattosio")) {
+    restrictions.add("lactose_intolerance");
+  }
+  if (normalized === "milkallergy" || raw.includes("leite") || raw.includes("milk") || raw.includes("latte")) {
+    restrictions.add("milk_allergy");
+    allergens.add("milk");
+  }
+  if (normalized === "fishseafoodrestriction" || normalized === "fishallergy" || raw.includes("peixe") || raw.includes("fish") || raw.includes("pesce") || raw.includes("frutosdomar") || raw.includes("seafood")) {
+    restrictions.add("fish_allergy");
+    allergens.add("fish");
+    allergens.add("shellfish");
+  }
+  if (normalized === "eggrestriction" || normalized === "eggallergy" || raw.includes("ovo") || raw.includes("egg") || raw.includes("uovo")) {
+    restrictions.add("egg_allergy");
+    allergens.add("egg");
+  }
+
+  if (!restrictions.size && !allergens.size) return null;
+  return { restrictions: Array.from(restrictions), allergens: Array.from(allergens) };
+}
+
+async function resolveAdminDietConstraints(memory: LooseRecord): Promise<{
+  foodRestrictions: string;
+  constraints?: UserFoodConstraints;
+  error?: { status: number; code: string; message: string; rawValue?: string };
+}> {
+  const rawRestriction = asString(memory.foodRestrictions, "").trim();
+  const foodRestrictions = isNoAdminFoodRestrictionText(rawRestriction) ? "none" : rawRestriction;
+  if (foodRestrictions === "none") return { foodRestrictions };
+
+  const resolvedFields = await resolveProfileFreeFields({
+    country: asString(memory.country, ""),
+    pathology: asString(memory.trainingPathology || memory.trainingLimitations, ""),
+    foodRestriction: rawRestriction,
+    previous: asRecord(memory.resolvedFields),
+  });
+  memory.resolvedFields = resolvedFields;
+  saveMemory(memory as any);
+
+  const pending = getPendingClarification(resolvedFields, "diet");
+  if (pending?.field === "foodRestriction") {
+    return {
+      foodRestrictions,
+      error: {
+        status: 422,
+        code: "FOOD_RESTRICTION_NEEDS_CLARIFICATION",
+        message: `Restrição alimentar precisa de confirmação antes de gerar dieta: ${pending.rawValue}.`,
+        rawValue: pending.rawValue,
+      },
+    };
+  }
+
+  const normalizedValue =
+    resolvedFields.foodRestriction?.status === "clear"
+      ? resolvedFields.foodRestriction.normalizedValue
+      : undefined;
+  const constraints = buildAdminDietRestrictionConstraints(normalizedValue, rawRestriction);
+  if (!constraints) {
+    return {
+      foodRestrictions,
+      error: {
+        status: 422,
+        code: "FOOD_RESTRICTION_UNSUPPORTED",
+        message: `Restrição alimentar ainda não suportada pelo gerador determinístico do painel: ${rawRestriction}.`,
+        rawValue: rawRestriction,
+      },
+    };
+  }
+
+  return { foodRestrictions, constraints };
+}
+
+function splitAdminDietCalories(totalKcal: number, slots: number): number[] {
+  const base = Math.floor(totalKcal / slots);
+  const values = Array.from({ length: slots }, () => base);
+  let remainder = totalKcal - base * slots;
+  for (let i = 0; i < values.length && remainder > 0; i += 1, remainder -= 1) {
+    values[i] += 1;
+  }
+  return values;
+}
+
+function adminDietSlotLabels(language: FoodLanguage): Record<string, string> {
+  if (language === "en-US") {
+    return { cafe: "Breakfast", lanche1: "Snack 1", almoco: "Lunch", lanche2: "Snack 2", jantar: "Dinner" };
+  }
+  if (language === "it-IT") {
+    return { cafe: "Colazione", lanche1: "Spuntino 1", almoco: "Pranzo", lanche2: "Spuntino 2", jantar: "Cena" };
+  }
+  return { cafe: "Café da manhã", lanche1: "Lanche 1", almoco: "Almoço", lanche2: "Lanche 2", jantar: "Jantar" };
+}
+
+async function buildAdminGeneratedDietPlan(userId: string, memory: LooseRecord): Promise<{
+  plan?: DietPlan;
+  error?: { status: number; code: string; message: string; missing?: string[]; rawValue?: string };
+}> {
+  const language = normalizeAdminDietLanguage(memory.language);
+  const biologicalSex = memory.biologicalSex === "female" || memory.biologicalSex === "male"
+    ? memory.biologicalSex
+    : null;
+  const userAge = asNumber(memory.userAge, 0);
+  const heightCm = asNumber(memory.heightCm, 0);
+  const weightKg = asNumber(memory.weightKg, 0);
+  const trainingLevel = normalizeAdminDietLevel(memory.trainingLevel || memory.trainingStatus);
+  const trainingGoal = normalizeAdminDietGoal(memory.trainingGoal);
+  const country = asString(memory.country, "").trim();
+  const city = asString(memory.city, "").trim();
+  const countryCode = asString(memory.countryCode, "").trim().toUpperCase();
+
+  const missing: string[] = [];
+  if (!biologicalSex) missing.push("biologicalSex");
+  if (!userAge) missing.push("userAge");
+  if (!heightCm) missing.push("heightCm");
+  if (!weightKg) missing.push("weightKg");
+  if (!trainingLevel) missing.push("trainingLevel");
+  if (!trainingGoal) missing.push("trainingGoal");
+  if (!country) missing.push("country");
+  if (!city) missing.push("city");
+  if (missing.length > 0) {
+    return {
+      error: {
+        status: 422,
+        code: "DIET_PROFILE_INCOMPLETE",
+        message: `Perfil incompleto para gerar dieta: ${missing.join(", ")}.`,
+        missing,
+      },
+    };
+  }
+  const dietBiologicalSex = biologicalSex as NutritionProfile["biologicalSex"];
+  const dietTrainingLevel = trainingLevel as NutritionProfile["trainingLevel"];
+  const dietTrainingGoal = trainingGoal as NutritionProfile["trainingGoal"];
+
+  const catalogCountry = resolveAdminDietCountry(memory);
+  if (!catalogCountry) {
+    return {
+      error: {
+        status: 422,
+        code: "DIET_COUNTRY_UNSUPPORTED",
+        message: `País ainda não suportado pelo gerador determinístico do painel: ${country}.`,
+      },
+    };
+  }
+
+  const restrictionResolution = await resolveAdminDietConstraints(memory);
+  if (restrictionResolution.error) return { error: restrictionResolution.error };
+
+  const profile: NutritionProfile = {
+    biologicalSex: dietBiologicalSex,
+    userAge,
+    heightCm,
+    weightKg,
+    trainingLevel: dietTrainingLevel,
+    trainingGoal: dietTrainingGoal,
+    country,
+    countryCode,
+    city,
+    foodRestrictions: restrictionResolution.foodRestrictions,
+  };
+  const macros = calculateMacros(profile);
+  const skeleton = buildBaseDietSkeleton({
+    country: catalogCountry,
+    goal: dietTrainingGoal,
+    constraints: restrictionResolution.constraints,
+    language,
+    limitPerType: 3,
+  });
+  const byType = {
+    breakfast: skeleton.filter((meal) => meal.mealType === "breakfast"),
+    snack: skeleton.filter((meal) => meal.mealType === "snack"),
+    lunch: skeleton.filter((meal) => meal.mealType === "lunch"),
+    dinner: skeleton.filter((meal) => meal.mealType === "dinner"),
+  };
+  const selected = [
+    { id: "cafe", time: "08:00", block: byType.breakfast[0], ratio: 0.25 },
+    { id: "lanche1", time: "10:30", block: byType.snack[0], ratio: 0.10 },
+    { id: "almoco", time: "13:00", block: byType.lunch[0], ratio: 0.30 },
+    { id: "lanche2", time: "16:30", block: byType.snack[1] || byType.snack[0], ratio: 0.10 },
+    { id: "jantar", time: "20:00", block: byType.dinner[0], ratio: 0.25 },
+  ];
+  if (selected.some((slot) => !slot.block)) {
+    return {
+      error: {
+        status: 422,
+        code: "DIET_NO_SAFE_LOCAL_BLOCKS",
+        message: "Não há blocos alimentares locais suficientes para gerar dieta segura com esse perfil.",
+      },
+    };
+  }
+
+  const labels = adminDietSlotLabels(language);
+  const mealTargets = selected.map((slot, index) => {
+    if (index === selected.length - 1) {
+      const previous = selected.slice(0, -1).reduce((sum, item) => sum + Math.round(macros.targetKcal * item.ratio), 0);
+      return macros.targetKcal - previous;
+    }
+    return Math.round(macros.targetKcal * slot.ratio);
+  });
+  const meals: DietMeal[] = selected.map((slot, index) => {
+    const block = slot.block!;
+    const calories = splitAdminDietCalories(mealTargets[index], block.ingredients.length);
+    const foods = block.ingredients.map((ingredient, foodIndex) => ({
+      name: ingredient.name,
+      quantity: "1 porção",
+      kcal: calories[foodIndex],
+    }));
+    return {
+      id: slot.id,
+      name: labels[slot.id] || block.title,
+      time: slot.time,
+      foods,
+      totalKcal: foods.reduce((sum, food) => sum + food.kcal, 0),
+      gutoNote: language === "en-US"
+        ? "Local, simple and matched to your goal."
+        : language === "it-IT"
+          ? "Locale, semplice e coerente col tuo obiettivo."
+          : "Local, simples e alinhado ao objetivo.",
+    };
+  });
+
+  return {
+    plan: {
+      userId,
+      title: "Dieta oficial",
+      generatedAt: new Date().toISOString(),
+      country,
+      countryCode,
+      city,
+      macros,
+      meals,
+      goal: dietTrainingGoal,
+      source: "guto_generated",
+      planSource: "ai_generated",
+      lockedByCoach: false,
+      manualOverride: false,
+      foodRestrictions: restrictionResolution.foodRestrictions,
+      restrictions: restrictionResolution.foodRestrictions,
+      updatedAt: new Date().toISOString(),
+    },
   };
 }
 
@@ -1727,13 +2117,30 @@ adminRouter.post("/students/:userId/diet/generate", asyncHandler(async (req, res
     res.status(409).json({ message: "Plano bloqueado pelo coach.", code: "COACH_LOCKED_PLAN" });
     return;
   }
-  if (!existing) {
-    res.status(404).json({ message: "Nenhuma dieta gerada pelo GUTO existe ainda. Crie manualmente ou peça ao aluno para concluir a calibragem." });
+
+  const memory = getMemory(student.userId);
+  const generated = await buildAdminGeneratedDietPlan(student.userId, memory as LooseRecord);
+  if (generated.error) {
+    res.status(generated.error.status).json({
+      message: generated.error.message,
+      code: generated.error.code,
+      missing: generated.error.missing,
+      rawValue: generated.error.rawValue,
+    });
     return;
   }
-  const diet = normalizeDietPlan({ ...existing, source: "guto_generated", lockedByCoach: false }, existing as LooseRecord, req, student.userId, "Marked as GUTO generated");
-  await saveDietPlan(diet as any);
-  addLog({ action: "diet_generated", actorUserId: caller.userId, actorRole: caller.role, targetUserId: student.userId, metadata: { sourceAfter: diet.source } });
+
+  const diet = generated.plan!;
+  await saveDietPlan(diet);
+  memory.dietGenerationStatus = "generated";
+  saveMemory(memory);
+  addLog({
+    action: "diet_generated",
+    actorUserId: caller.userId,
+    actorRole: caller.role,
+    targetUserId: student.userId,
+    metadata: { sourceBefore: existing?.source, sourceAfter: diet.source, country: diet.country, city: diet.city },
+  });
   res.json({ diet });
 }));
 
