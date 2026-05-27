@@ -49,10 +49,12 @@ function access(userId: string, role: UserAccess["role"], coachId: string, teamI
 const adminA = access("admin-a", "admin", "admin-a", "TEAM_A");
 const coachA = access("coach-a", "coach", "coach-a", "TEAM_A");
 const coachOtherA = access("coach-other-a", "coach", "coach-other-a", "TEAM_A");
+const coachB = access("coach-b", "coach", "coach-b", "TEAM_B");
 
 function seedTeams(): void {
   const now = new Date().toISOString();
   createTeam({ id: "TEAM_A", name: "Time A", plan: "pro", status: "active", createdAt: now, updatedAt: now });
+  createTeam({ id: "TEAM_B", name: "Time B", plan: "pro", status: "active", createdAt: now, updatedAt: now });
 }
 
 function seedAccessStore(): void {
@@ -61,6 +63,7 @@ function seedAccessStore(): void {
       [adminA.userId]: adminA,
       [coachA.userId]: coachA,
       [coachOtherA.userId]: coachOtherA,
+      [coachB.userId]: coachB,
     },
   });
 }
@@ -238,6 +241,55 @@ describe("Painel P0 — criar/convidar aluno", () => {
     assert.equal(response.status, 400);
     const body = (await response.json()) as { code?: string };
     assert.equal(body.code, "GUTO_TEAM_REQUIRED");
+  });
+
+  it("super_admin cria aluno em empresa cliente SEM coach → 400 GUTO_COACH_REQUIRED", async () => {
+    const response = await post("/admin/students", superToken(), {
+      name: "Sem Coach",
+      email: "semcoach@guto.test",
+      teamId: "TEAM_A",
+    });
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { code?: string };
+    assert.equal(body.code, "GUTO_COACH_REQUIRED");
+  });
+
+  it("super_admin cria aluno com coach de OUTRO time → 403 TEAM_ACCESS_FORBIDDEN", async () => {
+    const response = await post("/admin/students", superToken(), {
+      name: "Coach Errado",
+      email: "coacherrado@guto.test",
+      teamId: "TEAM_A",
+      coachId: coachB.userId,
+    });
+    assert.equal(response.status, 403);
+    const body = (await response.json()) as { code?: string };
+    assert.equal(body.code, "TEAM_ACCESS_FORBIDDEN");
+  });
+
+  it("super_admin cria aluno em empresa cliente COM coach da empresa → 201, vinculado", async () => {
+    const response = await post("/admin/students", superToken(), {
+      name: "Aluno Vinculado",
+      email: "vinculado@guto.test",
+      teamId: "TEAM_A",
+      coachId: coachA.userId,
+    });
+    assert.equal(response.status, 201);
+    const body = (await response.json()) as { user: UserAccess };
+    const created = getUserAccess(body.user.userId);
+    assert.equal(created!.teamId, "TEAM_A");
+    assert.equal(created!.coachId, coachA.userId);
+  });
+
+  it("super_admin cria aluno em GUTO_CORE SEM coach → 201 (exceção documentada)", async () => {
+    const response = await post("/admin/students", superToken(), {
+      name: "Aluno Core",
+      email: "alunocore@guto.test",
+      teamId: "GUTO_CORE",
+    });
+    assert.equal(response.status, 201);
+    const body = (await response.json()) as { user: UserAccess };
+    const created = getUserAccess(body.user.userId);
+    assert.equal(created!.teamId, "GUTO_CORE");
   });
 
   it("convite criado é recuperável via GET /admin/students/:userId/invite", async () => {

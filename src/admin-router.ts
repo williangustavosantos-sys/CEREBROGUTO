@@ -1093,6 +1093,16 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
       res.status(403).json({ message: "Coach pertence a outro Time.", code: "TEAM_ACCESS_FORBIDDEN" });
       return;
     }
+  } else if (actor.role === "super_admin" && teamId !== GUTO_CORE_TEAM_ID) {
+    // super_admin criando aluno em empresa CLIENTE sem coachId: não vinculamos
+    // o aluno ao próprio super_admin (que não é coach). Exige um coach real da
+    // empresa. Exceção documentada: GUTO_CORE (alunos internos do super admin).
+    // Admin comum opera o próprio time e pode ser o responsável → mantido.
+    res.status(400).json({
+      message: "Aluno em empresa cliente precisa de um coach responsável. Crie um coach na empresa antes de adicionar alunos.",
+      code: "GUTO_COACH_REQUIRED",
+    });
+    return;
   }
   if (!(await ensureTeamPlanCapacity(res, teamId, "student", userId))) return;
   const requestedPassword = body.password?.trim();

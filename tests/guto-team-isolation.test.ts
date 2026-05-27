@@ -447,16 +447,31 @@ describe("GUTO Phase 5 – admin team operations", () => {
     assert.equal(response.status, 403);
   });
 
-  // C) super_admin creates student with explicit teamId
+  // C) super_admin creates student with explicit teamId + coach da empresa
+  // (empresa cliente exige coach responsável — GUTO_COACH_REQUIRED).
   it("allows super_admin to create a student in a specific team", async () => {
     const response = await request("/admin/students", {
       method: "POST",
       headers: { Authorization: `Bearer ${superToken()}`, "Content-Type": "application/json" },
-      body: JSON.stringify(studentCreatePayload("super-created-student", "Aluno", "Super", { teamId: "TEAM_A" })),
+      body: JSON.stringify(
+        studentCreatePayload("super-created-student", "Aluno", "Super", { teamId: "TEAM_A", coachId: coachA.userId }),
+      ),
     });
 
     assert.equal(response.status, 201);
     assert.equal(getUserAccess("super-created-student")?.teamId, "TEAM_A");
+    assert.equal(getUserAccess("super-created-student")?.coachId, coachA.userId);
+  });
+
+  it("rejects super_admin creating a student in a client team WITHOUT a coach (GUTO_COACH_REQUIRED)", async () => {
+    const response = await request("/admin/students", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${superToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify(studentCreatePayload("super-no-coach-student", "Aluno", "SemCoach", { teamId: "TEAM_A" })),
+    });
+
+    assert.equal(response.status, 400);
+    assert.equal(((await response.json()) as { code?: string }).code, "GUTO_COACH_REQUIRED");
   });
 
   // D) admin creates student in own team
