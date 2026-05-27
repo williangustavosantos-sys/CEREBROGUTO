@@ -1466,7 +1466,9 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
 
   const fullName = `${firstName} ${lastName}`.trim();
   const userId = body.userId || buildStudentUserId({ ...body, firstName, lastName, name: fullName });
-  let coachId = body.coachId || actor.userId;
+  let coachId = typeof body.coachId === "string" && body.coachId.trim()
+    ? body.coachId.trim()
+    : undefined;
   if (actor.role === "coach") {
     if (body.coachId && body.coachId !== actor.userId) {
       res.status(403).json({ message: "Coach não pode criar aluno para outro coach.", code: "COACH_STUDENT_ACCESS_FORBIDDEN" });
@@ -1483,17 +1485,23 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
       res.status(403).json({ message: "Coach pertence a outro Time.", code: "TEAM_ACCESS_FORBIDDEN" });
       return;
     }
-  } else if (actor.role === "super_admin" && teamId !== GUTO_CORE_TEAM_ID) {
-    // super_admin criando aluno em empresa CLIENTE sem coachId: não vinculamos
-    // o aluno ao próprio super_admin (que não é coach). Exige um coach real da
-    // empresa. Exceção documentada: GUTO_CORE (alunos internos do super admin).
-    // Admin comum opera o próprio time e pode ser o responsável → mantido.
+  } else if (teamId !== GUTO_CORE_TEAM_ID) {
+    // Admin/super_admin criando aluno em empresa CLIENTE sem coachId: não
+    // vinculamos o aluno ao operador administrativo. Exige um coach real da
+    // empresa. Exceção documentada: GUTO_CORE (alunos internos).
     res.status(400).json({
       message: "Aluno em empresa cliente precisa de um coach responsável. Crie um coach na empresa antes de adicionar alunos.",
       code: "GUTO_COACH_REQUIRED",
     });
     return;
+  } else {
+    coachId = actor.coachId || actor.userId;
   }
+  if (!coachId) {
+    res.status(400).json({ message: "Coach responsável é obrigatório.", code: "GUTO_COACH_REQUIRED" });
+    return;
+  }
+  const resolvedCoachId = coachId;
   if (!(await ensureTeamPlanCapacity(res, teamId, "student", userId))) return;
   const requestedPassword = body.password?.trim();
   const temporaryPassword =
@@ -1508,7 +1516,7 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
   const user = await upsertUserAccessAsync(userId, {
     ...publicUserPatch({ ...body, firstName, lastName, name: fullName, email, phone }),
     role: "student",
-    coachId,
+    coachId: resolvedCoachId,
     teamId,
     active,
     archived: false,
@@ -1523,7 +1531,7 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
 
   let inviteLink = "";
   if (!passwordHash) {
-    const { rawToken } = await createInvite({ userId, name: fullName, coachId });
+    const { rawToken } = await createInvite({ userId, name: fullName, coachId: resolvedCoachId });
     inviteLink = buildInviteLink(rawToken);
   }
 
@@ -1532,7 +1540,7 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
     actorUserId: caller.userId,
     actorRole: caller.role,
     targetUserId: userId,
-    metadata: { role: "student", coachId, active },
+    metadata: { role: "student", coachId: resolvedCoachId, active },
   });
 
   res.status(201).json({ user, student: buildStudentView(user), inviteLink, temporaryPassword });
