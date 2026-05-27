@@ -18,6 +18,14 @@ export type GutoTeam = {
         maxStudents?: number | null;
     };
     status: "active" | "paused" | "archived";
+    // Operational contact data (B2B). Optional at the storage layer; the panel
+    // form requires email. Telefone/endereço são contato comercial, NÃO entram
+    // na GutoMemory do aluno.
+    email?: string;
+    phone?: string;
+    addressLine?: string;
+    city?: string;
+    country?: string;
     createdAt: string;
     updatedAt: string;
 };
@@ -211,6 +219,17 @@ export function updateTeam(teamId: string, patch: Partial<Omit<GutoTeam, "id" | 
     writeTeamsSync(store);
     writeTeamsAsync(store).catch(() => {});
     return updated;
+}
+
+export function deleteTeam(teamId: string): void {
+    if (teamId === GUTO_CORE_TEAM_ID) {
+        throw new Error("GUTO_CORE não pode ser removido.");
+    }
+    const store = readTeamsSync();
+    if (!store.teams[teamId]) throw new GutoTeamNotFoundError(teamId);
+    delete store.teams[teamId];
+    writeTeamsSync(store);
+    writeTeamsAsync(store).catch(() => {});
 }
 
 export function normalizeTeamId(teamId?: string | null): string {
