@@ -401,13 +401,15 @@ authRouter.post("/admin/invites", requireAuth, async (req: Request, res: Respons
     return;
   }
 
-  let resolvedCoachId =
-    actor.role === "admin" || actor.role === "super_admin" ? (coachId ?? actor.coachId ?? actor.userId) : actor.userId;
   if (actor.role === "coach" && coachId && coachId !== actor.userId) {
     res.status(403).json({ message: "Coach não pode criar convite para outro coach.", code: "COACH_STUDENT_ACCESS_FORBIDDEN" });
     return;
   }
-  if (coachId && actor.role !== "coach") {
+
+  let resolvedCoachId: string | undefined;
+  if (actor.role === "coach") {
+    resolvedCoachId = actor.userId;
+  } else if (coachId) {
     const assignedCoach = await getUserAccessAsync(coachId);
     if (!assignedCoach || assignedCoach.role !== "coach") {
       res.status(404).json({ message: "Coach não encontrado." });
@@ -418,6 +420,19 @@ authRouter.post("/admin/invites", requireAuth, async (req: Request, res: Respons
       return;
     }
     resolvedCoachId = assignedCoach.userId;
+  } else if (teamId !== GUTO_CORE_TEAM_ID) {
+    res.status(400).json({
+      message: "Aluno em empresa cliente precisa de um coach responsável. Crie um coach na empresa antes de adicionar alunos.",
+      code: "GUTO_COACH_REQUIRED",
+    });
+    return;
+  } else {
+    resolvedCoachId = actor.coachId || actor.userId;
+  }
+
+  if (!resolvedCoachId) {
+    res.status(400).json({ message: "Coach responsável é obrigatório.", code: "GUTO_COACH_REQUIRED" });
+    return;
   }
 
   const userId = `u-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;

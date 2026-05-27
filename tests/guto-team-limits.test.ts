@@ -190,6 +190,7 @@ describe("GUTO Time plan capacity HTTP routes", () => {
         email: "student-over-limit@guto.test",
         phone: "+390212345678",
         teamId: "TEAM_START_LIMIT",
+        coachId: "coach-start-1",
       }),
     });
 
