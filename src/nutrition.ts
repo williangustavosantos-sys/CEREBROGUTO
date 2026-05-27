@@ -238,6 +238,8 @@ export interface DietPlan {
   title?: string;
   generatedAt: string;
   country: string;
+  countryCode?: string;
+  city?: string;
   macros: DietMacros;
   meals: DietMeal[];
   goal?: string;

@@ -167,19 +167,19 @@ export function classifyShortContextIntent(params: {
 // ─── Copy determinística (curta, no idioma do usuário) ────────────────────────
 
 export function foodUnavailableReply(language: ShortIntentLanguage): string {
-  if (language === "en-US") return "No problem. Tell me which food ran out and I'll swap it for a local one with the same role — same protein/carb, no drama.";
-  if (language === "it-IT") return "Nessun problema. Dimmi quale alimento è finito e te lo cambio con uno locale equivalente — stessa proteina/carbo, senza drammi.";
-  return "Tranquilo. Me diz qual alimento acabou que eu troco por um equivalente local — mesma proteína/carbo, sem complicar.";
+  if (language === "en-US") return "No problem. I will swap this food for a local equivalent.";
+  if (language === "it-IT") return "Nessun problema. Lo cambio con un equivalente locale.";
+  return "Sem problema. Eu troco esse alimento por um equivalente local.";
 }
 
 export function equipmentUnavailableReply(language: ShortIntentLanguage): string {
-  if (language === "en-US") return "Got it, machine is taken. Tell me which exercise it is and I'll swap it for an equivalent for the same muscle, right now.";
-  if (language === "it-IT") return "Capito, l'attrezzo è occupato. Dimmi qual è l'esercizio e te lo cambio con uno equivalente per lo stesso muscolo, subito.";
-  return "Fechado, aparelho ocupado. Me diz qual é o exercício que eu troco por um equivalente pro mesmo músculo, agora.";
+  if (language === "en-US") return "Got it. I will swap it for an equivalent exercise.";
+  if (language === "it-IT") return "Capito. Lo cambio con un esercizio equivalente.";
+  return "Fechado. Eu troco por um exercício equivalente.";
 }
 
 export function clarificationReply(language: ShortIntentLanguage): string {
-  if (language === "en-US") return "Got it — you don't have what? An ingredient for your meal, or equipment for an exercise? Tell me and I'll solve it.";
-  if (language === "it-IT") return "Aspetta — non hai cosa? Un ingrediente del pasto o un attrezzo per l'esercizio? Dimmelo e lo risolvo.";
-  return "Peraí — não tem o quê? Um ingrediente da refeição ou um aparelho do treino? Me diz que eu resolvo.";
+  if (language === "en-US") return "You do not have what: food or equipment?";
+  if (language === "it-IT") return "Cosa non hai: alimento o attrezzo?";
+  return "Não tem o quê: alimento ou aparelho?";
 }
