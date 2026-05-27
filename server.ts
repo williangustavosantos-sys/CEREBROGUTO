@@ -74,6 +74,15 @@ import {
   summarizeWorkoutFeedback,
   type WorkoutFeedbackRecord,
 } from "./src/workout-progression.js";
+import { applyLevelStructure, resolveTrainingLevel, type WorkoutLanguage } from "./src/workout-level.js";
+import {
+  classifyShortContextIntent,
+  stripInjectedContext,
+  foodUnavailableReply,
+  equipmentUnavailableReply,
+  clarificationReply,
+  type ShortIntentLanguage,
+} from "./src/chat-context-intent.js";
 import {
   resolveProfileFreeFields,
   resolveKnownPathologyLocally,
@@ -5486,8 +5495,13 @@ function enforceTrainingFlowCertainty(
     return;
   }
 
-  if (/\b(ombro|shoulder|spalla)\b/.test(normalize(rawInput)) && !extractAgeFromContractText(rawInput)) {
-    memory.trainingLimitations = normalizeMemoryValue(rawInput);
+  // Fase 3L — só classifica ombro como patologia se a REGIÃO aparecer na fala do
+  // usuário, nunca no bloco de contexto injetado (ex.: [DIET CONTEXT … pathology:
+  // ombro…]). Isso impedia "não tenho" (em contexto de alimento) de virar "Ombro
+  // entendido". Persistimos apenas a fala limpa, não o bloco inteiro.
+  const userInputForPathology = stripInjectedContext(rawInput);
+  if (/\b(ombro|shoulder|spalla)\b/.test(normalize(userInputForPathology)) && !extractAgeFromContractText(userInputForPathology)) {
+    memory.trainingLimitations = normalizeMemoryValue(userInputForPathology);
     const fala = language === "en-US"
       ? "Shoulder noted. Warm-up first, no irritation, strengthen with control and protect the push."
       : language === "it-IT"
@@ -5988,6 +6002,9 @@ function enforceTrainingFlowCertainty(
 function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMemory, expectedResponse?: ExpectedResponse | null): GutoModelResponse {
   const selectedLanguage = normalizeLanguage(language);
   const text = normalize(rawInput);
+  // Fase 3L — detecção de patologia roda só sobre a FALA do usuário, nunca sobre
+  // o bloco de contexto injetado pelo app (que pode citar "ombro" etc.).
+  const userText = normalize(stripInjectedContext(rawInput));
 
   // SAFETY ABSOLUTA: crise de saúde mental roda antes de qualquer outra coisa.
   if (/\b(muito mal|besteira|suic|kill myself|harm myself|farmi male)\b/.test(text)) {
@@ -5997,6 +6014,21 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
         ? "Resta con me adesso. Respira, non stare solo, e chiama emergenza se puoi farti male."
         : "Fica comigo agora. Respira, não fica sozinho e chama emergência se você pode se machucar.";
     return { fala, acao: "none", expectedResponse: null };
+  }
+
+  // Fase 3L — mensagem curta interpretada pelo CONTEXTO ATIVO (antes de qualquer
+  // gate de patologia). "não tenho"/"acabou" em contexto de alimento = alimento
+  // indisponível; em contexto de exercício = equipamento; sem contexto = pedir
+  // esclarecimento. Nunca vira patologia sem região corporal explícita na fala.
+  const shortIntent = classifyShortContextIntent({ rawInput });
+  if (shortIntent.intent === "food_unavailable") {
+    return { fala: foodUnavailableReply(selectedLanguage as ShortIntentLanguage), acao: "none", expectedResponse: null, avatarEmotion: "default" };
+  }
+  if (shortIntent.intent === "equipment_unavailable") {
+    return { fala: equipmentUnavailableReply(selectedLanguage as ShortIntentLanguage), acao: "none", expectedResponse: null, avatarEmotion: "default" };
+  }
+  if (shortIntent.intent === "needs_clarification") {
+    return { fala: clarificationReply(selectedLanguage as ShortIntentLanguage), acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
 
   // Santo Graal §1.4 P2 + §17 Bug Crítico #1 — memória calibrada é soberana.
@@ -6113,7 +6145,7 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
     return { fala, acao: "none", expectedResponse: null };
   }
 
-  if (/\b(joelho|knee|ginocchio)\b/.test(text)) {
+  if (/\b(joelho|knee|ginocchio)\b/.test(userText)) {
     const fala = selectedLanguage === "en-US"
       ? "Knee noted. We reduce impact, go light, mobility first, and I protect the joint before any ego."
       : selectedLanguage === "it-IT"
@@ -6122,16 +6154,17 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
     return { fala, acao: "none", expectedResponse: null };
   }
 
-  if (/\b(ombro|shoulder|spalla)\b/.test(text)) {
-    const age = extractAgeFromContractText(rawInput);
+  if (/\b(ombro|shoulder|spalla)\b/.test(userText)) {
+    const userInput = stripInjectedContext(rawInput);
+    const age = extractAgeFromContractText(userInput);
     const nextMemory = {
       ...(memory || {}),
-      trainingLimitations: rawInput,
+      trainingLimitations: userInput,
       ...(age ? { userAge: age } : {}),
     } as GutoMemory;
     const gate = buildTrainingExecutionGate(nextMemory, selectedLanguage);
     const memoryPatch = {
-      trainingLimitations: rawInput,
+      trainingLimitations: userInput,
       ...(age ? { userAge: age } : {}),
     };
     if (gate.status !== "ready_to_execute") {
@@ -6617,7 +6650,11 @@ async function askGutoModel({
             : memory.trainingLimitations || memory.trainingPathology || undefined,
           foodRestrictions: memory.foodRestrictions,
           goal: memory.trainingGoal,
-          level: memory.trainingStatus || memory.trainingLevel,
+          // Nível canônico explícito (avançado/consistente/voltando/iniciante)
+          // + nuance do status livre, para o curator não rebaixar um avançado.
+          level: [resolveTrainingLevel(memory.trainingLevel, memory.trainingStatus), memory.trainingStatus]
+            .filter(Boolean)
+            .join(" — "),
           lastWeekFeedback: summarizeWorkoutFeedback(memory.workoutFeedbackHistory) || (memory as any).lastWeekFeedback,
           focus: semanticFocus,
           location: locationMode,
@@ -6665,6 +6702,17 @@ async function askGutoModel({
       }
 
       workoutPlan = safetyFilterWorkoutPlan(workoutPlan, memory);
+      // Fase 3L — o nível vira dose real (avançado ≠ iniciante), aplicado ao
+      // plano do curator OU do template, depois da segurança e antes da
+      // progressão semanal. Avançado segue avançado mesmo com patologia (a
+      // região já foi protegida pelo safetyFilter acima).
+      workoutPlan = applyLevelStructure(workoutPlan as any, {
+        level: memory.trainingLevel,
+        status: memory.trainingStatus,
+        goal: memory.trainingGoal,
+        hasLimitation: Boolean(deriveBodyRegionFromPathology(memory)),
+        language: selectedLanguage as WorkoutLanguage,
+      }) as WorkoutPlan;
       workoutPlan = applyWorkoutProgression(workoutPlan, memory.workoutFeedbackHistory) as WorkoutPlan;
       workoutPlan = dedupeAndRepairWorkoutPlan(workoutPlan, {
         focus: semanticFocus,
