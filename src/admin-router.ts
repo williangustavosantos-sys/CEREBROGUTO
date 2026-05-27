@@ -988,20 +988,37 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
   const actor = requireActor(req, res);
   if (!actor) return;
   const body = req.body as Partial<UserAccess> & { password?: string };
-  const firstName = normalizePersonName(body.firstName || body.name);
-  const lastName = normalizePersonName(body.lastName);
+  // Nome soberano: aceita "name" único OU firstName/lastName separados. O sobrenome é
+  // opcional — o aluno confirma o nome soberano no app. Mesma leniência de POST /coaches.
+  const fullNameInput = normalizePersonName(body.firstName || body.name);
+  let firstName = fullNameInput;
+  let lastName = normalizePersonName(body.lastName);
+  if (!lastName && fullNameInput.includes(" ")) {
+    const [head, ...rest] = fullNameInput.split(" ");
+    firstName = head;
+    lastName = rest.join(" ");
+  }
   const email = asString(body.email, "").trim().toLowerCase();
   const phone = normalizePhone(body.phone);
-  if (!firstName || !lastName) {
-    res.status(400).json({ message: "Nome e sobrenome do aluno são obrigatórios." });
+  if (!firstName) {
+    res.status(400).json({ message: "Nome do aluno é obrigatório.", code: "GUTO_NAME_REQUIRED" });
     return;
   }
   if (!email || !isValidEmail(email)) {
-    res.status(400).json({ message: "Email válido do aluno é obrigatório." });
+    res.status(400).json({ message: "Email válido do aluno é obrigatório.", code: "GUTO_EMAIL_INVALID" });
     return;
   }
-  if (!phone || !isValidPhone(phone)) {
-    res.status(400).json({ message: "Telefone válido do aluno é obrigatório." });
+  // Telefone é contato comercial opcional para o aluno; valida só quando enviado.
+  if (phone && !isValidPhone(phone)) {
+    res.status(400).json({ message: "Telefone do aluno é inválido.", code: "GUTO_PHONE_INVALID" });
+    return;
+  }
+  // Email é o identificador de login: precisa ser único na plataforma.
+  const emailTaken = (await getAllUserAccessAsync()).some(
+    (u) => asString(u.email, "").trim().toLowerCase() === email,
+  );
+  if (emailTaken) {
+    res.status(409).json({ message: "Já existe um usuário com este email.", code: "GUTO_EMAIL_DUPLICATE" });
     return;
   }
   if (body.role && body.role !== "student") {
