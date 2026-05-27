@@ -27,6 +27,7 @@ import {
 import {
   assertTeamPlanCapacity,
   createTeam,
+  deleteTeam,
   getAllTeams,
   getTeam,
   getTeamPlanUsage,
@@ -436,6 +437,36 @@ function phoneDigits(value: string): string {
 function isValidPhone(value: string): boolean {
   const digits = phoneDigits(value);
   return digits.length >= 8 && digits.length <= 15 && !/^(\d)\1+$/.test(digits);
+}
+
+// Operational contact fields for a Team/Empresa. Email is validated when sent
+// (the panel form requires it); phone/address são contato comercial opcional.
+// Returns the partial patch, or null after responding with 400.
+function readTeamContactFields(
+  body: LooseRecord,
+  res: Response,
+): Partial<Pick<GutoTeam, "email" | "phone" | "addressLine" | "city" | "country">> | null {
+  const patch: Partial<Pick<GutoTeam, "email" | "phone" | "addressLine" | "city" | "country">> = {};
+  if (body.email !== undefined) {
+    const email = asString(body.email, "").trim().toLowerCase();
+    if (email && !isValidEmail(email)) {
+      res.status(400).json({ message: "Email de contato da empresa é inválido.", code: "GUTO_EMAIL_INVALID" });
+      return null;
+    }
+    patch.email = email || undefined;
+  }
+  if (body.phone !== undefined) {
+    const phone = normalizePhone(body.phone);
+    if (phone && !isValidPhone(phone)) {
+      res.status(400).json({ message: "Telefone da empresa é inválido.", code: "GUTO_PHONE_INVALID" });
+      return null;
+    }
+    patch.phone = phone || undefined;
+  }
+  if (body.addressLine !== undefined) patch.addressLine = asString(body.addressLine, "").trim() || undefined;
+  if (body.city !== undefined) patch.city = asString(body.city, "").trim() || undefined;
+  if (body.country !== undefined) patch.country = asString(body.country, "").trim() || undefined;
+  return patch;
 }
 
 function userIdPart(value: string): string {
@@ -1915,16 +1946,23 @@ adminRouter.post("/teams", requireSuperAdmin, asyncHandler(async (req, res) => {
         maxCoaches: customLimitsRaw.maxCoaches !== undefined ? asNumber(customLimitsRaw.maxCoaches, 0) || null : undefined,
       }
     : undefined;
+  const contact = readTeamContactFields(body, res);
+  if (contact === null) return;
+  const statusInput = asString(body.status, "active");
+  const status = ["active", "paused", "archived"].includes(statusInput)
+    ? (statusInput as GutoTeam["status"])
+    : "active";
   const id = `team-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
   const now = new Date().toISOString();
   const team: GutoTeam = {
     id,
     name,
     plan: plan as GutoTeamPlan,
-    status: "active",
+    status,
     createdAt: now,
     updatedAt: now,
     ...(customLimits ? { customLimits } : {}),
+    ...contact,
   };
   const created = createTeam(team);
   addLog({
@@ -1973,6 +2011,9 @@ adminRouter.patch("/teams/:teamId", requireSuperAdmin, asyncHandler(async (req, 
         }
       : undefined;
   }
+  const contact = readTeamContactFields(body, res);
+  if (contact === null) return;
+  Object.assign(patch, contact);
   const updated = updateTeam(teamId, patch);
   addLog({
     action: "team_updated",
@@ -1981,6 +2022,72 @@ adminRouter.patch("/teams/:teamId", requireSuperAdmin, asyncHandler(async (req, 
     metadata: { teamId, ...patch },
   });
   res.json({ team: updated });
+}));
+
+// Conta coaches/alunos vinculados a um Time (qualquer estado).
+function countTeamMembers(teamId: string, users: UserAccess[]): { coaches: number; students: number } {
+  const normalized = normalizeAccessTeamId(teamId);
+  let coaches = 0;
+  let students = 0;
+  for (const u of users) {
+    if (normalizeAccessTeamId(u.teamId) !== normalized) continue;
+    if (u.role === "coach") coaches += 1;
+    else if (u.role === "student") students += 1;
+  }
+  return { coaches, students };
+}
+
+// DELETE de empresa — super_admin. Bloqueia GUTO_CORE e empresas com coaches/alunos.
+adminRouter.delete("/teams/:teamId", requireSuperAdmin, asyncHandler(async (req, res) => {
+  const teamId = routeParam(req, "teamId");
+  if (teamId === GUTO_CORE_TEAM_ID) {
+    res.status(400).json({ message: "A empresa interna GUTO_CORE não pode ser removida.", code: "GUTO_CORE_PROTECTED" });
+    return;
+  }
+  const team = getTeam(teamId);
+  if (!team) {
+    res.status(404).json({ message: `Time não encontrado: ${teamId}`, code: "GUTO_TEAM_NOT_FOUND" });
+    return;
+  }
+  const members = countTeamMembers(teamId, await getAllUserAccessAsync());
+  if (members.coaches > 0 || members.students > 0) {
+    res.status(409).json({
+      message: "Empresa possui coaches ou alunos. Remova/realoque antes de excluir.",
+      code: "GUTO_TEAM_NOT_EMPTY",
+      members,
+    });
+    return;
+  }
+  deleteTeam(teamId);
+  addLog({
+    action: "team_deleted",
+    actorUserId: req.gutoUser!.userId,
+    actorRole: req.gutoUser!.role,
+    metadata: { teamId, name: team.name },
+  });
+  res.json({ ok: true, teamId });
+}));
+
+// Limpeza de empresas de teste — super_admin. Remove apenas Times vazios
+// (0 coaches e 0 alunos), exceto GUTO_CORE. Idempotente.
+adminRouter.post("/maintenance/cleanup-empty-teams", requireSuperAdmin, asyncHandler(async (req, res) => {
+  const users = await getAllUserAccessAsync();
+  const removed: { id: string; name: string }[] = [];
+  for (const team of getAllTeams()) {
+    if (team.id === GUTO_CORE_TEAM_ID) continue;
+    const members = countTeamMembers(team.id, users);
+    if (members.coaches === 0 && members.students === 0) {
+      deleteTeam(team.id);
+      removed.push({ id: team.id, name: team.name });
+    }
+  }
+  addLog({
+    action: "teams_cleanup",
+    actorUserId: req.gutoUser!.userId,
+    actorRole: req.gutoUser!.role,
+    metadata: { removedCount: removed.length, removed: removed.map((r) => r.id) },
+  });
+  res.json({ ok: true, removedCount: removed.length, removed });
 }));
 
 // ─── Invite recovery ──────────────────────────────────────────────────────────

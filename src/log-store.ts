@@ -46,6 +46,8 @@ export type LogAction =
   | "billing_subscription_updated"
   | "team_created"
   | "team_updated"
+  | "team_deleted"
+  | "teams_cleanup"
   | "guto_revived"
   | "invite_regenerated";
 
