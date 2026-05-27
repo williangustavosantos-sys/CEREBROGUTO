@@ -55,6 +55,9 @@ function post(path: string, t: string, body: Record<string, unknown>) {
 function del(path: string, t: string) {
   return fetch(`${baseUrl}${path}`, { method: "DELETE", headers: { Authorization: `Bearer ${t}` } });
 }
+function get(path: string, t: string) {
+  return fetch(`${baseUrl}${path}`, { headers: { Authorization: `Bearer ${t}` } });
+}
 
 before(async () => {
   process.env.GUTO_DISABLE_LISTEN = "1";
@@ -104,6 +107,31 @@ describe("Painel Ops — empresa", () => {
     assert.equal(body.team.city, "São Paulo");
     assert.equal(body.team.status, "active");
     assert.ok(getTeam(body.team.id)?.phone);
+  });
+
+  it("round-trip: empresa criada reaparece em GET /admin/teams com TODOS os campos", async () => {
+    const create = await post("/admin/teams", superToken(), {
+      name: "Round Trip Co", plan: "elite", status: "paused",
+      email: "ops@roundtrip.com", phone: "+55 21 98888-7777",
+      addressLine: "Av. B, 200", city: "Rio de Janeiro", country: "Brasil",
+    });
+    assert.equal(create.status, 201);
+    const createdId = ((await create.json()) as { team: { id: string } }).team.id;
+
+    const list = await get("/admin/teams", superToken());
+    assert.equal(list.status, 200);
+    const teams = ((await list.json()) as { teams: Array<Record<string, unknown>> }).teams;
+    const found = teams.find((t) => t.id === createdId);
+    assert.ok(found, "empresa criada deve aparecer na listagem");
+    assert.equal(found!.name, "Round Trip Co");
+    assert.equal(found!.email, "ops@roundtrip.com");
+    // Telefone é normalizado no backend (remove espaços/traços, mantém + e dígitos).
+    assert.equal(found!.phone, "+5521988887777");
+    assert.equal(found!.addressLine, "Av. B, 200");
+    assert.equal(found!.city, "Rio de Janeiro");
+    assert.equal(found!.country, "Brasil");
+    assert.equal(found!.plan, "elite");
+    assert.equal(found!.status, "paused");
   });
 
   it("empresa com email inválido → 400 GUTO_EMAIL_INVALID", async () => {
