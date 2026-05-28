@@ -7913,6 +7913,15 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
   const hasSelfieEvidence = typeof imageBase64 === "string" && imageBase64.trim().length > 0;
   const validationImageBase64 = imageBase64 || "";
 
+  // Selfie obrigatória — sem prova, sem mérito. Ver GUTO_EVOLUCAO_XP_E_MORTE_DETALHADA.md (X-7)
+  // e GUTO_ONLINE_SESSAO_ASSISTIDA_DETALHADA.md (O-7).
+  if (!hasSelfieEvidence) {
+    return res.status(400).json({
+      error: "SELFIE_REQUIRED",
+      message: "Validação exige foto. Sem prova, sem mérito.",
+    });
+  }
+
   const validationAccess = getEffectiveUserAccess(userId);
   if (!validationAccess || !validationAccess.active || validationAccess.archived) {
     return res.status(403).json({
