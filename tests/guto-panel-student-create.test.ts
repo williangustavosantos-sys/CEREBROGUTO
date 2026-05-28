@@ -306,6 +306,92 @@ describe("Painel P0 — criar/convidar aluno", () => {
     assert.equal(inviteBody.inviteLink, created.inviteLink);
   });
 
+  it("GET /admin/students/:userId/validations retorna validations + feedback do mais novo para o mais velho", async () => {
+    // Coach precisa ver as fotos das validações do aluno (bug do fundador 2026-05-28).
+    // O endpoint expõe memory.validationHistory + memory.workoutFeedbackHistory,
+    // que antes só eram visíveis via lastValidationAt + validationsTotal.
+    const create = await post("/admin/students", token(coachA), {
+      name: "Aluno Com Historico",
+      email: "aluno.historico@guto.test",
+    });
+    assert.equal(create.status, 201);
+    const created = (await create.json()) as { user: UserAccess };
+
+    // Sem nenhuma validação: arrays vazios.
+    const empty = await get(`/admin/students/${created.user.userId}/validations`, token(coachA));
+    assert.equal(empty.status, 200);
+    const emptyBody = (await empty.json()) as { validations: unknown[]; feedback: unknown[] };
+    assert.deepEqual(emptyBody.validations, []);
+    assert.deepEqual(emptyBody.feedback, []);
+
+    // Popula validationHistory direto no JSON file (mesmo store que o backend lê).
+    const memStore = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, any>;
+    memStore[created.user.userId] = {
+      ...(memStore[created.user.userId] || {}),
+      userId: created.user.userId,
+      validationHistory: [
+        {
+          id: "v-1",
+          userId: created.user.userId,
+          createdAt: "2026-05-26T10:00:00.000Z",
+          dateLabel: "26 mai",
+          workoutFocus: "chest_triceps",
+          workoutLabel: "Peito e tríceps",
+          locationMode: "gym",
+          language: "pt-BR",
+          photoUrl: "/img/v1-photo.jpg",
+          posterUrl: "/img/v1-poster.jpg",
+          thumbUrl: "/img/v1-thumb.jpg",
+          xp: 100,
+          status: "validated",
+          gutoMessage: "Missão fechada.",
+        },
+        {
+          id: "v-2",
+          userId: created.user.userId,
+          createdAt: "2026-05-27T10:00:00.000Z",
+          dateLabel: "27 mai",
+          workoutFocus: "back_biceps",
+          workoutLabel: "Costas e bíceps",
+          locationMode: "gym",
+          language: "pt-BR",
+          photoUrl: "/img/v2-photo.jpg",
+          posterUrl: "/img/v2-poster.jpg",
+          thumbUrl: "/img/v2-thumb.jpg",
+          xp: 100,
+          status: "validated",
+          gutoMessage: "Missão fechada.",
+        },
+      ],
+      workoutFeedbackHistory: [
+        {
+          userId: created.user.userId,
+          createdAt: "2026-05-27T10:05:00.000Z",
+          workoutFocus: "back_biceps",
+          workoutLabel: "Costas e bíceps",
+          locationMode: "gym",
+          difficulty: "hard",
+          energy: "normal",
+          exerciseIds: ["x"],
+        },
+      ],
+    };
+    writeFileSync(testMemoryFile, JSON.stringify(memStore, null, 2));
+
+    const res = await get(`/admin/students/${created.user.userId}/validations`, token(coachA));
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      validations: Array<{ id: string; status: string }>;
+      feedback: Array<{ difficulty: string }>;
+    };
+    // Mais novo primeiro:
+    assert.equal(body.validations.length, 2);
+    assert.equal(body.validations[0].id, "v-2");
+    assert.equal(body.validations[1].id, "v-1");
+    assert.equal(body.feedback.length, 1);
+    assert.equal(body.feedback[0].difficulty, "hard");
+  });
+
   it("gerar treino sem calibragem → 422 WORKOUT_PROFILE_INCOMPLETE com lista de campos faltando", async () => {
     // Bug do fundador (2026-05-28): aluno criado só com nome+email, abre aba Treino,
     // clica em Gerar → backend devolvia treino genérico com defaults silenciosos
