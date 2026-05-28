@@ -2029,6 +2029,25 @@ adminRouter.get("/students/:userId/workout/history", asyncHandler(async (req, re
   res.json({ history: workoutHistory(student.userId) });
 }));
 
+// GET /admin/students/:userId/validations
+// Retorna o histórico completo de validações de treino (até 5 últimas, com fotos)
+// + o histórico de feedback (dificuldade, energia, dor). Usado pelo painel do
+// coach para acompanhar a evolução do aluno — bug do fundador (2026-05-28):
+// "o coach precisa ver as fotos das validações". Antes só havia validationsTotal
+// (contagem) e lastValidationAt em buildStudentView.
+adminRouter.get("/students/:userId/validations", asyncHandler(async (req, res) => {
+  const student = await getManagedStudent(req, res, routeParam(req, "userId"));
+  if (!student) return;
+  const memory = getMemory(student.userId);
+  const validations = Array.isArray(memory.validationHistory) ? memory.validationHistory : [];
+  const feedback = Array.isArray(memory.workoutFeedbackHistory) ? memory.workoutFeedbackHistory : [];
+  res.json({
+    // Ordem mais recente primeiro (UI mostra cards do mais novo pro mais velho).
+    validations: [...validations].reverse(),
+    feedback: [...feedback].reverse(),
+  });
+}));
+
 // ─── Weekly Workout Plan ──────────────────────────────────────────────────────
 
 function getTodayDayKey(): WeekDayKey {
