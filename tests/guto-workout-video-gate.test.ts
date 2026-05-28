@@ -578,7 +578,9 @@ describe("workout catalog video gate", () => {
     assert.ok(memory.memoryAudit.some((entry: any) => entry.source === "workout_validation"));
   });
 
-  it("records skip-camera validation as pending without XP and allows later selfie validation", async () => {
+  it("rejects validate-workout without selfie (SELFIE_REQUIRED) and then accepts the selfie version", async () => {
+    // Decisão do fundador (GUTO_EVOLUCAO_XP_E_MORTE_DETALHADA.md X-7 + GUTO_ONLINE_SESSAO_ASSISTIDA_DETALHADA.md O-7):
+    // sem prova, sem mérito. Validação SEM imageBase64 retorna 400 SELFIE_REQUIRED e não cria registro.
     writeFileSync(testMemoryFile, JSON.stringify({
       "student-video-gate": {
         userId: "student-video-gate",
@@ -603,7 +605,7 @@ describe("workout catalog video gate", () => {
       language: "pt-BR",
     };
 
-    const pending = await request("/guto/validate-workout", {
+    const rejected = await request("/guto/validate-workout", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -611,18 +613,19 @@ describe("workout catalog video gate", () => {
       },
       body: JSON.stringify(basePayload),
     });
-    assert.equal(pending.status, 200);
-    const pendingBody = await pending.json() as { validation: { status: string; xp: number }; arena?: unknown };
-    assert.equal(pendingBody.validation.status, "pending");
-    assert.equal(pendingBody.validation.xp, 0);
-    assert.equal(pendingBody.arena, null);
+    assert.equal(rejected.status, 400);
+    const rejectedBody = await rejected.json() as { error: string };
+    assert.equal(rejectedBody.error, "SELFIE_REQUIRED");
 
+    // Garantia: nada foi gravado (memória intacta).
     let store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, any>;
     let memory = store["student-video-gate"];
     assert.equal(memory.trainedToday, false);
     assert.deepEqual(memory.completedWorkoutDates, []);
+    assert.equal((memory.validationHistory ?? []).length, 0);
     assert.equal(memory.xpEvents.filter((event: any) => event.type === "complete_daily_mission").length, 0);
 
+    // Agora com a selfie: deve aceitar e creditar XP normalmente.
     const validated = await request("/guto/validate-workout", {
       method: "POST",
       headers: {
@@ -639,7 +642,7 @@ describe("workout catalog video gate", () => {
     store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, any>;
     memory = store["student-video-gate"];
     assert.equal(memory.trainedToday, true);
-    assert.equal(memory.validationHistory.length, 2);
+    assert.equal(memory.validationHistory.length, 1);
     assert.equal(memory.xpEvents.filter((event: any) => event.type === "complete_daily_mission").length, 1);
   });
 });
