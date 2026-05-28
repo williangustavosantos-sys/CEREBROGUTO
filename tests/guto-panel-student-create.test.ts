@@ -305,4 +305,39 @@ describe("Painel P0 — criar/convidar aluno", () => {
     const inviteBody = (await inviteRes.json()) as { inviteLink: string | null };
     assert.equal(inviteBody.inviteLink, created.inviteLink);
   });
+
+  it("gerar treino sem calibragem → 422 WORKOUT_PROFILE_INCOMPLETE com lista de campos faltando", async () => {
+    // Bug do fundador (2026-05-28): aluno criado só com nome+email, abre aba Treino,
+    // clica em Gerar → backend devolvia treino genérico com defaults silenciosos
+    // ("casa", "iniciante", "sem dor"). Decisão: gerar treino sem calibragem é
+    // proibido — mesmo padrão do gate da dieta (DIET_PROFILE_INCOMPLETE).
+    const create = await post("/admin/students", token(coachA), {
+      name: "Aluno Sem Calibragem",
+      email: "aluno.sem.calibragem@guto.test",
+    });
+    assert.equal(create.status, 201);
+    const created = (await create.json()) as { user: UserAccess };
+
+    const res = await post(
+      `/admin/students/${created.user.userId}/workout/generate`,
+      token(coachA),
+      {},
+    );
+    assert.equal(res.status, 422);
+    const body = (await res.json()) as { code: string; missing: string[] };
+    assert.equal(body.code, "WORKOUT_PROFILE_INCOMPLETE");
+    assert.ok(Array.isArray(body.missing));
+    // Campos críticos que faltam num aluno só com nome+email:
+    for (const field of [
+      "biologicalSex",
+      "userAge",
+      "heightCm",
+      "weightKg",
+      "trainingLevel",
+      "trainingGoal",
+      "preferredTrainingLocation",
+    ]) {
+      assert.ok(body.missing.includes(field), `missing deve conter "${field}", veio: ${JSON.stringify(body.missing)}`);
+    }
+  });
 });
