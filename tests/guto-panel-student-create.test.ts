@@ -306,6 +306,62 @@ describe("Painel P0 — criar/convidar aluno", () => {
     assert.equal(inviteBody.inviteLink, created.inviteLink);
   });
 
+  it("PUT /admin/students/:id/workout hidrata nomes no idioma do aluno (en-US, it-IT)", async () => {
+    // Bug do fundador (2026-05-28): coach edita treino do aluno EN/IT mas
+    // exercícios voltam em PT ("agachamento", "puxada"). Causa: normalizeWorkoutPlan
+    // chamava normalizeWorkoutPlanAgainstCatalog sem language → default pt-BR.
+    // Mesmo bug histórico do server.ts markGutoGeneratedWorkout (PR #35).
+    const create = await post("/admin/students", token(coachA), {
+      name: "Aluno En",
+      email: "aluno.en@guto.test",
+    });
+    assert.equal(create.status, 201);
+    const created = (await create.json()) as { user: UserAccess };
+
+    // Define o idioma do aluno via memória direta (igual ao patch do app).
+    const langMemStore = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, any>;
+    langMemStore[created.user.userId] = { ...(langMemStore[created.user.userId] || {}), userId: created.user.userId, language: "en-US" };
+    writeFileSync(testMemoryFile, JSON.stringify(langMemStore, null, 2));
+
+    // Coach envia treino com exercício do catálogo. Backend deve hidratar o
+    // nome em EN, não cair em "Agachamento livre" (canonicalNamePt).
+    const putRes = await fetch(`${baseUrl}/admin/students/${created.user.userId}/workout`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token(coachA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workout: {
+          focus: "legs_core",
+          focusKey: "legs_core",
+          exercises: [{ id: "agachamento_livre", sets: 3, reps: "10" }],
+        },
+      }),
+    });
+    assert.equal(putRes.status, 200);
+    const putBody = (await putRes.json()) as { workout: { exercises: Array<{ id: string; name: string }> } };
+    assert.equal(putBody.workout.exercises[0].id, "agachamento_livre");
+    // namesByLanguage["en-US"] do catálogo:
+    assert.equal(putBody.workout.exercises[0].name, "Bodyweight squat");
+
+    // Repeat em IT.
+    langMemStore[created.user.userId].language = "it-IT";
+    writeFileSync(testMemoryFile, JSON.stringify(langMemStore, null, 2));
+    const putItRes = await fetch(`${baseUrl}/admin/students/${created.user.userId}/workout`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token(coachA)}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workout: {
+          focus: "legs_core",
+          focusKey: "legs_core",
+          exercises: [{ id: "agachamento_livre", sets: 3, reps: "10" }],
+        },
+      }),
+    });
+    assert.equal(putItRes.status, 200);
+    const putItBody = (await putItRes.json()) as { workout: { exercises: Array<{ id: string; name: string }> } };
+    // namesByLanguage["it-IT"] do catálogo:
+    assert.equal(putItBody.workout.exercises[0].name, "Squat libero");
+  });
+
   it("GET /admin/students/:userId/validations retorna validations + feedback do mais novo para o mais velho", async () => {
     // Coach precisa ver as fotos das validações do aluno (bug do fundador 2026-05-28).
     // O endpoint expõe memory.validationHistory + memory.workoutFeedbackHistory,
