@@ -6432,8 +6432,11 @@ function isCoachLockedWorkout(plan?: WorkoutPlan | null): boolean {
   return Boolean(plan?.lockedByCoach);
 }
 
-function markGutoGeneratedWorkout(plan: WorkoutPlan): WorkoutPlan {
-  const catalogPlan = normalizeWorkoutPlanAgainstCatalog(plan as unknown as Record<string, unknown>, "pt-BR") as unknown as WorkoutPlan;
+function markGutoGeneratedWorkout(plan: WorkoutPlan, language: CatalogLanguage): WorkoutPlan {
+  // Hidrata os exercícios no idioma do aluno (catalog → namesByLanguage[language]).
+  // Antes, isso era hardcoded "pt-BR" e fazia exercícios virem em português mesmo
+  // com o app em EN/IT (ex.: "agachamento", "puxada" no treino em inglês).
+  const catalogPlan = normalizeWorkoutPlanAgainstCatalog(plan as unknown as Record<string, unknown>, language) as unknown as WorkoutPlan;
   return {
     ...catalogPlan,
     source: catalogPlan.source || "guto_generated",
@@ -6521,7 +6524,7 @@ async function askGutoModel({
       });
       const validation = validateWorkoutPlan(fallbackPlan, memory.recentTrainingHistory || [], locationMode);
       if (validation.valid) {
-        const officialPlan = markGutoGeneratedWorkout(fallbackPlan);
+        const officialPlan = markGutoGeneratedWorkout(fallbackPlan, selectedLanguage as CatalogLanguage);
         memory.lastWorkoutPlan = officialPlan;
         memory.lastSuggestedFocus = officialPlan.focusKey;
         memory.nextWorkoutFocus = officialPlan.focusKey;
@@ -6798,7 +6801,7 @@ async function askGutoModel({
         console.info(`[GUTO][safety] removidos por patologia: ${removed.join(", ")}`);
       }
       const lockedOfficialPlan = isCoachLockedWorkout(memory.lastWorkoutPlan) ? memory.lastWorkoutPlan : null;
-      const officialPlan = lockedOfficialPlan || markGutoGeneratedWorkout(workoutPlan);
+      const officialPlan = lockedOfficialPlan || markGutoGeneratedWorkout(workoutPlan, selectedLanguage as CatalogLanguage);
       memory.lastWorkoutPlan = officialPlan;
       workoutPlan = officialPlan;
       if (officialPlan.focusKey) {
@@ -6886,7 +6889,7 @@ async function askGutoModel({
       });
       const validation = validateWorkoutPlan(fallbackPlan, memory.recentTrainingHistory || [], locationMode);
       if (validation.valid) {
-        const officialPlan = markGutoGeneratedWorkout(fallbackPlan);
+        const officialPlan = markGutoGeneratedWorkout(fallbackPlan, selectedLanguage as CatalogLanguage);
         memory.lastWorkoutPlan = officialPlan;
         memory.lastSuggestedFocus = officialPlan.focusKey;
         memory.nextWorkoutFocus = officialPlan.focusKey;
@@ -7378,7 +7381,7 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
   if (b.lastWorkoutPlan && Array.isArray(b.lastWorkoutPlan.exercises)) {
     if (!isCoachLockedWorkout(memory.lastWorkoutPlan)) {
       try {
-        memory.lastWorkoutPlan = markGutoGeneratedWorkout(localizeWorkoutPlan(b.lastWorkoutPlan, memory.language));
+        memory.lastWorkoutPlan = markGutoGeneratedWorkout(localizeWorkoutPlan(b.lastWorkoutPlan, memory.language), memory.language as CatalogLanguage);
       } catch (error) {
         if (!isWorkoutCatalogValidationError(error)) throw error;
         return res.status(400).json({
@@ -7536,7 +7539,7 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
     if (result.workoutPlan) {
       const officialPlan = isCoachLockedWorkout(freshMemory.lastWorkoutPlan)
         ? freshMemory.lastWorkoutPlan!
-        : markGutoGeneratedWorkout(result.workoutPlan);
+        : markGutoGeneratedWorkout(result.workoutPlan, normalizeLanguage(language || freshMemory.language) as CatalogLanguage);
       freshMemory.lastWorkoutPlan = officialPlan;
       result.workoutPlan = officialPlan;
       if (officialPlan.focusKey) {

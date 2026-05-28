@@ -43,11 +43,19 @@ const forbiddenPortuguese: Record<Exclude<GutoLanguage, "pt-BR">, string[]> = {
     "amanhã", "hoje", "peito", "costas", "pernas", "ombros", "abdômen",
     "treino", "treinar", "academia", "dor", "limitação", "me manda", "me responde",
     "fechado", "boa", "sem dor", "agora", "ontem", "anteontem",
+    // Nomes de exercícios em PT (regression guard: catalog hydration deve usar
+    // namesByLanguage[language], não fallback canonicalNamePt — ver fix do
+    // markGutoGeneratedWorkout, 2026-05-28):
+    "agachamento", "puxada", "remada", "supino", "rosca", "elevação",
+    "abdução", "adução", "panturrilha", "afundo", "abdominal",
   ],
   "it-IT": [
     "amanhã", "hoje", "peito", "costas", "bíceps", "pernas", "ombros", "abdômen",
     "treino", "treinar", "academia", "limitação", "me manda", "me responde",
     "fechado", "boa", "sem dor", "ontem", "anteontem",
+    // Nomes de exercícios em PT (mesmo regression guard que en-US):
+    "agachamento", "puxada", "remada", "supino", "rosca", "elevação",
+    "abdução", "adução", "panturrilha", "afundo", "abdominal",
   ],
 };
 
