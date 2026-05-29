@@ -5480,6 +5480,35 @@ function looksLikeGrief(raw: string): boolean {
   );
 }
 
+const GREETING_TOKENS = new Set([
+  "oi", "oii", "oiii", "oie", "ola", "opa", "eai", "alo", "hey", "heyy", "hi", "hii",
+  "hello", "yo", "ciao", "salve",
+]);
+const GREETING_PHRASES = [
+  "bom dia", "boa tarde", "boa noite", "e ai", "tudo bem", "tudo bom",
+  "buon giorno", "buongiorno", "buona sera", "buonasera", "good morning", "good evening", "good afternoon",
+];
+const GREETING_FILLERS = new Set([
+  "guto", "tudo", "bem", "bom", "ai", "cara", "mano", "beleza", "blz", "td", "certo", "ae",
+]);
+
+// Saudação pura ("oi", "olá guto", "bom dia", "oi tudo bem") — NÃO é nonsense.
+// Uma mensagem com conteúdo real ("oi, não vou treinar") NÃO casa aqui: sobra
+// palavra fora de saudação/filler, então o classificador trata normalmente.
+export function looksLikeGreeting(raw: string): boolean {
+  let text = normalize(raw).replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+  if (!text) return false;
+  for (const phrase of GREETING_PHRASES) text = text.replace(phrase, " __greet__ ");
+  const words = text.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  if (words.length === 0 || words.length > 4) return false;
+  let hasGreeting = false;
+  for (const w of words) {
+    if (w === "__greet__" || GREETING_TOKENS.has(w)) hasGreeting = true;
+    else if (!GREETING_FILLERS.has(w)) return false;
+  }
+  return hasGreeting;
+}
+
 function pickByLanguage(language: GutoLanguage, map: Record<GutoLanguage, string>): string {
   return map[language] ?? map["pt-BR"];
 }
@@ -5824,6 +5853,13 @@ function enforceTrainingFlowCertainty(
       workoutPlan: null,
       avatarEmotion: "default",
     });
+    return;
+  }
+
+  // Saudação é primeiro contato, não "nonsense": deixa o GUTO responder em
+  // persona (resposta do modelo), sem jogar o "isso não serve" numa "oi".
+  if (looksLikeGreeting(rawInput)) {
+    resetChatRefusalStage(memory);
     return;
   }
 
