@@ -5914,13 +5914,21 @@ function enforceTrainingFlowCertainty(
     }
 
     if (contractIntent.kind === "nonsense") {
-      const fala = language === "it-IT"
-        ? "Diretto: questa roba non serve. Rispondi con una frase obiettivo e partiamo adesso."
-        : language === "en-US"
-          ? "Straight answer: that gives me nothing. Reply with one objective sentence and we start now."
-          : "Responde direto, Will: isso não serve. Uma frase objetiva e treino agora.";
+      // Frase real (>=3 palavras) NUNCA é "isso não serve": pode ser desabafo,
+      // frustração ou resposta fora do esperado. Deixa o modelo responder em
+      // persona (Regra 3: contexto, não template hostil).
+      const realWords = normalize(rawInput).split(/\s+/).filter((w) => w.length > 1).length;
+      if (realWords >= 3) {
+        resetChatRefusalStage(memory);
+        return;
+      }
+      // Só input curto/sem conteúdo recebe um empurrão — gentil, sem hostilidade.
       setContractResponse(response, {
-        fala,
+        fala: pickByLanguage(language, {
+          "pt-BR": "Não peguei essa. Me diz em uma frase o que você quer agora que a gente resolve.",
+          "en-US": "Didn't catch that. Tell me in one sentence what you want now and we sort it.",
+          "it-IT": "Non ho capito. Dimmi in una frase cosa vuoi adesso e lo risolviamo.",
+        }),
         acao: "none",
         expectedResponse: {
           type: "text",
@@ -5932,7 +5940,7 @@ function enforceTrainingFlowCertainty(
               : "Responder com uma frase objetiva.",
         },
         workoutPlan: null,
-        avatarEmotion: "alert",
+        avatarEmotion: "default",
       });
       return;
     }
