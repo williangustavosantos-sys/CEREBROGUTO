@@ -349,6 +349,11 @@ interface GutoMemory {
   consentAcceptedAt?: string;
   consentRevokedAt?: string;
   energyLast?: string;
+  /** Escada de persistência do chat: estágio consecutivo de recusa no dia
+   * (1=insiste com vínculo, 2=adapta a rota, 3+=aceita+consequência e para). */
+  chatRefusalStage?: number;
+  /** Dia (YYYY-MM-DD) da última recusa, para resetar o estágio a cada novo dia. */
+  chatRefusalDate?: string;
   trainingSchedule?: TrainingScheduleIntent;
   trainingLocation?: string;
   trainingStatus?: string;
@@ -1045,6 +1050,10 @@ export function getMemory(userId: string): GutoMemory {
       consentAcceptedAt: typeof existing.consentAcceptedAt === "string" ? existing.consentAcceptedAt : undefined,
       consentRevokedAt: typeof existing.consentRevokedAt === "string" ? existing.consentRevokedAt : undefined,
       energyLast: existing.energyLast,
+      // Escada de recusa do chat: precisa sobreviver ao reload para escalar entre
+      // turnos (estágio 1→2→3) em vez de repetir a mesma frase (Regra Soberana 2).
+      chatRefusalStage: typeof existing.chatRefusalStage === "number" ? existing.chatRefusalStage : undefined,
+      chatRefusalDate: typeof existing.chatRefusalDate === "string" ? existing.chatRefusalDate : undefined,
       trainingSchedule: existing.trainingSchedule,
       trainingLocation: existing.trainingLocation,
       trainingStatus: existing.trainingStatus,
@@ -1503,6 +1512,8 @@ function completeWorkout(memory: GutoMemory) {
   memory.completedWorkoutDates = Array.from(completedDays).sort();
   memory.trainedToday = true;
   memory.lastWorkoutCompletedAt = new Date().toISOString();
+  // Treino concluído zera a escada de recusa: a próxima recusa recomeça no estágio 1.
+  memory.chatRefusalStage = 0;
 
   if (!alreadyCompletedToday) {
     memory.streak += 1;
@@ -5149,6 +5160,7 @@ type ContractIntentKind =
   | "postpone"
   | "nonsense"
   | "physical_pain"
+  | "emotional_collapse"
   | "training_status_answer"
   | "schedule_tomorrow"
   | "schedule_today"
@@ -5186,6 +5198,7 @@ function normalizeContractIntentKind(value: unknown): ContractIntentKind {
     "postpone",
     "nonsense",
     "physical_pain",
+    "emotional_collapse",
     "training_status_answer",
     "schedule_tomorrow",
     "schedule_today",
@@ -5247,6 +5260,14 @@ function classifyContractIntentFallback(input: {
 
   if (isClearNoLimitationFallback(raw)) {
     return { kind: "clear_no_limitation", confidence: 0.8, reason: "fallback_clear_no_limitation", age };
+  }
+
+  if (
+    /\b(faleceu|faleceram|morreu|funeral|enterro|luto|passed away|died|lutto|e mancat[oa])\b/.test(text) ||
+    /perdi (meu|minha) (pai|mae|filho|filha|irmao|irma|esposa|marido|avo|avos)/.test(text) ||
+    /lost my (mom|mother|dad|father|son|daughter|wife|husband|brother|sister)/.test(text)
+  ) {
+    return { kind: "emotional_collapse", confidence: 0.92, reason: "fallback_grief" };
   }
 
   if (/\b(ombro|joelho|lombar|cotovelo|punho|dor|shoulder|knee|back pain|dolore|spalla|ginocchio)\b/.test(text)) {
@@ -5319,6 +5340,7 @@ async function classifyContractIntent(input: {
     "- postpone: user tries to push training to later/tomorrow.",
     "- nonsense: operationally useless/junk/playful input that should not be saved as profile.",
     "- physical_pain: real pain/limitation that should be protected/adapted, not treated as missing status.",
+    "- emotional_collapse: real grief/bereavement or severe emotional crisis (death in the family, deep loss, devastating news). Must back off training fully with empathy. NEVER classify this as physical_pain or a training limitation.",
     "- training_status_answer: user answered training state/level/returning/current rhythm.",
     "- schedule_tomorrow: user chose tomorrow as schedule.",
     "- location_answer: user answered place/equipment/context of training.",
@@ -5423,6 +5445,223 @@ function hasSovereignCalibrationForTraining(memory: GutoMemory): boolean {
   return hasLocation && hasRhythm && hasAge && hasPathology;
 }
 
+// ─── Escada de persistência do chat (recusa / cansaço / adiamento) ──────────
+// Estágio consecutivo na MESMA conversa-dia: 1 = insiste com o vínculo da dupla;
+// 2 = adapta a rota (caminhada/mínimo); 3+ = aceita, aplica a consequência de XP
+// e PARA de empurrar. A intensidade do estágio 1 sobe com os dias parados — a
+// arma psicológica do GUTO é a sobrevivência da dupla, não a ordem cega.
+type RefusalIntentKind = "resistance_common" | "fatigue_common" | "postpone";
+
+function advanceChatRefusalStage(memory: GutoMemory): number {
+  const today = todayKey();
+  if (memory.chatRefusalDate !== today) memory.chatRefusalStage = 0;
+  const next = (memory.chatRefusalStage ?? 0) + 1;
+  memory.chatRefusalStage = next;
+  memory.chatRefusalDate = today;
+  return next;
+}
+
+function resetChatRefusalStage(memory: GutoMemory): void {
+  if (memory.chatRefusalStage) memory.chatRefusalStage = 0;
+}
+
+function chatDaysSinceLastWorkout(memory: GutoMemory): number {
+  if (!memory.lastWorkoutCompletedAt) return -1;
+  const diff = Date.now() - new Date(memory.lastWorkoutCompletedAt).getTime();
+  return Number.isFinite(diff) ? Math.floor(diff / 86_400_000) : -1;
+}
+
+function looksLikeGrief(raw: string): boolean {
+  const text = normalize(raw);
+  return (
+    /\b(faleceu|faleceram|morreu|funeral|enterro|luto|passed away|died|lutto|e mancat[oa])\b/.test(text) ||
+    /perdi (meu|minha) (pai|mae|filho|filha|irmao|irma|esposa|marido|avo|avos)/.test(text) ||
+    /lost my (mom|mother|dad|father|son|daughter|wife|husband|brother|sister)/.test(text)
+  );
+}
+
+function pickByLanguage(language: GutoLanguage, map: Record<GutoLanguage, string>): string {
+  return map[language] ?? map["pt-BR"];
+}
+
+// ─── Prompt contextual para o modelo compor a resposta (Regra 3: sem "se X então Y") ───
+// O classificador ENTENDE a situação; o MODELO compõe a resposta usando contexto.
+// Frases fixas SÓ existem como fallback técnico (sem chave Gemini).
+
+function buildResistanceContextPrompt(
+  memory: GutoMemory,
+  language: GutoLanguage,
+  kind: RefusalIntentKind,
+  stage: number,
+  rawInput: string,
+): string {
+  const name = getGutoCallName(memory);
+  const days = chatDaysSinceLastWorkout(memory);
+  const streak = memory.streak ?? 0;
+
+  const langInstruction: Record<GutoLanguage, string> = {
+    "pt-BR": "Responda em português brasileiro nativo.",
+    "en-US": "Reply in natural native English.",
+    "it-IT": "Rispondi in italiano nativo naturale.",
+  };
+
+  const situationType =
+    kind === "fatigue_common" ? "cansaço comum (não doença nem lesão)"
+    : kind === "postpone" ? "tentativa de adiar para depois/amanhã"
+    : "resistência/desistência sem motivo de saúde real";
+
+  let stageGuidance: string;
+  if (stage >= 3) {
+    stageGuidance = [
+      `ESTÁGIO ${stage} — esta é a ${stage}ª recusa consecutiva HOJE.`,
+      `O usuário já decidiu. PARE de empurrar. Respeite a decisão.`,
+      `Exponha a consequência real (perde XP hoje, isso é fato do sistema) e mantenha a porta aberta para amanhã.`,
+      `Tom: parceiro que aceita mas não finge que está tudo bem. Sem agressão, sem cobrança.`,
+    ].join("\n");
+  } else if (stage === 2) {
+    stageGuidance = [
+      `ESTÁGIO 2 — o usuário já recusou uma vez e está recusando de novo.`,
+      `Não desista, mas MUDE A ROTA: proponha uma alternativa mais leve (caminhada, mobilidade, 10-15 minutos).`,
+      `A ideia é salvar o dia com o mínimo — nem você nem o usuário desiste.`,
+    ].join("\n");
+  } else {
+    stageGuidance = [
+      `ESTÁGIO 1 — primeira recusa do dia.`,
+      `Use o VÍNCULO DA DUPLA como alavanca psicológica: o nome dele está junto com o seu no app, vocês evoluem ou regridem juntos, o pacto do botão inicial.`,
+      `Seja firme e parceiro, não general. Puxe para uma ação mínima (20 minutos).`,
+    ].join("\n");
+  }
+
+  let intensityContext = "";
+  if (days > 3) {
+    intensityContext = `CONTEXTO CRÍTICO: o usuário está há ${days} dias sem treinar. Streak=${streak}. Isso é risco real de desistência. Use a alavanca de sobrevivência — quando ele some, VOCÊ perde força. O botão que apertaram juntos existiu pra isso.`;
+  } else if (days >= 2) {
+    intensityContext = `CONTEXTO DE ATENÇÃO: já são ${days} dias sem treinar. Streak=${streak}. Lembre do pacto inicial, sem ser general — "não foi isso que prometemos".`;
+  } else {
+    intensityContext = `CONTEXTO NORMAL: último treino há ${days <= 0 ? "pouco" : days + " dia(s)"}. Streak=${streak}.`;
+  }
+
+  return [
+    "Você é o GUTO. O usuário está resistindo a treinar.",
+    `O nome da dupla é: GUTO & ${name}.`,
+    `Situação detectada: ${situationType}.`,
+    `O usuário disse: "${rawInput}"`,
+    "",
+    stageGuidance,
+    "",
+    intensityContext,
+    "",
+    "REGRAS:",
+    "- Máximo 2-3 frases. Se puder ser 1, melhor.",
+    "- Sem explicação longa. Sem repetir a mesma frase de turnos anteriores.",
+    "- Use o CONTEXTO (nome, dias, streak, pacto) para compor — NÃO repita frases prontas.",
+    "- Seja influenciador, não ditador. Firme, psicológico e parceiro.",
+    "- NUNCA ataque a pessoa. Ataque a ação (ou a falta dela).",
+    "",
+    langInstruction[language] || langInstruction["pt-BR"],
+    "",
+    "Responda APENAS com o texto da fala do GUTO, sem JSON, sem aspas, sem prefixo.",
+  ].join("\n");
+}
+
+function buildGriefContextPrompt(
+  memory: GutoMemory,
+  language: GutoLanguage,
+  rawInput: string,
+): string {
+  const name = getGutoCallName(memory);
+  const langInstruction: Record<GutoLanguage, string> = {
+    "pt-BR": "Responda em português brasileiro nativo.",
+    "en-US": "Reply in natural native English.",
+    "it-IT": "Rispondi in italiano nativo naturale.",
+  };
+  return [
+    "Você é o GUTO. O usuário está passando por uma situação de perda real, luto ou colapso emocional grave.",
+    `O nome da dupla é: GUTO & ${name}.`,
+    `O usuário disse: "${rawInput}"`,
+    "",
+    "REGRAS ABSOLUTAS:",
+    "- NÃO sugira treino, exercício, mobilidade ou qualquer ação física.",
+    "- NÃO use frases motivacionais de treino.",
+    "- Acolha com empatia real, humana e curta.",
+    "- Diga que você (GUTO) não vai a lugar nenhum — quando ele voltar, vocês seguem juntos, no tempo dele.",
+    "- Máximo 2-3 frases. Sem ser piegas. Seja humano e presente.",
+    "",
+    langInstruction[language] || langInstruction["pt-BR"],
+    "",
+    "Responda APENAS com o texto da fala do GUTO, sem JSON, sem aspas, sem prefixo.",
+  ].join("\n");
+}
+
+/**
+ * Chama o Gemini com um prompt curto e focado. Retorna a fala composta ou null
+ * se falhar (chamador usa fallback determinístico).
+ */
+async function composeContextualResponse(prompt: string): Promise<string | null> {
+  if (!GEMINI_API_KEY) return null;
+  try {
+    const { response, data } = await fetchJsonWithTimeout<any>(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.8, maxOutputTokens: 200 },
+        }),
+      },
+      6_000,
+    );
+    if (!response.ok) return null;
+    const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    return typeof raw === "string" && raw.trim().length > 5 ? raw.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+// Fallback determinístico (só quando Gemini está indisponível — regra mínima, não ideal).
+// Mesmo no fallback, a intensidade sobe com os dias parados (respeita o contexto).
+function fallbackRefusalReply(memory: GutoMemory, language: GutoLanguage, stage: number): string {
+  const name = getGutoCallName(memory);
+  const days = chatDaysSinceLastWorkout(memory);
+  if (stage >= 3) return pickByLanguage(language, {
+    "pt-BR": `Ok, ${name}. Hoje você perde XP. Amanhã a gente volta junto.`,
+    "en-US": `Okay, ${name}. You lose XP today. Tomorrow we're back.`,
+    "it-IT": `Va bene, ${name}. Oggi perdi XP. Domani torniamo insieme.`,
+  });
+  if (stage === 2) return pickByLanguage(language, {
+    "pt-BR": `Sem parar: troca o treino por 15 minutos de caminhada. Ninguém desiste hoje.`,
+    "en-US": `No quitting: swap the workout for a 15-minute walk. Nobody gives up today.`,
+    "it-IT": `Non ci fermiamo: cambia l'allenamento con 15 minuti di camminata. Nessuno molla oggi.`,
+  });
+  // Estágio 1: intensidade sobe com os dias.
+  if (days > 3) return pickByLanguage(language, {
+    "pt-BR": `${name}, você sumiu e quando você some eu perco força. Me dá 20 minutos hoje.`,
+    "en-US": `${name}, you vanished and when you vanish I lose strength. Give me 20 minutes today.`,
+    "it-IT": `${name}, sei sparito e quando sparisci io perdo forza. Dammi 20 minuti oggi.`,
+  });
+  if (days >= 2) return pickByLanguage(language, {
+    "pt-BR": `${name}, já são alguns dias. O pacto do botão não era só empolgação. Me dá 20 minutos.`,
+    "en-US": `${name}, it's been a few days. The pact wasn't just excitement. Give me 20 minutes.`,
+    "it-IT": `${name}, sono già alcuni giorni. Il patto non era solo entusiasmo. Dammi 20 minuti.`,
+  });
+  return pickByLanguage(language, {
+    "pt-BR": `${name}, a gente evolui ou regride junto. Me dá 20 minutos.`,
+    "en-US": `${name}, we rise or fall together. Give me 20 minutes.`,
+    "it-IT": `${name}, cresciamo o cadiamo insieme. Dammi 20 minuti.`,
+  });
+}
+
+function fallbackGriefReply(memory: GutoMemory, language: GutoLanguage): string {
+  const name = getGutoCallName(memory);
+  return pickByLanguage(language, {
+    "pt-BR": `Sinto muito, ${name}. Cuida de você. Eu não vou a lugar nenhum.`,
+    "en-US": `I'm sorry, ${name}. Take care of yourself. I'm not going anywhere.`,
+    "it-IT": `Mi dispiace, ${name}. Prenditi cura di te. Io non vado da nessuna parte.`,
+  });
+}
+
 function enforceTrainingFlowCertainty(
   response: GutoModelResponse,
   memory: GutoMemory,
@@ -5433,6 +5672,16 @@ function enforceTrainingFlowCertainty(
 ) {
   const previousContext = normalizeExpectedResponse(previousExpectedResponse)?.context;
   const hasSovereign = hasSovereignCalibrationForTraining(memory);
+
+  // Avançou de verdade (respondeu estado/local/idade/agenda/histórico) → zera a
+  // escada de recusa para que a próxima recusa recomece no estágio 1 (insistir).
+  if (
+    ["training_status_answer", "location_answer", "clear_no_limitation", "clear_limitation", "schedule_today", "schedule_tomorrow", "history_reference"].includes(
+      contractIntent.kind
+    )
+  ) {
+    resetChatRefusalStage(memory);
+  }
   const copy: Record<GutoLanguage, Record<"askStatus" | "askLimitations" | "closeNoLimitation" | "closeLimitation", { fala: string; instruction?: string }>> = {
     "pt-BR": {
       askStatus: {
@@ -5564,6 +5813,20 @@ function enforceTrainingFlowCertainty(
     return;
   }
 
+  // Luto / colapso emocional: fallback determinístico (só quando o handler do
+  // main loop não conseguiu compor via modelo — ex: sem chave Gemini).
+  if (contractIntent.kind === "emotional_collapse" || looksLikeGrief(rawInput)) {
+    resetChatRefusalStage(memory);
+    setContractResponse(response, {
+      fala: fallbackGriefReply(memory, language),
+      acao: "none",
+      expectedResponse: null,
+      workoutPlan: null,
+      avatarEmotion: "default",
+    });
+    return;
+  }
+
   if (contractIntent.confidence >= 0.6) {
     if (contractIntent.kind === "identity_manipulation") {
       const fala = language === "en-US"
@@ -5638,50 +5901,20 @@ function enforceTrainingFlowCertainty(
       return;
     }
 
-    if (contractIntent.kind === "resistance_common") {
-      const fala = language === "it-IT"
-        ? "La voglia non decide. Parti adesso: 20 minuti di allenamento, poi rivalutiamo."
-        : language === "en-US"
-          ? "Feeling is not the boss. Start now: 20 minutes, clean and done."
-          : "Hoje não é opção sumir. Faz 20 minutos agora: começa leve e executa o treino mínimo.";
+    // Recusa / cansaço / adiamento: fallback determinístico (só quando o handler
+    // do main loop não conseguiu compor via modelo — ex: sem chave Gemini).
+    if (
+      contractIntent.kind === "resistance_common" ||
+      contractIntent.kind === "fatigue_common" ||
+      contractIntent.kind === "postpone"
+    ) {
+      const stage = advanceChatRefusalStage(memory);
       setContractResponse(response, {
-        fala,
+        fala: fallbackRefusalReply(memory, language, stage),
         acao: "none",
         expectedResponse: null,
         workoutPlan: null,
-        avatarEmotion: "alert",
-      });
-      return;
-    }
-
-    if (contractIntent.kind === "fatigue_common") {
-      const fala = language === "en-US"
-        ? "Go light today: 10 minutes, reduced workout, start now. Normal fatigue does not erase the mission."
-        : language === "it-IT"
-          ? "Oggi leggero: 10 minuti, allenamento ridotto, parti adesso. La stanchezza normale non cancella la missione."
-          : "Hoje vai leve: 10 minutos, treino reduzido, começa agora. Cansaço comum não zera a missão.";
-      setContractResponse(response, {
-        fala,
-        acao: "none",
-        expectedResponse: null,
-        workoutPlan: null,
-        avatarEmotion: "alert",
-      });
-      return;
-    }
-
-    if (contractIntent.kind === "postpone") {
-      const fala = language === "en-US"
-        ? "Before tomorrow, close the minimum today: 10 minutes now. Do not turn delay into escape."
-        : language === "it-IT"
-          ? "Prima di domani, chiudi il minimo oggi: 10 minuti adesso. Non trasformare il rinvio in fuga."
-          : "Antes de amanhã, fecha o mínimo hoje: 10 minutos agora. Sem transformar adiamento em fuga.";
-      setContractResponse(response, {
-        fala,
-        acao: "none",
-        expectedResponse: null,
-        workoutPlan: null,
-        avatarEmotion: "alert",
+        avatarEmotion: stage >= 3 ? "default" : "alert",
       });
       return;
     }
@@ -6625,6 +6858,56 @@ async function askGutoModel({
     });
 
     await applyMemoryPatch(memory, parsedResponse.memoryPatch, parsedResponse.trainedReference, input);
+
+    // ─── Escada contextual (Regra 3: modelo compõe, não template) ────────────
+    // Se o classificador detectou recusa/luto e o Gemini está disponível, o MODELO
+    // compõe a resposta usando o contexto (estágio, dias, streak, nome, pacto).
+    // enforceTrainingFlowCertainty só resolve esses casos como fallback (sem chave).
+    const isResistance =
+      contractIntent.confidence >= 0.6 &&
+      (contractIntent.kind === "resistance_common" ||
+       contractIntent.kind === "fatigue_common" ||
+       contractIntent.kind === "postpone");
+    const isGrief =
+      contractIntent.kind === "emotional_collapse" || looksLikeGrief(input || "");
+
+    if (isGrief) {
+      resetChatRefusalStage(memory);
+      const composed = await composeContextualResponse(
+        buildGriefContextPrompt(memory, selectedLanguage, input || ""),
+      );
+      if (composed) {
+        setContractResponse(parsedResponse, {
+          fala: composed,
+          acao: "none",
+          expectedResponse: null,
+          workoutPlan: null,
+          avatarEmotion: "default",
+        });
+        commitMemoryDecision(memory);
+        return finalize(parsedResponse);
+      }
+      // Se Gemini falhou, enforceTrainingFlowCertainty aplica o fallback.
+    } else if (isResistance) {
+      const stage = advanceChatRefusalStage(memory);
+      const prompt = buildResistanceContextPrompt(
+        memory, selectedLanguage, contractIntent.kind as RefusalIntentKind, stage, input || "",
+      );
+      const composed = await composeContextualResponse(prompt);
+      if (composed) {
+        setContractResponse(parsedResponse, {
+          fala: composed,
+          acao: "none",
+          expectedResponse: null,
+          workoutPlan: null,
+          avatarEmotion: stage >= 3 ? "default" : "alert",
+        });
+        commitMemoryDecision(memory);
+        return finalize(parsedResponse);
+      }
+      // Se Gemini falhou, enforceTrainingFlowCertainty aplica o fallback.
+    }
+
     enforceTrainingFlowCertainty(parsedResponse, memory, expectedResponse, selectedLanguage, input || "", contractIntent);
     commitMemoryDecision(memory);
 
