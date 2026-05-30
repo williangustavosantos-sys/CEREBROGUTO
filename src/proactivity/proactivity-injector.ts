@@ -281,7 +281,7 @@ export async function buildProactivityContextBlock(
           `Hai captato qualcosa dalla conversazione ma non hai ancora confermato:\n  ${item}\n` +
           `ID: ${first.id}\n` +
           `PRIORITÀ: risolvi questa conferma prima di parlare di allenamento, dieta o nuova missione.\n` +
-          `Quando arriva il momento giusto, chiedi naturalmente se hai capito bene — solo questo, non altri.\n` +
+          `Quando arriva il momento giusto, chiedi con parole TUE, come un amico (es: "parti mercoledì, vero?"). NON copiare il testo interno sopra né usare virgolette — solo questo.\n` +
           `Se CONFERMA (risponde "sì", "esatto" o equivalente chiaro): proactiveMemoryAction: { type: "confirm", memoryId: "${first.id}" }\n` +
           `Se NEGA e cancella l'evento: proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
           `Se corregge dettagli (es: "no, è venerdì"): proactiveMemoryAction: { type: "update", memoryId: "${first.id}", patch: { "dateText": "...", "dateParsed": "YYYY-MM-DD", "location": "...", "understood": "..." } }. Aggiorna solo i campi chiari e chiedi conferma del dettaglio corretto.\n` +
@@ -294,7 +294,7 @@ export async function buildProactivityContextBlock(
           `You picked up something from the conversation but haven't confirmed it yet:\n  ${item}\n` +
           `ID: ${first.id}\n` +
           `PRIORITY: resolve this before talking about workout, diet, or a new mission.\n` +
-          `When the moment is right, naturally check if you understood correctly — just this one.\n` +
+          `When the moment is right, ask IN YOUR OWN WORDS, like a friend (e.g. "you're traveling Wednesday, right?"). NEVER copy the internal text above or use quotes — just this one.\n` +
           `If CONFIRMS ("yes", "that's right" or clear equivalent): proactiveMemoryAction: { type: "confirm", memoryId: "${first.id}" }\n` +
           `If DENIES and cancels the event: proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
           `If corrects details ("no, Friday"): proactiveMemoryAction: { type: "update", memoryId: "${first.id}", patch: { "dateText": "...", "dateParsed": "YYYY-MM-DD", "location": "...", "understood": "..." } }. Update only clear fields and ask confirmation of the corrected detail.\n` +
@@ -307,7 +307,7 @@ export async function buildProactivityContextBlock(
           `Você captou algo da conversa mas ainda não confirmou:\n  ${item}\n` +
           `ID: ${first.id}\n` +
           `PRIORIDADE: resolva essa confirmação antes de falar de treino, dieta ou nova missão.\n` +
-          `Quando o momento for certo, confira naturalmente se entendeu direito — só esse.\n` +
+          `Quando o momento for certo, pergunte com SUAS palavras, como amigo (ex: "você viaja quarta, né? confirma só pra eu ajustar a semana"). NUNCA copie o texto interno acima nem use aspas — só esse, um por vez.\n` +
           `Se CONFIRMAR ("sim", "isso mesmo" ou equivalente claro): proactiveMemoryAction: { type: "confirm", memoryId: "${first.id}" }\n` +
           `Se NEGAR e cancelar o evento: proactiveMemoryAction: { type: "discard", memoryId: "${first.id}" }\n` +
           `Se corrigir detalhes ("não, é sexta"): proactiveMemoryAction: { type: "update", memoryId: "${first.id}", patch: { "dateText": "...", "dateParsed": "YYYY-MM-DD", "location": "...", "understood": "..." } }. Atualize só campos claros e peça confirmação do detalhe corrigido.\n` +
