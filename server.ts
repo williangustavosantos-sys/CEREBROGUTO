@@ -5964,6 +5964,16 @@ function enforceTrainingFlowCertainty(
     }
 
     if (contractIntent.kind === "off_topic_distraction") {
+      // Pergunta/frase real (>=3 palavras) NUNCA é brush-off enlatado: "qual o
+      // treino?", "e a dieta?", "posso comer pizza?", "quantas calorias?" são
+      // perguntas OPERACIONAIS — o classificador as confundia com distração e o
+      // GUTO virava chatbot. Deixa o MODELO responder em persona; ele já
+      // redireciona distração de verdade (§FOCO: "corta, redireciona").
+      const realWords = normalize(rawInput).split(/\s+/).filter((w) => w.length > 1).length;
+      if (realWords >= 3) {
+        return;
+      }
+      // Só input curtíssimo de fato (1-2 palavras) recebe um redirecionamento.
       const fala = language === "en-US"
         ? "After. Action now: workout first, distraction later."
         : language === "it-IT"
