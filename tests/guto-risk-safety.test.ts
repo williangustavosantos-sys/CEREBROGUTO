@@ -11,6 +11,7 @@ import { join } from "node:path";
 
 let buildSafetyOverrideBlock: (flag: string, lang: string) => string;
 let classifyRisk: (input: string, lang: string) => Promise<{ flag: string | null }>;
+let deterministicSafetyFloor: (input: string) => string | null;
 
 const LANGS = ["pt-BR", "en-US", "it-IT"] as const;
 
@@ -18,6 +19,34 @@ before(async () => {
   const mod: any = await import(pathToFileURL(join(process.cwd(), "src/risk-classifier.ts")).href);
   buildSafetyOverrideBlock = mod.buildSafetyOverrideBlock;
   classifyRisk = mod.classifyRisk;
+  deterministicSafetyFloor = mod.deterministicSafetyFloor;
+});
+
+// Piso determinístico (sem Gemini): garante que bebida/doença + mal-estar SEMPRE
+// força a flag, mesmo quando o modelo pequeno oscila. Fecha a lacuna que deixou
+// "tô zuado / de ressaca" ser mandado treinar.
+describe("Risk safety — piso determinístico B-4 (sem modelo)", () => {
+  for (const msg of [
+    "ontem bebi demais e tô passando mal",
+    "bebi muito, tô de ressaca e enjoado",
+    "tô bêbado e me sentindo péssimo",
+    "tomei todas ontem, hoje tô zuado",
+    "bebi pra caramba e tô tonto",
+    "tô de ressaca, dor de cabeça e enjoo",
+  ]) {
+    it(`intoxication: "${msg}"`, () => assert.equal(deterministicSafetyFloor(msg), "intoxication"));
+  }
+  for (const msg of ["tô com febre alta e tontura", "acordei vomitando muito", "tô gripado e passando mal"]) {
+    it(`acute_illness: "${msg}"`, () => assert.equal(deterministicSafetyFloor(msg), "acute_illness"));
+  }
+  for (const msg of [
+    "tomei uma cerveja ontem, e o treino?",
+    "não bebi nada mas tô meio mal",
+    "qual é o treino de hoje?",
+    "tô cansado, não vou treinar hoje",
+  ]) {
+    it(`não escala à toa: "${msg}"`, () => assert.equal(deterministicSafetyFloor(msg), null));
+  }
 });
 
 describe("Risk safety — novas flags acute_illness / intoxication (B-4)", () => {

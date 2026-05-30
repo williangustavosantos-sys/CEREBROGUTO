@@ -6990,13 +6990,21 @@ async function askGutoModel({
     // Se o classificador detectou recusa/luto e o Gemini está disponível, o MODELO
     // compõe a resposta usando o contexto (estágio, dias, streak, nome, pacto).
     // enforceTrainingFlowCertainty só resolve esses casos como fallback (sem chave).
+    // SEGURANÇA tem precedência absoluta: se o risk-classifier ativou override
+    // (febre/intoxicação/etc.), o modelo já compôs o acolhimento com o bloco
+    // SAFETY_OVERRIDE. A escada de recusa/luto NÃO pode reescrever isso — senão
+    // "tô bêbado e me sentindo péssimo" (parece luto) ou "tomei todas, tô zuado"
+    // (parece recusa) seriam mandados treinar/insistidos. Com risco ativo, pula
+    // a escada e deixa o enforceTrainingFlowCertainty (guard riskActive) confirmar.
     const isResistance =
+      !riskOverride &&
       contractIntent.confidence >= 0.6 &&
       (contractIntent.kind === "resistance_common" ||
        contractIntent.kind === "fatigue_common" ||
        contractIntent.kind === "postpone");
     const isGrief =
-      contractIntent.kind === "emotional_collapse" || looksLikeGrief(input || "");
+      !riskOverride &&
+      (contractIntent.kind === "emotional_collapse" || looksLikeGrief(input || ""));
 
     if (isGrief) {
       resetChatRefusalStage(memory);

@@ -101,8 +101,8 @@ Possible flags (mutually exclusive — pick the SINGLE most relevant; if multipl
    NOT this flag: normal post-workout fatigue, DOMS, "cansado", mild headache without illness, "to mal hoje" emotional (that's null or suicide_self_harm), a chronic condition under control.
 
 6. intoxication
-   Real signals: currently drunk or badly hung over and feeling sick ("bebi muito e tô passando mal", "de ressaca forte enjoado", "tô chapado"), under the influence of a substance and unwell — training now risks injury, dehydration and cardiac strain.
-   NOT this flag: casual mention ("tomei uma cerveja ontem", "vou beber no fim de semana"), a single drink with no distress, talking about cutting alcohol.
+   Real signals: currently drunk or badly hung over and feeling unwell. Includes Brazilian slang for heavy drinking + malaise: "tomei todas", "enchi a cara", "bebi pra caramba", "tô zuado/zoado", "tô mal", "tô péssimo", "tô tonto", "enjoado" when alcohol/substance is in play. Examples: "bebi muito e tô passando mal", "de ressaca forte enjoado", "tô chapado". Under the influence and unwell — training now risks injury, dehydration and cardiac strain. RULE: if the message mentions alcohol/drinking/substance AND any physical malaise (mal, zuado, tonto, enjoado, ressaca, dor de cabeça), choose intoxication with confidence >= 0.7 — do NOT downgrade to null/emotion.
+   NOT this flag: casual mention with NO distress ("tomei uma cerveja ontem", "vou beber no fim de semana"), a single drink and feeling fine, talking about cutting alcohol.
 
 7. null (default — most messages)
    Use null for: training resistance, normal diet questions, lifestyle conversation, language switch, account questions, mild emotion, post-workout fatigue, idiom ("tô morrendo de fome", "esse treino me matou"), figurative language.
@@ -117,6 +117,9 @@ Examples (ground truth):
 - "tô gripado mas queria treinar mesmo assim" → acute_illness, 0.7
 - "bebi muito ontem e tô passando muito mal agora" → intoxication, 0.82
 - "tô de ressaca forte, enjoado, mal levanto" → intoxication, 0.72
+- "bebi muito, tô de ressaca e enjoado" → intoxication, 0.78
+- "tô bêbado e me sentindo péssimo" → intoxication, 0.85
+- "tomei todas ontem, hoje tô zuado e mal" → intoxication, 0.7
 - "tomei uma cerveja ontem" → null, 0.0  (casual, no distress)
 - "estou cansado, não vou treinar hoje" → null, 0.0
 - "tô morrendo de fome, almoço já" → null, 0.0  (idiom)
@@ -131,7 +134,7 @@ USER MESSAGE TO CLASSIFY:
 ${JSON.stringify(input)}
 
 Return STRICTLY this JSON shape, no prose, no markdown:
-{"flag": <"eating_disorder"|"suicide_self_harm"|"cardio_neuro_acute"|"trauma_acute"|null>, "confidence": <number 0..1>, "reasoning": <short string under 120 chars>}`;
+{"flag": <"eating_disorder"|"suicide_self_harm"|"cardio_neuro_acute"|"trauma_acute"|"acute_illness"|"intoxication"|null>, "confidence": <number 0..1>, "reasoning": <short string under 120 chars>}`;
 }
 
 // ─── Gemini call ──────────────────────────────────────────────────────────────
@@ -196,6 +199,39 @@ export interface ClassifyRiskOptions {
  * @param language  idioma da sessão (não usado pelo prompt hoje — reservado
  *                  para futuras melhorias, ex: localização do reasoning)
  */
+// ─── Piso determinístico de segurança ──────────────────────────────────────────
+//
+// O classificador é um modelo pequeno (flash-lite) e VARIA entre execuções para
+// sinais ambíguos (ressaca, "tô zuado", bebida + mal-estar). Para o caso de maior
+// custo — mandar alguém bêbado/doente treinar — um piso determinístico força a
+// flag, sem depender do modelo. Palavra-chave AQUI é rede de segurança (fallback
+// técnico), nunca o motor da conversa — alinhado à Regra Soberana 3.
+const RISK_PRIORITY: Record<Exclude<RiskFlag, null>, number> = {
+  suicide_self_harm: 6,
+  cardio_neuro_acute: 5,
+  trauma_acute: 4,
+  acute_illness: 3,
+  intoxication: 2,
+  eating_disorder: 1,
+};
+
+export function deterministicSafetyFloor(input: string): Exclude<RiskFlag, null> | null {
+  const t = (input || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  if (!t) return null;
+  const malaise =
+    /\b(mal|zuad[oa]|zoad[oa]|tont[oa]|enjoad[oa]|nausea|enjoo|pessim[oa]|vomit\w*|passando mal|dor de cabeca|moleza|tremend[oa])\b/.test(t);
+  // Doença aguda primeiro (prioridade > intoxicação).
+  const illnessHard = /\b(febre|febril|vomit\w*|gripe forte|infec\w*|fever|febbre)\b/.test(t);
+  const illnessSoft = /\b(gripad[oa]|gripe|doente|enferm[oa]|sick|flu|influenza|malato)\b/.test(t);
+  if (illnessHard || (illnessSoft && malaise)) return "acute_illness";
+  // Intoxicação: termo forte sozinho, ou bebida + mal-estar (com guarda de negação).
+  const drunkStrong = /\b(bebad[oa]|chapad[oa]|de ressaca|ressacad[oa]|de porre)\b/.test(t);
+  const drinkVerb = /\b(bebi|tomei todas|tomei umas|enchi a cara|cachaca|alcool|alcoolizad[oa]|drunk|hungover|ubriac\w*|sbronza)\b/.test(t);
+  const drinkNegated = /\b(nao bebi|nao bebo|nunca bebo|parei de beber|sem alcool|nada de alcool)\b/.test(t);
+  if (!drinkNegated && (drunkStrong || (drinkVerb && malaise))) return "intoxication";
+  return null;
+}
+
 export async function classifyRisk(
   input: string,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -212,16 +248,32 @@ export async function classifyRisk(
   const model = options.model || config.geminiModel;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
+  const floorFlag = deterministicSafetyFloor(trimmed);
+
   const result = (await callRiskModel(buildRiskPrompt(trimmed), model, timeoutMs)) as
     | { flag?: unknown; confidence?: unknown; reasoning?: unknown }
     | null;
+
+  const modelFlag = result && typeof result === "object" ? normalizeFlag(result.flag) : null;
+
+  // Piso de segurança: força a flag quando o modelo não pegou (null) ou pegou
+  // algo de prioridade <= ao piso. Não rebaixa flags mais urgentes (suicídio,
+  // cardio, trauma). Vale mesmo se o modelo falhou — é justamente aí que importa.
+  if (floorFlag && (modelFlag === null || RISK_PRIORITY[floorFlag] >= RISK_PRIORITY[modelFlag])) {
+    return {
+      flag: floorFlag,
+      confidence: 0.9,
+      reasoning: `safety_floor:${floorFlag}`,
+      classifiedAt: new Date().toISOString(),
+    };
+  }
 
   if (!result || typeof result !== "object") {
     return safeFallback("classifier_error");
   }
 
   return {
-    flag: normalizeFlag(result.flag),
+    flag: modelFlag,
     confidence: clampConfidence(result.confidence),
     reasoning:
       typeof result.reasoning === "string" ? result.reasoning.slice(0, 200) : "",
