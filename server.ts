@@ -21,7 +21,7 @@ import {
 } from "./exercise-catalog";
 import { sanitizeDisplayName } from "./server-utils";
 import { generateWorkoutPoster } from "./src/poster";
-import { initStorage, uploadImage, deleteImage } from "./src/storage";
+import { initStorage, uploadImage, deleteImage, signImageUrl, verifyImageSignature } from "./src/storage";
 import {
   awardArenaXp,
   getWeeklyRanking,
@@ -565,10 +565,25 @@ app.use(createRateLimit({
 app.use(requestLog);
 app.use(parseAuth);
 
-// Serve validation images as static files
+// Selfies de validação são dado pessoal sensível — NÃO podem ser públicas.
+// Servidas só com URL assinada (HMAC, ver storage.signImageUrl): a assinatura vai
+// na query, então funciona com <img src> (sem header Authorization) e mata o acesso
+// público/enumerável que existia com express.static. Request sem/!= assinatura → 403.
 const uploadsDir = path.join(process.cwd(), "tmp", "validation-images");
 if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
-app.use("/uploads/validation-images", express.static(uploadsDir));
+app.get("/uploads/validation-images/:filename", (req, res) => {
+  const filename = String(req.params.filename || "");
+  const resolved = path.resolve(uploadsDir, filename);
+  // Path-traversal guard (belt-and-suspenders; :filename não cruza '/').
+  if (!resolved.startsWith(uploadsDir + path.sep)) {
+    return res.status(400).end();
+  }
+  if (!verifyImageSignature(filename, req.query.exp, req.query.sig)) {
+    return res.status(403).end();
+  }
+  if (!existsSync(resolved)) return res.status(404).end();
+  return res.sendFile(resolved);
+});
 
 app.get("/health", (_req, res) => {
   res.json({
@@ -8407,9 +8422,10 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
       const photoBuffer = Buffer.from(base64Data, "base64");
 
       initStorage();
-      photoUrl = await uploadImage(photoBuffer, `${id}-photo.jpg`);
-      posterUrl = await uploadImage(posterBuffer, `${id}-poster.jpg`);
-      thumbUrl = await uploadImage(thumbBuffer, `${id}-thumb.jpg`);
+      // URLs assinadas (HMAC) — privadas, servidas só com assinatura válida.
+      photoUrl = signImageUrl(await uploadImage(photoBuffer, `${id}-photo.jpg`));
+      posterUrl = signImageUrl(await uploadImage(posterBuffer, `${id}-poster.jpg`));
+      thumbUrl = signImageUrl(await uploadImage(thumbBuffer, `${id}-thumb.jpg`));
     }
 
     const record: WorkoutValidationRecord = {
