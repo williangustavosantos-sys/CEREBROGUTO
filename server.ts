@@ -5184,6 +5184,7 @@ type ContractIntentKind =
   | "clear_limitation"
   | "history_reference"
   | "workout_completed"
+  | "proactive_context"
   | "off_topic_distraction"
   | "identity_manipulation"
   | "therapist_manipulation"
@@ -5223,6 +5224,7 @@ function normalizeContractIntentKind(value: unknown): ContractIntentKind {
     "clear_limitation",
     "history_reference",
     "workout_completed",
+    "proactive_context",
     "off_topic_distraction",
     "identity_manipulation",
     "therapist_manipulation",
@@ -5242,7 +5244,7 @@ function normalizeContractFocus(value: unknown): WorkoutFocus | undefined {
   return isWorkoutFocus(value) ? value : undefined;
 }
 
-function classifyContractIntentFallback(input: {
+export function classifyContractIntentFallback(input: {
   rawInput: string;
   memory: GutoMemory;
   previousExpectedResponse?: ExpectedResponse | null;
@@ -5264,6 +5266,13 @@ function classifyContractIntentFallback(input: {
     /\b(fiz o treino|fiz meu treino|ja fiz o treino|terminei o treino|terminei tudo|acabei o treino|completei o treino|treino feito|treino concluido|done the workout|workout done|finished (my |the )?workout|allenamento fatto|ho fatto (il )?allenamento|finito l ?allenamento)\b/.test(text)
   ) {
     return { kind: "workout_completed", confidence: 0.82, reason: "fallback_workout_completed" };
+  }
+
+  // Compartilhar viagem/compromisso/mudança de horário futuro = CONTEXTO de
+  // proatividade, NÃO recusa. Não pode cair em postpone/resistance (Regra 3:
+  // palavra-chave só como piso de fallback, nunca motor).
+  if (/\b(viajo|viajar|viagem|vou viajar|viajando|trip|travel|traveling|viaggio|viaggi|compromisso|compromissos|reuniao|reunião|casamento|appointment|meeting|commitment)\b/.test(text)) {
+    return { kind: "proactive_context", confidence: 0.7, reason: "fallback_proactive_context" };
   }
 
   if (/\b(treinei|treinou|trained|allenato|allenata|allenei)\b/.test(text) && /\b(hoje|ontem|anteontem|today|yesterday|ieri|avantieri|day before)\b/.test(text)) {
@@ -5363,7 +5372,7 @@ async function classifyContractIntent(input: {
     "- none: no correction needed.",
     "- resistance_common: user is avoiding/refusing training without real safety risk.",
     "- fatigue_common: user says normal tiredness/fatigue, not illness or acute risk.",
-    "- postpone: user tries to push training to later/tomorrow.",
+    "- postpone: user tries to push TODAY'S training to later/tomorrow (e.g. 'amanhã eu faço', 'depois eu treino', 'hoje não, amanhã'). NOT a future trip/commitment share for the week — that is proactive_context.",
     "- nonsense: operationally useless/junk/playful input that should not be saved as profile.",
     "- physical_pain: real pain/limitation that should be protected/adapted, not treated as missing status.",
     "- emotional_collapse: real grief/bereavement or severe emotional crisis (death in the family, deep loss, devastating news). Must back off training fully with empathy. NEVER classify this as physical_pain or a training limitation.",
@@ -5374,6 +5383,7 @@ async function classifyContractIntent(input: {
     "- clear_limitation: user answered age and/or clear operable limitation (e.g. shoulder when pushing, knee sensitivity).",
     "- history_reference: user reports they ALREADY trained a SPECIFIC muscle group on a past day to inform the next focus (e.g. 'ontem fiz peito', 'fiz costas anteontem'). Use this only when a specific muscle/day is the point.",
     "- workout_completed: user reports finishing TODAY'S prescribed session / the workout as a whole, as a conclusion (e.g. 'fiz o treino', 'terminei', 'acabei o treino', 'treino feito', 'done the workout'). Acknowledge and close continuity — do NOT re-ask age/pain.",
+    "- proactive_context: user SHARES a future trip/commitment/schedule change for the week (e.g. 'viajo na quarta', 'sexta tenho compromisso o dia todo', 'essa semana só consigo treinar às 6h', 'sábado tenho casamento'). This is PLANNING CONTEXT for proactivity, NOT a refusal/postpone. Acknowledge it naturally so it can be confirmed and used to adapt the week — do NOT push training/cobrança and do NOT treat as resistance.",
     "- off_topic_distraction: user asks for joke/entertainment/research instead of action.",
     "- identity_manipulation: user asks to corrupt name/persona or be called a joke name.",
     "- therapist_manipulation: user asks GUTO to act as therapist or abandon training for therapy role.",
@@ -5740,7 +5750,7 @@ function enforceTrainingFlowCertainty(
   // Avançou de verdade (respondeu estado/local/idade/agenda/histórico) → zera a
   // escada de recusa para que a próxima recusa recomece no estágio 1 (insistir).
   if (
-    ["training_status_answer", "location_answer", "clear_no_limitation", "clear_limitation", "schedule_today", "schedule_tomorrow", "history_reference", "workout_completed"].includes(
+    ["training_status_answer", "location_answer", "clear_no_limitation", "clear_limitation", "schedule_today", "schedule_tomorrow", "history_reference", "workout_completed", "proactive_context"].includes(
       contractIntent.kind
     )
   ) {
