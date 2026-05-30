@@ -117,3 +117,22 @@ describe("Escada de persistência do chat (recusa / luto / dias parados)", () =>
     assert.match(r.fala || "", /sumiu|perco força|perco forca/i, "muitos dias parado deve acionar a alavanca de sobrevivência");
   });
 });
+
+describe("off_topic não engole pergunta real (anti-chatbot)", () => {
+  it("frase real classificada off_topic NÃO recebe brush-off enlatado", async () => {
+    const userId = "ot-real";
+    seed(userId, { ...BASE });
+    // 'piada' faz o fallback classificar off_topic; >=3 palavras → o guard deixa
+    // passar pro modelo em vez do enlatado "distração depois" (era o bug: "qual o
+    // treino?", "e a dieta?", "calorias?" viravam distração).
+    const r = await chat(userId, "me conta uma piada boa agora");
+    assert.doesNotMatch(r.fala || "", /distra[cç][aã]o depois|treino primeiro, distra/i, "frase real não pode virar brush-off enlatado");
+  });
+
+  it("input curtíssimo de distração ainda é redirecionado", async () => {
+    const userId = "ot-short";
+    seed(userId, { ...BASE });
+    const r = await chat(userId, "piada");
+    assert.match(r.fala || "", /distra[cç][aã]o|action now|distrazione/i, "1-2 palavras de distração ainda recebem redirecionamento");
+  });
+});
