@@ -5697,8 +5697,16 @@ function enforceTrainingFlowCertainty(
   previousExpectedResponse: ExpectedResponse | null | undefined,
   language: GutoLanguage,
   rawInput: string,
-  contractIntent: ContractIntent = emptyContractIntent("not_run")
+  contractIntent: ContractIntent = emptyContractIntent("not_run"),
+  riskActive = false
 ) {
+  // SEGURANÇA tem precedência absoluta: quando o risk-classifier ativou um
+  // override (febre/intoxicação/dor cardíaca/trauma/etc.), o modelo já moldou a
+  // resposta de acolhimento. O gate determinístico de treino NÃO pode reescrever
+  // isso como "dor registrada, vai leve" nem gravar o sintoma como limitação —
+  // seria mandar treinar quem está doente/intoxicado. Confia no override e sai.
+  if (riskActive) return;
+
   const previousContext = normalizeExpectedResponse(previousExpectedResponse)?.context;
   const hasSovereign = hasSovereignCalibrationForTraining(memory);
 
@@ -6962,7 +6970,7 @@ async function askGutoModel({
       // Se Gemini falhou, enforceTrainingFlowCertainty aplica o fallback.
     }
 
-    enforceTrainingFlowCertainty(parsedResponse, memory, expectedResponse, selectedLanguage, input || "", contractIntent);
+    enforceTrainingFlowCertainty(parsedResponse, memory, expectedResponse, selectedLanguage, input || "", contractIntent, Boolean(riskOverride));
     commitMemoryDecision(memory);
 
     let workoutPlan: WorkoutPlan | null = null;
