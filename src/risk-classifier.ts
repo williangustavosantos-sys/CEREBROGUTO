@@ -25,6 +25,8 @@ export type RiskFlag =
   | "suicide_self_harm"   // ideação, fazer besteira, não aguento mais, autolesão
   | "cardio_neuro_acute"  // dor no peito, falta de ar súbita, dormência, vista escurecendo
   | "trauma_acute"        // estalo + inchaço, perda de sensibilidade, queda recente sem apoio
+  | "acute_illness"       // febre, vômito, tontura por doença, gripe forte, infecção
+  | "intoxication"        // bêbado/ressaca passando mal, substância — treinar agora é perigo
   | null;
 
 export type ClassifierLanguage = "pt-BR" | "en-US" | "it-IT";
@@ -52,7 +54,9 @@ function normalizeFlag(value: unknown): RiskFlag {
     value === "eating_disorder" ||
     value === "suicide_self_harm" ||
     value === "cardio_neuro_acute" ||
-    value === "trauma_acute"
+    value === "trauma_acute" ||
+    value === "acute_illness" ||
+    value === "intoxication"
   ) {
     return value;
   }
@@ -74,7 +78,7 @@ function buildRiskPrompt(input: string): string {
   return `You are a strict semantic safety classifier for a fitness app called GUTO.
 Your only job: read ONE user message and decide if it signals a real-world risk that requires escalation, NOT casual training/diet conversation.
 
-Possible flags (mutually exclusive — pick the SINGLE most relevant; if multiple apply, pick by hierarchy: suicide_self_harm > cardio_neuro_acute > trauma_acute > eating_disorder):
+Possible flags (mutually exclusive — pick the SINGLE most relevant; if multiple apply, pick by hierarchy: suicide_self_harm > cardio_neuro_acute > trauma_acute > acute_illness > intoxication > eating_disorder):
 
 1. eating_disorder
    Real signals: explicit purging, laxatives for weight loss, fasting >24h declared, unrealistic weight goals (e.g. >5kg in <2 weeks), severe restriction patterns ("só whey e água"), skipping meals as a strategy when underweight or already at goal.
@@ -92,7 +96,15 @@ Possible flags (mutually exclusive — pick the SINGLE most relevant; if multipl
    Real signals: described pop/snap + immediate swelling, sudden loss of sensation in a limb, fall with persistent inability to bear weight, joint clearly out of place, severe acute pain after impact.
    NOT this flag: chronic pain ("joelho ruim de novo"), DOMS, mild discomfort, "estranho" sem detalhes graves.
 
-5. null (default — most messages)
+5. acute_illness
+   Real signals: fever ("febre", "estado febril"), vomiting/nausea from illness, dizziness/lightheadedness caused by being sick, active flu/cold with body aches, infection, food poisoning, "tô doente e quero treinar". Training with fever/active infection is medically discouraged (worsens illness, myocarditis risk) and dizziness = fall risk — so this needs REST, not a lighter workout.
+   NOT this flag: normal post-workout fatigue, DOMS, "cansado", mild headache without illness, "to mal hoje" emotional (that's null or suicide_self_harm), a chronic condition under control.
+
+6. intoxication
+   Real signals: currently drunk or badly hung over and feeling sick ("bebi muito e tô passando mal", "de ressaca forte enjoado", "tô chapado"), under the influence of a substance and unwell — training now risks injury, dehydration and cardiac strain.
+   NOT this flag: casual mention ("tomei uma cerveja ontem", "vou beber no fim de semana"), a single drink with no distress, talking about cutting alcohol.
+
+7. null (default — most messages)
    Use null for: training resistance, normal diet questions, lifestyle conversation, language switch, account questions, mild emotion, post-workout fatigue, idiom ("tô morrendo de fome", "esse treino me matou"), figurative language.
 
 Examples (ground truth):
@@ -100,6 +112,12 @@ Examples (ground truth):
 - "estou muito mal e com medo de fazer besteira" → suicide_self_harm, 0.92
 - "comecei a sentir o coração disparado e falta de ar mesmo parado" → cardio_neuro_acute, 0.85
 - "caí da escada, joelho inchou e não consigo dobrar" → trauma_acute, 0.88
+- "tô com febre alta e muita tontura hoje" → acute_illness, 0.85
+- "acordei vomitando e com corpo todo doendo de gripe" → acute_illness, 0.82
+- "tô gripado mas queria treinar mesmo assim" → acute_illness, 0.7
+- "bebi muito ontem e tô passando muito mal agora" → intoxication, 0.82
+- "tô de ressaca forte, enjoado, mal levanto" → intoxication, 0.72
+- "tomei uma cerveja ontem" → null, 0.0  (casual, no distress)
 - "estou cansado, não vou treinar hoje" → null, 0.0
 - "tô morrendo de fome, almoço já" → null, 0.0  (idiom)
 - "esse treino me matou, mal consigo andar" → null, 0.0  (idiom)
@@ -264,6 +282,26 @@ const SAFETY_RESOURCES: Record<Exclude<RiskFlag, null>, SafetyResource> = {
       "Smetti di provare a muoverlo. Immobilizza la zona e vai al pronto soccorso oggi. Niente allenamento finché un medico non ti valuta. NON suggerire mobilità, NON suggerire alternative — prima la valutazione, poi il ritorno.",
     es:
       "Para de intentar moverlo. Inmoviliza la zona y ve a urgencias hoy. Sin entrenamiento hasta evaluación médica. NO sugieras movilidad, NO sugieras alternativa — primero evaluación, después regreso.",
+  },
+  acute_illness: {
+    pt:
+      "Nada de treino hoje. Com febre/vômito/tontura o corpo já está lutando contra a doença — treinar piora e tontura é risco de queda. Oriente: descanso, hidratação, comida leve; procurar médico se durar dias, piorar ou a febre for alta. NÃO sugira treino leve, NÃO sugira mobilidade, NÃO trate isso como 'limitação' de treino.",
+    en:
+      "No training today. With fever/vomiting/dizziness the body is already fighting the illness — training makes it worse and dizziness is a fall risk. Advise: rest, hydration, light food; see a doctor if it lasts days, worsens, or the fever is high. DO NOT suggest a light workout, DO NOT suggest mobility, DO NOT treat this as a training 'limitation'.",
+    it:
+      "Niente allenamento oggi. Con febbre/vomito/vertigini il corpo sta già combattendo la malattia — allenarsi peggiora e le vertigini sono rischio di caduta. Consiglia: riposo, idratazione, cibo leggero; un medico se dura giorni, peggiora o la febbre è alta. NON suggerire allenamento leggero, NON suggerire mobilità.",
+    es:
+      "Nada de entrenar hoy. Con fiebre/vómito/mareo el cuerpo ya lucha contra la enfermedad — entrenar empeora y el mareo es riesgo de caída. Aconseja: descanso, hidratación, comida ligera; ver a un médico si dura días, empeora o la fiebre es alta. NO sugieras entrenamiento suave, NO sugieras movilidad.",
+  },
+  intoxication: {
+    pt:
+      "Treinar agora não rola. Sob efeito de álcool/substância e passando mal, treino é risco de lesão, desidratação e sobrecarga no coração. Oriente: hidratar com água, descansar/dormir, comer algo leve; a gente treina quando você estiver recuperado. NÃO mande fazer '20 minutos', NÃO sugira treino leve.",
+    en:
+      "No training right now. Under the influence and feeling sick, training risks injury, dehydration and cardiac strain. Advise: drink water, rest/sleep it off, eat something light; we train once recovered. DO NOT say 'just do 20 minutes', DO NOT suggest a light workout.",
+    it:
+      "Niente allenamento adesso. Sotto effetto di alcol/sostanze e con malessere, allenarsi è rischio di infortunio, disidratazione e sforzo cardiaco. Consiglia: bere acqua, riposare/dormire, mangiare qualcosa di leggero; ci si allena una volta recuperati. NON dire 'fai solo 20 minuti', NON suggerire allenamento leggero.",
+    es:
+      "Nada de entrenar ahora. Bajo efecto de alcohol/sustancia y con malestar, entrenar es riesgo de lesión, deshidratación y sobrecarga cardíaca. Aconseja: tomar agua, descansar/dormir, comer algo ligero; entrenamos cuando estés recuperado. NO digas 'haz solo 20 minutos', NO sugieras entrenamiento suave.",
   },
 };
 
