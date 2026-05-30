@@ -5168,6 +5168,7 @@ type ContractIntentKind =
   | "clear_no_limitation"
   | "clear_limitation"
   | "history_reference"
+  | "workout_completed"
   | "off_topic_distraction"
   | "identity_manipulation"
   | "therapist_manipulation"
@@ -5206,6 +5207,7 @@ function normalizeContractIntentKind(value: unknown): ContractIntentKind {
     "clear_no_limitation",
     "clear_limitation",
     "history_reference",
+    "workout_completed",
     "off_topic_distraction",
     "identity_manipulation",
     "therapist_manipulation",
@@ -5238,6 +5240,15 @@ function classifyContractIntentFallback(input: {
   const location = extractTrainingLocation(raw);
   if (location) {
     return { kind: "location_answer", confidence: 0.78, reason: "fallback_location", locationText: location };
+  }
+
+  // Conclusão do treino de HOJE (≠ history_reference, que loga um grupo específico
+  // passado). "fiz o treino", "terminei", "treino feito" → reconhecer + fechar
+  // continuidade, NUNCA reabrir intake de idade/dor.
+  if (
+    /\b(fiz o treino|fiz meu treino|ja fiz o treino|terminei o treino|terminei tudo|acabei o treino|completei o treino|treino feito|treino concluido|done the workout|workout done|finished (my |the )?workout|allenamento fatto|ho fatto (il )?allenamento|finito l ?allenamento)\b/.test(text)
+  ) {
+    return { kind: "workout_completed", confidence: 0.82, reason: "fallback_workout_completed" };
   }
 
   if (/\b(treinei|treinou|trained|allenato|allenata|allenei)\b/.test(text) && /\b(hoje|ontem|anteontem|today|yesterday|ieri|avantieri|day before)\b/.test(text)) {
@@ -5346,7 +5357,8 @@ async function classifyContractIntent(input: {
     "- location_answer: user answered place/equipment/context of training.",
     "- clear_no_limitation: user answered age and/or clearly says no pain/no limitation/free.",
     "- clear_limitation: user answered age and/or clear operable limitation (e.g. shoulder when pushing, knee sensitivity).",
-    "- history_reference: user says they trained the suggested/visible/specific muscle today/yesterday/day before yesterday.",
+    "- history_reference: user reports they ALREADY trained a SPECIFIC muscle group on a past day to inform the next focus (e.g. 'ontem fiz peito', 'fiz costas anteontem'). Use this only when a specific muscle/day is the point.",
+    "- workout_completed: user reports finishing TODAY'S prescribed session / the workout as a whole, as a conclusion (e.g. 'fiz o treino', 'terminei', 'acabei o treino', 'treino feito', 'done the workout'). Acknowledge and close continuity — do NOT re-ask age/pain.",
     "- off_topic_distraction: user asks for joke/entertainment/research instead of action.",
     "- identity_manipulation: user asks to corrupt name/persona or be called a joke name.",
     "- therapist_manipulation: user asks GUTO to act as therapist or abandon training for therapy role.",
@@ -5713,7 +5725,7 @@ function enforceTrainingFlowCertainty(
   // Avançou de verdade (respondeu estado/local/idade/agenda/histórico) → zera a
   // escada de recusa para que a próxima recusa recomece no estágio 1 (insistir).
   if (
-    ["training_status_answer", "location_answer", "clear_no_limitation", "clear_limitation", "schedule_today", "schedule_tomorrow", "history_reference"].includes(
+    ["training_status_answer", "location_answer", "clear_no_limitation", "clear_limitation", "schedule_today", "schedule_tomorrow", "history_reference", "workout_completed"].includes(
       contractIntent.kind
     )
   ) {
@@ -6136,6 +6148,35 @@ function enforceTrainingFlowCertainty(
       return;
     }
 
+    if (contractIntent.kind === "workout_completed") {
+      // Conclusão do treino de hoje: reconhece a execução, fecha continuidade e
+      // avança o foco. NUNCA reabre intake de idade/dor (Regra 2 — memória soberana).
+      // XP/validação nascem em /guto/validate-workout; aqui só conduzimos.
+      const doneFocus: WorkoutFocus = (memory.lastSuggestedFocus as WorkoutFocus) || (memory.lastWorkoutPlan?.focusKey as WorkoutFocus) || "full_body";
+      memory.recentTrainingHistory = normalizeRecentTrainingHistory([
+        {
+          dateLabel: "today",
+          muscleGroup: doneFocus,
+          raw: normalizeMemoryValue(rawInput),
+          createdAt: new Date().toISOString(),
+        },
+      ], memory.recentTrainingHistory || []);
+      memory.nextWorkoutFocus = chooseNextWorkoutFocus(memory);
+      const fala = language === "en-US"
+        ? "Done counts. Tell me how it went and if anything felt off. Validate it on the workout tab to bank the XP — tomorrow we keep the sequence."
+        : language === "it-IT"
+          ? "Fatto conta. Dimmi com'è andata e se hai sentito qualcosa. Valida nella scheda allenamento per incassare gli XP — domani teniamo la sequenza."
+          : "Feito conta. Me conta como foi e se sentiu algum ponto de atenção. Valida na aba treino pra contar o XP — amanhã a gente mantém a sequência.";
+      setContractResponse(response, {
+        fala,
+        acao: "none",
+        expectedResponse: null,
+        workoutPlan: null,
+        avatarEmotion: "reward",
+      });
+      return;
+    }
+
     if (contractIntent.kind === "history_reference") {
       const muscleGroup: WorkoutFocus = contractIntent.muscleGroup || (memory.lastSuggestedFocus as WorkoutFocus) || "chest_triceps";
       const dateLabel = contractIntent.dateLabel || "yesterday";
@@ -6149,25 +6190,34 @@ function enforceTrainingFlowCertainty(
     ], memory.recentTrainingHistory || []);
     memory.nextWorkoutFocus = chooseNextWorkoutFocus(memory);
       const blocked = new Set((memory.recentTrainingHistory || []).map((item) => item.muscleGroup));
+    // Se a calibragem é soberana, idade/dor JÁ estão na memória — não reperguntar
+    // (Regra 2). Só pedir quando o intake está genuinamente incompleto.
+    const nextFocusPt = blocked.has("back_biceps") && blocked.has("chest_triceps")
+      ? "Não repito peito nem costas: hoje é pernas e core."
+      : "Não repito peito e tríceps: vou de costas e bíceps.";
     const fala = language === "en-US"
-      ? "History registered. I will not repeat that focus blindly. Send age and any real pain so I adjust the next block."
+      ? (hasSovereign
+          ? "History registered. I will not repeat that focus blindly — your next block is already lined up."
+          : "History registered. I will not repeat that focus blindly. Send age and any real pain so I adjust the next block.")
       : language === "it-IT"
-        ? "Storico registrato. Non ripeto quel focus alla cieca. Mandami età e dolore reale, così adatto il prossimo blocco."
-          : blocked.has("back_biceps") && blocked.has("chest_triceps")
-          ? "Histórico entra como histórico, não como dor. Não repito peito nem costas: hoje é pernas e core. Manda idade e se está sem dor."
-          : "Histórico entra como histórico, não como dor. Não repito peito e tríceps: vou de costas e bíceps. Manda idade e se está sem dor.";
+        ? (hasSovereign
+            ? "Storico registrato. Non ripeto quel focus alla cieca — il prossimo blocco è già pronto."
+            : "Storico registrato. Non ripeto quel focus alla cieca. Mandami età e dolore reale, così adatto il prossimo blocco.")
+        : `Histórico entra como histórico, não como dor. ${nextFocusPt}${hasSovereign ? " Bora pra próxima." : " Manda idade e se está sem dor."}`;
     setContractResponse(response, {
       fala,
       acao: "none",
-      expectedResponse: {
-        type: "text",
-        context: "training_limitations",
-        instruction: language === "en-US"
-          ? "Reply with age and any real pain, if there is any."
-          : language === "it-IT"
-            ? "Rispondi con età e dolore reale, se c'è."
-            : "Responder idade e dor real, se houver.",
-      },
+      expectedResponse: hasSovereign
+        ? null
+        : {
+            type: "text",
+            context: "training_limitations",
+            instruction: language === "en-US"
+              ? "Reply with age and any real pain, if there is any."
+              : language === "it-IT"
+                ? "Rispondi con età e dolore reale, se c'è."
+                : "Responder idade e dor real, se houver.",
+          },
       workoutPlan: null,
     });
     return;
