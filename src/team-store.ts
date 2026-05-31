@@ -183,12 +183,18 @@ async function readTeamsAsync(): Promise<TeamStore> {
     return store;
 }
 
-async function writeTeamsAsync(store: TeamStore): Promise<void> {
-    memCache = store;
-    if (useRedis()) {
-        await redisSet(REDIS_KEY, JSON.stringify(store));
-    }
-    writeTeamsSync(store);
+// Persistência ao Redis SERIALIZADA: cada write espera o anterior e grava o
+// memCache ATUAL (não um snapshot capturado). Antes, create/update/deleteTeam
+// disparavam um write async fire-and-forget com snapshot — dois writes
+// concorrentes (ex.: criar 2 empresas em sequência) chegavam fora de ordem no
+// Upstash e o snapshot mais antigo sobrescrevia o mais novo, perdendo um time.
+let redisWriteChain: Promise<void> = Promise.resolve();
+function enqueueRedisPersist(): Promise<void> {
+    if (!useRedis()) return Promise.resolve();
+    redisWriteChain = redisWriteChain
+        .then(() => redisSet(REDIS_KEY, JSON.stringify(memCache)))
+        .catch(() => {});
+    return redisWriteChain;
 }
 
 // Bootstrap: load persisted teams on module init
@@ -206,7 +212,7 @@ export function createTeam(team: GutoTeam): GutoTeam {
     const store = readTeamsSync();
     store.teams[team.id] = team;
     writeTeamsSync(store);
-    writeTeamsAsync(store).catch(() => {});
+    void enqueueRedisPersist();
     return team;
 }
 
@@ -217,7 +223,7 @@ export function updateTeam(teamId: string, patch: Partial<Omit<GutoTeam, "id" | 
     const updated: GutoTeam = { ...existing, ...patch, id: existing.id, createdAt: existing.createdAt, updatedAt: new Date().toISOString() };
     store.teams[teamId] = updated;
     writeTeamsSync(store);
-    writeTeamsAsync(store).catch(() => {});
+    void enqueueRedisPersist();
     return updated;
 }
 
@@ -229,7 +235,7 @@ export function deleteTeam(teamId: string): void {
     if (!store.teams[teamId]) throw new GutoTeamNotFoundError(teamId);
     delete store.teams[teamId];
     writeTeamsSync(store);
-    writeTeamsAsync(store).catch(() => {});
+    void enqueueRedisPersist();
 }
 
 export function normalizeTeamId(teamId?: string | null): string {
