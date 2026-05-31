@@ -158,9 +158,23 @@ export async function findInviteByToken(rawToken: string): Promise<Invite | null
   return store.invites[tokenHash] ?? null;
 }
 
+// Seleciona o convite VIGENTE do usuário: o mais recente que NÃO está revogado
+// (cai pro mais recente geral se todos estiverem revogados). Um usuário pode ter
+// vários registros — convites revogados antigos + o atual. Antes, o `.find()`
+// pegava o PRIMEIRO da lista, que podia ser um revogado, fazendo o GET /invite
+// devolver 404 mesmo havendo um convite válido (bug confirmado no Redis: aluno
+// com 1 revoked + pending_claim → GET 404).
+function selectActiveInvite(store: InviteStore, userId: string): Invite | null {
+  const matches = Object.values(store.invites)
+    .filter((inv) => inv.userId === userId)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  if (matches.length === 0) return null;
+  return matches.find((inv) => inv.status !== "revoked") ?? matches[0];
+}
+
 export async function findInviteByUserId(userId: string): Promise<Invite | null> {
   const store = await readStore();
-  return Object.values(store.invites).find((inv) => inv.userId === userId) ?? null;
+  return selectActiveInvite(store, userId);
 }
 
 export async function claimInvite(rawToken: string): Promise<Invite | null> {
@@ -190,14 +204,26 @@ export async function updateInviteByUserId(
   patch: Partial<Pick<Invite, "status" | "subscriptionStatus" | "subscriptionEndsAt">>
 ): Promise<void> {
   const store = await readStore();
-  const invite = Object.values(store.invites).find((inv) => inv.userId === userId);
+  const invite = selectActiveInvite(store, userId);
   if (!invite) return;
   Object.assign(invite, patch);
   await writeStore(store);
 }
 
+// Revoga TODOS os convites não-revogados do usuário (não só o primeiro). Assim o
+// regenerate invalida de verdade qualquer link antigo em vez de acumular vários
+// pending_claim válidos ao mesmo tempo (cada regenerate só revogava o primeiro,
+// deixando o pending anterior ativo).
 export async function revokeInviteByUserId(userId: string): Promise<void> {
-  await updateInviteByUserId(userId, { status: "revoked" });
+  const store = await readStore();
+  let changed = false;
+  for (const inv of Object.values(store.invites)) {
+    if (inv.userId === userId && inv.status !== "revoked") {
+      inv.status = "revoked";
+      changed = true;
+    }
+  }
+  if (changed) await writeStore(store);
 }
 
 export async function getAllInvites(): Promise<Invite[]> {
