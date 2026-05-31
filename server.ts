@@ -4617,9 +4617,22 @@ function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
   const focusMap = FOCUS_NAME_BY_LANG[selectedLanguage];
   const localizedFocus = focusMap[catalogPlan.focusKey ?? ""] || focusMap[catalogPlan.focus] || catalogPlan.focus;
   const focusKey = plan.focusKey || inferWorkoutFocusKey(localizedFocus);
-  const localizedFocusLabel = focusKey
+  const generatedFocusLabel = focusKey
     ? WORKOUT_TITLE_BY_LANG[focusKey][selectedLanguage]
     : localizeWorkoutFocus(localizedFocus, selectedLanguage);
+
+  // Treino editado/criado pelo coach no painel é a verdade do aluno: o nome/foco
+  // que o coach salvou chega tal e qual ao app (apresentado como um treino normal
+  // do GUTO, mas o conteúdo é do coach). Só o treino gerado pelo GUTO deriva o
+  // rótulo do focusKey (que permite localizar por idioma). Sinal de autoria do
+  // coach: manualOverride / planSource de override (setados em
+  // admin-router.normalizeWorkoutPlan ao salvar ou criar pelo painel).
+  const isCoachAuthored =
+    plan.manualOverride === true ||
+    plan.planSource === "coach_override" ||
+    plan.planSource === "admin_override";
+  const coachFocus = (plan.focus || "").trim();
+  const focusLabel = isCoachAuthored && coachFocus ? coachFocus : generatedFocusLabel;
 
   const cueCopyForLang = selectedLanguage !== "pt-BR" ? CUE_COPY_BY_LANG[selectedLanguage] : {};
 
@@ -4637,9 +4650,9 @@ function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
 
   return {
     ...catalogPlan,
-    focus: localizedFocusLabel,
+    focus: focusLabel,
     dateLabel: localizedDateLabel,
-    summary: `${localizedFocusLabel}.`,
+    summary: `${focusLabel}.`,
     exercises: localizedExercises,
   };
 }
