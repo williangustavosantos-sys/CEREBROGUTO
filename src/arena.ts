@@ -162,8 +162,15 @@ export function awardArenaXp(options: AwardXpOptions): AwardXpResult {
   }
 
   profile.totalXp = Math.max(0, profile.totalXp + xp);
-  profile.weeklyXp = Math.max(0, profile.weeklyXp + xp);
-  profile.monthlyXp = Math.max(0, profile.monthlyXp + xp);
+
+  // O bônus do Pacto é um buffer SÓ de totalXp: NÃO infla weekly/mensal nem gera
+  // streak (Regra AR-5 "buffer não infla Semanal/Mensal" + X-4 "pacto não vira
+  // streak"). Só presença validada / penalidade conta no período e na sequência.
+  const countsForPeriod = type !== "bonus";
+  if (countsForPeriod) {
+    profile.weeklyXp = Math.max(0, profile.weeklyXp + xp);
+    profile.monthlyXp = Math.max(0, profile.monthlyXp + xp);
+  }
 
   if (type === "workout_validated" || type === "reduced_mission_validated") {
     profile.validatedWorkoutsTotal += 1;
@@ -171,15 +178,16 @@ export function awardArenaXp(options: AwardXpOptions): AwardXpResult {
     profile.validatedWorkoutsMonth += 1;
   }
 
-  if (profile.lastWorkoutValidatedAt) {
-    const lastDate = new Date(profile.lastWorkoutValidatedAt);
-    const diffDays = Math.floor((now.getTime() - lastDate.getTime()) / (1000 * 60 * 60 * 24));
-    profile.currentStreak = diffDays <= 1 ? profile.currentStreak + 1 : 1;
-  } else {
-    profile.currentStreak = 1;
+  if (countsForPeriod) {
+    if (profile.lastWorkoutValidatedAt) {
+      const lastDate = new Date(profile.lastWorkoutValidatedAt);
+      const diffDays = Math.floor((now.getTime() - lastDate.getTime()) / (1000 * 60 * 60 * 24));
+      profile.currentStreak = diffDays <= 1 ? profile.currentStreak + 1 : 1;
+    } else {
+      profile.currentStreak = 1;
+    }
+    profile.lastWorkoutValidatedAt = now.toISOString();
   }
-
-  profile.lastWorkoutValidatedAt = now.toISOString();
   profile.avatarStage = getAvatarStage(profile.totalXp);
   profile.updatedAt = now.toISOString();
 
