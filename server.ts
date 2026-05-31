@@ -7488,19 +7488,15 @@ app.post("/guto/consent/revoke", requireActiveUser, async (req, res) => {
 app.post("/guto/consent/accept", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
   try {
-    const store = await readMemoryStoreAsync();
-    const existing = (store[userId] && typeof store[userId] === "object" && !Array.isArray(store[userId]))
-      ? (store[userId] as Record<string, unknown>)
-      : {};
-    const next: Record<string, unknown> = {
-      ...existing,
-      consentHealthFitness: true,
-      acceptedTerms: true,
-      consentAcceptedAt: new Date().toISOString(),
-    };
-    delete next.consentRevokedAt;
-    store[userId] = next;
-    await writeMemoryStoreAsync(store);
+    // Via rápida + durável (igual aos outros writes): grava no cache na hora e
+    // persiste no Redis em background. A via async whole-store bloqueava 17-28s
+    // → o front abortava por timeout e o usuário travava no consentimento.
+    const memory = getMemory(userId);
+    memory.consentHealthFitness = true;
+    memory.acceptedTerms = true;
+    memory.consentAcceptedAt = new Date().toISOString();
+    memory.consentRevokedAt = undefined;
+    saveMemory(memory);
     addLog({
       action: "consent_accepted",
       actorUserId: userId,
