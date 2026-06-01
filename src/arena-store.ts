@@ -162,6 +162,41 @@ export function writeArenaStore(store: ArenaStore): void {
   void writeArenaStoreAsync(store).catch(() => {});
 }
 
+// ─── Anti-clobber: hidratação no boot + escrita por-mutação serializada ───────
+// Bug crítico (o arena foi de 61 perfis p/ 1 num cold-start): saveArenaProfile
+// lia o store vazio na janela do bootstrap e gravava 1 perfil por cima de TODOS
+// no Redis (writeArenaStore fire-and-forget). Mesma classe do user-access/memory.
+// Correção: grava SERIALIZADO e só DEPOIS da hidratação, RE-APLICANDO a mutação
+// (idempotente) sobre o store hidratado. Nunca apaga os outros perfis.
+let arenaHydrated = false;
+let arenaHydrationPromise: Promise<void> | null = null;
+function ensureArenaHydrated(): Promise<void> {
+  if (arenaHydrated || !useRedis()) return Promise.resolve();
+  if (!arenaHydrationPromise) {
+    arenaHydrationPromise = readArenaStoreAsync()
+      .then(() => { arenaHydrated = true; })
+      .catch(() => { arenaHydrationPromise = null; });
+  }
+  return arenaHydrationPromise;
+}
+
+let arenaWriteChain: Promise<void> = Promise.resolve();
+function persistArenaMutation(mutate: (store: ArenaStore) => void): void {
+  mutate(memCache);
+  ensureStoreFile();
+  try { fs.writeFileSync(ARENA_STORE_PATH, JSON.stringify(memCache, null, 2)); } catch { /* memCache é a fonte */ }
+  if (!useRedis()) return;
+  arenaWriteChain = arenaWriteChain
+    .then(async () => {
+      await ensureArenaHydrated();
+      if (!arenaHydrated) return; // Redis indisponível: não arrisca clobber
+      mutate(memCache);
+      await redisSet(REDIS_KEY, JSON.stringify(memCache));
+      try { fs.writeFileSync(ARENA_STORE_PATH, JSON.stringify(memCache, null, 2)); } catch { /* ok */ }
+    })
+    .catch(() => {});
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export function getArenaProfile(userId: string): ArenaProfile | undefined {
@@ -170,19 +205,21 @@ export function getArenaProfile(userId: string): ArenaProfile | undefined {
 }
 
 export function saveArenaProfile(profile: ArenaProfile): void {
-  const store = readArenaStore();
-  store.profiles[profile.userId] = profile;
-  writeArenaStore(store);
+  persistArenaMutation((store) => {
+    store.profiles[profile.userId] = profile;
+  });
 }
 
 export function appendArenaEvent(event: ArenaXpEvent): void {
-  const store = readArenaStore();
-  store.events.push(event);
-  // Keep event log bounded to avoid unbounded growth
-  if (store.events.length > 5000) {
-    store.events = store.events.slice(-4000);
-  }
-  writeArenaStore(store);
+  persistArenaMutation((store) => {
+    // idempotente (a re-aplicação pós-hidratação roda 2x): só empurra 1 vez por id
+    if (!store.events.some((e) => e.id === event.id)) {
+      store.events.push(event);
+      if (store.events.length > 5000) {
+        store.events = store.events.slice(-4000);
+      }
+    }
+  });
 }
 
 export function getProfilesByGroup(arenaGroupId: string): ArenaProfile[] {
@@ -195,7 +232,8 @@ export function getAllArenaProfiles(): ArenaProfile[] {
   return Object.values(store.profiles);
 }
 
-// ─── Bootstrap: load from Redis on module init ───────────────────────────────
-// Without this, after a Render cold start (file system wiped), readArenaStore()
-// would return empty profiles even though Redis has all the data.
-readArenaStoreAsync().catch(() => {});
+// ─── Bootstrap: hidrata do Redis no init (e trava writes até completar) ───────
+// Sem isso, após um cold start do Render (file system zerado), readArenaStore()
+// devolveria perfis vazios mesmo com o Redis cheio — e um write nessa janela
+// apagava todos os perfis (clobber). ensureArenaHydrated também serve de gate.
+void ensureArenaHydrated();

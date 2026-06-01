@@ -57,6 +57,32 @@ function writeToFile(store: Record<string, DietPlan>): void {
   }
 }
 
+// ─── Anti-clobber: ler o store COMPLETO do Redis antes de gravar + serializar ─
+// Bug crítico (a dieta de outros usuários sumia no deploy): saveDietPlan lia o
+// store do ARQUIVO (efêmero no Render → vazio após deploy) e gravava { só esse
+// usuário } por cima de todos no Redis. Mesma classe do memory/arena/user-access.
+// Correção: lê o Redis (fonte de verdade) antes; se a leitura falha, NÃO grava no
+// Redis (evita clobber); e as escritas são serializadas (sem corrida concorrente).
+let dietWriteChain: Promise<void> = Promise.resolve();
+function runDietSerialized(fn: () => Promise<void>): Promise<void> {
+  const next = dietWriteChain.then(fn, fn);
+  dietWriteChain = next.then(() => undefined, () => undefined);
+  return next;
+}
+
+async function readFullStoreForWrite(): Promise<{ store: Record<string, DietPlan>; redisReadOk: boolean }> {
+  const redis = getRedisClient();
+  if (!redis) return { store: readFromFile(), redisReadOk: false };
+  try {
+    const raw = await redis.get(REDIS_KEY);
+    const store = (raw ? (typeof raw === "string" ? JSON.parse(raw) : raw) : {}) as Record<string, DietPlan>;
+    Object.assign(inMemoryStore, store);
+    return { store, redisReadOk: true };
+  } catch {
+    return { store: readFromFile(), redisReadOk: false };
+  }
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function getDietPlan(userId: string): Promise<DietPlan | null> {
@@ -85,39 +111,30 @@ export async function getDietPlan(userId: string): Promise<DietPlan | null> {
 }
 
 export async function saveDietPlan(plan: DietPlan): Promise<void> {
-  // Update in-memory
-  inMemoryStore[plan.userId] = plan;
-
-  // Read full store first (to avoid overwriting other users)
-  const store = readFromFile();
-  store[plan.userId] = plan;
-
-  // Persist to Redis + filesystem
-  const redis = getRedisClient();
-  if (redis) {
-    try {
-      await redis.set(REDIS_KEY, store);
-    } catch {
-      // fall through to filesystem
+  inMemoryStore[plan.userId] = plan; // cache imediato
+  return runDietSerialized(async () => {
+    // Lê o store COMPLETO do Redis (não o arquivo efêmero) p/ não apagar outros.
+    const { store, redisReadOk } = await readFullStoreForWrite();
+    store[plan.userId] = plan;
+    Object.assign(inMemoryStore, store);
+    const redis = getRedisClient();
+    if (redis && redisReadOk) {
+      try { await redis.set(REDIS_KEY, store); } catch { /* fs fallback */ }
     }
-  }
-
-  writeToFile(store);
+    writeToFile(store);
+  });
 }
 
 export async function deleteDietPlan(userId: string): Promise<void> {
   delete inMemoryStore[userId];
-  const store = readFromFile();
-  delete store[userId];
-
-  const redis = getRedisClient();
-  if (redis) {
-    try {
-      await redis.set(REDIS_KEY, store);
-    } catch {
-      // fall through to filesystem
+  return runDietSerialized(async () => {
+    const { store, redisReadOk } = await readFullStoreForWrite();
+    delete store[userId];
+    delete inMemoryStore[userId];
+    const redis = getRedisClient();
+    if (redis && redisReadOk) {
+      try { await redis.set(REDIS_KEY, store); } catch { /* fs fallback */ }
     }
-  }
-
-  writeToFile(store);
+    writeToFile(store);
+  });
 }
