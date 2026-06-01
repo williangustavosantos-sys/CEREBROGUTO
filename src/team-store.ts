@@ -183,22 +183,43 @@ async function readTeamsAsync(): Promise<TeamStore> {
     return store;
 }
 
-// Persistência ao Redis SERIALIZADA: cada write espera o anterior e grava o
-// memCache ATUAL (não um snapshot capturado). Antes, create/update/deleteTeam
-// disparavam um write async fire-and-forget com snapshot — dois writes
-// concorrentes (ex.: criar 2 empresas em sequência) chegavam fora de ordem no
-// Upstash e o snapshot mais antigo sobrescrevia o mais novo, perdendo um time.
-let redisWriteChain: Promise<void> = Promise.resolve();
-function enqueueRedisPersist(): Promise<void> {
-    if (!useRedis()) return Promise.resolve();
-    redisWriteChain = redisWriteChain
-        .then(() => redisSet(REDIS_KEY, JSON.stringify(memCache)))
-        .catch(() => {});
-    return redisWriteChain;
+// Persistência anti-clobber (mesma blindagem do user-access-store): writes ao
+// Redis SERIALIZADOS e travados até a hidratação completar, RE-APLICANDO a
+// mutação sobre o memCache já hidratado. Fecha dois bugs: (1) write
+// fire-and-forget com snapshot → writes concorrentes fora de ordem perdiam um
+// time; (2) durante a janela do bootstrap, readTeamsSync devolvia só o seed
+// {GUTO_CORE} e um write podia apagar as empresas reais no Redis.
+let hydrated = false;
+let hydrationPromise: Promise<void> | null = null;
+function ensureHydration(): Promise<void> {
+    if (hydrated || !useRedis()) return Promise.resolve();
+    if (!hydrationPromise) {
+        hydrationPromise = readTeamsAsync()
+            .then(() => { hydrated = true; })
+            .catch(() => { hydrationPromise = null; });
+    }
+    return hydrationPromise;
 }
 
-// Bootstrap: load persisted teams on module init
-readTeamsAsync().catch(() => {});
+let writeChain: Promise<void> = Promise.resolve();
+function persistMutation(mutate: (store: TeamStore) => void): Promise<void> {
+    mutate(memCache);
+    writeTeamsSync(memCache);
+    if (!useRedis()) return Promise.resolve();
+    writeChain = writeChain
+        .then(async () => {
+            await ensureHydration();
+            if (!hydrated) return;
+            mutate(memCache);
+            await redisSet(REDIS_KEY, JSON.stringify(memCache));
+            writeTeamsSync(memCache);
+        })
+        .catch(() => {});
+    return writeChain;
+}
+
+// Bootstrap: hidrata o memCache do Redis no init (e trava writes até completar)
+void ensureHydration();
 
 export function getTeam(teamId: string): GutoTeam | undefined {
     return readTeamsSync().teams[teamId];
@@ -209,21 +230,19 @@ export function getAllTeams(): GutoTeam[] {
 }
 
 export function createTeam(team: GutoTeam): GutoTeam {
-    const store = readTeamsSync();
-    store.teams[team.id] = team;
-    writeTeamsSync(store);
-    void enqueueRedisPersist();
+    void persistMutation((store) => {
+        store.teams[team.id] = team;
+    });
     return team;
 }
 
 export function updateTeam(teamId: string, patch: Partial<Omit<GutoTeam, "id" | "createdAt">>): GutoTeam {
-    const store = readTeamsSync();
-    const existing = store.teams[teamId];
+    const existing = readTeamsSync().teams[teamId];
     if (!existing) throw new GutoTeamNotFoundError(teamId);
     const updated: GutoTeam = { ...existing, ...patch, id: existing.id, createdAt: existing.createdAt, updatedAt: new Date().toISOString() };
-    store.teams[teamId] = updated;
-    writeTeamsSync(store);
-    void enqueueRedisPersist();
+    void persistMutation((store) => {
+        store.teams[teamId] = updated;
+    });
     return updated;
 }
 
@@ -231,11 +250,10 @@ export function deleteTeam(teamId: string): void {
     if (teamId === GUTO_CORE_TEAM_ID) {
         throw new Error("GUTO_CORE não pode ser removido.");
     }
-    const store = readTeamsSync();
-    if (!store.teams[teamId]) throw new GutoTeamNotFoundError(teamId);
-    delete store.teams[teamId];
-    writeTeamsSync(store);
-    void enqueueRedisPersist();
+    if (!readTeamsSync().teams[teamId]) throw new GutoTeamNotFoundError(teamId);
+    void persistMutation((store) => {
+        delete store.teams[teamId];
+    });
 }
 
 export function normalizeTeamId(teamId?: string | null): string {

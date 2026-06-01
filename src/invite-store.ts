@@ -116,6 +116,18 @@ async function writeStore(store: InviteStore): Promise<void> {
   }
 }
 
+// Serializa as operações de escrita (read-modify-write) para evitar corrida:
+// duas ops concorrentes liam o mesmo estado, mutavam cópias e a última gravava,
+// perdendo a outra. (invite-store lê o Redis fresco a cada op, então NÃO tem o
+// clobber de janela-de-boot do user-access/team-store; o risco aqui é só a
+// concorrência entre writes.)
+let mutationChain: Promise<unknown> = Promise.resolve();
+function runSerialized<T>(fn: () => Promise<T>): Promise<T> {
+  const next = mutationChain.then(fn, fn);
+  mutationChain = next.then(() => undefined, () => undefined);
+  return next;
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function createInvite(params: {
@@ -124,32 +136,34 @@ export async function createInvite(params: {
   coachId: string;
   expiresInDays?: number;
 }): Promise<{ invite: Invite; rawToken: string }> {
-  const store = await readStore();
-  const rawToken = generateInviteToken();
-  const tokenHash = hashToken(rawToken);
-  const now = new Date();
-  const expiresAt = new Date(now);
-  expiresAt.setDate(expiresAt.getDate() + (params.expiresInDays ?? 7));
+  return runSerialized(async () => {
+    const store = await readStore();
+    const rawToken = generateInviteToken();
+    const tokenHash = hashToken(rawToken);
+    const now = new Date();
+    const expiresAt = new Date(now);
+    expiresAt.setDate(expiresAt.getDate() + (params.expiresInDays ?? 7));
 
-  const invite: Invite = {
-    id: crypto.randomUUID(),
-    tokenHash,
-    rawToken,
-    userId: params.userId,
-    name: params.name,
-    role: "student",
-    coachId: params.coachId,
-    status: "pending_claim",
-    createdAt: now.toISOString(),
-    expiresAt: expiresAt.toISOString(),
-    usedAt: null,
-    subscriptionStatus: "pending_payment",
-    subscriptionEndsAt: null,
-  };
+    const invite: Invite = {
+      id: crypto.randomUUID(),
+      tokenHash,
+      rawToken,
+      userId: params.userId,
+      name: params.name,
+      role: "student",
+      coachId: params.coachId,
+      status: "pending_claim",
+      createdAt: now.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      usedAt: null,
+      subscriptionStatus: "pending_payment",
+      subscriptionEndsAt: null,
+    };
 
-  store.invites[tokenHash] = invite;
-  await writeStore(store);
-  return { invite, rawToken };
+    store.invites[tokenHash] = invite;
+    await writeStore(store);
+    return { invite, rawToken };
+  });
 }
 
 export async function findInviteByToken(rawToken: string): Promise<Invite | null> {
@@ -178,36 +192,40 @@ export async function findInviteByUserId(userId: string): Promise<Invite | null>
 }
 
 export async function claimInvite(rawToken: string): Promise<Invite | null> {
-  const store = await readStore();
-  const tokenHash = hashToken(rawToken);
-  const invite = store.invites[tokenHash];
-  if (!invite) return null;
-  if (invite.status !== "pending_claim") return null;
-  if (new Date(invite.expiresAt) < new Date()) {
-    invite.status = "expired";
+  return runSerialized(async () => {
+    const store = await readStore();
+    const tokenHash = hashToken(rawToken);
+    const invite = store.invites[tokenHash];
+    if (!invite) return null;
+    if (invite.status !== "pending_claim") return null;
+    if (new Date(invite.expiresAt) < new Date()) {
+      invite.status = "expired";
+      await writeStore(store);
+      return null;
+    }
+    invite.status = "active";
+    invite.usedAt = new Date().toISOString();
+    invite.subscriptionStatus = "active";
+    const endsAt = new Date();
+    endsAt.setDate(endsAt.getDate() + 30);
+    invite.subscriptionEndsAt = endsAt.toISOString();
+    store.invites[tokenHash] = invite;
     await writeStore(store);
-    return null;
-  }
-  invite.status = "active";
-  invite.usedAt = new Date().toISOString();
-  invite.subscriptionStatus = "active";
-  const endsAt = new Date();
-  endsAt.setDate(endsAt.getDate() + 30);
-  invite.subscriptionEndsAt = endsAt.toISOString();
-  store.invites[tokenHash] = invite;
-  await writeStore(store);
-  return invite;
+    return invite;
+  });
 }
 
 export async function updateInviteByUserId(
   userId: string,
   patch: Partial<Pick<Invite, "status" | "subscriptionStatus" | "subscriptionEndsAt">>
 ): Promise<void> {
-  const store = await readStore();
-  const invite = selectActiveInvite(store, userId);
-  if (!invite) return;
-  Object.assign(invite, patch);
-  await writeStore(store);
+  return runSerialized(async () => {
+    const store = await readStore();
+    const invite = selectActiveInvite(store, userId);
+    if (!invite) return;
+    Object.assign(invite, patch);
+    await writeStore(store);
+  });
 }
 
 // Revoga TODOS os convites não-revogados do usuário (não só o primeiro). Assim o
@@ -215,15 +233,17 @@ export async function updateInviteByUserId(
 // pending_claim válidos ao mesmo tempo (cada regenerate só revogava o primeiro,
 // deixando o pending anterior ativo).
 export async function revokeInviteByUserId(userId: string): Promise<void> {
-  const store = await readStore();
-  let changed = false;
-  for (const inv of Object.values(store.invites)) {
-    if (inv.userId === userId && inv.status !== "revoked") {
-      inv.status = "revoked";
-      changed = true;
+  return runSerialized(async () => {
+    const store = await readStore();
+    let changed = false;
+    for (const inv of Object.values(store.invites)) {
+      if (inv.userId === userId && inv.status !== "revoked") {
+        inv.status = "revoked";
+        changed = true;
+      }
     }
-  }
-  if (changed) await writeStore(store);
+    if (changed) await writeStore(store);
+  });
 }
 
 export async function getAllInvites(): Promise<Invite[]> {
