@@ -110,6 +110,7 @@ import {
   buildPendingMemoryData,
   enrichPendingMemories,
   openWeeklyConversation,
+  getWeeklyCheckResult,
   getProactiveMemories,
   getProactiveMemoriesByStatus,
   hasMatchingProactiveMemory,
@@ -7964,6 +7965,36 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
         const p = prefix[selectedLang] || prefix["pt-BR"];
         result.fala = `${p}${clarification.charAt(0).toLocaleLowerCase()}${clarification.slice(1)}`;
         // acao and expectedResponse stay as set by the training gate inside askGutoModel
+      }
+    }
+
+    // Chegada do usuário recorrente: se a semana ainda não foi aberta com ele, a
+    // presença real (doc Proatividade, "Gatilho de Coleta Semanal") é PERGUNTAR
+    // sobre a semana — de forma DETERMINÍSTICA, não dependendo do modelo (que
+    // prioriza empurrar treino e ignora o sinal suave do injector). Dispara
+    // 1×/semana: openWeeklyConversation marca a semana como aberta.
+    if (slot === "arrival" && memory.hasSeenChatOpening && !memory.trainedToday) {
+      try {
+        const weekly = await getWeeklyCheckResult(userId, operationalContext.weekday);
+        if (weekly.shouldOpenWeekly) {
+          const wkName = sanitizeDisplayName(memory.name ?? "");
+          const wkLang = normalizeLanguage(language || memory.language);
+          const weeklyQuestion: Record<GutoLanguage, string> = {
+            "pt-BR": wkName
+              ? `${wkName}, antes da gente ir pra cima: como tá tua semana? Tem viagem, compromisso ou horário quebrado que eu preciso considerar pra montar tua missão direito?`
+              : `Antes da gente ir pra cima: como tá tua semana? Tem viagem, compromisso ou horário quebrado que eu preciso considerar?`,
+            "en-US": wkName
+              ? `${wkName}, before we get moving: how's your week looking? Any trip, commitment or tight schedule I should factor in to set your mission up right?`
+              : `Before we get moving: how's your week looking? Any trip, commitment or tight schedule I should factor in?`,
+            "it-IT": wkName
+              ? `${wkName}, prima di partire: com'è la tua settimana? C'è un viaggio, un impegno o un orario complicato che devo considerare per preparare la tua missione?`
+              : `Prima di partire: com'è la tua settimana? C'è un viaggio, un impegno o un orario complicato che devo considerare?`,
+          };
+          result.fala = weeklyQuestion[wkLang] || weeklyQuestion["pt-BR"];
+          await openWeeklyConversation(userId);
+        }
+      } catch {
+        // se a checagem semanal falhar, não bloqueia a chegada
       }
     }
 
