@@ -142,12 +142,64 @@ async function readStoreAsync(): Promise<UserAccessStore> {
   return store;
 }
 
-async function writeStoreAsync(store: UserAccessStore): Promise<void> {
-  memCache = store;
-  if (useRedis()) {
-    await redisSet(REDIS_KEY, JSON.stringify(store));
+// ─── Persistência anti-clobber (hidratação + escrita serializada) ────────────
+// Bug crítico (achado no QA 31/05, confirmado no Redis de prod): após um
+// restart/cold-start do Render, `readStoreSync` devolvia memória/arquivo VAZIO
+// durante a janela do bootstrap async, e um write fire-and-forget gravava esse
+// estado vazio por cima dos usuários reais no Redis — apagando coaches/alunos.
+// (README: "Memória no GUTO é confiança. Se diz 'salvei', salvou de verdade.")
+// Correção: todo write ao Redis é SERIALIZADO e só roda DEPOIS da hidratação,
+// RE-APLICANDO a mutação sobre o memCache já hidratado. Se a hidratação falhar,
+// NÃO grava no Redis (evita clobber); mantém memória/arquivo e tenta de novo.
+let hydrated = false;
+let hydrationPromise: Promise<void> | null = null;
+
+function ensureHydration(): Promise<void> {
+  if (hydrated || !useRedis()) return Promise.resolve();
+  if (!hydrationPromise) {
+    hydrationPromise = readStoreAsync()
+      .then(() => { hydrated = true; })
+      .catch(() => { hydrationPromise = null; }); // permite retry no próximo write
   }
-  writeStoreSync(store);
+  return hydrationPromise;
+}
+
+let writeChain: Promise<void> = Promise.resolve();
+
+// Aplica `mutate` ao memCache (sync, para leituras imediatas) e persiste o
+// estado já HIDRATADO no Redis de forma serializada. As versões async aguardam
+// a promise retornada; as sync disparam em background.
+function persistMutation(mutate: (store: UserAccessStore) => void): Promise<void> {
+  mutate(memCache);          // best-effort imediato p/ readStoreSync
+  writeStoreSync(memCache);  // arquivo + memCache (não toca Redis)
+  if (!useRedis()) return Promise.resolve();
+  writeChain = writeChain
+    .then(async () => {
+      await ensureHydration();   // memCache passa a refletir o Redis
+      if (!hydrated) return;     // Redis indisponível: não arrisca clobber
+      mutate(memCache);          // RE-aplica sobre o estado hidratado
+      await redisSet(REDIS_KEY, JSON.stringify(memCache));
+      writeStoreSync(memCache);
+    })
+    .catch(() => {});
+  return writeChain;
+}
+
+function buildUpsertedUser(
+  existing: UserAccess | undefined,
+  userId: string,
+  patch: Partial<Omit<UserAccess, "userId" | "createdAt">>,
+  now: string
+): UserAccess {
+  const updated = Object.assign(
+    {},
+    { role: "student" as UserRole, coachId: DEV_COACH_ID, active: false, visibleInArena: true, archived: false, subscriptionStatus: "pending_payment" as SubscriptionStatus, subscriptionEndsAt: null as string | null, teamId: "GUTO_CORE" },
+    existing ?? {},
+    patch,
+    { userId, createdAt: existing?.createdAt ?? now, updatedAt: now }
+  ) as UserAccess;
+  if (!updated.teamId) updated.teamId = "GUTO_CORE";
+  return updated;
 }
 
 // ─── Sync API (used by coach-router and server.ts) ───────────────────────────
@@ -202,29 +254,17 @@ export function upsertUserAccess(
   userId: string,
   patch: Partial<Omit<UserAccess, "userId" | "createdAt">>
 ): UserAccess {
-  const store = readStoreSync();
   const now = new Date().toISOString();
-  const existing = store.users[userId];
-  const updated = Object.assign(
-    {},
-    { role: "student" as UserRole, coachId: DEV_COACH_ID, active: false, visibleInArena: true, archived: false, subscriptionStatus: "pending_payment" as SubscriptionStatus, subscriptionEndsAt: null as string | null, teamId: "GUTO_CORE" },
-    existing ?? {},
-    patch,
-    { userId, createdAt: existing?.createdAt ?? now, updatedAt: now }
-  ) as UserAccess;
-  if (!updated.teamId) updated.teamId = "GUTO_CORE";
-  store.users[userId] = updated;
-  writeStoreSync(store);
-  // persist async to Redis in background
-  void writeStoreAsync(store).catch(() => { });
-  return updated;
+  void persistMutation((store) => {
+    store.users[userId] = buildUpsertedUser(store.users[userId], userId, patch, now);
+  });
+  return memCache.users[userId];
 }
 
 export function deleteUserAccessHard(userId: string): void {
-  const store = readStoreSync();
-  delete store.users[userId];
-  writeStoreSync(store);
-  void writeStoreAsync(store).catch(() => { });
+  void persistMutation((store) => {
+    delete store.users[userId];
+  });
 }
 
 export function getAllUserAccess(): UserAccess[] {
@@ -235,8 +275,12 @@ export function getAllUserAccess(): UserAccess[] {
 }
 
 export function writeUserAccessStoreRaw(store: { users: Record<string, UserAccess> }): void {
-  writeStoreSync(store);
-  void writeStoreAsync(store).catch(() => { });
+  // Sobrescrita deliberada do store inteiro (ex.: nuke administrativo). Mantém a
+  // mesma intenção mesmo após hidratação (define o estado exato pedido).
+  const snapshot = { ...store.users };
+  void persistMutation((s) => {
+    s.users = { ...snapshot };
+  });
 }
 
 // Async versions for auth router
@@ -292,36 +336,33 @@ export async function getAllUserAccessAsync(): Promise<UserAccess[]> {
 }
 
 export async function deleteUserAccessHardAsync(userId: string): Promise<void> {
-  const store = await readStoreAsync();
-  delete store.users[userId];
-  await writeStoreAsync(store);
+  await persistMutation((store) => {
+    delete store.users[userId];
+  });
 }
 
 export async function writeUserAccessStoreRawAsync(store: { users: Record<string, UserAccess> }): Promise<void> {
-  await writeStoreAsync(store);
+  const snapshot = { ...store.users };
+  await persistMutation((s) => {
+    s.users = { ...snapshot };
+  });
 }
 
 export async function upsertUserAccessAsync(
   userId: string,
   patch: Partial<Omit<UserAccess, "userId" | "createdAt">>
 ): Promise<UserAccess> {
-  const store = await readStoreAsync();
   const now = new Date().toISOString();
-  const existing = store.users[userId];
-  const updated = Object.assign(
-    {},
-    { role: "student" as UserRole, coachId: DEV_COACH_ID, active: false, visibleInArena: true, archived: false, subscriptionStatus: "pending_payment" as SubscriptionStatus, subscriptionEndsAt: null as string | null, teamId: "GUTO_CORE" },
-    existing ?? {},
-    patch,
-    { userId, createdAt: existing?.createdAt ?? now, updatedAt: now }
-  ) as UserAccess;
-  if (!updated.teamId) updated.teamId = "GUTO_CORE";
-  store.users[userId] = updated;
-  await writeStoreAsync(store);
-  return updated;
+  let result: UserAccess | undefined;
+  await persistMutation((store) => {
+    result = buildUpsertedUser(store.users[userId], userId, patch, now);
+    store.users[userId] = result;
+  });
+  return result ?? memCache.users[userId];
 }
 
-// ─── Bootstrap: load persisted users from Redis on module init ───────────────
-// Without this, after a Render cold start (file system wiped), readStoreSync
-// would read an empty file and miss every user that was saved to Redis.
-readStoreAsync().catch(() => {});
+// ─── Bootstrap: hidrata o memCache do Redis no init do módulo ────────────────
+// Sem isso, após um cold start do Render (file system zerado), readStoreSync
+// leria um arquivo vazio e perderia todo usuário salvo no Redis. ensureHydration
+// também trava os writes ao Redis até a hidratação completar (anti-clobber).
+void ensureHydration();
