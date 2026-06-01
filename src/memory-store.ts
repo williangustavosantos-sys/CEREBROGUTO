@@ -156,6 +156,49 @@ export function writeMemoryStoreSync(store: MemoryStore): void {
   writeToFile(store);
 }
 
+// ─── Anti-clobber: hidratação no boot + escrita por-usuário serializada ───────
+// Bug crítico (a memória/calibragem do usuário sumia a cada deploy/cold-start):
+// saveMemory lia o store SYNC (vazio no boot do Render, pois readMemoryStoreSync
+// só lê o arquivo efêmero) e gravava um store PARCIAL por cima de todos no Redis,
+// apagando a memória dos outros usuários. (README: "Memória no GUTO é confiança.")
+// Correção: (1) bootstrap hidrata o cache do Redis no init; (2) persistUserMemory
+// grava de forma SERIALIZADA e só DEPOIS da hidratação, re-aplicando a memória do
+// usuário sobre o store já hidratado — nunca apaga a dos outros.
+let memHydrated = false;
+let memHydrationPromise: Promise<void> | null = null;
+
+export function ensureMemoryHydrated(): Promise<void> {
+  if (memHydrated || !getRedisClient()) return Promise.resolve();
+  if (!memHydrationPromise) {
+    memHydrationPromise = readMemoryStoreAsync()
+      .then(() => { memHydrated = true; })
+      .catch(() => { memHydrationPromise = null; });
+  }
+  return memHydrationPromise;
+}
+
+let memWriteChain: Promise<void> = Promise.resolve();
+
+export function persistUserMemory(userId: string, memory: unknown): void {
+  globalMemoryStore[userId] = memory;       // cache imediato p/ leituras sync
+  writeToFile(globalMemoryStore);
+  const redis = getRedisClient();
+  if (!redis) return;
+  memWriteChain = memWriteChain
+    .then(async () => {
+      await ensureMemoryHydrated();           // cache passa a refletir o Redis (full)
+      if (!memHydrated) return;               // Redis indisponível: não arrisca clobber
+      globalMemoryStore[userId] = memory;     // re-aplica sobre o store hidratado
+      await redis.set(REDIS_KEY, globalMemoryStore);
+      writeToFile(globalMemoryStore);
+    })
+    .catch(() => {});
+}
+
+// Bootstrap: hidrata o cache no init do módulo (encolhe a janela de clobber p/ TODOS
+// os caminhos, pois readMemoryStoreSync passa a devolver o cache cheio).
+void ensureMemoryHydrated();
+
 /**
  * Clear the in-memory cache. Use in tests to prevent state leaking between test cases.
  */

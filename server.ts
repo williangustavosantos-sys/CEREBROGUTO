@@ -8,7 +8,7 @@ import path from "path";
 import { config, isProductionEnv } from "./src/config";
 import { createRateLimit } from "./src/http/rate-limit";
 import { requestLog } from "./src/http/request-log";
-import { readMemoryStoreSync, writeMemoryStoreSync, readMemoryStoreAsync, writeMemoryStoreAsync } from "./src/memory-store";
+import { readMemoryStoreSync, writeMemoryStoreSync, readMemoryStoreAsync, writeMemoryStoreAsync, persistUserMemory } from "./src/memory-store";
 import {
   getCatalogById,
   getExerciseLocations,
@@ -1173,8 +1173,10 @@ export function saveMemory(memory: GutoMemory) {
   nextMemory.biologicalSex = normalizeBiologicalSex(nextMemory.biologicalSex);
   nextMemory.heightCm = normalizeHeightCm(nextMemory.heightCm);
   nextMemory.weightKg = normalizeWeightKg(nextMemory.weightKg);
-  store[memory.userId] = nextMemory;
-  writeMemoryStore(store);
+  // Persistência por-usuário hidratada + serializada (anti-clobber): grava SÓ a
+  // memória deste usuário sobre o store hidratado, sem apagar a dos outros no
+  // Redis (bug que fazia a calibragem/onboarding sumir a cada deploy/cold-start).
+  persistUserMemory(memory.userId, nextMemory);
 }
 
 function commitMemoryDecision(memory: GutoMemory) {
