@@ -14,6 +14,10 @@ services:
         value: Europe/Rome
       - key: GUTO_GEMINI_MODEL
         value: gemini-3.1-flash-lite
+      - key: GUTO_VOICE_MODEL
+        value: gemini-2.5-flash-preview-tts
+      - key: GUTO_VOICE_MODEL_FALLBACK
+        value: gemini-3.1-flash-tts-preview
       - key: GUTO_MODEL_TIMEOUT_MS
         value: 30000
       - key: GUTO_MODEL_TEMPERATURE
@@ -53,7 +57,7 @@ services:
       - key: ANTHROPIC_API_KEY
         sync: false
 
-      # ── Voice (ElevenLabs) ───────────────────────────────────────────────────
+      # ── Voice (Gemini TTS — pode ser a MESMA chave do GEMINI_API_KEY) ────────
       - key: VOICE_API_KEY
         sync: false
 

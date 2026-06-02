@@ -447,15 +447,16 @@ const GEMINI_MODEL = config.geminiModel;
 const GUTO_MODEL_TIMEOUT_MS = config.modelTimeoutMs;
 const GUTO_MODEL_TEMPERATURE = config.modelTemperature;
 const VOICE_API_KEY = config.voiceApiKey;
+// Modelos de TTS do Gemini (mesma API/chave do cérebro — generativelanguage).
+// Tenta o primário; se ele falhar (ex.: 429/quota no plano grátis), cai no
+// secundário automaticamente. Ambos configuráveis por env.
+const GUTO_VOICE_MODEL = (process.env.GUTO_VOICE_MODEL || "gemini-2.5-flash-preview-tts").replace(/['"]/g, "");
+const GUTO_VOICE_MODEL_FALLBACK = (process.env.GUTO_VOICE_MODEL_FALLBACK || "gemini-3.1-flash-tts-preview").replace(/['"]/g, "");
+const GUTO_VOICE_MODELS = [...new Set([GUTO_VOICE_MODEL, GUTO_VOICE_MODEL_FALLBACK].filter(Boolean))];
 const OPENAI_API_KEY = config.openaiApiKey;
 const WORKOUTX_API_KEY = config.workoutxApiKey;
 
 const GUTO_TIME_ZONE = config.timeZone;
-const DEFAULT_VOICE_STYLE = {
-  speakingRate: 0.94,
-  pitch: -2.2,
-  volumeGainDb: 0,
-};
 
 const WORKOUTX_ANIMATION_BY_EXERCISE_ID: Record<string, string> = {
   "puxada-frente": "2330",
@@ -482,21 +483,24 @@ const WORKOUTX_ANIMATION_BY_EXERCISE_ID: Record<string, string> = {
   "prancha-isometrica": "0463",
 };
 
+// Vozes Gemini TTS (prebuilt). O modelo detecta o idioma pelo texto, então a
+// mesma voz serve pt-BR/en-US/it-IT. "Charon" preserva o caráter da voz antiga
+// (Chirp3-HD-Charon); "Orus" é o fallback masculino.
 const GUTO_VOICES: Record<GutoLanguage, GutoVoiceProfile> = {
   "pt-BR": {
     languageCode: "pt-BR",
-    primaryName: "pt-BR-Chirp3-HD-Charon",
-    fallbackName: "pt-BR-Neural2-B",
+    primaryName: "Charon",
+    fallbackName: "Orus",
   },
   "en-US": {
     languageCode: "en-US",
-    primaryName: "en-US-Chirp3-HD-Charon",
-    fallbackName: "en-US-Neural2-D",
+    primaryName: "Charon",
+    fallbackName: "Orus",
   },
   "it-IT": {
     languageCode: "it-IT",
-    primaryName: "it-IT-Chirp3-HD-Charon",
-    fallbackName: "it-IT-Neural2-C",
+    primaryName: "Charon",
+    fallbackName: "Orus",
   },
 };
 
@@ -2488,6 +2492,31 @@ function parseJsonObject<T>(raw: string | undefined): T | null {
   }
 }
 
+// Embrulha PCM cru de 16-bit mono (o que o Gemini TTS devolve, audio/L16) em um
+// container WAV para que o browser consiga tocar via new Audio()/Blob.
+function pcmToWavBase64(pcmBase64: string, sampleRate = 24000): string {
+  const pcm = Buffer.from(pcmBase64, "base64");
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+  const blockAlign = numChannels * (bitsPerSample / 8);
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16); // PCM fmt chunk size
+  header.writeUInt16LE(1, 20); // audioFormat = PCM
+  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]).toString("base64");
+}
+
 async function synthesizeGutoVoice({
   text,
   language,
@@ -2501,39 +2530,85 @@ async function synthesizeGutoVoice({
   useNamedVoice?: boolean;
   applyGutoStyle?: boolean;
 }) {
+  // applyGutoStyle/useNamedVoice mantidos por compatibilidade com os call-sites
+  // do fallback; o Gemini TTS controla estilo via prompt, não via audioConfig.
+  void applyGutoStyle;
+  void useNamedVoice;
   const selectedLanguage = normalizeLanguage(language);
   const voice = GUTO_VOICES[selectedLanguage];
-  const url = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${VOICE_API_KEY}`;
   const selectedVoiceName = voiceName || voice.primaryName;
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      input: { text },
-      voice: useNamedVoice
-        ? {
-            languageCode: voice.languageCode,
-            name: selectedVoiceName,
-          }
-        : {
-            languageCode: voice.languageCode,
-            ssmlGender: "MALE",
+  // Tenta cada modelo em ordem; cai pro próximo quando o atual falha
+  // (429/quota/erro). Só percorre a lista enquanto não obtém áudio válido.
+  let lastStatus = 502;
+  let lastError: any;
+  for (const model of GUTO_VOICE_MODELS) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${VOICE_API_KEY}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), GUTO_MODEL_TIMEOUT_MS);
+    let response: Response;
+    let raw: any;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          contents: [{ parts: [{ text }] }],
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedVoiceName } },
+            },
           },
-      audioConfig: {
-        audioEncoding: "MP3",
-        ...(applyGutoStyle ? DEFAULT_VOICE_STYLE : {}),
-      },
-    }),
-  });
-  const data: any = await response.json();
+        }),
+      });
+      raw = await response.json().catch(() => ({}));
+    } catch (err) {
+      // Timeout/erro de rede: registra e tenta o próximo modelo.
+      lastError = { message: err instanceof Error ? err.message : String(err) };
+      clearTimeout(timer);
+      continue;
+    }
+    clearTimeout(timer);
 
+    const inline = raw?.candidates?.[0]?.content?.parts?.find((p: any) => p?.inlineData)?.inlineData;
+    let audioContent: string | undefined;
+    if (inline?.data) {
+      const rateMatch = /rate=(\d+)/.exec(inline.mimeType || "");
+      const sampleRate = rateMatch ? Number(rateMatch[1]) : 24000;
+      audioContent = pcmToWavBase64(inline.data, sampleRate);
+    }
+
+    if (response.ok && audioContent) {
+      return {
+        ok: true,
+        status: response.status,
+        data: { audioContent, error: undefined as any },
+        voiceUsed: selectedVoiceName,
+        languageCode: voice.languageCode,
+        mimeType: "audio/wav",
+        modelUsed: model,
+      };
+    }
+
+    lastStatus = response.status;
+    lastError = raw?.error;
+    if (GUTO_VOICE_MODELS.length > 1) {
+      console.warn("[GUTO_VOICE] model_fallback", { model, status: response.status, detail: raw?.error?.message });
+    }
+  }
+
+  // Todos os modelos falharam.
   return {
-    ok: response.ok && Boolean(data?.audioContent),
-    status: response.status,
-    data,
-    voiceUsed: useNamedVoice ? selectedVoiceName : `${voice.languageCode}:MALE`,
+    ok: false,
+    status: lastStatus,
+    // Mantém `error` para o logging do call-site (data?.error?.message).
+    data: { audioContent: undefined as string | undefined, error: lastError },
+    voiceUsed: selectedVoiceName,
     languageCode: voice.languageCode,
+    mimeType: "audio/wav",
+    modelUsed: undefined as string | undefined,
   };
 }
 
@@ -8215,7 +8290,7 @@ app.post("/voz", requireActiveUser, async (req, res) => {
 
   // ── Helper: respond with synthesized audio ─────────────────────────────────
   const respondWithAudio = async (audioContent: string, voiceUsed: string, languageCode: string) => {
-    return res.json({ audioContent, voiceUsed, languageCode });
+    return res.json({ audioContent, voiceUsed, languageCode, mimeType: "audio/wav" });
   };
 
   try {
@@ -8229,7 +8304,7 @@ app.post("/voz", requireActiveUser, async (req, res) => {
 
     if (primary.ok) {
       console.info("[GUTO_VOICE] synth_ok", { userId, language: selectedLanguage, voiceUsed: primary.voiceUsed });
-      return respondWithAudio(primary.data.audioContent, primary.voiceUsed, primary.languageCode);
+      return respondWithAudio(primary.data.audioContent!, primary.voiceUsed, primary.languageCode);
     }
 
     // ── 4. Fallback voice ──────────────────────────────────────────────────
@@ -8241,7 +8316,7 @@ app.post("/voz", requireActiveUser, async (req, res) => {
 
     if (fallback.ok) {
       console.info("[GUTO_VOICE] synth_ok_fallback", { userId, language: selectedLanguage, voiceUsed: fallback.voiceUsed });
-      return respondWithAudio(fallback.data.audioContent, fallback.voiceUsed, fallback.languageCode);
+      return respondWithAudio(fallback.data.audioContent!, fallback.voiceUsed, fallback.languageCode);
     }
 
     // ── 5. Native male (last resort) ───────────────────────────────────────
@@ -8253,7 +8328,7 @@ app.post("/voz", requireActiveUser, async (req, res) => {
 
     if (nativeMale.ok) {
       console.info("[GUTO_VOICE] synth_ok_native", { userId, language: selectedLanguage, voiceUsed: nativeMale.voiceUsed });
-      return respondWithAudio(nativeMale.data.audioContent, nativeMale.voiceUsed, nativeMale.languageCode);
+      return respondWithAudio(nativeMale.data.audioContent!, nativeMale.voiceUsed, nativeMale.languageCode);
     }
 
     // ── 6. All attempts failed ─────────────────────────────────────────────
@@ -8342,7 +8417,7 @@ app.post("/guto-audio", requireActiveUser, upload.single("audio"), async (req, r
       console.warn("Voz do GUTO indisponível no áudio:", voiceError);
     }
 
-    res.json({ ...gutoData, fala, transcript, audioContent });
+    res.json({ ...gutoData, fala, transcript, audioContent, mimeType: audioContent ? "audio/wav" : undefined });
   } catch (error) {
     console.warn("Erro no Guto Audio:", error);
     res.status(500).json({ error: fallbackLine(language, "internal_error") });
