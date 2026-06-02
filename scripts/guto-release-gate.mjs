@@ -112,7 +112,21 @@ async function main() {
   await runCommand("backend:test:guto", backendDir, "npm", ["run", "test:guto"]);
 
   console.log("[release-gate] Backend evals PT/EN/IT");
-  await runCommand("backend:eval:guto:no-judge", backendDir, "npm", ["run", "eval:guto", "--", "--no-judge"]);
+  // Juiz LLM (Claude) liga automaticamente quando ANTHROPIC_API_KEY está no
+  // ambiente — aí o gate mede nuance de verdade. Sem a chave, cai pro modo
+  // por palavra-chave (--no-judge) com aviso, em vez de fingir que mediu.
+  const judgeEnabled = Boolean(process.env.ANTHROPIC_API_KEY);
+  console.log(
+    judgeEnabled
+      ? "[release-gate] juiz LLM LIGADO (ANTHROPIC_API_KEY presente)"
+      : "[release-gate] juiz LLM DESLIGADO — defina ANTHROPIC_API_KEY para medir nuance (usando match por palavra-chave)"
+  );
+  await runCommand(
+    judgeEnabled ? "backend:eval:guto" : "backend:eval:guto:no-judge",
+    backendDir,
+    "npm",
+    judgeEnabled ? ["run", "eval:guto"] : ["run", "eval:guto", "--", "--no-judge"]
+  );
 
   console.log("[release-gate] Frontend lint");
   await runCommand("frontend:lint", frontendDir, "npm", ["run", "lint"]);

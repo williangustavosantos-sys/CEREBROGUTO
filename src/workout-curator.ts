@@ -208,18 +208,38 @@ interface GeminiCallOptions {
   timeoutMs: number;
 }
 
-export async function curateWorkout(
+// Retry/backoff do curador — sob carga (rajada), o Gemini devolve 429/timeout e
+// o flash-lite às vezes oscila no JSON. Em vez de cair direto no template, o
+// curador tenta de novo com backoff exponencial + jitter. Configurável por env.
+const CURATOR_MAX_ATTEMPTS = Math.max(1, Number(process.env.GUTO_CURATOR_MAX_ATTEMPTS) || 3);
+const CURATOR_BACKOFF_BASE_MS = Math.max(0, Number(process.env.GUTO_CURATOR_BACKOFF_MS) || 500);
+const CURATOR_BACKOFF_MAX_MS = Math.max(0, Number(process.env.GUTO_CURATOR_BACKOFF_MAX_MS) || 4000);
+
+// HTTP que vale a pena repetir (transientes do provedor). 400/401/403/404 são
+// permanentes (request/chave/modelo errados) — não adianta repetir.
+const RETRYABLE_HTTP = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+
+function curatorSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function curatorBackoffDelay(attempt: number): number {
+  // attempt é 1-based; espera cresce 2^(attempt-1), com teto e jitter de ±25%.
+  const base = Math.min(CURATOR_BACKOFF_BASE_MS * 2 ** (attempt - 1), CURATOR_BACKOFF_MAX_MS);
+  const jitter = base * (Math.random() * 0.5 - 0.25);
+  return Math.max(0, Math.round(base + jitter));
+}
+
+type CuratorAttempt =
+  | { kind: "ok"; workout: CuratedWorkout }
+  | { kind: "retryable"; reason: string }
+  | { kind: "fatal"; reason: string };
+
+async function runCuratorAttempt(
   ctx: CuratorContext,
+  prompt: string,
   options: GeminiCallOptions
-): Promise<CuratedWorkout | null> {
-  const pool = getCandidatePool(ctx.focus, ctx.location);
-  if (pool.length === 0) {
-    console.warn(`[curator] empty pool for focus=${ctx.focus} location=${ctx.location}`);
-    return null;
-  }
-
-  const prompt = buildCuratorPrompt(ctx, pool);
-
+): Promise<CuratorAttempt> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs);
 
@@ -243,40 +263,42 @@ export async function curateWorkout(
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      console.warn(`[curator] HTTP ${res.status}: ${body.slice(0, 200)}`);
-      return null;
+      const reason = `HTTP ${res.status}: ${body.slice(0, 200)}`;
+      return RETRYABLE_HTTP.has(res.status)
+        ? { kind: "retryable", reason }
+        : { kind: "fatal", reason };
     }
 
     const data = (await res.json()) as {
       candidates?: { content?: { parts?: { text?: string }[] } }[];
     };
     const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    if (!raw) return null;
+    if (!raw) return { kind: "retryable", reason: "empty model output" };
 
     let parsed: any;
     try {
       parsed = JSON.parse(raw);
     } catch {
       const match = raw.match(/\{[\s\S]*\}/);
-      if (!match) return null;
+      if (!match) return { kind: "retryable", reason: "no JSON in output" };
       try {
         parsed = JSON.parse(match[0]);
       } catch {
-        return null;
+        return { kind: "retryable", reason: "invalid JSON in output" };
       }
     }
 
     if (!Array.isArray(parsed?.exercises) || parsed.exercises.length === 0) {
-      return null;
+      return { kind: "retryable", reason: "no exercises in output" };
     }
 
     // Validação mínima: cada exercício escolhido tem que ter id no catálogo
-    // E tem que pertencer a um grupo muscular válido para o foco
+    // E tem que pertencer a um grupo muscular válido para o foco. Isso é
+    // estocástico (o modelo pode acertar numa nova tentativa), então é retryable.
     const exerciseIds = parsed.exercises.map((e: any) => String(e.id || ""));
     const muscleCheck = validateMuscleGroupsForFocus(exerciseIds, ctx.focus);
     if (!muscleCheck.valid) {
-      console.warn(`[curator] muscle group validation failed:`, muscleCheck.offending);
-      return null;
+      return { kind: "retryable", reason: `muscle group validation: ${muscleCheck.offending.join("; ")}` };
     }
 
     // Coerce types
@@ -290,21 +312,61 @@ export async function curateWorkout(
     }));
 
     return {
-      focus: ctx.focus,
-      exercises,
-      summary: String(parsed.summary || ""),
-      progressionNote: parsed.progressionNote ? String(parsed.progressionNote) : undefined,
+      kind: "ok",
+      workout: {
+        focus: ctx.focus,
+        exercises,
+        summary: String(parsed.summary || ""),
+        progressionNote: parsed.progressionNote ? String(parsed.progressionNote) : undefined,
+      },
     };
   } catch (err: any) {
-    if (err?.name === "AbortError") {
-      console.warn("[curator] timeout");
-    } else {
-      console.warn("[curator] error:", err?.message || err);
-    }
-    return null;
+    // Timeout (AbortError) e erro de rede são transientes → vale repetir.
+    const reason = err?.name === "AbortError" ? "timeout" : `network: ${err?.message || err}`;
+    return { kind: "retryable", reason };
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function curateWorkout(
+  ctx: CuratorContext,
+  options: GeminiCallOptions
+): Promise<CuratedWorkout | null> {
+  const pool = getCandidatePool(ctx.focus, ctx.location);
+  if (pool.length === 0) {
+    console.warn(`[curator] empty pool for focus=${ctx.focus} location=${ctx.location}`);
+    return null;
+  }
+
+  const prompt = buildCuratorPrompt(ctx, pool);
+
+  for (let attempt = 1; attempt <= CURATOR_MAX_ATTEMPTS; attempt++) {
+    const result = await runCuratorAttempt(ctx, prompt, options);
+
+    if (result.kind === "ok") {
+      if (attempt > 1) {
+        console.info(`[curator] succeeded on attempt ${attempt}/${CURATOR_MAX_ATTEMPTS} (focus=${ctx.focus} location=${ctx.location})`);
+      }
+      return result.workout;
+    }
+
+    if (result.kind === "fatal") {
+      console.warn(`[curator] fatal (no retry): ${result.reason}`);
+      return null;
+    }
+
+    // retryable
+    if (attempt < CURATOR_MAX_ATTEMPTS) {
+      const delay = curatorBackoffDelay(attempt);
+      console.warn(`[curator] attempt ${attempt}/${CURATOR_MAX_ATTEMPTS} failed (${result.reason}); retrying in ${delay}ms`);
+      await curatorSleep(delay);
+    } else {
+      console.warn(`[curator] exhausted ${CURATOR_MAX_ATTEMPTS} attempts (last: ${result.reason}) — falling back to template`);
+    }
+  }
+
+  return null;
 }
 
 /**

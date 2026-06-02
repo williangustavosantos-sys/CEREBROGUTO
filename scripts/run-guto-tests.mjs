@@ -4,6 +4,11 @@ import { spawnSync } from "node:child_process";
 
 const backendDir = resolve(process.cwd());
 const testsDir = resolve(backendDir, "tests");
+
+// Mantém o backoff do curador instantâneo nos testes: cenários que caem em
+// fallback (modelo mockado vazio) ainda exercem o retry (3 tentativas), mas sem
+// dormir de verdade — suíte rápida e determinística. Produção usa o default.
+if (!process.env.GUTO_CURATOR_BACKOFF_MS) process.env.GUTO_CURATOR_BACKOFF_MS = "0";
 const files = readdirSync(testsDir)
   .filter((file) => file.endsWith(".test.ts"))
   .sort()

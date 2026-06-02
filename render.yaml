@@ -18,6 +18,11 @@ services:
         value: gemini-2.5-flash-preview-tts
       - key: GUTO_VOICE_MODEL_FALLBACK
         value: gemini-3.1-flash-tts-preview
+      # Curador de treino — retry/backoff sob carga (evita cair em template no 429/timeout).
+      - key: GUTO_CURATOR_MAX_ATTEMPTS
+        value: 3
+      - key: GUTO_CURATOR_BACKOFF_MS
+        value: 500
       - key: GUTO_MODEL_TIMEOUT_MS
         value: 30000
       - key: GUTO_MODEL_TEMPERATURE
