@@ -400,6 +400,26 @@ interface GutoMemory {
    * status="unknown" means "user wrote something we did not understand".
    */
   resolvedFields?: ResolvedProfileFields;
+  /**
+   * Exercício técnico em foco AGORA. Fonte única que liga a dúvida do treino
+   * (chat) e a execução do GUTO Online ao cérebro: enquanto presente, o chat
+   * responde sempre sobre ESTE exercício e nunca volta ao genérico (CORE §6).
+   * Expira por TTL na leitura (ver ACTIVE_EXERCISE_TTL_MS).
+   */
+  activeExercise?: ActiveExerciseContext | null;
+}
+
+interface ActiveExerciseContext {
+  source: "chat" | "online";
+  name: string;
+  muscleGroup?: string;
+  reps?: string;
+  load?: string;
+  rest?: string;
+  currentSet?: number;
+  totalSets?: number;
+  note?: string;
+  updatedAt: string;
 }
 
 type XpEventType =
@@ -2704,6 +2724,42 @@ function formatHistoryForPrompt(history: GutoHistoryItem[] = []) {
     .join("\n");
 }
 
+// Exercício ativo vira contexto morto após algumas horas (sessão antiga / dúvida
+// abandonada). TTL de segurança: não injeta exercício velho como se fosse o atual.
+const ACTIVE_EXERCISE_TTL_MS = 3 * 60 * 60 * 1000;
+
+function buildActiveExerciseContextBlock(memory: GutoMemory): string | null {
+  const ex = memory.activeExercise;
+  if (!ex || !ex.name) return null;
+  const updated = Date.parse(ex.updatedAt || "");
+  if (Number.isFinite(updated) && Date.now() - updated > ACTIVE_EXERCISE_TTL_MS) return null;
+
+  const origin =
+    ex.source === "online"
+      ? "GUTO Online, em execução agora"
+      : "dúvida no card do treino (botão ?)";
+  const lines = [
+    `Origem: ${origin}.`,
+    `Exercício: "${ex.name}"${ex.muscleGroup ? ` — grupo muscular: ${ex.muscleGroup}` : ""}.`,
+  ];
+  if (typeof ex.currentSet === "number" && typeof ex.totalSets === "number") {
+    lines.push(`Série atual: ${ex.currentSet} de ${ex.totalSets}.`);
+  }
+  const prescription = [
+    ex.reps ? `${ex.reps} reps` : "",
+    ex.load ? `carga ${ex.load}` : "",
+    ex.rest ? `descanso ${ex.rest}` : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
+  if (prescription) lines.push(`Prescrição: ${prescription}.`);
+  if (ex.note) lines.push(`Nota: ${ex.note}.`);
+  lines.push(
+    `REGRA: você JÁ SABE qual exercício é este. Responda sempre sobre ELE. NUNCA volte ao genérico nem pergunte "qual exercício". Se o usuário relatar aparelho ocupado, dor ou pedir troca, adapte mantendo o MESMO grupo muscular.`
+  );
+  return lines.join("\n");
+}
+
 function buildGutoBrainPrompt({
   input,
   memory,
@@ -2713,6 +2769,7 @@ function buildGutoBrainPrompt({
   expectedResponse,
   riskOverride,
   proactivityContext,
+  activeExerciseContext,
 }: {
   input: string;
   memory: GutoMemory;
@@ -2730,6 +2787,9 @@ function buildGutoBrainPrompt({
   riskOverride?: RiskClassification | null;
   /** Optional block injected from the proactivity system. */
   proactivityContext?: string | null;
+  /** Exercício ativo (chat doubt / GUTO Online) já formatado. Mantém o turno
+   *  ancorado no exercício real e impede resposta genérica. */
+  activeExerciseContext?: string | null;
 }) {
   const selectedLanguage = normalizeLanguage(language);
   const langName = languageName(selectedLanguage);
@@ -3147,6 +3207,13 @@ Usuário pede excluir conta:
           "─── CONTEXTO PROATIVO DESTE TURNO ───",
           proactivityContext,
           "Confirmação pendente, descarte pendente ou validação pendente têm prioridade real. Abertura semanal é presença contextual: não substitui pedido explícito de treino, dieta, dor ou técnica. Nesses casos, responda a intenção atual primeiro e acrescente o check semanal só se couber em uma frase curta.",
+          "",
+        ]
+      : []),
+    ...(activeExerciseContext
+      ? [
+          "─── EXERCÍCIO ATIVO DESTE TURNO ───",
+          activeExerciseContext,
           "",
         ]
       : []),
@@ -6913,6 +6980,7 @@ async function askGutoModel({
   history = [],
   expectedResponse,
   proactivityContext,
+  activeExerciseContext,
   resolverResult,
 }: {
   input: string;
@@ -6921,6 +6989,7 @@ async function askGutoModel({
   history?: GutoHistoryItem[];
   expectedResponse?: ExpectedResponse | null;
   proactivityContext?: string | null;
+  activeExerciseContext?: string | null;
   resolverResult?: ResolverResult;
 }) {
   const memory = mergeMemory(profile, language || profile?.language);
@@ -7034,6 +7103,7 @@ async function askGutoModel({
     expectedResponse: normalizedExpectedResponse,
     riskOverride,
     proactivityContext: proactivityContext ?? null,
+    activeExerciseContext: activeExerciseContext ?? null,
   });
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
@@ -8232,6 +8302,7 @@ app.post("/guto", requireActiveUser, async (req, res) => {
       history: history || [],
       expectedResponse: normalizeExpectedResponse(expectedResponse),
       proactivityContext: effectiveProactivityCtx,
+      activeExerciseContext: buildActiveExerciseContextBlock(memory),
       resolverResult,
     });
     if (result.proactiveMemoryAction) {
@@ -8980,6 +9051,43 @@ app.post("/guto/proactivity/open-weekly", requireActiveUser, async (req, res) =>
   try {
     const wc = await openWeeklyConversation(userId);
     res.json({ ok: true, weeklyConversation: wc });
+  } catch {
+    res.json({ ok: false });
+  }
+});
+
+// Liga a dúvida do treino (chat) e a execução do GUTO Online ao cérebro: persiste
+// o exercício em foco na fonte única (GutoMemory). Enviar { exercise: null } limpa.
+app.post("/guto/active-exercise", requireActiveUser, (req, res) => {
+  const userId = req.gutoUser!.userId;
+  const { exercise } = req.body as { exercise?: Partial<ActiveExerciseContext> | null };
+  try {
+    const memory = getMemory(userId);
+    if (!exercise || typeof exercise.name !== "string" || !exercise.name.trim()) {
+      memory.activeExercise = null;
+    } else {
+      const str = (value: unknown, max = 120): string | undefined => {
+        if (typeof value !== "string") return undefined;
+        const trimmed = value.trim();
+        return trimmed ? trimmed.slice(0, max) : undefined;
+      };
+      const num = (value: unknown): number | undefined =>
+        typeof value === "number" && Number.isFinite(value) ? value : undefined;
+      memory.activeExercise = {
+        source: exercise.source === "online" ? "online" : "chat",
+        name: exercise.name.trim().slice(0, 120),
+        muscleGroup: str(exercise.muscleGroup),
+        reps: str(exercise.reps, 40),
+        load: str(exercise.load, 40),
+        rest: str(exercise.rest, 40),
+        currentSet: num(exercise.currentSet),
+        totalSets: num(exercise.totalSets),
+        note: str(exercise.note, 200),
+        updatedAt: new Date().toISOString(),
+      };
+    }
+    saveMemory(memory);
+    res.json({ ok: true });
   } catch {
     res.json({ ok: false });
   }
