@@ -1,0 +1,164 @@
+import './test-env.js'
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+
+import {
+  buildImpactFromDecision,
+  decideFromProactiveMemory,
+  getAdaptationForDate,
+  resolveEffectiveImpacts,
+} from '../src/proactivity/decision-engine.js'
+import type { ProactiveImpact, ProactiveMemory } from '../src/proactivity/types.js'
+
+const NOW = '2026-06-07T12:00:00.000Z'
+const WEDNESDAY = '2026-06-10'
+
+function makeMemory(
+  id: string,
+  type: ProactiveMemory['type'],
+  rawText: string,
+  patch: Partial<ProactiveMemory> = {}
+): ProactiveMemory {
+  return {
+    id,
+    userId: 'decision-engine-user',
+    type,
+    status: 'confirmed',
+    rawText,
+    understood: rawText,
+    createdAt: NOW,
+    updatedAt: NOW,
+    weekKey: '2026-W23',
+    ...patch,
+  }
+}
+
+function pipeline(memory: ProactiveMemory, date = WEDNESDAY, coachLocked = false) {
+  const decision = decideFromProactiveMemory({ memory, now: NOW, language: 'pt-BR', coachLocked })
+  assert.ok(decision, 'memória operacional deve gerar decisão')
+  const impact = buildImpactFromDecision(decision, { proactiveImpacts: [] })
+  assert.ok(impact, 'decisão operacional deve gerar impacto')
+  const adaptation = getAdaptationForDate({ proactiveImpacts: [impact] }, date)
+  return { decision, impact, adaptation }
+}
+
+test('viajo quarta: memória vira decisão, impacto e treino/missão curto e leve', () => {
+  const memory = makeMemory('pm_trip', 'trip', 'viajo quarta', { dateText: 'quarta' })
+  const { decision, impact, adaptation } = pipeline(memory)
+
+  assert.equal(decision.reason, 'travel')
+  assert.equal(impact.blockedPeriod, 'all_day')
+  assert.equal(adaptation.workoutEffect, 'short_light')
+  assert.equal(adaptation.missionEffect, 'protected_before')
+  assert.equal(adaptation.shouldAvoidBlindPenalty, true)
+  assert.equal(adaptation.xpPolicy, 'no_free_xp')
+  assert.equal(adaptation.arenaPolicy, 'validation_required')
+})
+
+test('reunião quarta à noite: bloqueia período e reduz/antecipa treino', () => {
+  const memory = makeMemory('pm_meeting', 'commitment', 'reunião quarta à noite', { dateText: 'quarta à noite' })
+  const { decision, impact, adaptation } = pipeline(memory)
+
+  assert.equal(decision.reason, 'commitment')
+  assert.equal(decision.blockedPeriod, 'evening')
+  assert.equal(impact.surfaces.includes('workout'), true)
+  assert.equal(impact.surfaces.includes('mission'), true)
+  assert.equal(adaptation.workoutEffect, 'short_light')
+  assert.equal(adaptation.missionEffect, 'reduced')
+})
+
+test('semana corrida: reduz complexidade semanal e exige execução mínima', () => {
+  const memory = makeMemory('pm_busy_week', 'other', 'semana corrida')
+  const { decision, impact, adaptation } = pipeline(memory, '2026-06-08')
+
+  assert.equal(decision.reason, 'busy_week')
+  assert.equal(impact.affectedDates.length, 7)
+  assert.equal(adaptation.workoutEffect, 'minimal')
+  assert.equal(adaptation.missionEffect, 'reduced')
+  assert.equal(adaptation.xpPolicy, 'no_free_xp')
+})
+
+test('nada essa semana: mantém plano normal e resolve abertura semanal', () => {
+  const memory = makeMemory('pm_clear_week', 'other', 'nada essa semana')
+  const { decision, impact, adaptation } = pipeline(memory, '2026-06-08')
+
+  assert.equal(decision.reason, 'clear_week')
+  assert.equal(impact.status, 'active')
+  assert.equal(adaptation.workoutEffect, 'normal')
+  assert.equal(adaptation.missionEffect, 'normal')
+  assert.equal(adaptation.xpPolicy, 'normal')
+})
+
+test('saudação pura não gera decisão nem impacto', () => {
+  const memory = makeMemory('pm_hello', 'other', 'oi GUTO')
+  const decision = decideFromProactiveMemory({ memory, now: NOW, language: 'pt-BR' })
+
+  assert.equal(decision, null)
+})
+
+test('viagem + reunião na mesma data: viagem vence reunião por prioridade', () => {
+  const trip = pipeline(makeMemory('pm_trip_conflict', 'trip', 'viajo quarta', { dateText: 'quarta' })).impact
+  const meeting = pipeline(makeMemory('pm_meeting_conflict', 'commitment', 'reunião quarta à noite', { dateText: 'quarta à noite' })).impact
+  const resolved = resolveEffectiveImpacts([meeting, trip], WEDNESDAY)
+  const adaptation = getAdaptationForDate({ proactiveImpacts: [meeting, trip] }, WEDNESDAY)
+
+  assert.equal(resolved.find((impact) => impact.id === trip.id)?.status, 'active')
+  assert.equal(resolved.find((impact) => impact.id === meeting.id)?.status, 'superseded')
+  assert.equal(adaptation.reason, 'travel')
+  assert.equal(adaptation.workoutEffect, 'short_light')
+})
+
+test('dor + semana corrida: saúde vence semana corrida', () => {
+  const pain = pipeline(makeMemory('pm_pain', 'health', 'estou com dor quarta', { dateText: 'quarta' })).impact
+  const busy = pipeline(makeMemory('pm_busy_conflict', 'other', 'semana corrida'), WEDNESDAY).impact
+  const resolved = resolveEffectiveImpacts([busy, pain], WEDNESDAY)
+  const adaptation = getAdaptationForDate({ proactiveImpacts: [busy, pain] }, WEDNESDAY)
+
+  assert.equal(resolved.find((impact) => impact.id === pain.id)?.status, 'active')
+  assert.equal(resolved.find((impact) => impact.id === busy.id)?.status, 'superseded')
+  assert.equal(adaptation.reason, 'health')
+  assert.equal(adaptation.workoutEffect, 'minimal')
+})
+
+test('coach lock: treino travado pelo coach não é sobrescrito', () => {
+  const memory = makeMemory('pm_locked', 'trip', 'viajo quarta', { dateText: 'quarta' })
+  const { decision, impact, adaptation } = pipeline(memory, WEDNESDAY, true)
+
+  assert.equal(decision.reason, 'coach_lock')
+  assert.equal(impact.workoutEffect, 'coach_locked')
+  assert.equal(adaptation.workoutEffect, 'coach_locked')
+  assert.equal(adaptation.isAdaptedDay, false)
+})
+
+test('cancelamento remove impacto ativo do seletor', () => {
+  const impact = pipeline(makeMemory('pm_cancel', 'trip', 'viajo quarta', { dateText: 'quarta' })).impact
+  const discarded: ProactiveImpact = { ...impact, status: 'discarded' }
+  const adaptation = getAdaptationForDate({ proactiveImpacts: [discarded] }, WEDNESDAY)
+
+  assert.equal(adaptation.primaryImpact, undefined)
+  assert.equal(adaptation.workoutEffect, 'normal')
+  assert.equal(adaptation.missionEffect, 'normal')
+})
+
+test('confirmar memória cria decisão e impacto persistível', () => {
+  const memory = makeMemory('pm_confirm', 'commitment', 'reunião quarta à noite', { dateText: 'quarta à noite' })
+  const decision = decideFromProactiveMemory({ memory, now: NOW, language: 'pt-BR' })
+  assert.ok(decision)
+  const impact = buildImpactFromDecision(decision, { proactiveImpacts: [] })
+
+  assert.ok(impact)
+  assert.equal(impact.memoryId, memory.id)
+  assert.equal(impact.status, 'active')
+  assert.equal(impact.surfaces.includes('workout'), true)
+  assert.equal(impact.surfaces.includes('mission'), true)
+})
+
+test('descartar memória descarta impacto e treino/missão voltam ao normal', () => {
+  const impact = pipeline(makeMemory('pm_discard', 'other', 'semana corrida'), '2026-06-08').impact
+  const discarded: ProactiveImpact = { ...impact, status: 'discarded' }
+  const adaptation = getAdaptationForDate({ proactiveImpacts: [discarded] }, '2026-06-08')
+
+  assert.equal(adaptation.primaryImpact, undefined)
+  assert.equal(adaptation.workoutEffect, 'normal')
+  assert.equal(adaptation.missionEffect, 'normal')
+})

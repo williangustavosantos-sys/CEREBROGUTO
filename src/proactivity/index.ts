@@ -5,6 +5,12 @@ export { resolveProactiveMemoryActionFromUserReply } from './memory-action-resol
 export type { ResolverResult, ResolvedAction } from './memory-action-resolver'
 export { extractEventsFromConversation, buildPendingMemoryData } from './memory-extractor'
 export { enrichPendingMemories } from './memory-enricher'
+export {
+  decideFromProactiveMemory,
+  buildImpactFromDecision,
+  resolveEffectiveImpacts,
+  getAdaptationForDate,
+} from './decision-engine'
 export { openWeeklyConversation, getWeeklyCheckResult } from './weekly-conversation'
 export {
   getProactiveMemories,
@@ -25,6 +31,10 @@ export type {
   ProactiveMemory,
   ProactiveMemoryStatus,
   ProactiveMemoryType,
+  ProactiveDecision,
+  ProactiveImpact,
+  ProactiveImpactStatus,
+  ProactiveImpactSurface,
   WeeklyConversation,
   ProactivityContext,
 } from './types'
