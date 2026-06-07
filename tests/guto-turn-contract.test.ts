@@ -5,6 +5,7 @@ import { describe, it } from "node:test";
 import {
   detectImmediateOperationalIntent,
   extractTrainingLocation,
+  looksLikeWeeklyAnswer,
   shouldDeferWeeklyOpeningForTurn,
 } from "../src/guto-turn-contract.js";
 
@@ -31,6 +32,21 @@ describe("GUTO turn contract", () => {
     assert.equal(shouldDeferWeeklyOpeningForTurn(weekly, "Qual treino hoje?"), true);
     assert.equal(shouldDeferWeeklyOpeningForTurn(weekly, "Gym."), true);
     assert.equal(shouldDeferWeeklyOpeningForTurn(weekly, "E aí, GUTO?"), false);
+  });
+
+  it("adia abertura semanal quando o usuário RESPONDE à pergunta da semana (P0)", () => {
+    const weekly = "[PROATIVIDADE — ABERTURA SEMANAL]\nEsta semana ainda não foi aberta.";
+    // Caso real do bug: resposta de compromisso não pode re-perguntar a semana
+    // (antes virava mensagem duplicada → dedupe no front → GUTO mudo).
+    assert.equal(shouldDeferWeeklyOpeningForTurn(weekly, "reunião na quarta"), true);
+    assert.equal(shouldDeferWeeklyOpeningForTurn(weekly, "vou viajar sexta"), true);
+    assert.equal(shouldDeferWeeklyOpeningForTurn(weekly, "semana corrida, trabalho apertado"), true);
+    assert.equal(shouldDeferWeeklyOpeningForTurn(weekly, "tudo tranquilo essa semana"), true);
+    assert.equal(shouldDeferWeeklyOpeningForTurn(weekly, "nada essa semana"), true);
+    // Saudação pura ainda NÃO defere: a abertura semanal deve ser feita.
+    assert.equal(shouldDeferWeeklyOpeningForTurn(weekly, "E aí, GUTO?"), false);
+    assert.equal(looksLikeWeeklyAnswer("reunião na quarta"), true);
+    assert.equal(looksLikeWeeklyAnswer("oi"), false);
   });
 
   it("não adia confirmação ou validação proativa real", () => {
