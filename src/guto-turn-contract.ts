@@ -50,12 +50,28 @@ export function isImmediateOperationalTurn(value: string): boolean {
   return detectImmediateOperationalIntent(value) !== null;
 }
 
+// Detecta que o usuário está RESPONDENDO à abertura semanal ("tem viagem,
+// horário apertado, dor ou compromisso?"): compromissos/eventos, viagem,
+// horário/agenda, dia da semana/período, ou negativa/"tudo certo".
+const WEEKLY_ANSWER_PATTERNS =
+  /\b(reuniao|compromisso|evento|prova|exame|esame|medico|consulta|dentista|viagem|viajar|viaggio|trip|travel|trabalho|work|festa|aniversario|casamento|formatura|riunione|appuntamento|impegno|horario|apertad|corrid|ocupad|busy|tight|livre|folga|agenda|segunda|terca|quarta|quinta|sexta|sabado|domingo|amanha|hoje|semana|weekend|manha|tarde|noite|lunedi|martedi|mercoledi|giovedi|venerdi|sabato|domenica|nada|nenhum|tranquil|normal|niente|libero|occupato|nothing)\b/;
+
+export function looksLikeWeeklyAnswer(value: string): boolean {
+  const normalized = normalizeContractText(value);
+  if (!normalized) return false;
+  if (WEEKLY_ANSWER_PATTERNS.test(normalized)) return true;
+  // "tudo certo/bem/ok", "all good", "tutto bene/ok"
+  if (/\b(tudo|all|tutto)\b/.test(normalized) && /\b(certo|bem|ok|good|bene|tranquil)\b/.test(normalized)) return true;
+  return false;
+}
+
 export function shouldDeferWeeklyOpeningForTurn(proactivityContext: string | null | undefined, input: string): boolean {
-  if (!proactivityContext || !isImmediateOperationalTurn(input)) return false;
+  if (!proactivityContext) return false;
   const hasWeeklyOpening =
     proactivityContext.includes("ABERTURA SEMANAL") ||
     proactivityContext.includes("WEEKLY OPENING") ||
     proactivityContext.includes("APERTURA SETTIMANALE");
+  if (!hasWeeklyOpening) return false;
   const hasBlockingProactivity =
     proactivityContext.includes("CONFIRMAÇÃO DE DESCARTE") ||
     proactivityContext.includes("DISCARD CONFIRMATION") ||
@@ -66,5 +82,14 @@ export function shouldDeferWeeklyOpeningForTurn(proactivityContext: string | nul
     proactivityContext.includes("CONFIRMAÇÃO PENDENTE") ||
     proactivityContext.includes("PENDING CONFIRMATION") ||
     proactivityContext.includes("CONFERMA PENDENTE");
-  return hasWeeklyOpening && !hasBlockingProactivity;
+  if (hasBlockingProactivity) return false;
+  // Deferir (NÃO re-perguntar a abertura semanal) quando o usuário está
+  // RESPONDENDO a ela — compromisso/viagem/horário/dia/"nada/tudo certo" — ou
+  // num turno operacional. Re-perguntar nesses casos repetia o texto da abertura
+  // → o front deduplicava (removeConsecutiveDuplicateGutoMessages) → GUTO ficava
+  // MUDO (bug P0: "reunião na quarta" → silêncio). Saudação pura NÃO defere: aí
+  // a abertura semanal ainda deve ser feita.
+  // Antes só deferíamos em intents operacionais (treino/local/dieta/dor/técnica),
+  // então respostas de compromisso/viagem/disponibilidade caíam de fora.
+  return isImmediateOperationalTurn(input) || looksLikeWeeklyAnswer(input);
 }
