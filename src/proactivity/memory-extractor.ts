@@ -34,6 +34,9 @@ Read this conversation and extract ONLY concrete future events that affect worko
 - Scheduled commitments that block or change training (meetings, appointments, events)
 - Training schedule changes (will train at different time/day)
 - Health events that affect training (planned procedure, doctor appointment, known recovery period)
+- Weekly availability answers that affect execution:
+  - Busy week / overloaded week / "semana corrida" => type "other"
+  - Clear week / nothing this week / "nada essa semana" => type "other"
 
 DO NOT extract:
 - Past events already happened
@@ -43,6 +46,7 @@ DO NOT extract:
 - General research questions, curiosity, trivia, weather questions, sports/team references or city mentions that are not an actual trip/commitment.
 - City/team ambiguity: "vou assistir o jogo da Roma" is about a football team, NOT a trip to Rome. "Roma é linda" is not a memory. "quinta viajo para Roma" is a trip.
 - Anything that does not change training execution, availability, location, safety, travel preparation or routine continuity.
+- For weekly availability answers, use dateText: "esta semana" and leave dateParsed empty unless the user provided a specific day.
 
 Rules:
 - Understand intent across Portuguese, English, Italian, slang and typos. Do NOT use keyword matching.

@@ -80,13 +80,14 @@ describe("proactivity HTTP cycle", () => {
     assert.match(body.memories[0]?.understood ?? "", /Roma/i)
   })
 
-  it("POST confirm → status confirmed com confirmedAt", async () => {
+  it("POST confirm → status confirmed, decision e proactiveImpact", async () => {
     const { addProactiveMemory } = await import("../src/proactivity/proactive-store.js")
     const memory = await addProactiveMemory(USER_ID, {
       type: "trip",
       status: "pending_confirmation",
-      rawText: "Viagem Roma",
-      understood: "Viagem para Roma",
+      rawText: "viajo quarta",
+      understood: "Viagem na quarta",
+      dateText: "quarta",
       weekKey: "2026-W20",
     })
 
@@ -96,10 +97,67 @@ describe("proactivity HTTP cycle", () => {
       body: JSON.stringify({ memoryId: memory.id }),
     })
     assert.equal(res.status, 200)
-    const body = (await res.json()) as { ok: boolean; memory: { status: string; confirmedAt?: string } }
+    const body = (await res.json()) as {
+      ok: boolean
+      memory: { status: string; confirmedAt?: string; decision?: { reason: string } }
+      impact?: { status: string; memoryId: string; workoutEffect: string; missionEffect: string }
+      memoryPatch?: { proactiveImpacts?: Array<{ memoryId: string; status: string; workoutEffect: string }> }
+    }
     assert.equal(body.ok, true)
     assert.equal(body.memory.status, "confirmed")
     assert.ok(body.memory.confirmedAt)
+    assert.equal(body.memory.decision?.reason, "travel")
+    assert.equal(body.impact?.status, "active")
+    assert.equal(body.impact?.memoryId, memory.id)
+    assert.equal(body.impact?.workoutEffect, "short_light")
+    assert.equal(body.impact?.missionEffect, "protected_before")
+    assert.equal(body.memoryPatch?.proactiveImpacts?.[0]?.memoryId, memory.id)
+
+    const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<
+      string,
+      { proactiveImpacts?: Array<{ memoryId: string; status: string; workoutEffect: string }> }
+    >
+    assert.equal(store[USER_ID]?.proactiveImpacts?.[0]?.memoryId, memory.id)
+    assert.equal(store[USER_ID]?.proactiveImpacts?.[0]?.workoutEffect, "short_light")
+  })
+
+  it("POST discard confirmed memory → proactiveImpact discarded", async () => {
+    const { addProactiveMemory } = await import("../src/proactivity/proactive-store.js")
+    const memory = await addProactiveMemory(USER_ID, {
+      type: "trip",
+      status: "pending_confirmation",
+      rawText: "viajo quarta",
+      understood: "Viagem na quarta",
+      dateText: "quarta",
+      weekKey: "2026-W20",
+    })
+
+    const confirmRes = await fetch(`${baseUrl}/guto/proactivity/confirm`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ memoryId: memory.id }),
+    })
+    assert.equal(confirmRes.status, 200)
+
+    const requestDiscardRes = await fetch(`${baseUrl}/guto/proactivity/request-discard`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ memoryId: memory.id }),
+    })
+    assert.equal(requestDiscardRes.status, 200)
+
+    const discardRes = await fetch(`${baseUrl}/guto/proactivity/discard`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ memoryId: memory.id }),
+    })
+    assert.equal(discardRes.status, 200)
+    const body = (await discardRes.json()) as {
+      ok: boolean
+      memoryPatch?: { proactiveImpacts?: Array<{ memoryId: string; status: string }> }
+    }
+    assert.equal(body.ok, true)
+    assert.equal(body.memoryPatch?.proactiveImpacts?.find((impact) => impact.memoryId === memory.id)?.status, "discarded")
   })
 
   it("POST discard remove pending_confirmation", async () => {

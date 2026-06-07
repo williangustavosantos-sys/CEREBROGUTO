@@ -122,7 +122,15 @@ import {
   markWeeklyConversationDone,
   resolveProactiveMemoryActionFromUserReply,
 } from "./src/proactivity/index.js";
-import type { ProactiveMemory, WeeklyConversation } from "./src/proactivity/types.js";
+import {
+  buildImpactFromDecision,
+  decideFromProactiveMemory,
+  getAdaptationForDate,
+} from "./src/proactivity/decision-engine.js";
+import type {
+  ProactiveAdaptationForDate,
+} from "./src/proactivity/decision-engine.js";
+import type { ProactiveImpact, ProactiveMemory, WeeklyConversation } from "./src/proactivity/types.js";
 import type { ResolverResult } from "./src/proactivity/memory-action-resolver.js";
 
 type Acao = "none" | "updateWorkout" | "lock" | "changeLanguage" | "requestDeleteAccount" | "showProfile";
@@ -283,6 +291,8 @@ interface WorkoutPlan {
   lockedByCoach?: boolean;
   updatedBy?: string;
   updatedAt?: string;
+  proactiveImpactId?: string;
+  proactiveAdaptationMode?: ProactiveImpact["workoutEffect"];
 }
 interface RecentTrainingHistoryItem {
   dateLabel: "today" | "yesterday" | "day_before_yesterday" | "recent" | "unknown";
@@ -391,6 +401,7 @@ interface GutoMemory {
   validationHistory?: WorkoutValidationRecord[];
   memoryAudit?: MemoryAuditEntry[];
   proactiveMemories?: ProactiveMemory[];
+  proactiveImpacts?: ProactiveImpact[];
   weeklyConversation?: WeeklyConversation;
   /**
    * Result of the dirty-data resolver applied to the 3 free fields
@@ -1140,6 +1151,7 @@ export function getMemory(userId: string): GutoMemory {
       lastSuggestedFocus: isWorkoutFocus(existing.lastSuggestedFocus) ? existing.lastSuggestedFocus : undefined,
       proactiveSent: existing.proactiveSent || {},
       proactiveMemories: Array.isArray(existing.proactiveMemories) ? existing.proactiveMemories : [],
+      proactiveImpacts: Array.isArray(existing.proactiveImpacts) ? existing.proactiveImpacts : [],
       weeklyConversation:
         existing.weeklyConversation &&
         typeof existing.weeklyConversation === "object" &&
@@ -1179,6 +1191,7 @@ export function getMemory(userId: string): GutoMemory {
     nextWorkoutFocus: undefined,
     proactiveSent: {},
     proactiveMemories: [],
+    proactiveImpacts: [],
   };
 }
 
@@ -1191,6 +1204,9 @@ export function saveMemory(memory: GutoMemory) {
     proactiveMemories: Array.isArray(memory.proactiveMemories)
       ? memory.proactiveMemories
       : existing?.proactiveMemories,
+    proactiveImpacts: Array.isArray(memory.proactiveImpacts)
+      ? memory.proactiveImpacts
+      : existing?.proactiveImpacts,
     weeklyConversation: memory.weeklyConversation ?? existing?.weeklyConversation,
   };
   delete nextMemory.phone;
@@ -1210,6 +1226,108 @@ function commitMemoryDecision(memory: GutoMemory) {
   return memory;
 }
 
+type BackendProactiveActionResult = {
+  id?: string;
+  status?: string;
+  memory?: ProactiveMemory | null;
+  impact?: ProactiveImpact | null;
+  memoryPatch?: GutoMemoryPatch;
+  discardRequestedAt?: string;
+  ignored?: boolean;
+};
+
+function buildProactiveMemoryPatch(memory: GutoMemory): GutoMemoryPatch {
+  return {
+    proactiveMemories: memory.proactiveMemories || [],
+    proactiveImpacts: memory.proactiveImpacts || [],
+  };
+}
+
+function upsertProactiveImpact(impacts: ProactiveImpact[] = [], impact: ProactiveImpact): ProactiveImpact[] {
+  const now = new Date().toISOString();
+  const next = impacts
+    .filter((item) => item.id !== impact.id)
+    .map((item) =>
+      item.memoryId === impact.memoryId && item.status === "active"
+        ? { ...item, status: "discarded" as const, updatedAt: now }
+        : item
+    );
+  return [...next, impact];
+}
+
+function persistDecisionImpactForMemory(userId: string, proactiveMemory: ProactiveMemory | null): BackendProactiveActionResult {
+  if (!proactiveMemory) return { memory: null, impact: null };
+  const memory = getMemory(userId);
+  const decision = decideFromProactiveMemory({
+    memory: proactiveMemory,
+    language: memory.language,
+    coachLocked: isCoachLockedWorkout(memory.lastWorkoutPlan),
+  });
+  if (!decision) {
+    return {
+      memory: proactiveMemory,
+      impact: null,
+      memoryPatch: buildProactiveMemoryPatch(memory),
+    };
+  }
+
+  const memoryWithDecision: ProactiveMemory = { ...proactiveMemory, decision };
+  memory.proactiveMemories = (memory.proactiveMemories || []).map((item) =>
+    item.id === proactiveMemory.id ? memoryWithDecision : item
+  );
+  const impact = buildImpactFromDecision(decision, memory);
+  if (!impact) {
+    saveMemory(memory);
+    return {
+      memory: memoryWithDecision,
+      impact: null,
+      memoryPatch: buildProactiveMemoryPatch(memory),
+    };
+  }
+
+  memory.proactiveImpacts = upsertProactiveImpact(memory.proactiveImpacts || [], impact);
+  appendMemoryAudit(
+    memory,
+    "proactivity_action",
+    ["proactiveMemories", "proactiveImpacts"],
+    `Impacto operacional criado para memória proativa ${proactiveMemory.id}.`
+  );
+  saveMemory(memory);
+  return {
+    memory: memoryWithDecision,
+    impact,
+    memoryPatch: buildProactiveMemoryPatch(memory),
+  };
+}
+
+function setProactiveImpactsStatusForMemory(
+  userId: string,
+  memoryId: string,
+  status: ProactiveImpact["status"]
+): BackendProactiveActionResult {
+  const memory = getMemory(userId);
+  const now = new Date().toISOString();
+  const nextImpacts = (memory.proactiveImpacts || []).map((impact) =>
+    impact.memoryId === memoryId
+      ? { ...impact, status, updatedAt: now }
+      : impact
+  );
+  memory.proactiveImpacts = nextImpacts;
+  memory.proactiveMemories = memory.proactiveMemories || [];
+  appendMemoryAudit(
+    memory,
+    "proactivity_action",
+    ["proactiveImpacts"],
+    `Impactos operacionais da memória ${memoryId} marcados como ${status}.`
+  );
+  saveMemory(memory);
+  return {
+    id: memoryId,
+    status,
+    memoryPatch: buildProactiveMemoryPatch(memory),
+  };
+}
+
 type BackendProactiveAction = ResolverResult["action"] | GutoModelResponse["proactiveMemoryAction"];
 
 async function applyBackendProactiveAction(userId: string, action: BackendProactiveAction) {
@@ -1227,14 +1345,22 @@ async function applyBackendProactiveAction(userId: string, action: BackendProact
       confirmedAt: new Date().toISOString(),
       discardRequestedAt: undefined,
     });
+    const impactResult = persistDecisionImpactForMemory(userId, result);
     auditProactivity("confirm");
-    return result;
+    return {
+      id: action.memoryId,
+      status: "confirmed",
+      memory: impactResult.memory || result,
+      impact: impactResult.impact,
+      memoryPatch: impactResult.memoryPatch,
+    };
   }
 
   if (action.type === "discard") {
     await discardProactiveMemory(userId, action.memoryId);
+    const impactResult = setProactiveImpactsStatusForMemory(userId, action.memoryId, "discarded");
     auditProactivity("discard");
-    return { id: action.memoryId, status: "discarded" };
+    return { id: action.memoryId, status: "discarded", memoryPatch: impactResult.memoryPatch };
   }
 
   if (action.type === "request_discard") {
@@ -1256,8 +1382,14 @@ async function applyBackendProactiveAction(userId: string, action: BackendProact
       status: "pending_confirmation",
       discardRequestedAt: undefined,
     });
+    const impactResult = setProactiveImpactsStatusForMemory(userId, action.memoryId, "discarded");
     auditProactivity("update");
-    return result;
+    return {
+      id: action.memoryId,
+      status: "pending_confirmation",
+      memory: result,
+      memoryPatch: impactResult.memoryPatch,
+    };
   }
 
   if (action.type === "validate") {
@@ -1267,24 +1399,43 @@ async function applyBackendProactiveAction(userId: string, action: BackendProact
         status: "validated_happened",
         validatedAt: new Date().toISOString(),
       });
+      const impactResult = setProactiveImpactsStatusForMemory(userId, action.memoryId, "validated");
       auditProactivity("validate_happened");
-      return result;
+      return {
+        id: action.memoryId,
+        status: "validated_happened",
+        memory: result,
+        memoryPatch: impactResult.memoryPatch,
+      };
     }
     if (action.outcome === "postponed") {
       const result = await updateProactiveMemory(userId, action.memoryId, {
         status: "validated_postponed",
         validatedAt: new Date().toISOString(),
       });
+      const impactResult = persistDecisionImpactForMemory(userId, result);
       auditProactivity("validate_postponed");
-      return result;
+      return {
+        id: action.memoryId,
+        status: "validated_postponed",
+        memory: impactResult.memory || result,
+        impact: impactResult.impact,
+        memoryPatch: impactResult.memoryPatch,
+      };
     }
     const result = await updateProactiveMemory(userId, action.memoryId, {
       status: "discarded",
       validatedAt: new Date().toISOString(),
       discardedAt: new Date().toISOString(),
     });
+    const impactResult = setProactiveImpactsStatusForMemory(userId, action.memoryId, "discarded");
     auditProactivity("validate_discarded");
-    return result;
+    return {
+      id: action.memoryId,
+      status: "discarded",
+      memory: result,
+      memoryPatch: impactResult.memoryPatch,
+    };
   }
 
   return null;
@@ -4972,6 +5123,57 @@ function buildWorkoutPlan({
   }, selectedLanguage);
 }
 
+function isWarmupExercise(exercise: WorkoutExercise): boolean {
+  const value = `${exercise.id} ${exercise.name}`.toLocaleLowerCase("pt-BR");
+  return value.includes("aquecimento") || value.includes("warm-up") || value.includes("warmup") || value.includes("riscaldamento");
+}
+
+function buildProactiveAdaptationSummary(adaptation: ProactiveAdaptationForDate, language: GutoLanguage): string {
+  if (adaptation.workoutEffect === "minimal") {
+    return language === "en-US"
+      ? "Minimum executable mission"
+      : language === "it-IT"
+        ? "Missione minima eseguibile"
+        : "Missão mínima executável";
+  }
+  return language === "en-US"
+    ? "Adapted short and light mission"
+    : language === "it-IT"
+      ? "Missione adattata corta e leggera"
+      : "Missão adaptada curta e leve";
+}
+
+function applyProactiveWorkoutAdaptation(
+  plan: WorkoutPlan,
+  adaptation: ProactiveAdaptationForDate,
+  language: GutoLanguage
+): WorkoutPlan {
+  if (!adaptation.primaryImpact || adaptation.workoutEffect === "normal") return plan;
+  if (adaptation.workoutEffect === "ask_critical" || adaptation.workoutEffect === "coach_locked") return plan;
+  if (plan.proactiveImpactId === adaptation.primaryImpact.id) return plan;
+
+  const maxMainExercises = adaptation.workoutEffect === "minimal" ? 2 : 3;
+  const maxSets = adaptation.workoutEffect === "minimal" ? 2 : 3;
+  const warmup = plan.exercises.filter(isWarmupExercise).slice(0, 2);
+  const main = plan.exercises.filter((exercise) => !isWarmupExercise(exercise)).slice(0, maxMainExercises);
+  const selected = (warmup.length > 0 ? [...warmup, ...main] : plan.exercises.slice(0, maxMainExercises + 1)).map((exercise, index) => ({
+    ...exercise,
+    sets: Math.max(1, Math.min(exercise.sets || maxSets, maxSets)),
+    order: index + 1,
+  }));
+  const summaryPrefix = buildProactiveAdaptationSummary(adaptation, language);
+
+  return {
+    ...plan,
+    summary: `${summaryPrefix}: ${plan.summary}`,
+    exercises: selected,
+    estimatedDurationMinutes: adaptation.workoutEffect === "minimal" ? 12 : 20,
+    difficulty: language === "en-US" ? "light" : language === "it-IT" ? "leggero" : "leve",
+    proactiveImpactId: adaptation.primaryImpact.id,
+    proactiveAdaptationMode: adaptation.workoutEffect,
+  };
+}
+
 export function buildWorkoutPlanFromSemanticFocus({
   language,
   location,
@@ -7052,6 +7254,8 @@ async function askGutoModel({
         locationMode,
         language: selectedLanguage,
       });
+      const proactiveAdaptation = getAdaptationForDate(memory, todayKey());
+      fallbackPlan = applyProactiveWorkoutAdaptation(fallbackPlan, proactiveAdaptation, selectedLanguage);
       const validation = validateWorkoutPlan(fallbackPlan, memory.recentTrainingHistory || [], locationMode);
       if (validation.valid) {
         const officialPlan = markGutoGeneratedWorkout(fallbackPlan, selectedLanguage as CatalogLanguage);
@@ -7343,12 +7547,14 @@ async function askGutoModel({
         locationMode,
         language: selectedLanguage,
       });
+      const proactiveAdaptation = getAdaptationForDate(memory, todayKey());
+      workoutPlan = applyProactiveWorkoutAdaptation(workoutPlan, proactiveAdaptation, selectedLanguage);
 
       const pv = validateWorkoutPlan(workoutPlan, memory.recentTrainingHistory || [], locationMode);
       if (!pv.valid) {
         console.warn("[GUTO] validateWorkoutPlan errors:", pv.errors);
         const repairLocation = locationMode === "gym" ? "academia" : "casa";
-        const repairedPlan = dedupeAndRepairWorkoutPlan(
+        let repairedPlan = dedupeAndRepairWorkoutPlan(
           safetyFilterWorkoutPlan(buildWorkoutPlanFromSemanticFocus({
             language: selectedLanguage,
             location: repairLocation,
@@ -7363,6 +7569,7 @@ async function askGutoModel({
             language: selectedLanguage,
           }
         );
+        repairedPlan = applyProactiveWorkoutAdaptation(repairedPlan, proactiveAdaptation, selectedLanguage);
         const repairedValidation = validateWorkoutPlan(
           repairedPlan,
           memory.recentTrainingHistory || [],
@@ -7383,6 +7590,8 @@ async function askGutoModel({
       // todo plano passa pelo filtro de patologia aqui, independente de ter
       // vindo do modelo (JSON direto), do curator ou do template. O modelo
       // pode devolver workoutPlan inline sem passar pelo bloco do curator.
+      const proactiveAdaptation = getAdaptationForDate(memory, todayKey());
+      workoutPlan = applyProactiveWorkoutAdaptation(workoutPlan, proactiveAdaptation, selectedLanguage);
       const beforeIds = workoutPlan.exercises.map((e) => e.id);
       workoutPlan = safetyFilterWorkoutPlan(workoutPlan, memory);
       const removed = beforeIds.filter((id) => !workoutPlan!.exercises.some((e) => e.id === id));
@@ -7476,6 +7685,8 @@ async function askGutoModel({
         locationMode,
         language: selectedLanguage,
       });
+      const proactiveAdaptation = getAdaptationForDate(memory, todayKey());
+      fallbackPlan = applyProactiveWorkoutAdaptation(fallbackPlan, proactiveAdaptation, selectedLanguage);
       const validation = validateWorkoutPlan(fallbackPlan, memory.recentTrainingHistory || [], locationMode);
       if (validation.valid) {
         const officialPlan = markGutoGeneratedWorkout(fallbackPlan, selectedLanguage as CatalogLanguage);
@@ -8306,9 +8517,19 @@ app.post("/guto", requireActiveUser, async (req, res) => {
       resolverResult,
     });
     if (result.proactiveMemoryAction) {
-      await applyBackendProactiveAction(userId, result.proactiveMemoryAction).catch((error) => {
+      const proactiveActionResult = await applyBackendProactiveAction(userId, result.proactiveMemoryAction).catch((error) => {
         console.warn("[GUTO] Backend proactive action failed:", error);
+        return null;
       });
+      if (proactiveActionResult?.memoryPatch) {
+        result.memoryPatch = {
+          ...result.memoryPatch,
+          ...proactiveActionResult.memoryPatch,
+        };
+      }
+      if (proactiveActionResult?.impact?.decision.message) {
+        result.fala = proactiveActionResult.impact.decision.message;
+      }
     }
     result.proactiveMemoryAction = null;
     res.json(result);
@@ -8820,7 +9041,7 @@ app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
     }
 
     if (current.status !== "pending_confirmation") {
-      return res.json({ ok: true, memory: current, ignored: true });
+      return res.json({ ok: true, memory: current, ignored: true, memoryPatch: buildProactiveMemoryPatch(getMemory(userId)) });
     }
 
     const confirmedAt = new Date().toISOString();
@@ -8828,14 +9049,20 @@ app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
       status: "confirmed",
       confirmedAt,
     });
+    const impactResult = persistDecisionImpactForMemory(userId, updated);
 
     // Trigger background enrichment (fire and forget)
-    const memory = getMemory(userId);
-    const userCountry = memory.country || "";
-    const selectedLanguage = normalizeLanguage(memory.language || "pt-BR");
-    enrichPendingMemories(userId, userCountry, memory.countryCode, selectedLanguage).catch(() => {});
+    const freshMemory = getMemory(userId);
+    const userCountry = freshMemory.country || "";
+    const selectedLanguage = normalizeLanguage(freshMemory.language || "pt-BR");
+    enrichPendingMemories(userId, userCountry, freshMemory.countryCode, selectedLanguage).catch(() => {});
 
-    res.json({ ok: true, memory: updated });
+    res.json({
+      ok: true,
+      memory: impactResult.memory || updated,
+      impact: impactResult.impact,
+      memoryPatch: impactResult.memoryPatch,
+    });
   } catch (e) {
     console.error("[GUTO][proactivity] confirm error:", e);
     res.status(500).json({ error: "internal error" });
@@ -8867,11 +9094,12 @@ app.post("/guto/proactivity/discard", requireActiveUser, async (req, res) => {
       ((activeStatuses as readonly string[]).includes(current.status) && !!current.discardRequestedAt);
 
     if (!canDiscard) {
-      return res.json({ ok: true, memory: current, ignored: true });
+      return res.json({ ok: true, memory: current, ignored: true, memoryPatch: buildProactiveMemoryPatch(getMemory(userId)) });
     }
 
     await discardProactiveMemory(userId, memoryId);
-    res.json({ ok: true });
+    const impactResult = setProactiveImpactsStatusForMemory(userId, memoryId, "discarded");
+    res.json({ ok: true, memoryPatch: impactResult.memoryPatch });
   } catch (e) {
     console.error("[GUTO][proactivity] discard error:", e);
     res.status(500).json({ error: "internal error" });
@@ -8900,7 +9128,7 @@ app.post("/guto/proactivity/update", requireActiveUser, async (req, res) => {
       return res.status(404).json({ error: "memory not found" });
     }
     if (current.status !== "pending_confirmation") {
-      return res.json({ ok: true, memory: current, ignored: true });
+      return res.json({ ok: true, memory: current, ignored: true, memoryPatch: buildProactiveMemoryPatch(getMemory(userId)) });
     }
 
     const safePatch: Partial<Pick<ProactiveMemory, "understood" | "dateText" | "dateParsed" | "location">> = {};
@@ -8917,7 +9145,8 @@ app.post("/guto/proactivity/update", requireActiveUser, async (req, res) => {
       ...safePatch,
       status: "pending_confirmation",
     });
-    res.json({ ok: true, memory: updated });
+    const impactResult = setProactiveImpactsStatusForMemory(userId, memoryId, "discarded");
+    res.json({ ok: true, memory: updated, memoryPatch: impactResult.memoryPatch });
   } catch (e) {
     console.error("[GUTO][proactivity] update error:", e);
     res.status(500).json({ error: "internal error" });
@@ -8946,11 +9175,12 @@ app.post("/guto/proactivity/request-discard", requireActiveUser, async (req, res
 
     const activeStatuses = ["confirmed", "enriched", "surfaced"] as const;
     if (!(activeStatuses as readonly string[]).includes(current.status)) {
-      return res.json({ ok: true, memory: current, ignored: true });
+      return res.json({ ok: true, memory: current, ignored: true, memoryPatch: buildProactiveMemoryPatch(getMemory(userId)) });
     }
 
     await requestDiscardProactiveMemory(userId, memoryId);
-    res.json({ ok: true });
+    const freshMemory = getMemory(userId);
+    res.json({ ok: true, memoryPatch: buildProactiveMemoryPatch(freshMemory) });
   } catch (e) {
     console.error("[GUTO][proactivity] request-discard error:", e);
     res.status(500).json({ error: "internal error" });
@@ -8977,11 +9207,12 @@ app.post("/guto/proactivity/cancel-discard-request", requireActiveUser, async (r
     }
 
     if (!current.discardRequestedAt) {
-      return res.json({ ok: true, memory: current, ignored: true });
+      return res.json({ ok: true, memory: current, ignored: true, memoryPatch: buildProactiveMemoryPatch(getMemory(userId)) });
     }
 
     await cancelDiscardRequest(userId, memoryId);
-    res.json({ ok: true });
+    const freshMemory = getMemory(userId);
+    res.json({ ok: true, memoryPatch: buildProactiveMemoryPatch(freshMemory) });
   } catch (e) {
     console.error("[GUTO][proactivity] cancel-discard-request error:", e);
     res.status(500).json({ error: "internal error" });
@@ -9011,7 +9242,7 @@ app.post("/guto/proactivity/validate", requireActiveUser, async (req, res) => {
     }
 
     if (current.status !== "pending_validation") {
-      return res.json({ ok: true, memory: current, ignored: true });
+      return res.json({ ok: true, memory: current, ignored: true, memoryPatch: buildProactiveMemoryPatch(getMemory(userId)) });
     }
 
     let newStatus: import("./src/proactivity/types.js").ProactiveMemoryStatus;
@@ -9029,11 +9260,22 @@ app.post("/guto/proactivity/validate", requireActiveUser, async (req, res) => {
       validatedAt,
       ...(newStatus === "discarded" ? { discardedAt: validatedAt } : {}),
     });
+    const impactResult =
+      newStatus === "validated_happened"
+        ? setProactiveImpactsStatusForMemory(userId, memoryId, "validated")
+        : newStatus === "validated_postponed"
+          ? persistDecisionImpactForMemory(userId, updated)
+          : setProactiveImpactsStatusForMemory(userId, memoryId, "discarded");
 
     // Mark validation as done for this week
     await markWeeklyConversationDone(userId, "validationDone");
 
-    res.json({ ok: true, memory: updated });
+    res.json({
+      ok: true,
+      memory: impactResult.memory || updated,
+      impact: impactResult.impact,
+      memoryPatch: impactResult.memoryPatch,
+    });
   } catch (e) {
     console.error("[GUTO][proactivity] validate error:", e);
     res.status(500).json({ error: "internal error" });

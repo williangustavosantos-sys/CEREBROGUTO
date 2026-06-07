@@ -19,6 +19,96 @@ export type ProactiveMemoryStatus =
   | 'validated_postponed'   // não aconteceu, mover para próxima semana
   | 'discarded'             // descartada
 
+export type ProactiveImpactSurface =
+  | 'chat'
+  | 'workout'
+  | 'mission'
+  | 'guto_online'
+  | 'push'
+  | 'xp'
+  | 'arena'
+  | 'path'
+  | 'evolution'
+
+export type ProactiveImpactStatus =
+  | 'active'
+  | 'superseded'
+  | 'discarded'
+  | 'validated'
+
+export type ProactiveDecisionReason =
+  | 'health'
+  | 'coach_lock'
+  | 'travel'
+  | 'commitment'
+  | 'busy_week'
+  | 'clear_week'
+
+export type ProactiveDecisionKind =
+  | 'adapt_day'
+  | 'block_period'
+  | 'reduce_week'
+  | 'keep_normal'
+  | 'ask_critical'
+  | 'preserve_coach_lock'
+
+export type ProactiveBlockedPeriod =
+  | 'morning'
+  | 'afternoon'
+  | 'evening'
+  | 'night'
+  | 'all_day'
+
+export type ProactiveWorkoutEffect =
+  | 'normal'
+  | 'short_light'
+  | 'minimal'
+  | 'ask_critical'
+  | 'coach_locked'
+
+export type ProactiveMissionEffect =
+  | 'normal'
+  | 'reduced'
+  | 'protected_before'
+  | 'ask_critical'
+  | 'coach_locked'
+
+export interface ProactiveDecision {
+  id: string
+  memoryId: string
+  kind: ProactiveDecisionKind
+  reason: ProactiveDecisionReason
+  priority: number
+  affectedDates: string[]
+  blockedPeriod?: ProactiveBlockedPeriod
+  criticalQuestion?: 'date' | 'period' | 'health_detail'
+  workoutEffect: ProactiveWorkoutEffect
+  missionEffect: ProactiveMissionEffect
+  message: string
+  createdAt: string
+}
+
+export interface ProactiveImpact {
+  id: string
+  memoryId: string
+  decision: ProactiveDecision
+  status: ProactiveImpactStatus
+  surfaces: ProactiveImpactSurface[]
+  priority: number
+  affectedDates: string[]
+  blockedPeriod?: ProactiveBlockedPeriod
+  workoutEffect: ProactiveWorkoutEffect
+  missionEffect: ProactiveMissionEffect
+  pushEffect: 'none' | 'avoid_blind_charge'
+  xpEffect: 'none' | 'no_free_xp_context_only'
+  arenaEffect: 'none' | 'validation_required'
+  pathEffect: 'none' | 'adapted_context'
+  evolutionEffect: 'none' | 'adapted_context'
+  supersededBy?: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface WeatherEnrichment {
   city: string
   date: string           // ISO date: "2026-05-18"
@@ -59,6 +149,7 @@ export interface ProactiveMemory {
   validatedAt?: string
   discardedAt?: string
   discardRequestedAt?: string
+  decision?: ProactiveDecision
 }
 
 export interface WeeklyConversation {
