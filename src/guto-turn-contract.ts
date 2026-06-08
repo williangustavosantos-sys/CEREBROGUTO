@@ -18,7 +18,19 @@ function normalizeContractText(value: string): string {
 
 export function isWorkoutExecutionRequest(value: string): boolean {
   const normalized = normalizeContractText(value);
-  return /\b(treino|treinar|monta|montar|workout|training|allenamento|allenarmi|scheda)\b/.test(normalized);
+  if (!/\b(treino|treinar|monta|montar|workout|training|allenamento|allenarmi|scheda)\b/.test(normalized)) {
+    return false;
+  }
+  // Recusa ou feedback NEGATIVO sobre treino NÃO é pedido de execução. Sem este
+  // guard, quando o Gemini cai e a calibragem está completa, "não quero treinar"
+  // e "não gostei do treino" caíam no fallback técnico que PROMOVIA treino
+  // ("Bora começar" + updateWorkout) — ignorando a recusa/feedback do usuário.
+  const refusalOrDislike =
+    /\b(nao quero|nao vou|nao estou a fim|nao to a fim|nao gostei|nao curti|nem a fim|sem vontade|sem saco|odiei|detestei|preguica)\b/.test(normalized) ||
+    /\b(dont want|do not want|wont|not feeling|didnt like|did not like|hate|boring|lame)\b/.test(normalized) ||
+    /\b(non voglio|non vado|non mi va|non mi piace|odio|noioso|zero sbatti|non ho voglia)\b/.test(normalized) ||
+    /\b(chato|chata|entediante|pessimo|horrivel)\b/.test(normalized);
+  return !refusalOrDislike;
 }
 
 export function extractTrainingLocation(value: string): string | undefined {
