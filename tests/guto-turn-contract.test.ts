@@ -5,6 +5,7 @@ import { describe, it } from "node:test";
 import {
   detectImmediateOperationalIntent,
   extractTrainingLocation,
+  isWorkoutExecutionRequest,
   looksLikeWeeklyAnswer,
   shouldDeferWeeklyOpeningForTurn,
 } from "../src/guto-turn-contract.js";
@@ -17,6 +18,24 @@ describe("GUTO turn contract", () => {
     assert.equal(detectImmediateOperationalIntent("Meu joelho está doendo."), "pain");
     assert.equal(detectImmediateOperationalIntent("How do I do a push-up?"), "technique");
     assert.equal(detectImmediateOperationalIntent("Qual filme vejo hoje?"), null);
+  });
+
+  it("recusa/feedback negativo sobre treino NÃO é pedido de execução (P1: fallback empurrava treino)", () => {
+    // Pedidos reais continuam sendo execução.
+    assert.equal(isWorkoutExecutionRequest("monta meu treino de hoje"), true);
+    assert.equal(isWorkoutExecutionRequest("bora treinar"), true);
+    assert.equal(isWorkoutExecutionRequest("treino de hoje"), true);
+    assert.equal(isWorkoutExecutionRequest("quero treinar peito"), true);
+    // Recusa e feedback negativo NÃO podem virar "vamos treinar" no fallback.
+    assert.equal(isWorkoutExecutionRequest("não quero treinar hoje"), false);
+    assert.equal(isWorkoutExecutionRequest("não vou treinar"), false);
+    assert.equal(isWorkoutExecutionRequest("não gostei do treino de hoje, achei chato"), false);
+    assert.equal(isWorkoutExecutionRequest("esse treino tá chato"), false);
+    assert.equal(isWorkoutExecutionRequest("I don't want to train today"), false);
+    assert.equal(isWorkoutExecutionRequest("non voglio allenarmi"), false);
+    // E o roteador de intenção operacional não classifica recusa como workout.
+    assert.notEqual(detectImmediateOperationalIntent("não quero treinar hoje"), "workout");
+    assert.notEqual(detectImmediateOperationalIntent("não gostei do treino"), "workout");
   });
 
   it("normaliza locais curtos sem virar motor principal de comportamento", () => {
