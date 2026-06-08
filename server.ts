@@ -1152,6 +1152,7 @@ export function getMemory(userId: string): GutoMemory {
       proactiveSent: existing.proactiveSent || {},
       proactiveMemories: Array.isArray(existing.proactiveMemories) ? existing.proactiveMemories : [],
       proactiveImpacts: Array.isArray(existing.proactiveImpacts) ? existing.proactiveImpacts : [],
+      activeExercise: normalizeActiveExerciseContext(existing.activeExercise),
       weeklyConversation:
         existing.weeklyConversation &&
         typeof existing.weeklyConversation === "object" &&
@@ -1192,6 +1193,7 @@ export function getMemory(userId: string): GutoMemory {
     proactiveSent: {},
     proactiveMemories: [],
     proactiveImpacts: [],
+    activeExercise: null,
   };
 }
 
@@ -2878,6 +2880,32 @@ function formatHistoryForPrompt(history: GutoHistoryItem[] = []) {
 // Exercício ativo vira contexto morto após algumas horas (sessão antiga / dúvida
 // abandonada). TTL de segurança: não injeta exercício velho como se fosse o atual.
 const ACTIVE_EXERCISE_TTL_MS = 3 * 60 * 60 * 1000;
+
+function normalizeActiveExerciseContext(value: unknown): ActiveExerciseContext | null | undefined {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Partial<ActiveExerciseContext>;
+  if (typeof raw.name !== "string" || !raw.name.trim()) return null;
+  const updatedAt = typeof raw.updatedAt === "string" ? raw.updatedAt : "";
+  const updated = Date.parse(updatedAt);
+  if (Number.isFinite(updated) && Date.now() - updated > ACTIVE_EXERCISE_TTL_MS) return null;
+  const str = (item: unknown): string | undefined =>
+    typeof item === "string" && item.trim() ? item.trim() : undefined;
+  const num = (item: unknown): number | undefined =>
+    typeof item === "number" && Number.isFinite(item) ? item : undefined;
+  return {
+    source: raw.source === "online" ? "online" : "chat",
+    name: raw.name.trim(),
+    muscleGroup: str(raw.muscleGroup),
+    reps: str(raw.reps),
+    load: str(raw.load),
+    rest: str(raw.rest),
+    currentSet: num(raw.currentSet),
+    totalSets: num(raw.totalSets),
+    note: str(raw.note),
+    updatedAt: updatedAt || new Date().toISOString(),
+  };
+}
 
 function buildActiveExerciseContextBlock(memory: GutoMemory): string | null {
   const ex = memory.activeExercise;
@@ -7162,6 +7190,33 @@ function isCoachLockedWorkout(plan?: WorkoutPlan | null): boolean {
   return Boolean(plan?.lockedByCoach);
 }
 
+function preserveCoachLockedWorkout(memory: GutoMemory, response: GutoModelResponse): WorkoutPlan | null {
+  const lockedPlan = isCoachLockedWorkout(memory.lastWorkoutPlan) ? memory.lastWorkoutPlan : null;
+  if (!lockedPlan) return null;
+
+  if (isWorkoutFocus(lockedPlan.focusKey)) {
+    memory.lastSuggestedFocus = lockedPlan.focusKey;
+    memory.nextWorkoutFocus = lockedPlan.focusKey;
+  }
+  memory.dietGenerationStatus = "ready_to_generate";
+  appendMemoryAudit(
+    memory,
+    "workout_generated",
+    ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus", "dietGenerationStatus"],
+    "Treino manual do coach preservado; geração do GUTO bloqueada por lockedByCoach."
+  );
+  commitMemoryDecision(memory);
+  response.workoutPlan = lockedPlan;
+  response.expectedResponse = null;
+  response.memoryPatch = {
+    ...response.memoryPatch,
+    dietGenerationStatus: memory.dietGenerationStatus,
+    nextWorkoutFocus: memory.nextWorkoutFocus,
+    recentTrainingHistory: memory.recentTrainingHistory,
+  };
+  return lockedPlan;
+}
+
 function markGutoGeneratedWorkout(plan: WorkoutPlan, language: CatalogLanguage): WorkoutPlan {
   // Hidrata os exercícios no idioma do aluno (catalog → namesByLanguage[language]).
   // Antes, isso era hardcoded "pt-BR" e fazia exercícios virem em português mesmo
@@ -7231,6 +7286,9 @@ async function askGutoModel({
           context: executionGate.field || "training_limitations",
           instruction: executionGate.instruction || "Clarificar antes de executar.",
         };
+        return finalize(fallback);
+      }
+      if (preserveCoachLockedWorkout(memory, fallback)) {
         return finalize(fallback);
       }
       const semanticFocus = chooseNextWorkoutFocus(memory, memory.nextWorkoutFocus);
@@ -7662,6 +7720,9 @@ async function askGutoModel({
           context: executionGate.field || "training_limitations",
           instruction: executionGate.instruction || "Clarificar antes de executar.",
         };
+        return finalize(fallback);
+      }
+      if (preserveCoachLockedWorkout(memory, fallback)) {
         return finalize(fallback);
       }
       const semanticFocus = chooseNextWorkoutFocus(memory, memory.nextWorkoutFocus);

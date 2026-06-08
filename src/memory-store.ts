@@ -192,7 +192,12 @@ export function persistUserMemory(userId: string, memory: unknown): void {
       await redis.set(REDIS_KEY, globalMemoryStore);
       writeToFile(globalMemoryStore);
     })
-    .catch(() => {});
+    .catch((err) => {
+      // Antes era silenciado: uma falha de escrita no Redis sumia sem rastro,
+      // contradizendo "memória é confiança". Alinha com o console.warn já usado
+      // nos caminhos de leitura/escrita acima.
+      console.warn("[GUTO] Redis memory write failed (async write chain):", err);
+    });
 }
 
 // Bootstrap: hidrata o cache no init do módulo (encolhe a janela de clobber p/ TODOS

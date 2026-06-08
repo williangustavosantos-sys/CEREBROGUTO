@@ -159,7 +159,9 @@ export function writeArenaStore(store: ArenaStore): void {
     // ignore — memCache is the source of truth while Redis is configured
   }
   // Fire-and-forget async write to Redis (same pattern as user-access-store)
-  void writeArenaStoreAsync(store).catch(() => {});
+  void writeArenaStoreAsync(store).catch((err) =>
+    console.warn("[GUTO] Redis arena write failed:", err)
+  );
 }
 
 // ─── Anti-clobber: hidratação no boot + escrita por-mutação serializada ───────
@@ -194,7 +196,9 @@ function persistArenaMutation(mutate: (store: ArenaStore) => void): void {
       await redisSet(REDIS_KEY, JSON.stringify(memCache));
       try { fs.writeFileSync(ARENA_STORE_PATH, JSON.stringify(memCache, null, 2)); } catch { /* ok */ }
     })
-    .catch(() => {});
+    .catch((err) => {
+      console.warn("[GUTO] Redis arena write failed (async mutation chain):", err);
+    });
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────

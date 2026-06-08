@@ -435,7 +435,7 @@ export const mealBlocks: MealBlock[] = [
     mealType: "snack",
     ingredientIds: ["apple", "almonds"],
     countryCompatibility: ["italy", "brazil", "spain", "portugal", "usa", "uk", "germany", "france", "argentina"],
-    goalCompatibility: ["fat_loss", "consistency"],
+    goalCompatibility: ["fat_loss", "muscle_gain", "consistency"],
     avoidIf: ["tree_nut_allergy"],
   },
   {
