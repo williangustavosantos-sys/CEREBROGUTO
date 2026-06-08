@@ -6245,7 +6245,8 @@ function enforceTrainingFlowCertainty(
   // entendido". Persistimos apenas a fala limpa, não o bloco inteiro.
   const userInputForPathology = stripInjectedContext(rawInput);
   if (/\b(ombro|shoulder|spalla)\b/.test(normalize(userInputForPathology)) && !extractAgeFromContractText(userInputForPathology)) {
-    memory.trainingLimitations = normalizeMemoryValue(userInputForPathology);
+    // Preserva limitação real anterior e anexa o ombro (regra 3) — não sobrescreve cru.
+    memory.trainingLimitations = mergeLimitation(memory.trainingLimitations, userInputForPathology);
     const fala = language === "en-US"
       ? "Shoulder noted. Warm-up first, no irritation, strengthen with control and protect the push."
       : language === "it-IT"
@@ -6424,7 +6425,9 @@ function enforceTrainingFlowCertainty(
     }
 
     if (contractIntent.kind === "physical_pain") {
-      memory.trainingLimitations = normalizeMemoryValue(contractIntent.limitationText || rawInput);
+      // Preserva a limitação real anterior e anexa a nova (regra 3) — não sobrescreve
+      // cru, senão "também tô com dor no ombro" apagaria um "joelho" já registrado.
+      captureReportedLimitation(memory, contractIntent.limitationText || rawInput);
       const fala = language === "en-US"
         ? "Pain logged. Today we reduce impact, go light, mobility first, and no ego lifting."
         : language === "it-IT"
@@ -6948,14 +6951,16 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
   if (/\b(ombro|shoulder|spalla)\b/.test(userText)) {
     const userInput = stripInjectedContext(rawInput);
     const age = extractAgeFromContractText(userInput);
+    // Preserva limitação real anterior e anexa o ombro (regra 3) — não sobrescreve cru.
+    const mergedLimitation = mergeLimitation(memory?.trainingLimitations, userInput);
     const nextMemory = {
       ...(memory || {}),
-      trainingLimitations: userInput,
+      trainingLimitations: mergedLimitation,
       ...(age ? { userAge: age } : {}),
     } as GutoMemory;
     const gate = buildTrainingExecutionGate(nextMemory, selectedLanguage);
     const memoryPatch = {
-      trainingLimitations: userInput,
+      trainingLimitations: mergedLimitation,
       ...(age ? { userAge: age } : {}),
     };
     if (gate.status !== "ready_to_execute") {
@@ -8488,14 +8493,64 @@ function mentionsPainInjuryOrIllness(text: string, language: GutoLanguage): bool
 }
 
 function hasStructuredLimitation(memory: GutoMemory): boolean {
-  return Boolean(
-    (memory.trainingLimitations && String(memory.trainingLimitations).trim()) ||
-      (memory.trainingPathology && String(memory.trainingPathology).trim())
-  );
+  // "sem dor"/"no pain"/"nessun dolore"/"livre" NÃO conta como limitação real —
+  // assim uma dor NOVA relatada no chat substitui o "sem dor" da calibragem
+  // (antes o campo ficava "preenchido" e a dor nova era ignorada).
+  const lim = String(memory.trainingLimitations || "").trim();
+  const path = String(memory.trainingPathology || "").trim();
+  const realLim = Boolean(lim) && !isClearNoLimitationFallback(lim);
+  const realPath = Boolean(path) && !isClearNoLimitationFallback(path);
+  return realLim || realPath;
 }
 
 function summarizeReportedLimitation(text: string): string {
   return text.replace(/\s+/g, " ").trim().slice(0, 140);
+}
+
+// Grava a limitação na memória e força o treino a adaptar (regra 4).
+function applyLimitationToMemory(memory: GutoMemory, value: string, reason: string): void {
+  memory.trainingLimitations = value;
+  memory.trainingPathology = value;
+  // Limitação mudou → o treino atual precisa adaptar. Invalida para recálculo,
+  // salvo se travado pelo Coach (que o GUTO não pode sobrescrever automaticamente).
+  if (memory.lastWorkoutPlan && !isCoachLockedWorkout(memory.lastWorkoutPlan)) {
+    memory.lastWorkoutPlan = null;
+    memory.nextWorkoutFocus = chooseNextWorkoutFocus(memory);
+  }
+  appendMemoryAudit(memory, "chat_patch", ["trainingLimitations", "trainingPathology"], reason);
+  commitMemoryDecision(memory);
+}
+
+// Junta a limitação existente com a nova relatada:
+//  - "sem dor"/"livre"/vazio anterior → a nova SUBSTITUI (regra 1/2);
+//  - limitação REAL anterior → preserva e anexa a parte nova (regra 3);
+//  - parte do corpo já coberta → não duplica.
+const LIMITATION_BODY_PART_RE =
+  /\b(joelho|ombro|lombar|coluna|quadril|tornozelo|punho|cotovelo|pescoco|pescoço|costas|perna|braco|braço|knee|shoulder|lower ?back|spine|hip|ankle|wrist|elbow|neck|back|leg|arm|ginocchio|spalla|schiena|anca|caviglia|polso|gomito|collo)\b/gi;
+
+function mergeLimitation(existing: string | null | undefined, incoming: string): string {
+  const ex = String(existing || "").trim();
+  const inc = String(incoming || "").trim();
+  if (!inc || isClearNoLimitationFallback(inc)) return ex || inc; // nada novo → mantém
+  if (!ex || isClearNoLimitationFallback(ex)) return inc;          // "sem dor" → substitui
+  const exParts = new Set((ex.toLowerCase().match(LIMITATION_BODY_PART_RE) || []).map((p) => p.replace(/\s+/g, " ")));
+  const incParts = (inc.toLowerCase().match(LIMITATION_BODY_PART_RE) || []).map((p) => p.replace(/\s+/g, " "));
+  if (incParts.length > 0 && incParts.every((p) => exParts.has(p))) return ex; // mesma(s) parte(s)
+  if (ex.toLowerCase().includes(inc.toLowerCase()) || inc.toLowerCase().includes(ex.toLowerCase())) return ex;
+  return `${ex}; ${inc}`.slice(0, 200); // anexa sem apagar a anterior
+}
+
+// Captura/atualiza a limitação a partir do relato de dor no chat (regras 1-3, 5):
+//  - "sem dor"/"livre" anterior → a dor nova SUBSTITUI;
+//  - limitação REAL anterior → preserva e anexa a parte nova;
+//  - "sem dor" dito no chat → não cria limitação falsa.
+function captureReportedLimitation(memory: GutoMemory, text: string): void {
+  const reported = summarizeReportedLimitation(text);
+  if (!reported || isClearNoLimitationFallback(reported)) return;
+  const current = String(memory.trainingLimitations || memory.trainingPathology || "");
+  const merged = mergeLimitation(current, reported);
+  if (merged === current.trim()) return; // nada a mudar
+  applyLimitationToMemory(memory, merged, "Dor/limitação relatada no chat (substitui 'sem dor' / anexa à real) — P0 segurança.");
 }
 
 // Flags FÍSICOS agudos: segurança determinística suspende o treino na hora.
@@ -8536,18 +8591,10 @@ async function enforceSafetyAndLimitationBeforeGates(
     timeoutMs: 1800,
   }).catch(() => null);
 
-  // Regra 2 + 5: dor/limitação clara vira memória estruturada — o gate
+  // Regra 2 + 3 + 5: dor/limitação clara vira memória estruturada — substitui
+  // "sem dor" da calibragem e anexa se já houver limitação real. O gate
   // "tem dor ou limitação?" deixa de disparar logo após o relato de dor.
-  if (!hasStructuredLimitation(memory)) {
-    memory.trainingLimitations = summarizeReportedLimitation(text);
-    appendMemoryAudit(
-      memory,
-      "chat_patch",
-      ["trainingLimitations"],
-      "Dor/limitação relatada pelo usuário, capturada antes dos gates (P0 segurança)."
-    );
-    commitMemoryDecision(memory);
-  }
+  captureReportedLimitation(memory, text);
 
   // Regra 3: risco AGUDO físico → suspende treino e responde segurança (early).
   if (risk && risk.flag && risk.confidence >= 0.6 && ACUTE_PHYSICAL_FLAGS.has(risk.flag)) {
