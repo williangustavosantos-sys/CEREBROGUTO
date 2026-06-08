@@ -42,6 +42,7 @@ export type ProactiveDecisionReason =
   | 'travel'
   | 'commitment'
   | 'busy_week'
+  | 'short_window'   // janela curta de tempo hoje (ex.: "só tenho 10 minutos")
   | 'clear_week'
 
 export type ProactiveDecisionKind =
@@ -63,7 +64,8 @@ export type ProactiveWorkoutEffect =
   | 'normal'
   | 'short_light'
   | 'minimal'
-  | 'ask_critical'
+  | 'ask_critical'   // contexto insuficiente — pergunta o dado crítico antes de decidir
+  | 'protected'      // dia indisponível/protegido (não é descanso passivo; reorganiza a semana)
   | 'coach_locked'
 
 export type ProactiveMissionEffect =
@@ -71,6 +73,7 @@ export type ProactiveMissionEffect =
   | 'reduced'
   | 'protected_before'
   | 'ask_critical'
+  | 'protected'
   | 'coach_locked'
 
 export interface ProactiveDecision {
@@ -81,7 +84,7 @@ export interface ProactiveDecision {
   priority: number
   affectedDates: string[]
   blockedPeriod?: ProactiveBlockedPeriod
-  criticalQuestion?: 'date' | 'period' | 'health_detail'
+  criticalQuestion?: 'date' | 'period' | 'health_detail' | 'training'
   workoutEffect: ProactiveWorkoutEffect
   missionEffect: ProactiveMissionEffect
   message: string

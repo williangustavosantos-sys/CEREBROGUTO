@@ -380,11 +380,14 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
   it("01 viajo quarta: memoria proativa confirmada cria impacto em treino, missao, XP, arena, evolucao e percurso", async () => {
     const { student } = seedOrg("s01");
     seedMemory(student.userId);
+    // Continuidade primeiro: a viagem só vira impacto cross-system DEFINITIVO com
+    // o dado crítico (consegue treinar). Viagem nua é ask_critical — coberto em
+    // guto-proactive-continuity / guto-proactivity-http.
     const memory = await addProactiveMemory(student.userId, {
       type: "trip",
       status: "pending_confirmation",
-      rawText: "viajo quarta",
-      understood: "Viagem na quarta",
+      rawText: "viajo quarta, consigo treinar no hotel",
+      understood: "Viagem na quarta, treina no hotel",
       dateText: "quarta",
       weekKey: "2026-W23",
     });
@@ -394,7 +397,7 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
     assert.equal(body.memory.status, "confirmed");
     assert.equal(body.impact.decision.reason, "travel");
     assert.equal(body.impact.workoutEffect, "short_light");
-    assert.equal(body.impact.missionEffect, "protected_before");
+    assert.equal(body.impact.missionEffect, "reduced");
     for (const surface of ["workout", "mission", "xp", "arena", "path", "evolution"]) {
       assert.ok(body.impact.surfaces.includes(surface), `impacto deve incluir ${surface}`);
     }
@@ -733,11 +736,13 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
   it("18 proatividade altera treino gerado no dia impactado", async () => {
     const { student } = seedOrg("s18");
     seedMemory(student.userId, { nextWorkoutFocus: "full_body" });
+    // Continuidade primeiro: viagem COM o dado crítico (consegue treinar) mantém
+    // o treino adaptado no dia. Viagem nua (ask_critical) não fabrica treino.
     const memory = await addProactiveMemory(student.userId, {
       type: "trip",
       status: "pending_confirmation",
-      rawText: "viajo hoje",
-      understood: "Viagem hoje",
+      rawText: "viajo hoje, consigo treinar no hotel",
+      understood: "Viagem hoje, treina no hotel",
       dateParsed: dateKey(),
       weekKey: "2026-W23",
     });
@@ -758,17 +763,19 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
   it("19 proatividade altera missao sem conceder XP gratis", async () => {
     const { student } = seedOrg("s19");
     seedMemory(student.userId);
+    // Continuidade primeiro: treino mantido e adaptado (reduced), e mesmo assim
+    // SEM XP grátis — a adaptação não vira atalho de pontuação.
     const memory = await addProactiveMemory(student.userId, {
       type: "trip",
       status: "pending_confirmation",
-      rawText: "viajo hoje",
-      understood: "Viagem hoje",
+      rawText: "viajo hoje, consigo treinar no hotel",
+      understood: "Viagem hoje, treina no hotel",
       dateParsed: dateKey(),
       weekKey: "2026-W23",
     });
     const confirm = await requestJson("POST", "/guto/proactivity/confirm", tokenFor(student), { memoryId: memory.id });
     assert.equal(confirm.res.status, 200);
-    assert.equal(confirm.body.impact.missionEffect, "protected_before");
+    assert.equal(confirm.body.impact.missionEffect, "reduced");
     assert.equal(confirm.body.impact.xpEffect, "no_free_xp_context_only");
 
     const stored = readMemory(student.userId);

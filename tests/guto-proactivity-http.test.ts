@@ -109,8 +109,11 @@ describe("proactivity HTTP cycle", () => {
     assert.equal(body.memory.decision?.reason, "travel")
     assert.equal(body.impact?.status, "active")
     assert.equal(body.impact?.memoryId, memory.id)
-    assert.equal(body.impact?.workoutEffect, "short_light")
-    assert.equal(body.impact?.missionEffect, "protected_before")
+    // Continuidade primeiro: confirmar a VIAGEM não basta para criar impacto
+    // definitivo — sem saber se consegue treinar, fica ask_critical (pergunta o
+    // dado crítico antes de marcar descanso/treino).
+    assert.equal(body.impact?.workoutEffect, "ask_critical")
+    assert.equal(body.impact?.missionEffect, "ask_critical")
     assert.equal(body.memoryPatch?.proactiveImpacts?.[0]?.memoryId, memory.id)
 
     const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<
@@ -118,7 +121,7 @@ describe("proactivity HTTP cycle", () => {
       { proactiveImpacts?: Array<{ memoryId: string; status: string; workoutEffect: string }> }
     >
     assert.equal(store[USER_ID]?.proactiveImpacts?.[0]?.memoryId, memory.id)
-    assert.equal(store[USER_ID]?.proactiveImpacts?.[0]?.workoutEffect, "short_light")
+    assert.equal(store[USER_ID]?.proactiveImpacts?.[0]?.workoutEffect, "ask_critical")
   })
 
   it("POST discard confirmed memory → proactiveImpact discarded", async () => {

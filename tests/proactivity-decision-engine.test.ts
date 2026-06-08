@@ -42,17 +42,66 @@ function pipeline(memory: ProactiveMemory, date = WEDNESDAY, coachLocked = false
   return { decision, impact, adaptation }
 }
 
-test('viajo quarta: memória vira decisão, impacto e treino/missão curto e leve', () => {
+test('viajo quarta (sem dado crítico): NÃO cria impacto definitivo, pergunta o crítico', () => {
+  // Continuidade primeiro: viagem nua é mudança de contexto, não interrupção.
+  // Sem saber se o usuário consegue treinar, o GUTO não decide descanso nem
+  // treino adaptado — vira ask_critical (pending_clarification).
   const memory = makeMemory('pm_trip', 'trip', 'viajo quarta', { dateText: 'quarta' })
   const { decision, impact, adaptation } = pipeline(memory)
 
   assert.equal(decision.reason, 'travel')
-  assert.equal(impact.blockedPeriod, 'all_day')
+  assert.equal(decision.kind, 'ask_critical')
+  assert.equal(decision.criticalQuestion, 'training')
+  // Não assume descanso (protected) nem treino adaptado (short_light) ainda.
+  assert.equal(adaptation.workoutEffect, 'ask_critical')
+  assert.notEqual(adaptation.workoutEffect, 'short_light')
+  assert.notEqual(adaptation.workoutEffect, 'protected')
+  assert.equal(adaptation.shouldAskCritical, true)
+  // Impacto não-definitivo: só chat, sem efeito de XP/Arena/push.
+  assert.deepEqual(impact.surfaces, ['chat'])
+  assert.equal(impact.xpEffect, 'none')
+  assert.equal(impact.arenaEffect, 'none')
+  assert.equal(impact.pushEffect, 'none')
+})
+
+test('viajo quarta + consigo treinar no hotel: mantém treino adaptado, NÃO descanso', () => {
+  const memory = makeMemory('pm_trip_hotel', 'trip', 'viajo quarta, consigo treinar no hotel', { dateText: 'quarta' })
+  const { decision, adaptation } = pipeline(memory)
+
+  assert.equal(decision.reason, 'travel')
+  assert.equal(decision.kind, 'adapt_day')
   assert.equal(adaptation.workoutEffect, 'short_light')
-  assert.equal(adaptation.missionEffect, 'protected_before')
-  assert.equal(adaptation.shouldAvoidBlindPenalty, true)
+  assert.equal(adaptation.missionEffect, 'reduced')
+  assert.equal(adaptation.isAdaptedDay, true)
+  assert.equal(adaptation.isProtectedDay, false)
+  // Não bloqueia o dia inteiro — ele consegue treinar.
+  assert.notEqual(adaptation.blockedPeriod, 'all_day')
+})
+
+test('viajo quarta + não vou conseguir treinar: dia protegido, sem XP/Arena grátis', () => {
+  const memory = makeMemory('pm_trip_block', 'trip', 'viajo quarta, não vou conseguir treinar', { dateText: 'quarta' })
+  const { decision, adaptation } = pipeline(memory)
+
+  assert.equal(decision.reason, 'travel')
+  assert.equal(adaptation.workoutEffect, 'protected')
+  assert.equal(adaptation.missionEffect, 'protected')
+  assert.equal(adaptation.isProtectedDay, true)
+  assert.equal(adaptation.isAdaptedDay, false)
+  // Sem compensação cega: nada de XP/Arena grátis nem intensidade máxima.
   assert.equal(adaptation.xpPolicy, 'no_free_xp')
   assert.equal(adaptation.arenaPolicy, 'validation_required')
+  assert.equal(adaptation.shouldAvoidBlindPenalty, true)
+})
+
+test('só tenho 10 minutos: missão curta, NÃO cancela', () => {
+  const memory = makeMemory('pm_short', 'other', 'só tenho 10 minutos hoje')
+  const { decision, adaptation } = pipeline(memory, '2026-06-07')
+
+  assert.equal(decision.reason, 'short_window')
+  assert.equal(adaptation.workoutEffect, 'minimal')
+  assert.equal(adaptation.missionEffect, 'reduced')
+  // Não vira 'normal' (cancelado/sem efeito): a missão curta é mantida.
+  assert.notEqual(adaptation.workoutEffect, 'normal')
 })
 
 test('reunião quarta à noite: bloqueia período e reduz/antecipa treino', () => {
@@ -97,7 +146,9 @@ test('saudação pura não gera decisão nem impacto', () => {
 })
 
 test('viagem + reunião na mesma data: viagem vence reunião por prioridade', () => {
-  const trip = pipeline(makeMemory('pm_trip_conflict', 'trip', 'viajo quarta', { dateText: 'quarta' })).impact
+  // Viagem com dado crítico (consegue treinar) gera impacto definitivo que, por
+  // prioridade, supera a reunião nas surfaces compartilhadas.
+  const trip = pipeline(makeMemory('pm_trip_conflict', 'trip', 'viajo quarta, treino no hotel', { dateText: 'quarta' })).impact
   const meeting = pipeline(makeMemory('pm_meeting_conflict', 'commitment', 'reunião quarta à noite', { dateText: 'quarta à noite' })).impact
   const resolved = resolveEffectiveImpacts([meeting, trip], WEDNESDAY)
   const adaptation = getAdaptationForDate({ proactiveImpacts: [meeting, trip] }, WEDNESDAY)
