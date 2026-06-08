@@ -96,6 +96,7 @@ import {
   classifyRisk,
   buildSafetyOverrideBlock,
   type RiskClassification,
+  type RiskFlag,
   type ClassifierLanguage,
 } from "./src/risk-classifier.js";
 import {
@@ -8466,6 +8467,108 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
   }
 });
 
+// ── P0 — SEGURANÇA E LIMITAÇÃO ANTES DOS GATES ────────────────────────────────
+// Bug vivo (segunda-feira / calibragem incompleta): o GUTO ficava preso em gates
+// determinísticos (abertura semanal, "tem dor ou limitação?", treino pendente) e
+// IGNORAVA o relato de dor — chegando a perguntar "tem dor ou limitação?" logo
+// depois do usuário dizer "tenho dor no joelho". Aqui a segurança e a limitação
+// física são processadas ANTES de qualquer gate.
+const PAIN_INJURY_PATTERNS: Record<GutoLanguage, RegExp> = {
+  "pt-BR":
+    /(\bdor\b|\bdói\b|\bdoi\b|doendo|machuc|les[ãa]o|lesion|estir|tor(c|ç)|inflam|joelho|lombar|coluna|ombro|tornozelo|punho|cotovelo|quadril|tendin|h[ée]rnia|contus|c[ãa]ibra|febre|tontura|\btont|enjo[oa]|v[ôo]mit|n[áa]usea|mal[\s-]?estar|passando mal|ressaca|limita(ç|c)|n[ãa]o consigo (mexer|dobrar|apoiar))/i,
+  "en-US":
+    /(\bpain\b|hurts?\b|hurting|\bsore\b|injur|sprain|strain|swoll|swelling|\bknee\b|lower back|\bspine\b|shoulder|ankle|wrist|elbow|\bhip\b|tendin|hernia|\bcramp|fever|dizz|nause|vomit|\bsick\b|hungover|limitation|can'?t (move|bend|stand))/i,
+  "it-IT":
+    /(dolore|fa male|\bmale\b|infortun|lesion|stiramento|distorsion|gonfi|ginocchio|schiena|colonna|spalla|caviglia|polso|gomito|\banca\b|tendin|ernia|crampo|febbre|vertigin|nausea|vomit|malessere|sto male|sbornia|limitazion|non riesco a (muovere|piegare))/i,
+};
+
+function mentionsPainInjuryOrIllness(text: string, language: GutoLanguage): boolean {
+  const pattern = PAIN_INJURY_PATTERNS[language] || PAIN_INJURY_PATTERNS["pt-BR"];
+  return pattern.test(text);
+}
+
+function hasStructuredLimitation(memory: GutoMemory): boolean {
+  return Boolean(
+    (memory.trainingLimitations && String(memory.trainingLimitations).trim()) ||
+      (memory.trainingPathology && String(memory.trainingPathology).trim())
+  );
+}
+
+function summarizeReportedLimitation(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, 140);
+}
+
+// Flags FÍSICOS agudos: segurança determinística suspende o treino na hora.
+// Os flags psicológicos (suicide_self_harm, eating_disorder) NÃO entram aqui — o
+// modelo os trata com o SAFETY_OVERRIDE especializado (acolhimento + encaminhamento),
+// melhor do que um template fixo.
+const ACUTE_PHYSICAL_FLAGS = new Set<RiskFlag>([
+  "cardio_neuro_acute",
+  "trauma_acute",
+  "acute_illness",
+  "intoxication",
+]);
+
+function buildAcuteSafetyFala(name: string, language: GutoLanguage): string {
+  const callName = name ? `${name}, ` : "";
+  const map: Record<GutoLanguage, string> = {
+    "pt-BR": `${callName}para tudo. Hoje não tem treino — isso aí precisa de cuidado primeiro, não de carga. Descansa e, se piorar ou não passar, busca avaliação. Eu te espero pra voltar quando estiver seguro.`,
+    "en-US": `${callName}stop here. No workout today — this needs care first, not load. Rest, and if it gets worse or doesn't ease up, get it checked. I'll be here when you're safe to come back.`,
+    "it-IT": `${callName}fermati. Oggi niente allenamento — questo va curato prima, non caricato. Riposa e, se peggiora o non passa, fatti valutare. Ti aspetto quando sei al sicuro.`,
+  };
+  return map[language] || map["pt-BR"];
+}
+
+// Roda o risk-classifier e captura dor/limitação ANTES de qualquer gate.
+// Retorna acuteResponse != null somente em risco físico agudo (suspende treino).
+async function enforceSafetyAndLimitationBeforeGates(
+  input: string,
+  memory: GutoMemory,
+  language: GutoLanguage
+): Promise<{ acuteResponse: GutoModelResponse | null }> {
+  const text = (input || "").trim();
+  if (!text || !mentionsPainInjuryOrIllness(text, language)) {
+    return { acuteResponse: null };
+  }
+
+  // Regra 1: risk-classifier roda ANTES dos gates (falha aberta = sem bloqueio).
+  const risk = await classifyRisk(text, language as ClassifierLanguage, {
+    timeoutMs: 1800,
+  }).catch(() => null);
+
+  // Regra 2 + 5: dor/limitação clara vira memória estruturada — o gate
+  // "tem dor ou limitação?" deixa de disparar logo após o relato de dor.
+  if (!hasStructuredLimitation(memory)) {
+    memory.trainingLimitations = summarizeReportedLimitation(text);
+    appendMemoryAudit(
+      memory,
+      "chat_patch",
+      ["trainingLimitations"],
+      "Dor/limitação relatada pelo usuário, capturada antes dos gates (P0 segurança)."
+    );
+    commitMemoryDecision(memory);
+  }
+
+  // Regra 3: risco AGUDO físico → suspende treino e responde segurança (early).
+  if (risk && risk.flag && risk.confidence >= 0.6 && ACUTE_PHYSICAL_FLAGS.has(risk.flag)) {
+    console.warn(
+      `[GUTO][safety] PRE-GATE acute flag=${risk.flag} conf=${risk.confidence.toFixed(2)} — treino suspenso.`
+    );
+    return {
+      acuteResponse: {
+        fala: buildAcuteSafetyFala(getGutoCallName(memory), language),
+        acao: "none",
+        expectedResponse: null,
+        avatarEmotion: "alert",
+        memoryPatch: {},
+      },
+    };
+  }
+
+  // Regra 4: dor não-aguda → segue o fluxo com a limitação já salva (treino adapta).
+  return { acuteResponse: null };
+}
+
 app.post("/guto", requireActiveUser, async (req, res) => {
   const { input, language, history, expectedResponse } = req.body as {
     input?: string;
@@ -8486,6 +8589,20 @@ app.post("/guto", requireActiveUser, async (req, res) => {
 
   const memory = getMemory(userId);
   const selectedLanguage = normalizeLanguage(language || memory.language || "pt-BR");
+
+  // P0 — SEGURANÇA ANTES DOS GATES. Roda o risk-classifier e captura dor/limitação
+  // ANTES de montar o `profile` abaixo, para que o askGutoModel já enxergue a
+  // limitação (o gate de calibragem não trava) e o risco agudo suspenda o treino.
+  const safetyPre = await enforceSafetyAndLimitationBeforeGates(input || "", memory, selectedLanguage);
+  if (safetyPre.acuteResponse) {
+    return res.json(attachAvatarEmotion({
+      response: safetyPre.acuteResponse,
+      memory,
+      context: getOperationalContext(new Date(), selectedLanguage),
+      input: input || "",
+    }));
+  }
+
   const profile = {
     userId: memory.userId,
     name: memory.name,
