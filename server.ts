@@ -126,6 +126,7 @@ import {
 import {
   buildImpactFromDecision,
   decideFromProactiveMemory,
+  detectTravelTrainingSignal,
   getAdaptationForDate,
 } from "./src/proactivity/decision-engine.js";
 import type {
@@ -5178,7 +5179,13 @@ function applyProactiveWorkoutAdaptation(
   language: GutoLanguage
 ): WorkoutPlan {
   if (!adaptation.primaryImpact || adaptation.workoutEffect === "normal") return plan;
-  if (adaptation.workoutEffect === "ask_critical" || adaptation.workoutEffect === "coach_locked") return plan;
+  // ask_critical: ainda sem dado crítico; protected: dia indisponível (não fabrica
+  // treino adaptado — a semana se reorganiza); coach_locked: plano travado.
+  if (
+    adaptation.workoutEffect === "ask_critical" ||
+    adaptation.workoutEffect === "protected" ||
+    adaptation.workoutEffect === "coach_locked"
+  ) return plan;
   if (plan.proactiveImpactId === adaptation.primaryImpact.id) return plan;
 
   const maxMainExercises = adaptation.workoutEffect === "minimal" ? 2 : 3;
@@ -5664,6 +5671,17 @@ export function classifyContractIntentFallback(input: {
     return { kind: "proactive_context", confidence: 0.7, reason: "fallback_proactive_context" };
   }
 
+  // Continuidade primeiro: semana corrida e janela curta de tempo ("só tenho 10
+  // minutos") são contexto a adaptar, NÃO recusa. Não podem cair na escada de
+  // cobrança — o GUTO mantém o usuário ativo com plano reduzido/missão curta.
+  if (
+    /\b(semana corrida|semana apertada|busy week|packed week|settimana piena|settimana pesante)\b/.test(text) ||
+    /\b\d{1,2}\s*(min|mins|minuto|minutos|minutes|minuti)\b/.test(text) ||
+    /\b(pouco tempo|pouquinho de tempo|little time|poco tempo)\b/.test(text)
+  ) {
+    return { kind: "proactive_context", confidence: 0.7, reason: "fallback_proactive_continuity" };
+  }
+
   if (/\b(treinei|treinou|trained|allenato|allenata|allenei)\b/.test(text) && /\b(hoje|ontem|anteontem|today|yesterday|ieri|avantieri|day before)\b/.test(text)) {
     const dateLabel: RecentTrainingHistoryItem["dateLabel"] = /\b(hoje|today)\b/.test(text)
       ? "today"
@@ -5772,7 +5790,7 @@ async function classifyContractIntent(input: {
     "- clear_limitation: user answered age and/or clear operable limitation (e.g. shoulder when pushing, knee sensitivity).",
     "- history_reference: user reports they ALREADY trained a SPECIFIC muscle group on a past day to inform the next focus (e.g. 'ontem fiz peito', 'fiz costas anteontem'). Use this only when a specific muscle/day is the point.",
     "- workout_completed: user reports finishing TODAY'S prescribed session / the workout as a whole, as a conclusion (e.g. 'fiz o treino', 'terminei', 'acabei o treino', 'treino feito', 'done the workout'). Acknowledge and close continuity — do NOT re-ask age/pain.",
-    "- proactive_context: user SHARES a future trip/commitment/schedule change for the week (e.g. 'viajo na quarta', 'sexta tenho compromisso o dia todo', 'essa semana só consigo treinar às 6h', 'sábado tenho casamento'). This is PLANNING CONTEXT for proactivity, NOT a refusal/postpone. Acknowledge it naturally so it can be confirmed and used to adapt the week — do NOT push training/cobrança and do NOT treat as resistance.",
+    "- proactive_context: user SHARES a context change for the week — a future trip/commitment/schedule change, a busy week, a closed gym, rain, OR a limited time window today (e.g. 'viajo na quarta', 'sexta tenho compromisso o dia todo', 'essa semana só consigo treinar às 6h', 'sábado tenho casamento', 'semana corrida', 'só tenho 10 minutos hoje'). This is PLANNING CONTEXT for proactivity, NOT a refusal/postpone. CONTINUITY FIRST: a context change is something to ADAPT around, never an automatic excuse to stop. Acknowledge it naturally so it can be confirmed and used to keep the user active — do NOT push cobrança, do NOT treat as resistance, and NEVER assume rest by default or 'max intensity to compensate'.",
     "- off_topic_distraction: user asks for joke/entertainment/research instead of action.",
     "- identity_manipulation: user asks to corrupt name/persona or be called a joke name.",
     "- therapist_manipulation: user asks GUTO to act as therapist or abandon training for therapy role.",
@@ -5942,6 +5960,135 @@ function pickByLanguage(language: GutoLanguage, map: Record<GutoLanguage, string
 // ─── Prompt contextual para o modelo compor a resposta (Regra 3: sem "se X então Y") ───
 // O classificador ENTENDE a situação; o MODELO compõe a resposta usando contexto.
 // Frases fixas SÓ existem como fallback técnico (sem chave Gemini).
+
+// ─── Proatividade: continuidade primeiro ────────────────────────────────────
+// Viagem/compromisso/semana corrida/pouco tempo = mudança de contexto, NUNCA
+// interrupção. O GUTO assume continuidade e propõe adaptação antes de perguntar
+// só o dado crítico. Nunca "descanso por padrão" nem "intensidade máxima pra
+// compensar". Ver GUTO_PROATIVIDADE_E_CICLO_SEMANAL.md (Continuidade Primeiro).
+export type ProactiveContinuitySignal =
+  | "travel_unknown"
+  | "travel_can_train"
+  | "travel_cannot_train"
+  | "commitment"
+  | "busy_week"
+  | "short_window"
+  | "generic";
+
+export function classifyProactiveContinuitySignal(rawInput: string): ProactiveContinuitySignal {
+  const text = normalize(rawInput);
+  const isTravel = /\b(viajo|viajar|viagem|vou viajar|viajando|trip|travel|traveling|viaggio|viaggi|parto)\b/.test(text);
+  if (isTravel) {
+    const sig = detectTravelTrainingSignal(rawInput);
+    return sig === "can_train"
+      ? "travel_can_train"
+      : sig === "cannot_train"
+        ? "travel_cannot_train"
+        : "travel_unknown";
+  }
+  if (/\b(reuniao|compromisso|consulta|evento|meeting|appointment|riunione|impegno|casamento)\b/.test(text)) {
+    return "commitment";
+  }
+  if (/\b(semana corrida|semana apertada|busy week|packed week|settimana piena|settimana pesante)\b/.test(text)) {
+    return "busy_week";
+  }
+  if (
+    /\b\d{1,2}\s*(min|mins|minuto|minutos|minutes|minuti)\b/.test(text) ||
+    /\b(pouco tempo|pouquinho de tempo|little time|poco tempo)\b/.test(text)
+  ) {
+    return "short_window";
+  }
+  return "generic";
+}
+
+// Piso determinístico (sem Gemini): fala de continuidade ativa por sinal. Mantém
+// o comportamento certo mesmo no fallback técnico — nunca passivo, nunca descanso.
+export function buildProactiveContinuityFala(
+  signal: ProactiveContinuitySignal,
+  language: GutoLanguage,
+  name: string,
+): string {
+  const byLang: Record<GutoLanguage, Record<ProactiveContinuitySignal, string>> = {
+    "pt-BR": {
+      travel_unknown: `Fechado, ${name}. Viajar não é desculpa pra sumir — eu consigo adaptar o treino pra hotel, quarto, academia ou uma missão curta. Só me diz: você vai ter algum tempo pra treinar nesse dia ou vai ser impossível mesmo?`,
+      travel_can_train: `Perfeito, ${name}. Então eu não vou bloquear esse dia. Vou adaptar o treino pra hotel/quarto e manter tua sequência viva, curto e direto. Confirmo assim?`,
+      travel_cannot_train: `Fechado, ${name}. Aí sim eu considero esse dia indisponível e reorganizo a semana, sem inventar intensidade máxima pra compensar. Confirmo o dia como protegido?`,
+      commitment: `Fechado, ${name}. Esse período fica bloqueado, então eu puxo o treino pra antes ou deixo uma missão curta — a gente não para. Prefere de manhã, de tarde, ou eu decido o melhor horário?`,
+      busy_week: `Então a semana vai ser executável, não perfeita, ${name}. Eu reduzo o plano e seguro o mínimo que mantém tua evolução viva.`,
+      short_window: `Então hoje é missão curta, ${name}. Direta e sem desculpa — a gente mantém a sequência viva mesmo com pouco tempo.`,
+      generic: `Boa, ${name}. Isso muda o contexto, não o plano — eu adapto pra manter tua sequência viva. Me diz só o que precisa mudar que eu encaixo.`,
+    },
+    "en-US": {
+      travel_unknown: `Got it, ${name}. Traveling is no excuse to disappear — I can adapt the workout for a hotel, your room, a gym or a short mission. Just tell me: will you have any time to train that day, or is it truly impossible?`,
+      travel_can_train: `Perfect, ${name}. Then I won't block that day. I'll adapt the workout for the hotel/room and keep your streak alive — short and clean. Confirm it like this?`,
+      travel_cannot_train: `Got it, ${name}. Then I treat that day as unavailable and reorganize the week — no made-up max intensity to compensate. Confirm the day as protected?`,
+      commitment: `Got it, ${name}. That window is blocked, so I pull the workout earlier or leave a short mission — we don't stop. Morning, afternoon, or should I pick the best time?`,
+      busy_week: `So the week will be doable, not perfect, ${name}. I cut the plan down and hold the minimum that keeps your progress alive.`,
+      short_window: `Then today is a short mission, ${name}. Direct and no excuses — we keep the streak alive even with little time.`,
+      generic: `Good, ${name}. That changes the context, not the plan — I adapt to keep your streak alive. Just tell me what needs to change and I'll fit it in.`,
+    },
+    "it-IT": {
+      travel_unknown: `Chiaro, ${name}. Viaggiare non è una scusa per sparire — posso adattare l'allenamento per hotel, camera, palestra o una missione corta. Dimmi solo: avrai un po' di tempo per allenarti quel giorno o è davvero impossibile?`,
+      travel_can_train: `Perfetto, ${name}. Allora non blocco quel giorno. Adatto l'allenamento per hotel/camera e tengo viva la tua striscia, corto e pulito. Confermo così?`,
+      travel_cannot_train: `Chiaro, ${name}. Allora considero quel giorno non disponibile e riorganizzo la settimana, senza inventare intensità massima per compensare. Confermo il giorno come protetto?`,
+      commitment: `Chiaro, ${name}. Quella fascia è bloccata, quindi anticipo l'allenamento o lascio una missione corta — non ci fermiamo. Preferisci mattina, pomeriggio, o scelgo io l'orario migliore?`,
+      busy_week: `Allora la settimana sarà fattibile, non perfetta, ${name}. Riduco il piano e tengo il minimo che mantiene viva la tua evoluzione.`,
+      short_window: `Allora oggi è una missione corta, ${name}. Diretta e senza scuse — teniamo viva la striscia anche con poco tempo.`,
+      generic: `Bene, ${name}. Questo cambia il contesto, non il piano — adatto per tenere viva la tua striscia. Dimmi solo cosa deve cambiare e lo incastro.`,
+    },
+  };
+  return (byLang[language] || byLang["pt-BR"])[signal];
+}
+
+function buildProactiveContinuityContextPrompt(
+  memory: GutoMemory,
+  language: GutoLanguage,
+  rawInput: string,
+  signal: ProactiveContinuitySignal,
+): string {
+  const name = getGutoCallName(memory);
+  const langInstruction: Record<GutoLanguage, string> = {
+    "pt-BR": "Responda em português brasileiro nativo.",
+    "en-US": "Reply in natural native English.",
+    "it-IT": "Rispondi in italiano nativo naturale.",
+  };
+  const signalGuidance: Record<ProactiveContinuitySignal, string> = {
+    travel_unknown:
+      "Viagem SEM o dado crítico. PROPONHA continuidade (consigo adaptar pra hotel/quarto/academia ou missão curta) e PERGUNTE só UMA coisa: se ele vai ter tempo/equipamento pra treinar nesse dia ou se é impossível. NÃO decida ainda, NÃO marque descanso, NÃO crie treino definitivo.",
+    travel_can_train:
+      "Ele CONSEGUE treinar viajando. Confirme que o dia NÃO será bloqueado e que você adapta pra hotel/quarto (curto e direto). NÃO marque descanso, NÃO fale em intensidade máxima.",
+    travel_cannot_train:
+      "Ele NÃO vai conseguir treinar. Trate o dia como protegido/indisponível e diga que reorganiza a semana. NUNCA fale em intensidade máxima pra compensar, nem prometa XP/Arena grátis.",
+    commitment:
+      "Há um período bloqueado. PRESERVE continuidade: puxe o treino pra antes ou deixe uma missão curta. NUNCA cancele o dia inteiro. Ofereça escolher o horário ou decidir pelo melhor.",
+    busy_week:
+      "Semana corrida. Continuidade reduzida: plano mínimo executável. A semana vai ser 'executável, não perfeita'. Linguagem ativa.",
+    short_window:
+      "Pouco tempo hoje. NÃO cancele nada: vira missão curta e direta. 'Curta, direta e sem desculpa.'",
+    generic:
+      "Mudança de contexto qualquer. Assuma continuidade e proponha adaptação; pergunte só o dado crítico que falta.",
+  };
+  return [
+    "Você é o GUTO. O usuário compartilhou uma mudança de contexto da rotina (viagem, compromisso, semana corrida ou pouco tempo).",
+    `O nome da dupla é: GUTO & ${name}.`,
+    `O usuário disse: "${rawInput}"`,
+    "",
+    "PRINCÍPIO SOBERANO — CONTINUIDADE PRIMEIRO:",
+    "- Mudança de contexto NÃO é interrupção. O padrão é manter o usuário ATIVO e adaptar.",
+    "- Assuma continuidade primeiro. Só decida impacto definitivo quando tiver o dado crítico.",
+    "- Fale ATIVO: 'eu consigo adaptar', 'a gente não para', 'me diz só...'.",
+    "- PROIBIDO: assumir que viagem = descanso; dizer 'intensidade máxima pra compensar'; virar formulário; perguntar várias coisas de uma vez; cancelar treino antes de tentar adaptar.",
+    "",
+    `SITUAÇÃO: ${signalGuidance[signal]}`,
+    "",
+    "REGRAS:",
+    "- Máximo 2-3 frases. Pergunte no máximo UMA coisa (só o dado crítico).",
+    "- Companheiro ativo, direto e parceiro. Sem frase de sistema, sem aspas.",
+    langInstruction[language] || langInstruction["pt-BR"],
+    "",
+    "Responda APENAS com o texto da fala do GUTO, sem JSON, sem aspas, sem prefixo.",
+  ].join("\n");
+}
 
 function buildResistanceContextPrompt(
   memory: GutoMemory,
@@ -6144,6 +6291,20 @@ function enforceTrainingFlowCertainty(
     )
   ) {
     resetChatRefusalStage(memory);
+  }
+
+  // Continuidade primeiro (piso determinístico, sem Gemini): compartilhar mudança
+  // de contexto não é recusa nem intake de treino. Responde com fala ativa de
+  // continuidade e sai — nunca cai na escada nem no "descanso por padrão".
+  if (contractIntent.kind === "proactive_context") {
+    const signal = classifyProactiveContinuitySignal(rawInput);
+    setContractResponse(response, {
+      fala: buildProactiveContinuityFala(signal, language, getGutoCallName(memory)),
+      acao: "none",
+      expectedResponse: null,
+      workoutPlan: null,
+    });
+    return;
   }
   const copy: Record<GutoLanguage, Record<"askStatus" | "askLimitations" | "closeNoLimitation" | "closeLimitation", { fala: string; instruction?: string }>> = {
     "pt-BR": {
@@ -7444,6 +7605,11 @@ async function askGutoModel({
     const isGrief =
       !riskOverride &&
       (contractIntent.kind === "emotional_collapse" || looksLikeGrief(input || ""));
+    // Continuidade primeiro: compartilhar mudança de contexto (viagem/compromisso/
+    // semana corrida/pouco tempo) NÃO é recusa. O GUTO compõe fala ativa que propõe
+    // adaptação e pergunta só o dado crítico — nunca "descanso" por padrão nem
+    // "intensidade máxima pra compensar".
+    const isProactiveContext = !riskOverride && contractIntent.kind === "proactive_context";
 
     if (isGrief) {
       resetChatRefusalStage(memory);
@@ -7480,6 +7646,22 @@ async function askGutoModel({
         return finalize(parsedResponse);
       }
       // Se Gemini falhou, enforceTrainingFlowCertainty aplica o fallback.
+    } else if (isProactiveContext) {
+      resetChatRefusalStage(memory);
+      const signal = classifyProactiveContinuitySignal(input || "");
+      const composed = await composeContextualResponse(
+        buildProactiveContinuityContextPrompt(memory, selectedLanguage, input || "", signal),
+      );
+      const fala = composed || buildProactiveContinuityFala(signal, selectedLanguage, getGutoCallName(memory));
+      setContractResponse(parsedResponse, {
+        fala,
+        acao: "none",
+        expectedResponse: null,
+        workoutPlan: null,
+        avatarEmotion: "default",
+      });
+      commitMemoryDecision(memory);
+      return finalize(parsedResponse);
     }
 
     enforceTrainingFlowCertainty(parsedResponse, memory, expectedResponse, selectedLanguage, input || "", contractIntent, Boolean(riskOverride));

@@ -15,6 +15,7 @@ const PRIORITY: Record<ProactiveDecisionReason, number> = {
   coach_lock: 90,
   travel: 80,
   commitment: 70,
+  short_window: 65,
   busy_week: 60,
   clear_week: 50,
 }
@@ -35,6 +36,7 @@ export interface ProactiveAdaptationForDate {
   workoutEffect: ProactiveWorkoutEffect
   missionEffect: ProactiveMissionEffect
   isAdaptedDay: boolean
+  isProtectedDay: boolean
   shouldAskCritical: boolean
   shouldAvoidBlindPenalty: boolean
   xpPolicy: 'no_free_xp' | 'normal'
@@ -52,6 +54,25 @@ function normalizeText(value?: string): string {
     .replace(/[^\p{L}\p{N}:h]+/gu, ' ')
     .trim()
     .toLowerCase()
+}
+
+// Continuidade primeiro: viagem \u00e9 mudan\u00e7a de contexto, n\u00e3o interrup\u00e7\u00e3o. O dado
+// cr\u00edtico \u00e9 se o usu\u00e1rio consegue treinar. Sem ele, N\u00c3O criamos impacto
+// definitivo (vira ask_critical). Detecta o sinal a partir do texto da mem\u00f3ria.
+export type TravelTrainingSignal = 'can_train' | 'cannot_train' | 'unknown'
+
+const TRAVEL_CANNOT_TRAIN =
+  /\b(nao vou conseguir treinar|nao consigo treinar|nao da pra treinar|nao tem como treinar|impossivel treinar|sem tempo pra treinar|sem tempo pro treino|nao vai dar pra treinar|nao vai dar|nao da pra|dia inteiro (ocupado|fora|sem tempo|de viagem)|wont be able to train|won t be able to train|can ?not train|cant train|no time to train|no way to train|impossible to train)\b/
+
+const TRAVEL_CAN_TRAIN =
+  /\b(consigo treinar|vou treinar|posso treinar|da pra treinar|tem academia|academia do hotel|academia no hotel|treino no hotel|treino no quarto|treinar no hotel|treinar no quarto|treinar no destino|hotel tem academia|missao curta|i can train|i can work ?out|hotel gym|gym at the hotel|train at the hotel|treino adaptado|treinar viajando|levo o treino)\b/
+
+export function detectTravelTrainingSignal(value?: string): TravelTrainingSignal {
+  const text = normalizeText(value)
+  if (!text) return 'unknown'
+  if (TRAVEL_CANNOT_TRAIN.test(text)) return 'cannot_train'
+  if (TRAVEL_CAN_TRAIN.test(text)) return 'can_train'
+  return 'unknown'
 }
 
 function asDate(value?: Date | string): Date {
@@ -144,15 +165,19 @@ function buildDecision({
       ? 'adapt_day'
       : reason === 'coach_lock'
         ? 'preserve_coach_lock'
-        : reason === 'travel'
-          ? 'adapt_day'
-          : reason === 'commitment' && criticalQuestion
-            ? 'ask_critical'
-            : reason === 'commitment'
-              ? 'block_period'
-              : reason === 'busy_week'
-                ? 'reduce_week'
-                : 'keep_normal'
+        : reason === 'travel' && criticalQuestion
+          ? 'ask_critical'
+          : reason === 'travel'
+            ? 'adapt_day'
+            : reason === 'commitment' && criticalQuestion
+              ? 'ask_critical'
+              : reason === 'commitment'
+                ? 'block_period'
+                : reason === 'busy_week'
+                  ? 'reduce_week'
+                  : reason === 'short_window'
+                    ? 'adapt_day'
+                    : 'keep_normal'
   return {
     id: decisionId(memory.id, reason, affectedDates),
     memoryId: memory.id,
@@ -219,18 +244,59 @@ export function decideFromProactiveMemory(
     /\b(viajo|viajar|viagem|vou viajar|travel|trip|flight|volo|viaggio|parto)\b/.test(text)
   if (travelDetected) {
     const affectedDates = resolveAffectedDates(memory, text, now)
+    const signal = detectTravelTrainingSignal(text)
+
+    // Continuidade ativa: usuário consegue treinar viajando → mantém o treino,
+    // adaptado para hotel/quarto (curto e leve). NÃO marca descanso, NÃO bloqueia
+    // o dia inteiro, NÃO compensa com intensidade máxima.
+    if (signal === 'can_train') {
+      return buildDecision({
+        memory,
+        reason: 'travel',
+        affectedDates,
+        workoutEffect: 'short_light',
+        missionEffect: 'reduced',
+        message: language.includes('en')
+          ? 'You can train on the trip, so I will NOT block that day. I keep the workout alive, adapted for hotel/room — short and clean. No rest by default, no max-intensity to compensate. XP only with real validation.'
+          : language.includes('it')
+            ? 'Puoi allenarti in viaggio, quindi NON blocco quel giorno. Tengo l allenamento vivo, adattato per hotel/camera — corto e pulito. Niente riposo di default, niente intensità massima per compensare. XP solo con validazione reale.'
+            : 'Você consegue treinar na viagem, então NÃO vou bloquear o dia. Mantenho o treino vivo, adaptado pra hotel/quarto — curto e limpo. Sem descanso por padrão, sem intensidade máxima pra compensar. XP só com validação real.',
+      })
+    }
+
+    // Usuário não vai conseguir treinar → dia protegido/indisponível. Reorganiza
+    // a semana, sem XP grátis e sem Arena grátis. Isso NÃO é descanso passivo nem
+    // "intensidade máxima pra compensar" — é proteger o dia e seguir o plano.
+    if (signal === 'cannot_train') {
+      return buildDecision({
+        memory,
+        reason: 'travel',
+        affectedDates,
+        blockedPeriod: 'all_day',
+        workoutEffect: 'protected',
+        missionEffect: 'protected',
+        message: language.includes('en')
+          ? 'Got it — that day is protected/unavailable. I reorganize the week around it. No automatic max-intensity, no free XP, no free Arena.'
+          : language.includes('it')
+            ? 'Capito — quel giorno è protetto/non disponibile. Riorganizzo la settimana. Niente intensità massima automatica, niente XP gratis, niente Arena gratis.'
+            : 'Fechado — esse dia fica protegido/indisponível. Eu reorganizo a semana sem inventar intensidade máxima, sem XP grátis e sem Arena grátis.',
+      })
+    }
+
+    // Contexto insuficiente: viagem nua ("viajo na quarta"). NÃO cria impacto
+    // definitivo. Propõe continuidade e pergunta o único dado crítico que falta.
     return buildDecision({
       memory,
       reason: 'travel',
       affectedDates,
-      blockedPeriod: 'all_day',
-      workoutEffect: 'short_light',
-      missionEffect: 'protected_before',
+      workoutEffect: 'ask_critical',
+      missionEffect: 'ask_critical',
+      criticalQuestion: 'training',
       message: language.includes('en')
-        ? 'Travel locked in: that day becomes adapted. I will protect the main mission before the trip and keep the day short and light. No free XP; Arena only counts with real validation.'
+        ? 'Traveling is not stopping. I can adapt to a hotel/room/gym workout or a short 15-minute mission. I just need one thing: will you have any time to train that day, or is it truly impossible?'
         : language.includes('it')
-          ? 'Viaggio segnato: quel giorno diventa adattato. Proteggo la missione principale prima e tengo il giorno corto e leggero. Niente XP gratis; Arena solo con validazione reale.'
-          : 'Viagem fechada: esse dia vira adaptado. Vou proteger a missão principal antes e deixar o treino curto e leve no dia. Sem XP grátis; Arena só com validação real.',
+          ? 'Viaggiare non è fermarsi. Posso adattare ad allenamento in hotel/camera/palestra o una missione corta di 15 minuti. Mi serve solo una cosa: avrai un po di tempo per allenarti quel giorno o è davvero impossibile?'
+          : 'Viajar não é parar. Eu consigo adaptar pra treino de hotel/quarto/academia ou missão curta de 15 minutos. Só preciso de uma coisa: você vai ter algum tempo pra treinar nesse dia ou vai ser impossível mesmo?',
     })
   }
 
@@ -276,6 +342,27 @@ export function decideFromProactiveMemory(
         : language.includes('it')
           ? 'Settimana piena registrata. Riduco la complessita e tengo un piano minimo eseguibile; la streak dipende da esecuzione minima, non da XP gratis.'
           : 'Semana corrida registrada. Vou reduzir a complexidade e manter plano mínimo executável; streak depende de execução mínima, não de XP grátis.',
+    })
+  }
+
+  // Pouco tempo hoje ("só tenho 10 minutos") = continuidade reduzida, NUNCA
+  // cancelar. Vira missão curta e direta no dia.
+  if (
+    /\b\d{1,2}\s*(min|mins|minuto|minutos|minutes|minuti)\b/.test(text) ||
+    /\b(pouco tempo|pouquinho de tempo|little time|poco tempo|sem muito tempo)\b/.test(text)
+  ) {
+    const affectedDates = resolveAffectedDates(memory, text, now)
+    return buildDecision({
+      memory,
+      reason: 'short_window',
+      affectedDates,
+      workoutEffect: 'minimal',
+      missionEffect: 'reduced',
+      message: language.includes('en')
+        ? 'Short window today, not a day off. I keep a short, direct mission so the streak stays alive — execution counts, no free XP.'
+        : language.includes('it')
+          ? 'Finestra corta oggi, non un giorno di riposo. Tengo una missione corta e diretta per mantenere viva la streak — conta l esecuzione, niente XP gratis.'
+          : 'Janela curta hoje, não é dia parado. Eu seguro uma missão curta e direta pra manter a sequência viva — conta a execução, sem XP grátis.',
     })
   }
 
@@ -388,6 +475,7 @@ export function getAdaptationForDate(memory: MemoryWithImpacts, date: string | D
     workoutEffect,
     missionEffect,
     isAdaptedDay: workoutEffect === 'short_light' || workoutEffect === 'minimal',
+    isProtectedDay: workoutEffect === 'protected' || missionEffect === 'protected',
     shouldAskCritical: workoutEffect === 'ask_critical' || missionEffect === 'ask_critical',
     shouldAvoidBlindPenalty: primaryImpact?.pushEffect === 'avoid_blind_charge',
     xpPolicy: primaryImpact?.xpEffect === 'no_free_xp_context_only' ? 'no_free_xp' : 'normal',
