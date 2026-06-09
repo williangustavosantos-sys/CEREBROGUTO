@@ -100,9 +100,11 @@ import {
   type ClassifierLanguage,
 } from "./src/risk-classifier.js";
 import {
+  detectTrainingPrep,
   extractTrainingLocation,
   isWorkoutExecutionRequest,
   shouldDeferWeeklyOpeningForTurn,
+  type TrainingPrepKind,
 } from "./src/guto-turn-contract.js";
 
 import {
@@ -5569,6 +5571,7 @@ type ContractIntentKind =
   | "resistance_common"
   | "fatigue_common"
   | "postpone"
+  | "training_prep"
   | "nonsense"
   | "physical_pain"
   | "emotional_collapse"
@@ -5609,6 +5612,7 @@ function normalizeContractIntentKind(value: unknown): ContractIntentKind {
     "resistance_common",
     "fatigue_common",
     "postpone",
+    "training_prep",
     "nonsense",
     "physical_pain",
     "emotional_collapse",
@@ -5651,6 +5655,22 @@ export function classifyContractIntentFallback(input: {
 
   const age = extractAgeFromContractText(raw);
   const location = extractTrainingLocation(raw);
+
+  // Preparação curta antes do treino (café/água/pré-treino/roupa/banheiro/
+  // deslocamento/"espera N min") NÃO é recusa nem adiamento — o treino planejado
+  // continua de pé. Tem precedência sobre o piso de location ("indo pra academia"
+  // é deslocamento, não resposta de local), EXCETO quando GUTO acabou de perguntar
+  // o local (aí "vou pra academia" responde a pergunta). Recusa/adiamento já é
+  // excluído dentro de detectTrainingPrep, então isso não captura "não vou treinar".
+  const expectingLocation =
+    normalizeExpectedResponse(input.previousExpectedResponse)?.context === "training_location";
+  if (!expectingLocation) {
+    const prep = detectTrainingPrep(raw);
+    if (prep) {
+      return { kind: "training_prep", confidence: 0.78, reason: `fallback_prep_${prep.kind}` };
+    }
+  }
+
   if (location) {
     return { kind: "location_answer", confidence: 0.78, reason: "fallback_location", locationText: location };
   }
@@ -5779,7 +5799,8 @@ async function classifyContractIntent(input: {
     "- none: no correction needed.",
     "- resistance_common: user is avoiding/refusing training without real safety risk.",
     "- fatigue_common: user says normal tiredness/fatigue, not illness or acute risk.",
-    "- postpone: user tries to push TODAY'S training to later/tomorrow (e.g. 'amanhã eu faço', 'depois eu treino', 'hoje não, amanhã'). NOT a future trip/commitment share for the week — that is proactive_context.",
+    "- postpone: user tries to push TODAY'S training to later/tomorrow (e.g. 'amanhã eu faço', 'depois eu treino', 'hoje não, amanhã'). NOT a future trip/commitment share for the week — that is proactive_context. NOT a short pre-training step — that is training_prep.",
+    "- training_prep: user is doing a SHORT preparation step BEFORE training and clearly STILL intends to train today (e.g. 'vou tomar café primeiro', 'vou comer antes', 'vou beber água antes', 'vou tomar pré-treino', 'vou trocar de roupa', 'vou ao banheiro', 'tô indo pra academia', 'vou chegar na academia', 'deixa eu terminar de comer', 'espera 10 minutos'). This is NOT postpone and NOT resistance — the planned workout STAYS. Never classify a real refusal/cancel ('não vou treinar', 'não quero treinar', 'vou deixar pra amanhã') as training_prep.",
     "- nonsense: operationally useless/junk/playful input that should not be saved as profile.",
     "- physical_pain: real pain/limitation that should be protected/adapted, not treated as missing status.",
     "- emotional_collapse: real grief/bereavement or severe emotional crisis (death in the family, deep loss, devastating news). Must back off training fully with empathy. NEVER classify this as physical_pain or a training limitation.",
@@ -6253,6 +6274,139 @@ function fallbackRefusalReply(memory: GutoMemory, language: GutoLanguage, stage:
     "en-US": `${name}, we rise or fall together. Give me 20 minutes.`,
     "it-IT": `${name}, cresciamo o cadiamo insieme. Dammi 20 minuti.`,
   });
+}
+
+// ─── Preparação curta antes do treino (NÃO é recusa) ───────────────────────
+// "vou tomar café primeiro", "vou beber água antes", "vou trocar de roupa",
+// "tô indo pra academia"... A pessoa VAI treinar. O GUTO autoriza a pausa curta,
+// MANTÉM o treino planejado, puxa a refeição da dieta se ela existir (sem inventar
+// quando não existe), reforça a continuidade e pede um retorno curto. Não mexe em
+// XP, Arena, nem cancela/reduz treino.
+
+// Refeição de referência para uma preparação de comida (café da manhã / 1ª refeição).
+function findBreakfastMeal(plan: DietPlan | null): DietMeal | null {
+  if (!plan || !Array.isArray(plan.meals) || plan.meals.length === 0) return null;
+  const breakfast = plan.meals.find((meal) =>
+    /\b(cafe|breakfast|colazione|manha|desjejum|prima colazione)\b/.test(normalize(`${meal.id} ${meal.name}`))
+  );
+  return breakfast || plan.meals[0];
+}
+
+function buildPrepContextPrompt(
+  memory: GutoMemory,
+  language: GutoLanguage,
+  kind: TrainingPrepKind,
+  meal: DietMeal | null,
+  rawInput: string,
+): string {
+  const name = getGutoCallName(memory);
+  const langInstruction: Record<GutoLanguage, string> = {
+    "pt-BR": "Responda em português brasileiro nativo.",
+    "en-US": "Reply in natural native English.",
+    "it-IT": "Rispondi in italiano nativo naturale.",
+  };
+  const prepType =
+    kind === "meal" ? "alimentação curta antes do treino (café/comer)"
+    : kind === "hydration" ? "hidratação antes do treino (beber água)"
+    : "preparação curta (trocar de roupa, banheiro, deslocamento, pequena espera)";
+
+  const dietLine = meal
+    ? `A dieta da semana TEM a refeição correspondente: "${meal.name}"${meal.foods?.length ? ` (${meal.foods.map((f) => f.name).slice(0, 4).join(", ")})` : ""}. Puxe essa refeição: mande seguir o que já está no plano, sem inventar nova comida.`
+    : kind === "meal"
+      ? "NÃO existe dieta cadastrada. NÃO invente refeição nem cardápio — só autorize a pausa curta para comer e mantenha o treino."
+      : "";
+
+  return [
+    "Você é o GUTO. O usuário NÃO está recusando treino — está fazendo uma preparação curta ANTES de treinar e vai treinar em seguida.",
+    `O nome da dupla é: GUTO & ${name}.`,
+    `Tipo de preparação: ${prepType}.`,
+    `O usuário disse: "${rawInput}"`,
+    dietLine,
+    "",
+    "REGRAS:",
+    "- NÃO trate como recusa, desistência ou adiamento. NÃO proponha caminhada/treino mínimo no lugar do treino. NÃO cobre XP.",
+    "- Autorize a preparação curta e deixe claro que o TREINO PLANEJADO CONTINUA DE PÉ.",
+    "- Reforce a continuidade da dupla (vocês seguem juntos).",
+    "- Termine pedindo um retorno curto, do tipo: \"come e volta que eu te puxo pro treino\".",
+    "- Máximo 2-3 frases. Tom parceiro e firme, sem ser general.",
+    "",
+    langInstruction[language] || langInstruction["pt-BR"],
+    "",
+    "Responda APENAS com o texto da fala do GUTO, sem JSON, sem aspas, sem prefixo.",
+  ].filter(Boolean).join("\n");
+}
+
+// Fallback determinístico (sem Gemini): mantém treino, puxa refeição se existir.
+function fallbackPrepReply(
+  memory: GutoMemory,
+  language: GutoLanguage,
+  kind: TrainingPrepKind,
+  meal: DietMeal | null,
+): string {
+  const name = getGutoCallName(memory);
+  if (kind === "meal" && meal) {
+    const mealName = meal.name.toLowerCase();
+    return pickByLanguage(language, {
+      "pt-BR": `Boa. A primeira alimentação do dia é sagrada — teu ${mealName} já tá lá na dieta da semana. Segue o plano, não inventa moda. Come e volta que eu te puxo pro treino, ${name}.`,
+      "en-US": `Good. The first meal of the day is sacred — your ${mealName} is already in this week's diet. Stick to the plan, don't improvise. Eat and come back so I pull you into the workout, ${name}.`,
+      "it-IT": `Bene. Il primo pasto della giornata è sacro — il tuo ${mealName} è già nella dieta della settimana. Segui il piano, niente invenzioni. Mangia e torna che ti porto all'allenamento, ${name}.`,
+    });
+  }
+  if (kind === "meal") {
+    return pickByLanguage(language, {
+      "pt-BR": `Boa, ${name}. Come com calma — o treino de hoje continua de pé, não muda nada. Come e volta que eu te puxo pro treino.`,
+      "en-US": `Good, ${name}. Eat calmly — today's workout still stands, nothing changes. Eat and come back so I pull you into the workout.`,
+      "it-IT": `Bene, ${name}. Mangia con calma — l'allenamento di oggi resta in piedi, non cambia nulla. Mangia e torna che ti porto all'allenamento.`,
+    });
+  }
+  if (kind === "hydration") {
+    return pickByLanguage(language, {
+      "pt-BR": `Hidrata bem, ${name} — água antes é parte do jogo. O treino de hoje continua de pé. Bebe e volta que eu te puxo pro treino.`,
+      "en-US": `Hydrate well, ${name} — water first is part of the game. Today's workout still stands. Drink and come back so I pull you into the workout.`,
+      "it-IT": `Idratati bene, ${name} — l'acqua prima fa parte del gioco. L'allenamento di oggi resta in piedi. Bevi e torna che ti porto all'allenamento.`,
+    });
+  }
+  return pickByLanguage(language, {
+    "pt-BR": `Boa, ${name}. Te aprontar faz parte — o treino de hoje continua de pé, não muda nada. Se ajeita e volta que eu te puxo pro treino.`,
+    "en-US": `Good, ${name}. Getting ready is part of it — today's workout still stands, nothing changes. Sort yourself out and come back so I pull you into the workout.`,
+    "it-IT": `Bene, ${name}. Prepararti fa parte — l'allenamento di oggi resta in piedi, non cambia nulla. Sistemati e torna che ti porto all'allenamento.`,
+  });
+}
+
+function prepReturnInstruction(language: GutoLanguage): string {
+  return pickByLanguage(language, {
+    "pt-BR": "Responda quando voltar que eu te puxo pro treino.",
+    "en-US": "Reply when you're back so I pull you into the workout.",
+    "it-IT": "Rispondi quando torni che ti porto all'allenamento.",
+  });
+}
+
+// Compõe a resposta de preparação. Retorna a fala (modelo ou fallback) ou null
+// quando NÃO é preparação. Puxa a dieta do dia só quando a preparação é sobre comida.
+async function resolveTrainingPrepResponse(
+  memory: GutoMemory,
+  language: GutoLanguage,
+  rawInput: string,
+): Promise<string | null> {
+  const prep = detectTrainingPrep(rawInput);
+  if (!prep) return null;
+
+  let meal: DietMeal | null = null;
+  if (prep.kind === "meal") {
+    try {
+      meal = findBreakfastMeal(await getDietPlan(memory.userId));
+    } catch {
+      meal = null;
+    }
+  }
+
+  if (GEMINI_API_KEY) {
+    const composed = await composeContextualResponse(
+      buildPrepContextPrompt(memory, language, prep.kind, meal, rawInput),
+    );
+    if (composed) return composed;
+  }
+  return fallbackPrepReply(memory, language, prep.kind, meal);
 }
 
 function fallbackGriefReply(memory: GutoMemory, language: GutoLanguage): string {
@@ -7440,6 +7594,23 @@ async function askGutoModel({
       previousExpectedResponse: expectedResponse,
       modelResponse: fallback,
     });
+    // Preparação curta antes do treino: NÃO é recusa. Mantém o treino planejado,
+    // puxa a refeição da dieta se existir, pede retorno curto. Não toca XP/Arena.
+    if (contractIntent.kind === "training_prep") {
+      const prepFala = await resolveTrainingPrepResponse(memory, selectedLanguage, input || "");
+      if (prepFala) {
+        await applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
+        setContractResponse(fallback, {
+          fala: prepFala,
+          acao: "none",
+          expectedResponse: { type: "text", instruction: prepReturnInstruction(selectedLanguage) },
+          workoutPlan: null,
+          avatarEmotion: "default",
+        });
+        commitMemoryDecision(memory);
+        return finalize(fallback);
+      }
+    }
     await applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
     enforceTrainingFlowCertainty(fallback, memory, expectedResponse, selectedLanguage, input || "", contractIntent);
     commitMemoryDecision(memory);
@@ -7610,6 +7781,25 @@ async function askGutoModel({
     // adaptação e pergunta só o dado crítico — nunca "descanso" por padrão nem
     // "intensidade máxima pra compensar".
     const isProactiveContext = !riskOverride && contractIntent.kind === "proactive_context";
+    const isTrainingPrep =
+      !riskOverride && !isGrief && contractIntent.kind === "training_prep";
+
+    if (isTrainingPrep) {
+      // Preparação curta antes do treino: NÃO é recusa. Mantém o treino, puxa a
+      // refeição da dieta se existir, pede retorno curto. Não toca XP/Arena.
+      const prepFala = await resolveTrainingPrepResponse(memory, selectedLanguage, input || "");
+      if (prepFala) {
+        setContractResponse(parsedResponse, {
+          fala: prepFala,
+          acao: "none",
+          expectedResponse: { type: "text", instruction: prepReturnInstruction(selectedLanguage) },
+          workoutPlan: null,
+          avatarEmotion: "default",
+        });
+        commitMemoryDecision(memory);
+        return finalize(parsedResponse);
+      }
+    }
 
     if (isGrief) {
       resetChatRefusalStage(memory);
@@ -7890,6 +8080,23 @@ async function askGutoModel({
       previousExpectedResponse: expectedResponse,
       modelResponse: fallback,
     });
+    // Preparação curta antes do treino: NÃO é recusa. Mantém o treino planejado,
+    // puxa a refeição da dieta se existir, pede retorno curto. Não toca XP/Arena.
+    if (contractIntent.kind === "training_prep") {
+      const prepFala = await resolveTrainingPrepResponse(memory, selectedLanguage, input || "");
+      if (prepFala) {
+        await applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
+        setContractResponse(fallback, {
+          fala: prepFala,
+          acao: "none",
+          expectedResponse: { type: "text", instruction: prepReturnInstruction(selectedLanguage) },
+          workoutPlan: null,
+          avatarEmotion: "default",
+        });
+        commitMemoryDecision(memory);
+        return finalize(fallback);
+      }
+    }
     await applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
     enforceTrainingFlowCertainty(fallback, memory, expectedResponse, selectedLanguage, input || "", contractIntent);
     commitMemoryDecision(memory);

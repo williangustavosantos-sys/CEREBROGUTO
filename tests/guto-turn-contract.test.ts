@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 
 import {
   detectImmediateOperationalIntent,
+  detectTrainingPrep,
   extractTrainingLocation,
   isWorkoutExecutionRequest,
   looksLikeWeeklyAnswer,
@@ -66,6 +67,34 @@ describe("GUTO turn contract", () => {
     assert.equal(shouldDeferWeeklyOpeningForTurn(weekly, "E aí, GUTO?"), false);
     assert.equal(looksLikeWeeklyAnswer("reunião na quarta"), true);
     assert.equal(looksLikeWeeklyAnswer("oi"), false);
+  });
+
+  it("preparação curta antes do treino NÃO é recusa (bug: 'vou tomar café' virava caminhada)", () => {
+    // Alimentação curta → kind meal (puxa a refeição da dieta quando existir).
+    assert.equal(detectTrainingPrep("vou tomar café primeiro")?.kind, "meal");
+    assert.equal(detectTrainingPrep("vou comer antes")?.kind, "meal");
+    assert.equal(detectTrainingPrep("deixa eu terminar de comer")?.kind, "meal");
+    // Hidratação → kind hydration.
+    assert.equal(detectTrainingPrep("vou beber água antes")?.kind, "hydration");
+    // Preparação genérica → kind generic.
+    assert.equal(detectTrainingPrep("vou tomar pré-treino")?.kind, "generic");
+    assert.equal(detectTrainingPrep("vou trocar de roupa")?.kind, "generic");
+    assert.equal(detectTrainingPrep("vou ao banheiro")?.kind, "generic");
+    assert.equal(detectTrainingPrep("vou chegar na academia")?.kind, "generic");
+    assert.equal(detectTrainingPrep("estou indo pra academia")?.kind, "generic");
+    assert.equal(detectTrainingPrep("espera 10 minutos")?.kind, "generic");
+  });
+
+  it("recusa/adiamento real NÃO é preparação (continua recusa)", () => {
+    assert.equal(detectTrainingPrep("não vou treinar hoje"), null);
+    assert.equal(detectTrainingPrep("não quero treinar"), null);
+    assert.equal(detectTrainingPrep("vou deixar pra amanhã"), null);
+    assert.equal(detectTrainingPrep("tô cansado demais"), null);
+    // Pergunta/pedido operacional também não é preparação.
+    assert.equal(detectTrainingPrep("qual o treino de hoje?"), null);
+    assert.equal(detectTrainingPrep("monta meu treino"), null);
+    // "academia" pura (resposta de local) não é preparação — só o deslocamento é.
+    assert.equal(detectTrainingPrep("academia"), null);
   });
 
   it("não adia confirmação ou validação proativa real", () => {
