@@ -106,6 +106,11 @@ import {
   shouldDeferWeeklyOpeningForTurn,
   type TrainingPrepKind,
 } from "./src/guto-turn-contract.js";
+import {
+  GUTO_PERSONA_CANONICAL,
+  detectForeignLanguageLeak,
+  resolveCanonicalVoiceText,
+} from "./src/voice-identity.js";
 
 import {
   buildProactivityContextBlock,
@@ -2339,6 +2344,9 @@ function localizeLocationLabel(location: string | undefined, language: string) {
 
 function hasLanguageLeak(text: string | undefined, language: string) {
   const selectedLanguage = normalizeLanguage(language);
+  // Vazamento de idioma estrangeiro (ex.: espanhol/inglês numa resposta pt-BR)
+  // — cobre pt-BR, que o checador legado de termos PT ignorava.
+  if (detectForeignLanguageLeak(text || "", selectedLanguage)) return true;
   if (selectedLanguage === "pt-BR") return false;
   const normalizedText = ` ${normalize(text || "").replace(/[^\p{L}\p{N}]+/gu, " ")} `;
   if (!normalizedText.trim()) return false;
@@ -2491,7 +2499,9 @@ function assertAndRepairVisibleLanguage(response: GutoModelResponse, language: s
     : response.workoutPlan;
   const localizedResponse = { ...response, workoutPlan: localizedWorkoutPlan };
 
-  if (selectedLanguage === "pt-BR") return localizedResponse;
+  // Antes pt-BR saía sem checagem (só en/it eram auditados) — por isso espanhol
+  // vazava na fala pt-BR e o TTS falava espanhol. Agora pt-BR também é checado
+  // via hasLanguageLeak → detectForeignLanguageLeak.
   if (localizedResponse.trainedReference && localizedResponse.expectedResponse?.context === "training_limitations") {
     return localizedResponse;
   }
@@ -2983,6 +2993,8 @@ function buildGutoBrainPrompt({
     : "";
 
   const persona = `
+${GUTO_PERSONA_CANONICAL}
+
 VOCÊ É GUTO.
 Não é assistente, não é chatbot, não é coach corporativo, não é IA neutra.
 Você é o melhor amigo digital do usuário. Assumidamente robô. Sem rosto, só olhos.
@@ -9220,7 +9232,24 @@ app.post("/voz", requireActiveUser, async (req, res) => {
     return res.status(400).json({ message: localizedHttpMessage("voice_text", language || "pt-BR") });
   }
 
-  const selectedLanguage = normalizeLanguage(language);
+  // Idioma é LEI e vem da MEMÓRIA do usuário (fonte de verdade), nunca só do
+  // body do cliente. Defesa: se a memória tiver idioma, ele vence.
+  let memoryLanguage: string | undefined;
+  try {
+    memoryLanguage = getMemory(userId)?.language;
+  } catch {
+    memoryLanguage = undefined;
+  }
+  const selectedLanguage = normalizeLanguage(memoryLanguage || language);
+
+  // VoiceIdentityResolver: toda fala passa por aqui antes do TTS. Trava o idioma
+  // no canônico e corrige a fala se vazou outro idioma (ex.: modelo devolveu
+  // espanhol) — o GUTO nunca fala um idioma que o usuário não escolheu.
+  const canonicalVoice = resolveCanonicalVoiceText({ text, language: selectedLanguage });
+  const voiceText = canonicalVoice.text;
+  if (canonicalVoice.repaired) {
+    console.warn("[GUTO_VOICE] language_leak_repaired", { userId, language: selectedLanguage });
+  }
 
   // ── API key guard ────────────────────────────────────────────────────────
   if (!VOICE_API_KEY) {
@@ -9245,7 +9274,7 @@ app.post("/voz", requireActiveUser, async (req, res) => {
   try {
     // ── 3. Primary voice ───────────────────────────────────────────────────
     const primary = await synthesizeGutoVoice({
-      text,
+      text: voiceText,
       language: selectedLanguage,
       voiceName: voice.primaryName,
       applyGutoStyle: false,
@@ -9258,7 +9287,7 @@ app.post("/voz", requireActiveUser, async (req, res) => {
 
     // ── 4. Fallback voice ──────────────────────────────────────────────────
     const fallback = await synthesizeGutoVoice({
-      text,
+      text: voiceText,
       language: selectedLanguage,
       voiceName: voice.fallbackName,
     });
@@ -9270,7 +9299,7 @@ app.post("/voz", requireActiveUser, async (req, res) => {
 
     // ── 5. Native male (last resort) ───────────────────────────────────────
     const nativeMale = await synthesizeGutoVoice({
-      text,
+      text: voiceText,
       language: selectedLanguage,
       useNamedVoice: false,
     });
@@ -10464,8 +10493,8 @@ function buildOnlineExceptionPrompt(
   };
 
   return [
-    "Você é o GUTO, personal trainer e melhor amigo digital.",
-    "Você está conduzindo um treino ao vivo pelo microfone.",
+    GUTO_PERSONA_CANONICAL,
+    "Aqui você é o GUTO conduzindo um treino ao vivo pelo microfone (GUTO Online) — a MESMA entidade do chat.",
     "Responda de forma curta, direta e humana — como um amigo, nunca como um sistema.",
     "Não use *asteriscos*, emojis, markdown. Texto puro.",
     langNote,
