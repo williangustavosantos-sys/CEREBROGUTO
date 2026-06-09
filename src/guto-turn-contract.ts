@@ -33,6 +33,56 @@ export function isWorkoutExecutionRequest(value: string): boolean {
   return !refusalOrDislike;
 }
 
+export type TrainingPrepKind = "meal" | "hydration" | "generic";
+
+// Preparação CURTA antes do treino: tomar café/comer, beber água, pré-treino,
+// trocar de roupa, banheiro, deslocar-se até a academia, "espera 10 minutos".
+// Isso NÃO é recusa, desistência nem adiamento — a pessoa VAI treinar, só está
+// se preparando. O treino planejado continua de pé.
+//
+// O guard de recusa/adiamento tem precedência: quem nega ("não vou treinar",
+// "não quero", "vou deixar pra amanhã") NÃO está se preparando — continua sendo
+// recusa real e deve seguir para a escada de persistência, não para cá.
+export function detectTrainingPrep(value: string): { kind: TrainingPrepKind } | null {
+  const text = normalizeContractText(value);
+  if (!text) return null;
+
+  const refusalOrPostpone =
+    /\b(nao vou|nao quero|nao to a fim|nao estou a fim|nem a fim|sem vontade|sem saco|desisto|desistir|fica pra|deixa pra|deixar pra|deixo pra|amanha|outro dia|nao treino|nao da hoje|nao rola hoje)\b/.test(text) ||
+    /\b(dont want|do not want|wont|not today|tomorrow|skip it|give up|quit)\b/.test(text) ||
+    /\b(non voglio|non vado|domani|un altro giorno|lascio|rimando)\b/.test(text);
+  if (refusalOrPostpone) return null;
+
+  // Hidratação antes do treino (água/beber) — desde que não seja sobre comida.
+  if (
+    /\b(agua|hidrat|beber|bebo|water|hydrate|drink|idrat|bere|acqua)\b/.test(text) &&
+    !/\b(cafe|comer|comendo|comida|refeicao|lanche)\b/.test(text)
+  ) {
+    return { kind: "hydration" };
+  }
+
+  // Alimentação curta antes do treino (café da manhã, comer, terminar de comer).
+  if (
+    /\b(cafe|comer|comendo|comida|refeicao|lanche|breakfast|eat|eating|finish eating|colazione|mangiare|mangio|finire di mangiare)\b/.test(text)
+  ) {
+    return { kind: "meal" };
+  }
+
+  // Preparação genérica: pré-treino, trocar de roupa, banheiro, deslocamento até
+  // a academia, "espera N minutos", "já tô indo".
+  // "espera N minutos" é preparação (pedir pra GUTO aguardar). "só tenho/tenho N
+  // minutos" é DISPONIBILIDADE limitada = proactive_context (continuidade), não
+  // preparação — por isso o gatilho de espera exige o verbo de aguardar, nunca o
+  // "N minutos" solto.
+  const genericPrep =
+    /\b(pre treino|pretreino|trocar de roupa|trocar a roupa|me trocar|roupa|banheiro|wc|toalete|chegar na academia|chegando na academia|indo pra academia|indo para academia|estou indo|to indo|ja vou|ja to indo|me arrumar|me apront|me ajeit|espera|espere|aguarda|me da (uns )?\d+ ?min)\b/.test(text) ||
+    /\b(pre workout|preworkout|change clothes|getting dressed|getting ready|bathroom|restroom|on my way|heading to the gym|wait a (sec|minute|moment)|give me \d+ ?min)\b/.test(text) ||
+    /\b(pre allenamento|preallenamento|cambiarmi|bagno|sto arrivando|sto andando|aspetta|dammi \d+ ?min|mi preparo)\b/.test(text);
+  if (genericPrep) return { kind: "generic" };
+
+  return null;
+}
+
 export function extractTrainingLocation(value: string): string | undefined {
   const normalized = normalizeContractText(value);
   if (/\b(academia|academias|gym|palestra|pales)\b/.test(normalized)) return "gym";
