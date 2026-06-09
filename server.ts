@@ -4934,7 +4934,24 @@ const WORKOUT_TITLE_BY_LANG: Record<WorkoutFocus, Record<GutoLanguage, string>> 
   },
 };
 
-function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
+// O título de corpo inteiro NÃO pode afirmar "força" para todo objetivo. A
+// calibragem manda: o objetivo "molda a prioridade de treinos aeróbicos ou
+// resistidos na Missão" (GUTO_CALIBRAGEM_E_MEMORIA_DETALHADA §6) e fat_loss é
+// "circuitos de maior densidade cardíaca" (GUTO_SISTEMA_DE_TREINO_E_MISSAO). Só
+// objetivo de força (muscle_gain/hypertrophy) recebe o rótulo "Força total"; os
+// demais (fat_loss/conditioning/mobility_health/consistency ou objetivo ausente)
+// recebem o rótulo neutro de corpo inteiro. Nunca afirmar força sem ser força.
+const FULL_BODY_TITLE_BY_GOAL: Record<"strength" | "neutral", Record<GutoLanguage, string>> = {
+  strength: { "pt-BR": "Força total", "it-IT": "Forza totale", "en-US": "Full-body strength" },
+  neutral: { "pt-BR": "Corpo inteiro", "it-IT": "Corpo intero", "en-US": "Full body" },
+};
+
+function resolveFullBodyTitle(goal: string | undefined, language: GutoLanguage): string {
+  const isStrengthGoal = goal === "muscle_gain" || goal === "hypertrophy";
+  return FULL_BODY_TITLE_BY_GOAL[isStrengthGoal ? "strength" : "neutral"][language];
+}
+
+function localizeWorkoutPlan(plan: WorkoutPlan, language: string, goalHint?: string): WorkoutPlan {
   const selectedLanguage = normalizeLanguage(language);
   const catalogPlan = normalizeWorkoutPlanAgainstCatalog(plan as unknown as Record<string, unknown>, selectedLanguage as CatalogLanguage) as unknown as WorkoutPlan;
   const scheduledDate = new Date(plan.scheduledFor);
@@ -4946,7 +4963,9 @@ function localizeWorkoutPlan(plan: WorkoutPlan, language: string): WorkoutPlan {
   const localizedFocus = focusMap[catalogPlan.focusKey ?? ""] || focusMap[catalogPlan.focus] || catalogPlan.focus;
   const focusKey = plan.focusKey || inferWorkoutFocusKey(localizedFocus);
   const generatedFocusLabel = focusKey
-    ? WORKOUT_TITLE_BY_LANG[focusKey][selectedLanguage]
+    ? (focusKey === "full_body"
+        ? resolveFullBodyTitle(plan.goal || goalHint, selectedLanguage)
+        : WORKOUT_TITLE_BY_LANG[focusKey][selectedLanguage])
     : localizeWorkoutFocus(localizedFocus, selectedLanguage);
 
   // Treino editado/criado pelo coach no painel é a verdade do aluno: o nome/foco
@@ -5408,6 +5427,7 @@ export function buildWorkoutPlanFromSemanticFocus({
   return localizeWorkoutPlan({
     focus: focusLabel,
     focusKey: "full_body",
+    goal: trainingGoal,
     dateLabel: getWorkoutDateLabel(selectedLanguage, scheduledFor),
     scheduledFor: scheduledFor.toISOString(),
     summary: commonSummary,
@@ -5415,7 +5435,7 @@ export function buildWorkoutPlanFromSemanticFocus({
       ...buildWarmupExercises(mode === "gym" ? "gym" : mode === "park" ? "park" : "home"),
       ...fullBodyMainExercises,
     ],
-  }, selectedLanguage);
+  }, selectedLanguage, trainingGoal);
 }
 
 interface WorkoutValidationResult {
@@ -5644,6 +5664,23 @@ function normalizeContractFocus(value: unknown): WorkoutFocus | undefined {
   return isWorkoutFocus(value) ? value : undefined;
 }
 
+// Falta de tempo = sinal de CONTINUIDADE (janela curta), NÃO recusa. O doc
+// (GUTO_PROATIVIDADE_E_CICLO_SEMANAL) trata pouco tempo como contexto a adaptar:
+// o GUTO reduz o plano/segura o mínimo, nunca cobra nem cancela. Recebe texto já
+// normalizado (minúsculo, sem acento). Não captura "tenho tempo de sobra".
+function isLackOfTimeSignal(normalizedText: string): boolean {
+  return (
+    /\bsem tempo\b/.test(normalizedText) ||
+    /\bfalta de tempo\b/.test(normalizedText) ||
+    /\btempo curto\b/.test(normalizedText) ||
+    /\bnao (tenho|vou ter|terei|teria) (muito )?tempo\b/.test(normalizedText) ||
+    /\bno time\b/.test(normalizedText) ||
+    /\b(do not|don't|dont|won't|wont|will not) have (the )?time\b/.test(normalizedText) ||
+    /\bshort on time\b/.test(normalizedText) ||
+    /\b(non ho|non avro|senza|manca) tempo\b/.test(normalizedText)
+  );
+}
+
 export function classifyContractIntentFallback(input: {
   rawInput: string;
   memory: GutoMemory;
@@ -5691,13 +5728,16 @@ export function classifyContractIntentFallback(input: {
     return { kind: "proactive_context", confidence: 0.7, reason: "fallback_proactive_context" };
   }
 
-  // Continuidade primeiro: semana corrida e janela curta de tempo ("só tenho 10
-  // minutos") são contexto a adaptar, NÃO recusa. Não podem cair na escada de
-  // cobrança — o GUTO mantém o usuário ativo com plano reduzido/missão curta.
+  // Continuidade primeiro: semana corrida, janela curta de tempo ("só tenho 10
+  // minutos") e FALTA DE TEMPO ("sem tempo", "não vou ter tempo") são contexto a
+  // adaptar, NÃO recusa (GUTO_PROATIVIDADE_E_CICLO_SEMANAL: falta de tempo →
+  // ajusta missão, nunca cancela/cobra). Não podem cair na escada de cobrança —
+  // o GUTO mantém o usuário ativo com plano reduzido/missão curta.
   if (
     /\b(semana corrida|semana apertada|busy week|packed week|settimana piena|settimana pesante)\b/.test(text) ||
     /\b\d{1,2}\s*(min|mins|minuto|minutos|minutes|minuti)\b/.test(text) ||
-    /\b(pouco tempo|pouquinho de tempo|little time|poco tempo)\b/.test(text)
+    /\b(pouco tempo|pouquinho de tempo|little time|poco tempo)\b/.test(text) ||
+    isLackOfTimeSignal(text)
   ) {
     return { kind: "proactive_context", confidence: 0.7, reason: "fallback_proactive_continuity" };
   }
@@ -5752,7 +5792,9 @@ export function classifyContractIntentFallback(input: {
     return { kind: "off_topic_distraction", confidence: 0.7, reason: "fallback_off_topic" };
   }
 
-  if (/\b(nao tenho vontade|não tenho vontade|enrolando|sem tempo|largar|desistir|motiva|voglia|stanchezza|tired|cansado)\b/.test(text)) {
+  // "sem tempo"/falta de tempo saiu daqui: é CONTINUIDADE (tratado acima como
+  // proactive_context), não resistência — não pode disparar a escada de cobrança.
+  if (/\b(nao tenho vontade|não tenho vontade|enrolando|largar|desistir|motiva|voglia|stanchezza|tired|cansado)\b/.test(text)) {
     return { kind: "resistance_common", confidence: 0.68, reason: "fallback_resistance" };
   }
 
@@ -5811,7 +5853,7 @@ async function classifyContractIntent(input: {
     "- clear_limitation: user answered age and/or clear operable limitation (e.g. shoulder when pushing, knee sensitivity).",
     "- history_reference: user reports they ALREADY trained a SPECIFIC muscle group on a past day to inform the next focus (e.g. 'ontem fiz peito', 'fiz costas anteontem'). Use this only when a specific muscle/day is the point.",
     "- workout_completed: user reports finishing TODAY'S prescribed session / the workout as a whole, as a conclusion (e.g. 'fiz o treino', 'terminei', 'acabei o treino', 'treino feito', 'done the workout'). Acknowledge and close continuity — do NOT re-ask age/pain.",
-    "- proactive_context: user SHARES a context change for the week — a future trip/commitment/schedule change, a busy week, a closed gym, rain, OR a limited time window today (e.g. 'viajo na quarta', 'sexta tenho compromisso o dia todo', 'essa semana só consigo treinar às 6h', 'sábado tenho casamento', 'semana corrida', 'só tenho 10 minutos hoje'). This is PLANNING CONTEXT for proactivity, NOT a refusal/postpone. CONTINUITY FIRST: a context change is something to ADAPT around, never an automatic excuse to stop. Acknowledge it naturally so it can be confirmed and used to keep the user active — do NOT push cobrança, do NOT treat as resistance, and NEVER assume rest by default or 'max intensity to compensate'.",
+    "- proactive_context: user SHARES a context change for the week — a future trip/commitment/schedule change, a busy week, a closed gym, rain, OR a limited time window / lack of time today (e.g. 'viajo na quarta', 'sexta tenho compromisso o dia todo', 'essa semana só consigo treinar às 6h', 'sábado tenho casamento', 'semana corrida', 'só tenho 10 minutos hoje', 'tô sem tempo', 'não vou ter tempo hoje'). Lack of time is CONTINUITY (adapt to a shorter mission), NOT resistance/refusal. This is PLANNING CONTEXT for proactivity, NOT a refusal/postpone. CONTINUITY FIRST: a context change is something to ADAPT around, never an automatic excuse to stop. Acknowledge it naturally so it can be confirmed and used to keep the user active — do NOT push cobrança, do NOT treat as resistance, and NEVER assume rest by default or 'max intensity to compensate'.",
     "- off_topic_distraction: user asks for joke/entertainment/research instead of action.",
     "- identity_manipulation: user asks to corrupt name/persona or be called a joke name.",
     "- therapist_manipulation: user asks GUTO to act as therapist or abandon training for therapy role.",
@@ -6015,7 +6057,8 @@ export function classifyProactiveContinuitySignal(rawInput: string): ProactiveCo
   }
   if (
     /\b\d{1,2}\s*(min|mins|minuto|minutos|minutes|minuti)\b/.test(text) ||
-    /\b(pouco tempo|pouquinho de tempo|little time|poco tempo)\b/.test(text)
+    /\b(pouco tempo|pouquinho de tempo|little time|poco tempo)\b/.test(text) ||
+    isLackOfTimeSignal(text)
   ) {
     return "short_window";
   }
@@ -7860,7 +7903,7 @@ async function askGutoModel({
     let workoutPlan: WorkoutPlan | null = null;
     if (parsedResponse.workoutPlan) {
       try {
-        workoutPlan = localizeWorkoutPlan(parsedResponse.workoutPlan as WorkoutPlan, selectedLanguage);
+        workoutPlan = localizeWorkoutPlan(parsedResponse.workoutPlan as WorkoutPlan, selectedLanguage, memory.trainingGoal);
       } catch (catalogError) {
         if (!isWorkoutCatalogValidationError(catalogError)) throw catalogError;
         console.warn("[GUTO] Rejected model workoutPlan outside official catalog:", catalogError.issues);
