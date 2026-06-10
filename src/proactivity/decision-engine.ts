@@ -61,8 +61,14 @@ function normalizeText(value?: string): string {
 // definitivo (vira ask_critical). Detecta o sinal a partir do texto da mem\u00f3ria.
 export type TravelTrainingSignal = 'can_train' | 'cannot_train' | 'unknown'
 
+// "(?: treinar)?" é OPCIONAL: dentro do contexto de viagem (detectTravelTrainingSignal
+// só roda quando travelDetected), a resposta curta "não vou conseguir" / "não consigo"
+// / "não tem como" / "impossível" JÁ resolve a indisponibilidade — não precisa repetir
+// "treinar". Sem isso, o follow-up curto caía em 'unknown' → ask_critical → LOOP
+// ("ele repergunta o mesmo"), violando a Continuidade Primeiro (confirmar→registrar→
+// adaptar→seguir). "não vai dar"/"não da pra" já eram standalone; alinhamos os demais.
 const TRAVEL_CANNOT_TRAIN =
-  /\b(nao vou conseguir treinar|nao consigo treinar|nao da pra treinar|nao tem como treinar|impossivel treinar|sem tempo pra treinar|sem tempo pro treino|nao vai dar pra treinar|nao vai dar|nao da pra|dia inteiro (ocupado|fora|sem tempo|de viagem)|wont be able to train|won t be able to train|can ?not train|cant train|no time to train|no way to train|impossible to train)\b/
+  /\b(nao vou conseguir|nao consigo|nao tem como|nao rola|impossivel|nao da pra(?: treinar)?|nao vai dar(?: pra treinar)?|sem tempo pra treinar|sem tempo pro treino|dia inteiro (ocupado|fora|sem tempo|de viagem)|wont be able to train|won t be able to train|can ?not train|cant train|no time to train|no way to train|impossible to train)\b/
 
 const TRAVEL_CAN_TRAIN =
   /\b(consigo treinar|vou treinar|posso treinar|da pra treinar|tem academia|academia do hotel|academia no hotel|treino no hotel|treino no quarto|treinar no hotel|treinar no quarto|treinar no destino|hotel tem academia|missao curta|i can train|i can work ?out|hotel gym|gym at the hotel|train at the hotel|treino adaptado|treinar viajando|levo o treino)\b/

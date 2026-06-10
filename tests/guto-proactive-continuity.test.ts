@@ -129,6 +129,15 @@ describe("Continuidade Primeiro — caso 3: 'viajo quarta, não vou conseguir tr
     assert.equal(classifyProactiveContinuitySignal("viajo quarta, não vou conseguir treinar"), "travel_cannot_train");
   });
 
+  it("detector: resposta CURTA de indisponibilidade (sem 'treinar') = cannot_train (anti-loop)", () => {
+    // No contexto de viagem, a resposta curta já resolve — não precisa repetir "treinar".
+    for (const phrase of ["não vou conseguir", "não consigo", "não tem como", "impossível", "não vai dar"]) {
+      assert.equal(detectTravelTrainingSignal(phrase), "cannot_train", `"${phrase}" deveria ser cannot_train`);
+    }
+    // Não confunde com quem CONSEGUE treinar.
+    assert.equal(detectTravelTrainingSignal("consigo treinar no hotel"), "can_train");
+  });
+
   it("fala: protege o dia e nega intensidade máxima (não afirma)", () => {
     const fala = buildProactiveContinuityFala("travel_cannot_train", "pt-BR", "Will");
     assert.match(fala, /proteg|indispon|reorganiz/i);
