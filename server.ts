@@ -345,7 +345,7 @@ interface GutoModelResponse {
     type: "confirm" | "discard" | "validate" | "request_discard" | "cancel_discard_request" | "update";
     memoryId: string;
     outcome?: "happened" | "postponed" | "discarded";
-    patch?: Partial<Pick<ProactiveMemory, "understood" | "dateText" | "dateParsed" | "location">>;
+    patch?: Partial<Pick<ProactiveMemory, "rawText" | "understood" | "dateText" | "dateParsed" | "location">>;
   } | null;
 }
 interface GutoVoiceProfile {
@@ -1352,6 +1352,7 @@ async function applyBackendProactiveAction(userId: string, action: BackendProact
 
   if (action.type === "confirm") {
     const result = await updateProactiveMemory(userId, action.memoryId, {
+      ...(action.patch || {}),
       status: "confirmed",
       confirmedAt: new Date().toISOString(),
       discardRequestedAt: undefined,
@@ -1966,6 +1967,163 @@ function buildArrivalMissionFala({
     return `${prefix}${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "a viagem" : "a agenda"} já está protegida. Hoje o jogo é outro: ${mission}.`;
   }
   return `${prefix}hoje ainda temos a missão aberta: ${mission}. Se você tiver 25 minutos, eu te puxo agora.`;
+}
+
+type PostConfirmationRedirectPriority =
+  | "daily_mission"
+  | "pending_workout"
+  | "pending_diet"
+  | "pending_validation"
+  | "operational_next_action";
+
+export const POST_CONFIRMATION_REDIRECT = {
+  name: "POST_CONFIRMATION_REDIRECT",
+  order: [
+    "daily_mission",
+    "pending_workout",
+    "pending_diet",
+    "pending_validation",
+    "operational_next_action",
+  ] as PostConfirmationRedirectPriority[],
+} as const;
+
+function hasDietActionAvailable(memory: GutoMemory): boolean {
+  return Boolean(memory.weeklyDietPlan || memory.dietGenerationStatus === "generated");
+}
+
+function hasPendingValidation(memory: GutoMemory): boolean {
+  return Boolean((memory.proactiveMemories || []).some((item) => item.status === "pending_validation"));
+}
+
+function shouldApplyPostConfirmationRedirect(impact?: ProactiveImpact | null): boolean {
+  return Boolean(
+    impact &&
+      impact.workoutEffect !== "ask_critical" &&
+      impact.missionEffect !== "ask_critical"
+  );
+}
+
+export function buildPostConfirmationRedirect(
+  memory: GutoMemory,
+  language: GutoLanguage,
+  day = todayKey()
+): { priority: PostConfirmationRedirectPriority; fala: string } {
+  const plan = getTodayMissionPlan(memory);
+  const mission = plan && !memory.trainedToday ? formatMissionLabel(plan) : "";
+  const limitation = getMeaningfulLimitation(memory);
+
+  if (mission) {
+    if (language === "en-US") {
+      return {
+        priority: "daily_mission",
+        fala: `Now come back with me to today.\n\nYour mission is ${mission}${limitation ? `, with ${limitation} care` : ""}.\n\nOpen the mission and start with the warm-up; when you're ready I keep going from here.`,
+      };
+    }
+    if (language === "it-IT") {
+      return {
+        priority: "daily_mission",
+        fala: `Ora torna con me a oggi.\n\nLa tua missione è ${mission}${limitation ? `, con attenzione a ${limitation}` : ""}.\n\nApri la missione e parti dal riscaldamento; quando sei pronto continuo da qui.`,
+      };
+    }
+    return {
+      priority: "daily_mission",
+      fala: `Agora volta comigo para hoje.\n\nSua missão é ${mission}${limitation ? `, com cuidado no ${limitation}` : ""}.\n\nAbre a missão e começa pelo aquecimento; quando estiver pronto eu continuo daqui.`,
+    };
+  }
+
+  const gate = buildTrainingExecutionGate(memory, language);
+  if (gate.status !== "ready_to_execute" && gate.instruction) {
+    if (language === "en-US") {
+      return {
+        priority: "pending_workout",
+        fala: `Now come back with me to today.\n\nNext action: ${gate.instruction}`,
+      };
+    }
+    if (language === "it-IT") {
+      return {
+        priority: "pending_workout",
+        fala: `Ora torna con me a oggi.\n\nProssima azione: ${gate.instruction}`,
+      };
+    }
+    return {
+      priority: "pending_workout",
+      fala: `Agora volta comigo para hoje.\n\nPróxima ação: ${gate.instruction}`,
+    };
+  }
+
+  if (hasDietActionAvailable(memory)) {
+    if (language === "en-US") {
+      return {
+        priority: "pending_diet",
+        fala: "Now come back with me to today.\n\nNext action: follow the next meal in your diet and tell me your real time window for the day.",
+      };
+    }
+    if (language === "it-IT") {
+      return {
+        priority: "pending_diet",
+        fala: "Ora torna con me a oggi.\n\nProssima azione: segui il prossimo pasto della dieta e dimmi la finestra reale della giornata.",
+      };
+    }
+    return {
+      priority: "pending_diet",
+      fala: "Agora volta comigo para hoje.\n\nPróxima ação: segue a próxima refeição da dieta e me diz tua janela real do dia.",
+    };
+  }
+
+  if (hasPendingValidation(memory)) {
+    if (language === "en-US") {
+      return {
+        priority: "pending_validation",
+        fala: "Now come back with me to today.\n\nNext action: answer the pending validation in one straight sentence so I clean up the week.",
+      };
+    }
+    if (language === "it-IT") {
+      return {
+        priority: "pending_validation",
+        fala: "Ora torna con me a oggi.\n\nProssima azione: rispondi alla validazione pendente in una frase secca, così pulisco la settimana.",
+      };
+    }
+    return {
+      priority: "pending_validation",
+      fala: "Agora volta comigo para hoje.\n\nPróxima ação: responde a validação pendente em uma frase direta para eu limpar a semana.",
+    };
+  }
+
+  if (language === "en-US") {
+    return {
+      priority: "operational_next_action",
+      fala: "Now come back with me to today.\n\nNext action: tell me your real time window for today and I fit the safest minimum.",
+    };
+  }
+  if (language === "it-IT") {
+    return {
+      priority: "operational_next_action",
+      fala: "Ora torna con me a oggi.\n\nProssima azione: dimmi la tua finestra reale di oggi e incastro il minimo sicuro.",
+    };
+  }
+  return {
+    priority: "operational_next_action",
+    fala: "Agora volta comigo para hoje.\n\nPróxima ação: me diz qual janela real você tem hoje e eu encaixo o mínimo seguro.",
+  };
+}
+
+export function appendPostConfirmationRedirect(
+  response: GutoModelResponse,
+  memory: GutoMemory,
+  language: GutoLanguage
+): GutoModelResponse {
+  if (!response.fala || response.expectedResponse || response.acao === "updateWorkout") return response;
+  const current = normalize(response.fala);
+  if (
+    current.includes("agora volta comigo") ||
+    current.includes("now come back with me") ||
+    current.includes("ora torna con me")
+  ) {
+    return response;
+  }
+  const redirect = buildPostConfirmationRedirect(memory, language).fala;
+  response.fala = `${response.fala.trim()}\n\n${redirect}`;
+  return response;
 }
 
 function buildProactiveInput(memory: GutoMemory, slot: string, context: OperationalContext) {
@@ -5915,6 +6073,10 @@ export function classifyContractIntentFallback(input: {
   }
 
   if (/\b(ombro|joelho|lombar|cotovelo|punho|dor|shoulder|knee|back pain|dolore|spalla|ginocchio)\b/.test(text)) {
+    const expectingLimitation = normalizeExpectedResponse(input.previousExpectedResponse)?.context === "training_limitations";
+    if (!expectingLimitation && hasCalibrationProfileLocked(input.memory) && !getUnresolvedTrainingPathology(input.memory)) {
+      return { kind: "physical_pain", confidence: 0.8, reason: "fallback_physical_pain", limitationText: raw };
+    }
     return { kind: "clear_limitation", confidence: 0.74, reason: "fallback_limitation", age, limitationText: raw };
   }
 
@@ -6244,6 +6406,14 @@ export function buildProactiveContinuityFala(
     },
   };
   return (byLang[language] || byLang["pt-BR"])[signal];
+}
+
+function buildNoMissionShortWindowFala(language: GutoLanguage, name: string): string {
+  return pickByLanguage(language, {
+    "pt-BR": `Janela curta registrada, ${name}. Eu trabalho com o mínimo seguro de hoje sem inventar plano que não está ativo.`,
+    "en-US": `Short window logged, ${name}. I work with today's safest minimum without inventing a plan that is not active.`,
+    "it-IT": `Finestra corta registrata, ${name}. Lavoro col minimo sicuro di oggi senza inventare un piano non attivo.`,
+  });
 }
 
 function buildProactiveContinuityContextPrompt(
@@ -6637,12 +6807,18 @@ function enforceTrainingFlowCertainty(
   // continuidade e sai — nunca cai na escada nem no "descanso por padrão".
   if (contractIntent.kind === "proactive_context") {
     const signal = classifyProactiveContinuitySignal(rawInput);
+    const noMissionShortWindow = signal === "short_window" && !getTodayMissionPlan(memory);
     setContractResponse(response, {
-      fala: buildProactiveContinuityFala(signal, language, getGutoCallName(memory)),
+      fala: noMissionShortWindow
+        ? buildNoMissionShortWindowFala(language, getGutoCallName(memory))
+        : buildProactiveContinuityFala(signal, language, getGutoCallName(memory)),
       acao: "none",
       expectedResponse: null,
       workoutPlan: null,
     });
+    if (signal === "busy_week" || signal === "short_window") {
+      appendPostConfirmationRedirect(response, memory, language);
+    }
     return;
   }
   const copy: Record<GutoLanguage, Record<"askStatus" | "askLimitations" | "closeNoLimitation" | "closeLimitation", { fala: string; instruction?: string }>> = {
@@ -6759,6 +6935,7 @@ function enforceTrainingFlowCertainty(
       workoutPlan: null,
       avatarEmotion: "alert",
     });
+    appendPostConfirmationRedirect(response, memory, language);
     return;
   }
 
@@ -6940,6 +7117,7 @@ function enforceTrainingFlowCertainty(
         workoutPlan: null,
         avatarEmotion: "alert",
       });
+      appendPostConfirmationRedirect(response, memory, language);
       return;
     }
 
@@ -7636,7 +7814,7 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
     };
   }
 
-  if (memory && (isWorkoutExecutionRequest(rawInput) || /\b(treino|allenamento|workout|treinar|allenarmi)\b/.test(text))) {
+  if (memory && isWorkoutExecutionRequest(rawInput)) {
     const storedLimitation = normalize(memory.trainingLimitations || memory.trainingPathology || "");
     if (/\b(joelho|knee|ginocchio)\b/.test(storedLimitation)) {
       return {
@@ -7772,6 +7950,9 @@ async function askGutoModel({
 
   if (!GEMINI_API_KEY) {
     const fallback = buildTechnicalFallback(selectedLanguage, input || "", memory, normalizedExpectedResponse);
+    const fallbackProactiveMemoryAction = resolverResult?.engaged
+      ? (resolverResult.action ?? null)
+      : null;
     const contractIntent = await classifyContractIntent({
       rawInput: input || "",
       language: selectedLanguage,
@@ -7862,6 +8043,7 @@ async function askGutoModel({
         fallback.acao = "none";
       }
     }
+    fallback.proactiveMemoryAction = fallbackProactiveMemoryAction;
     return finalize(fallback);
   }
 
@@ -8027,7 +8209,10 @@ async function askGutoModel({
       const composed = await composeContextualResponse(
         buildProactiveContinuityContextPrompt(memory, selectedLanguage, input || "", signal),
       );
-      const fala = composed || buildProactiveContinuityFala(signal, selectedLanguage, getGutoCallName(memory));
+      const noMissionShortWindow = signal === "short_window" && !getTodayMissionPlan(memory);
+      const fala = noMissionShortWindow
+        ? buildNoMissionShortWindowFala(selectedLanguage, getGutoCallName(memory))
+        : (composed || buildProactiveContinuityFala(signal, selectedLanguage, getGutoCallName(memory)));
       setContractResponse(parsedResponse, {
         fala,
         acao: "none",
@@ -8035,6 +8220,9 @@ async function askGutoModel({
         workoutPlan: null,
         avatarEmotion: "default",
       });
+      if (signal === "busy_week" || signal === "short_window") {
+        appendPostConfirmationRedirect(parsedResponse, memory, selectedLanguage);
+      }
       commitMemoryDecision(memory);
       return finalize(parsedResponse);
     }
@@ -8258,6 +8446,9 @@ async function askGutoModel({
   } catch (error) {
     console.error(`[GUTO] Fluxo IA falhou para o input: "${input.substring(0, 100)}..."`, error);
     const fallback = buildTechnicalFallback(selectedLanguage, input || "", memory, normalizedExpectedResponse);
+    const fallbackProactiveMemoryAction = resolverResult?.engaged
+      ? (resolverResult.action ?? null)
+      : null;
     const contractIntent = await classifyContractIntent({
       rawInput: input || "",
       language: selectedLanguage,
@@ -8353,6 +8544,7 @@ async function askGutoModel({
         fallback.acao = "none";
       }
     }
+    fallback.proactiveMemoryAction = fallbackProactiveMemoryAction;
     return finalize(fallback);
   }
 }
@@ -9385,6 +9577,12 @@ app.post("/guto", requireActiveUser, async (req, res) => {
       }
       if (proactiveActionResult?.impact?.decision.message) {
         result.fala = proactiveActionResult.impact.decision.message;
+        result.acao = "none";
+        result.expectedResponse = null;
+        result.workoutPlan = null;
+        if (shouldApplyPostConfirmationRedirect(proactiveActionResult.impact)) {
+          appendPostConfirmationRedirect(result, getMemory(userId), selectedLanguage);
+        }
       }
     }
     result.proactiveMemoryAction = null;
@@ -9929,12 +10127,24 @@ app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
     const userCountry = freshMemory.country || "";
     const selectedLanguage = normalizeLanguage(freshMemory.language || "pt-BR");
     enrichPendingMemories(userId, userCountry, freshMemory.countryCode, selectedLanguage).catch(() => {});
+    const fala = impactResult.impact?.decision.message && shouldApplyPostConfirmationRedirect(impactResult.impact)
+      ? appendPostConfirmationRedirect(
+          {
+            fala: impactResult.impact.decision.message,
+            acao: "none",
+            expectedResponse: null,
+          },
+          freshMemory,
+          selectedLanguage
+        ).fala
+      : undefined;
 
     res.json({
       ok: true,
       memory: impactResult.memory || updated,
       impact: impactResult.impact,
       memoryPatch: impactResult.memoryPatch,
+      ...(fala ? { fala } : {}),
     });
   } catch (e) {
     console.error("[GUTO][proactivity] confirm error:", e);

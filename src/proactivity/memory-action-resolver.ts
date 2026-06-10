@@ -6,19 +6,24 @@
 // but state transitions still need guardrails and memory-id validation.
 
 import { getProactiveMemoriesByStatus, getProactiveMemories } from './proactive-store'
+import { detectTravelTrainingSignal } from './decision-engine'
 import type { ProactiveMemory } from './types'
 import { config } from '../config'
 
 // ─── Output types ──────────────────────────────────────────────────────────────
 
 export type ResolvedAction =
-  | { type: 'confirm'; memoryId: string }
+  | {
+      type: 'confirm'
+      memoryId: string
+      patch?: Partial<Pick<ProactiveMemory, 'rawText' | 'understood' | 'dateText' | 'dateParsed' | 'location'>>
+    }
   | { type: 'discard'; memoryId: string }
   | { type: 'request_discard'; memoryId: string }
   | {
       type: 'update'
       memoryId: string
-      patch: Partial<Pick<ProactiveMemory, 'understood' | 'dateText' | 'dateParsed' | 'location'>>
+      patch: Partial<Pick<ProactiveMemory, 'rawText' | 'understood' | 'dateText' | 'dateParsed' | 'location'>>
     }
   | { type: 'validate'; memoryId: string; outcome: 'happened' | 'postponed' | 'discarded' }
   | { type: 'cancel_discard_request'; memoryId: string }
@@ -213,6 +218,24 @@ function actionFallback(action: ResolvedAction, memory: ProactiveMemory, languag
   return undefined
 }
 
+function appendUserReplyToMemoryPatch(
+  memory: ProactiveMemory,
+  userInput: string
+): Partial<Pick<ProactiveMemory, 'rawText' | 'understood'>> {
+  const reply = userInput.replace(/\s+/g, ' ').trim().slice(0, 180)
+  if (!reply) return {}
+  const append = (base: string | undefined): string => {
+    const cleanBase = (base || '').replace(/\s+/g, ' ').trim()
+    if (!cleanBase) return reply
+    if (cleanBase.toLowerCase().includes(reply.toLowerCase())) return cleanBase
+    return `${cleanBase}; ${reply}`.slice(0, 360)
+  }
+  return {
+    rawText: append(memory.rawText),
+    understood: append(memory.understood),
+  }
+}
+
 function relevantMemoriesForSemantic(all: ProactiveMemory[]): ProactiveMemory[] {
   const active = new Set(['pending_confirmation', 'confirmed', 'enriched', 'surfaced', 'pending_validation'])
   return all
@@ -279,7 +302,31 @@ function sanitizeSemanticAction(raw: unknown, memories: ProactiveMemory[], langu
   if (!memory || typeof action.type !== 'string') return null
 
   if (action.type === 'confirm' && memory.status === 'pending_confirmation') {
-    return { engaged: true, action: { type: 'confirm', memoryId }, reason }
+    const patchInput =
+      'patch' in action && action.patch && typeof action.patch === 'object'
+        ? (action.patch as Record<string, unknown>)
+        : {}
+    const patch: Partial<Pick<ProactiveMemory, 'rawText' | 'understood' | 'dateText' | 'dateParsed' | 'location'>> = {}
+    if (typeof patchInput.rawText === 'string' && patchInput.rawText.trim()) {
+      patch.rawText = patchInput.rawText.trim().slice(0, 360)
+    }
+    if (typeof patchInput.understood === 'string' && patchInput.understood.trim()) {
+      patch.understood = patchInput.understood.trim().slice(0, 360)
+    }
+    if (typeof patchInput.dateText === 'string' && patchInput.dateText.trim()) {
+      patch.dateText = patchInput.dateText.trim().slice(0, 80)
+    }
+    if (typeof patchInput.dateParsed === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(patchInput.dateParsed)) {
+      patch.dateParsed = patchInput.dateParsed
+    }
+    if (typeof patchInput.location === 'string' && patchInput.location.trim()) {
+      patch.location = patchInput.location.trim().slice(0, 120)
+    }
+    return {
+      engaged: true,
+      action: { type: 'confirm', memoryId, ...(Object.keys(patch).length ? { patch } : {}) },
+      reason,
+    }
   }
   if (action.type === 'discard' && (memory.status === 'pending_confirmation' || memory.discardRequestedAt)) {
     return { engaged: true, action: { type: 'discard', memoryId }, reason }
@@ -520,6 +567,25 @@ export async function resolveProactiveMemoryActionFromUserReply(
           action: null,
           fallbackMessage: correctionFallback(target, language),
           reason: 'correction_no_endpoint',
+        }
+      }
+
+      // Resposta curta ao dado crítico da viagem ("não vou conseguir treinar",
+      // "consigo treinar no hotel") confirma a memória e completa o contexto
+      // antes de gerar impacto. Sem isso, "não vou..." caía como descarte da
+      // viagem ou como pedido de treino no fallback técnico.
+      if (target.type === 'trip') {
+        const travelTrainingSignal = detectTravelTrainingSignal(userInput)
+        if (travelTrainingSignal !== 'unknown') {
+          return {
+            engaged: true,
+            action: {
+              type: 'confirm',
+              memoryId: target.id,
+              patch: appendUserReplyToMemoryPatch(target, userInput),
+            },
+            reason: `confirmed_trip_training_${travelTrainingSignal}`,
+          }
         }
       }
 

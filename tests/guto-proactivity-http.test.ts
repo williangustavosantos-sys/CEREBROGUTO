@@ -157,6 +157,7 @@ describe("proactivity HTTP cycle", () => {
       memory: { status: string; confirmedAt?: string; decision?: { reason: string } }
       impact?: { status: string; memoryId: string; workoutEffect: string; missionEffect: string }
       memoryPatch?: { proactiveImpacts?: Array<{ memoryId: string; status: string; workoutEffect: string }> }
+      fala?: string
     }
     assert.equal(body.ok, true)
     assert.equal(body.memory.status, "confirmed")
@@ -169,6 +170,7 @@ describe("proactivity HTTP cycle", () => {
     // dado crítico antes de marcar descanso/treino).
     assert.equal(body.impact?.workoutEffect, "ask_critical")
     assert.equal(body.impact?.missionEffect, "ask_critical")
+    assert.equal(body.fala, undefined, "ask_critical ainda precisa do dado crítico; não redireciona para missão")
     assert.equal(body.memoryPatch?.proactiveImpacts?.[0]?.memoryId, memory.id)
 
     const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<
