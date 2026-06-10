@@ -1838,6 +1838,136 @@ function shouldSendLimitationCheck(memory: GutoMemory, day: string) {
   return true;
 }
 
+const WEEKDAY_KEYS: WeekDayKey[] = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+
+function getWeekDayKey(now = new Date()): WeekDayKey {
+  const dateKey = todayKey(now);
+  const [year, month, day] = dateKey.split("-").map(Number) as [number, number, number];
+  return WEEKDAY_KEYS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+}
+
+function hasWorkoutPlanExercises(plan?: WorkoutPlan | null): plan is WorkoutPlan {
+  return Boolean(plan?.exercises?.length);
+}
+
+function getTodayMissionPlan(memory: GutoMemory, now = new Date()): WorkoutPlan | null {
+  const weeklyPlan = memory.weeklyWorkoutPlan?.days?.[getWeekDayKey(now)] || null;
+  if (hasWorkoutPlanExercises(weeklyPlan)) return weeklyPlan;
+  if (hasWorkoutPlanExercises(memory.lastWorkoutPlan)) return memory.lastWorkoutPlan;
+  return null;
+}
+
+function getMeaningfulLimitation(memory: GutoMemory): string {
+  const raw = `${memory.trainingPathology || ""} ${memory.trainingLimitations || ""}`.trim();
+  const normalized = normalize(raw);
+  if (!normalized) return "";
+  if (
+    [
+      "sem dor",
+      "sem dores",
+      "sem limitacao",
+      "sem limitacoes",
+      "nenhuma",
+      "none",
+      "no pain",
+      "no pain or injury",
+      "nessuna",
+      "nessun dolore",
+    ].includes(normalized)
+  ) {
+    return "";
+  }
+  if (/\b(ombro|shoulder|spalla)\b/.test(normalized)) return "ombro";
+  if (/\b(joelho|knee|ginocchio)\b/.test(normalized)) return "joelho";
+  if (/\b(lombar|coluna|back|schiena)\b/.test(normalized)) return "lombar";
+  return raw.split(/[,.]/)[0]?.trim() || raw;
+}
+
+function getArrivalContextImpact(memory: GutoMemory, day: string): ProactiveImpact | null {
+  const candidates = (memory.proactiveImpacts || [])
+    .filter((impact) => {
+      if (impact.status !== "active") return false;
+      if (!["travel", "commitment"].includes(impact.decision.reason)) return false;
+      return impact.affectedDates.some((date) => date >= day);
+    })
+    .sort((a, b) => {
+      const aDate = a.affectedDates.find((date) => date >= day) || "";
+      const bDate = b.affectedDates.find((date) => date >= day) || "";
+      if (aDate !== bDate) return aDate.localeCompare(bDate);
+      return b.priority - a.priority;
+    });
+  return candidates[0] || null;
+}
+
+function formatDateWeekday(dateKey: string | undefined, language: GutoLanguage): string {
+  if (!dateKey) return "";
+  const date = new Date(`${dateKey.slice(0, 10)}T12:00:00.000Z`);
+  return new Intl.DateTimeFormat(language, { timeZone: GUTO_TIME_ZONE, weekday: "long" }).format(date);
+}
+
+function formatMissionLabel(plan: WorkoutPlan): string {
+  return (plan.title || plan.focus || plan.summary || "missão de hoje").replace(/\s+/g, " ").trim();
+}
+
+function buildArrivalMissionFala({
+  memory,
+  plan,
+  language,
+  day,
+}: {
+  memory: GutoMemory;
+  plan: WorkoutPlan | null;
+  language: GutoLanguage;
+  day: string;
+}): string | null {
+  if (!plan || memory.trainedToday) return null;
+
+  const name = sanitizeDisplayName(memory.name ?? "");
+  const prefix = name ? `${name}, ` : "";
+  const mission = formatMissionLabel(plan);
+  const limitation = getMeaningfulLimitation(memory);
+  const impact = getArrivalContextImpact(memory, day);
+  const impactDate = impact?.affectedDates.find((date) => date >= day);
+  const weekday = formatDateWeekday(impactDate, language);
+
+  if (language === "en-US") {
+    if (limitation && impact) {
+      return `${prefix}today's mission is ready with ${limitation} care. ${weekday ? `${weekday}'s ` : ""}${impact.decision.reason === "travel" ? "trip" : "schedule"} is already protected. Start now, or should I adjust more?`;
+    }
+    if (limitation) {
+      return `${prefix}today's mission is ready: ${mission}, with ${limitation} care. Is it calm, or should I adjust more before we start?`;
+    }
+    if (impact) {
+      return `${prefix}${weekday ? `${weekday}'s ` : "that "} ${impact.decision.reason === "travel" ? "trip" : "schedule"} is already protected. Today is another game: ${mission}.`;
+    }
+    return `${prefix}today's mission is open: ${mission}. If you have 25 minutes, I pull you in now.`;
+  }
+
+  if (language === "it-IT") {
+    if (limitation && impact) {
+      return `${prefix}la missione di oggi è pronta con attenzione a ${limitation}. ${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "il viaggio" : "l'agenda"} è già protetta. Partiamo o adatto ancora?`;
+    }
+    if (limitation) {
+      return `${prefix}la missione di oggi è pronta: ${mission}, con attenzione a ${limitation}. È tranquillo o adatto ancora prima di partire?`;
+    }
+    if (impact) {
+      return `${prefix}${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "il viaggio" : "l'agenda"} è già protetta. Oggi si cambia gioco: ${mission}.`;
+    }
+    return `${prefix}la missione di oggi è aperta: ${mission}. Se hai 25 minuti, ti porto dentro adesso.`;
+  }
+
+  if (limitation && impact) {
+    return `${prefix}tua missão de hoje já está pronta com cuidado no ${limitation}. ${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "a viagem" : "a agenda"} já está protegida. Começo contigo agora ou ajusto mais?`;
+  }
+  if (limitation) {
+    return `${prefix}tua missão de hoje já está pronta: ${mission}, com cuidado no ${limitation}. Antes de começar: está tranquilo ou ajusto mais?`;
+  }
+  if (impact) {
+    return `${prefix}${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "a viagem" : "a agenda"} já está protegida. Hoje o jogo é outro: ${mission}.`;
+  }
+  return `${prefix}hoje ainda temos a missão aberta: ${mission}. Se você tiver 25 minutos, eu te puxo agora.`;
+}
+
 function buildProactiveInput(memory: GutoMemory, slot: string, context: OperationalContext) {
   const slotGoal: Record<string, string> = {
     "12": "assumir que ainda dá tempo hoje e pedir contexto operacional em uma frase",
@@ -8763,13 +8893,14 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
     : shouldSendLimitationCheck(memory, day)
       ? "limitation_check"
       : getProactiveSlot();
+  const missionPlanAtOpen = getTodayMissionPlan(memory);
 
   if (!slot || (memory.trainedToday && slot !== "limitation_check" && slot !== "arrival")) {
     return res.json({ due: false });
   }
 
   const sentToday = memory.proactiveSent[day] || [];
-  if (!force && sentToday.includes(slot)) {
+  if (sentToday.includes(slot)) {
     return res.json({ due: false });
   }
 
@@ -8778,6 +8909,39 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
     const minutesSinceLastActive = (new Date().getTime() - new Date(memory.lastActiveAt).getTime()) / 60000;
     if (minutesSinceLastActive < 120) {
       return res.json({ due: false });
+    }
+  }
+
+  if (slot === "arrival" && missionPlanAtOpen && !memory.trainedToday) {
+    const freshMemory = getMemory(userId);
+    const selectedLang = normalizeLanguage(language || freshMemory.language);
+    const fala = buildArrivalMissionFala({
+      memory: freshMemory,
+      plan: missionPlanAtOpen,
+      language: selectedLang,
+      day,
+    });
+
+    if (fala) {
+      freshMemory.proactiveSent[day] = [...(freshMemory.proactiveSent[day] || []), slot];
+      freshMemory.hasSeenChatOpening = true;
+      freshMemory.lastActiveAt = new Date().toISOString();
+      saveMemory(freshMemory);
+      return res.json({
+        due: true,
+        slot,
+        ...attachAvatarEmotion({
+          response: {
+            fala,
+            acao: "none",
+            expectedResponse: null,
+            avatarEmotion: "reward",
+          },
+          memory: freshMemory,
+          context: operationalContext,
+          slot,
+        }),
+      });
     }
   }
 
@@ -8835,12 +8999,35 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
       }
     }
 
+    const selectedLang = normalizeLanguage(language || memory.language);
+    const missionPlanForArrival = missionPlanAtOpen || result.workoutPlan || null;
+    const missionArrivalFala = slot === "arrival"
+      ? buildArrivalMissionFala({
+          memory,
+          plan: missionPlanForArrival,
+          language: selectedLang,
+          day,
+        })
+      : null;
+
+    if (missionArrivalFala) {
+      result.fala = missionArrivalFala;
+      result.expectedResponse = null;
+      result.avatarEmotion = "reward";
+      if (missionPlanAtOpen) {
+        result.acao = "none";
+        result.workoutPlan = null;
+      } else if (result.workoutPlan) {
+        result.acao = "updateWorkout";
+      }
+    }
+
     // Chegada do usuário recorrente: se a semana ainda não foi aberta com ele, a
     // presença real (doc Proatividade, "Gatilho de Coleta Semanal") é PERGUNTAR
     // sobre a semana — de forma DETERMINÍSTICA, não dependendo do modelo (que
     // prioriza empurrar treino e ignora o sinal suave do injector). Dispara
     // 1×/semana: openWeeklyConversation marca a semana como aberta.
-    if (slot === "arrival" && memory.hasSeenChatOpening && !memory.trainedToday) {
+    if (slot === "arrival" && memory.hasSeenChatOpening && !memory.trainedToday && !missionArrivalFala) {
       try {
         const weekly = await getWeeklyCheckResult(userId, operationalContext.weekday);
         if (weekly.shouldOpenWeekly) {
