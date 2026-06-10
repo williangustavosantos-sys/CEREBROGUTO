@@ -64,6 +64,20 @@ test('viajo quarta (sem dado crítico): NÃO cria impacto definitivo, pergunta o
   assert.equal(impact.pushEffect, 'none')
 })
 
+test('viagem + resposta CURTA "não vou conseguir" (sem "treinar"): resolve protegido, NÃO repergunta (anti-loop)', () => {
+  // Bug do loop: turn-1 "viajo sexta" → ask_critical (pergunta se consegue treinar);
+  // turn-2 resposta curta "não vou conseguir" precisa RESOLVER em dia protegido, não
+  // voltar a ask_critical e repetir a pergunta. Antes a regex exigia "treinar" junto.
+  const memory = makeMemory('pm_trip_short_no', 'trip', 'viajo quarta, não vou conseguir', { dateText: 'quarta' })
+  const { decision, adaptation } = pipeline(memory)
+
+  assert.equal(decision.reason, 'travel')
+  assert.notEqual(decision.kind, 'ask_critical') // NÃO pode repetir a pergunta
+  assert.equal(adaptation.workoutEffect, 'protected')
+  assert.equal(adaptation.isProtectedDay, true)
+  assert.equal(adaptation.shouldAskCritical, false)
+})
+
 test('viajo quarta + consigo treinar no hotel: mantém treino adaptado, NÃO descanso', () => {
   const memory = makeMemory('pm_trip_hotel', 'trip', 'viajo quarta, consigo treinar no hotel', { dateText: 'quarta' })
   const { decision, adaptation } = pipeline(memory)
