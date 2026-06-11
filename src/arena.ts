@@ -47,6 +47,34 @@ function isSameMonth(dateA: Date, dateB: Date): boolean {
   return dateA.getFullYear() === dateB.getFullYear() && dateA.getMonth() === dateB.getMonth();
 }
 
+// weeklyXp/monthlyXp são contadores com reset preguiçoso: awardArenaXp só zera
+// na PRÓXIMA concessão. Sem projeção na leitura, o ranking semanal continua
+// exibindo XP da semana passada para quem não ganhou XP depois da virada
+// ("Reinicia segunda-feira" virava só label). Não muta o store — só a projeção.
+export function projectPeriodCounters(
+  profile: Pick<
+    ArenaProfile,
+    "weeklyXp" | "monthlyXp" | "validatedWorkoutsWeek" | "validatedWorkoutsMonth" | "lastWorkoutValidatedAt"
+  >,
+  now: Date = new Date()
+): { weeklyXp: number; monthlyXp: number; validatedWorkoutsWeek: number; validatedWorkoutsMonth: number } {
+  let { weeklyXp, monthlyXp, validatedWorkoutsWeek, validatedWorkoutsMonth } = profile;
+  if (profile.lastWorkoutValidatedAt) {
+    const lastDate = new Date(profile.lastWorkoutValidatedAt);
+    if (!Number.isNaN(lastDate.getTime())) {
+      if (!isSameWeek(lastDate, now)) {
+        weeklyXp = 0;
+        validatedWorkoutsWeek = 0;
+      }
+      if (!isSameMonth(lastDate, now)) {
+        monthlyXp = 0;
+        validatedWorkoutsMonth = 0;
+      }
+    }
+  }
+  return { weeklyXp, monthlyXp, validatedWorkoutsWeek, validatedWorkoutsMonth };
+}
+
 function buildUniquePairName(displayName: string, arenaGroupId: string, ownUserId: string): string {
   const base = `GUTO & ${displayName.toUpperCase()}`;
   const existing = getProfilesByGroup(arenaGroupId).filter((p) => p.userId !== ownUserId);
@@ -223,39 +251,45 @@ function deriveStatus(xp: number, workouts: number): string {
 }
 
 export function getWeeklyRanking(arenaGroupId: string) {
-  const profiles = getProfilesByGroup(arenaGroupId).filter((p) => isVisibleInRanking(p.userId));
-  const sorted = [...profiles].sort((a, b) => b.weeklyXp - a.weeklyXp);
+  const now = new Date();
+  const profiles = getProfilesByGroup(arenaGroupId)
+    .filter((p) => isVisibleInRanking(p.userId))
+    .map((p) => ({ profile: p, period: projectPeriodCounters(p, now) }));
+  const sorted = [...profiles].sort((a, b) => b.period.weeklyXp - a.period.weeklyXp);
   return {
     rankingType: "weekly",
     arenaGroupId,
     resetLabel: "Reinicia segunda-feira",
-    items: sorted.map((p, i) => ({
+    items: sorted.map(({ profile: p, period }, i) => ({
       position: i + 1,
       userId: p.userId,
       pairName: p.pairName,
       avatarStage: getAvatarStage(p.totalXp),
-      xp: p.weeklyXp,
-      validatedWorkouts: p.validatedWorkoutsWeek,
-      status: deriveStatus(p.weeklyXp, p.validatedWorkoutsWeek),
+      xp: period.weeklyXp,
+      validatedWorkouts: period.validatedWorkoutsWeek,
+      status: deriveStatus(period.weeklyXp, period.validatedWorkoutsWeek),
     })),
   };
 }
 
 export function getMonthlyRanking(arenaGroupId: string) {
-  const profiles = getProfilesByGroup(arenaGroupId).filter((p) => isVisibleInRanking(p.userId));
-  const sorted = [...profiles].sort((a, b) => b.monthlyXp - a.monthlyXp);
+  const now = new Date();
+  const profiles = getProfilesByGroup(arenaGroupId)
+    .filter((p) => isVisibleInRanking(p.userId))
+    .map((p) => ({ profile: p, period: projectPeriodCounters(p, now) }));
+  const sorted = [...profiles].sort((a, b) => b.period.monthlyXp - a.period.monthlyXp);
   return {
     rankingType: "monthly",
     arenaGroupId,
     resetLabel: "Reinicia no próximo mês",
-    items: sorted.map((p, i) => ({
+    items: sorted.map(({ profile: p, period }, i) => ({
       position: i + 1,
       userId: p.userId,
       pairName: p.pairName,
       avatarStage: getAvatarStage(p.totalXp),
-      xp: p.monthlyXp,
-      validatedWorkouts: p.validatedWorkoutsMonth,
-      status: deriveStatus(p.monthlyXp, p.validatedWorkoutsMonth),
+      xp: period.monthlyXp,
+      validatedWorkouts: period.validatedWorkoutsMonth,
+      status: deriveStatus(period.monthlyXp, period.validatedWorkoutsMonth),
     })),
   };
 }
@@ -316,13 +350,14 @@ export function getMyArenaProfile(userId: string, arenaGroupId: string) {
   if (!profile || profile.arenaGroupId !== arenaGroupId) return null;
   const nextEvolutionXp = getNextEvolutionXp(profile.totalXp);
   const avatarStage = getAvatarStage(profile.totalXp);
+  const period = projectPeriodCounters(profile);
   return {
     userId: profile.userId,
     pairName: profile.pairName,
     avatarStage,
     totalXp: profile.totalXp,
-    weeklyXp: profile.weeklyXp,
-    monthlyXp: profile.monthlyXp,
+    weeklyXp: period.weeklyXp,
+    monthlyXp: period.monthlyXp,
     currentStreak: profile.currentStreak,
     validatedWorkoutsTotal: profile.validatedWorkoutsTotal,
     nextEvolutionXp,

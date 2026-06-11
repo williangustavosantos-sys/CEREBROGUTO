@@ -1685,7 +1685,10 @@ function appendXpEvent(memory: GutoMemory, type: XpEventType, amount: number, da
 
 function grantInitialXp(memory: GutoMemory) {
   if (memory.initialXpGranted) return memory;
-  appendXpEvent(memory, "grant_initial_xp", 100, "lifetime");
+  // Datado com o dia real (não "lifetime"): o Percurso mostra o XP do dia
+  // somando xpEvents por data, e o pacto É XP ganho hoje. A idempotência não
+  // depende do id do evento — initialXpGranted é o guard de re-concessão.
+  appendXpEvent(memory, "grant_initial_xp", 100);
   memory.initialXpGranted = true;
 
   // Bug fix: os 100 XP iniciais também precisam ir pra Arena, senão o
