@@ -30,6 +30,8 @@ describe("GUTO turn contract", () => {
     // Recusa e feedback negativo NÃO podem virar "vamos treinar" no fallback.
     assert.equal(isWorkoutExecutionRequest("não quero treinar hoje"), false);
     assert.equal(isWorkoutExecutionRequest("não vou treinar"), false);
+    assert.equal(isWorkoutExecutionRequest("não vou conseguir treinar"), false);
+    assert.equal(isWorkoutExecutionRequest("não consigo treinar sexta"), false);
     assert.equal(isWorkoutExecutionRequest("não gostei do treino de hoje, achei chato"), false);
     assert.equal(isWorkoutExecutionRequest("esse treino tá chato"), false);
     assert.equal(isWorkoutExecutionRequest("I don't want to train today"), false);

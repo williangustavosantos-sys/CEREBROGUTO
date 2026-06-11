@@ -17,6 +17,10 @@ let originalFetch: typeof globalThis.fetch
 
 const USER_ID = "proactivity-http-user"
 
+function buildGeminiResponse(text: string) {
+  return { candidates: [{ content: { parts: [{ text }] } }] }
+}
+
 function authHeaders(userId = USER_ID) {
   const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!)
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
@@ -28,6 +32,56 @@ function writeUserMemory(userId: string, data: Record<string, unknown>) {
     : {}
   store[userId] = { userId, name: "Will", language: "pt-BR", ...data }
   writeFileSync(testMemoryFile, JSON.stringify(store, null, 2))
+}
+
+function dateKey(offsetDays = 0) {
+  const date = new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000)
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: process.env.GUTO_TIME_ZONE || "Europe/Rome",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date)
+}
+
+function missionPlan(title = "Corpo inteiro controlado") {
+  return {
+    title,
+    focus: title,
+    focusKey: "full_body",
+    dateLabel: "hoje",
+    scheduledFor: dateKey(),
+    summary: "Missão do dia pronta.",
+    exercises: [
+      {
+        id: "agachamento_livre",
+        name: "Agachamento livre",
+        canonicalNamePt: "Agachamento livre",
+        muscleGroup: "legs_core",
+        sets: 3,
+        reps: "10",
+        rest: "60s",
+        cue: "Desce controlado.",
+        note: "Controle antes de carga.",
+        videoUrl: "/videos/agachamento_livre.mp4",
+        videoProvider: "local",
+        sourceFileName: "agachamento_livre.mp4",
+      },
+    ],
+  }
+}
+
+function mockGutoModel(payload: Record<string, unknown>) {
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    if (url.includes("generativelanguage.googleapis.com")) {
+      return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify(payload))), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    }
+    return originalFetch(input as RequestInfo, init)
+  }) as typeof globalThis.fetch
 }
 
 describe("proactivity HTTP cycle", () => {
@@ -52,6 +106,7 @@ describe("proactivity HTTP cycle", () => {
   })
 
   beforeEach(() => {
+    globalThis.fetch = originalFetch
     writeFileSync(testMemoryFile, JSON.stringify({}, null, 2))
     writeUserMemory(USER_ID, { proactiveMemories: [], weeklyConversation: null })
   })
@@ -102,6 +157,7 @@ describe("proactivity HTTP cycle", () => {
       memory: { status: string; confirmedAt?: string; decision?: { reason: string } }
       impact?: { status: string; memoryId: string; workoutEffect: string; missionEffect: string }
       memoryPatch?: { proactiveImpacts?: Array<{ memoryId: string; status: string; workoutEffect: string }> }
+      fala?: string
     }
     assert.equal(body.ok, true)
     assert.equal(body.memory.status, "confirmed")
@@ -114,6 +170,7 @@ describe("proactivity HTTP cycle", () => {
     // dado crítico antes de marcar descanso/treino).
     assert.equal(body.impact?.workoutEffect, "ask_critical")
     assert.equal(body.impact?.missionEffect, "ask_critical")
+    assert.equal(body.fala, undefined, "ask_critical ainda precisa do dado crítico; não redireciona para missão")
     assert.equal(body.memoryPatch?.proactiveImpacts?.[0]?.memoryId, memory.id)
 
     const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<
@@ -244,5 +301,131 @@ describe("proactivity HTTP cycle", () => {
     assert.equal(store[USER_ID]?.weeklyConversation?.extractionDone, true)
 
     globalThis.fetch = originalFetch
+  })
+
+  it("GET /guto/proactive?force=1 abre com missão pronta e não com saudação genérica", async () => {
+    mockGutoModel({
+      fala: "Olá! Como posso te ajudar hoje?",
+      acao: "none",
+      expectedResponse: null,
+    })
+    writeUserMemory(USER_ID, {
+      name: "Maria",
+      hasSeenChatOpening: true,
+      trainedToday: false,
+      totalXp: 100,
+      xpEvents: [],
+      completedWorkoutDates: [],
+      proactiveSent: {},
+      proactiveMemories: [],
+      proactiveImpacts: [],
+      weeklyConversation: null,
+      lastWorkoutPlan: missionPlan(),
+      trainingGoal: "fat_loss",
+      preferredTrainingLocation: "gym",
+      trainingLevel: "returning",
+      trainingPathology: "sem dor",
+      trainingLimitations: "sem dor",
+    })
+
+    const res = await fetch(`${baseUrl}/guto/proactive?language=pt-BR&force=1`, { headers: authHeaders() })
+    assert.equal(res.status, 200)
+    const body = (await res.json()) as { due: boolean; slot: string; fala: string }
+    assert.equal(body.due, true)
+    assert.equal(body.slot, "arrival")
+    assert.match(body.fala, /Maria/i)
+    assert.match(body.fala, /miss[aã]o/i)
+    assert.doesNotMatch(body.fala, /Como posso te ajudar hoje/i)
+
+    const second = await fetch(`${baseUrl}/guto/proactive?language=pt-BR&force=1`, { headers: authHeaders() })
+    assert.equal(second.status, 200)
+    const secondBody = (await second.json()) as { due: boolean }
+    assert.equal(secondBody.due, false, "arrival não deve repetir no mesmo dia")
+
+    const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<
+      string,
+      { totalXp?: number; xpEvents?: unknown[]; completedWorkoutDates?: unknown[]; lastWorkoutPlan?: { title?: string } }
+    >
+    assert.equal(store[USER_ID]?.totalXp, 100)
+    assert.equal(store[USER_ID]?.xpEvents?.length, 0)
+    assert.equal(store[USER_ID]?.completedWorkoutDates?.length, 0)
+    assert.equal(store[USER_ID]?.lastWorkoutPlan?.title, "Corpo inteiro controlado")
+  })
+
+  it("GET /guto/proactive?force=1 com missão e ombro menciona cuidado físico", async () => {
+    mockGutoModel({ fala: "Olá! Como posso te ajudar hoje?", acao: "none", expectedResponse: null })
+    writeUserMemory(USER_ID, {
+      name: "Maria",
+      hasSeenChatOpening: true,
+      trainedToday: false,
+      proactiveSent: {},
+      proactiveMemories: [],
+      proactiveImpacts: [],
+      weeklyConversation: null,
+      lastWorkoutPlan: missionPlan("Corpo inteiro"),
+      trainingPathology: "ombro direito sensível",
+      trainingLimitations: "ombro direito sensível",
+    })
+
+    const res = await fetch(`${baseUrl}/guto/proactive?language=pt-BR&force=1`, { headers: authHeaders() })
+    const body = (await res.json()) as { fala: string }
+    assert.match(body.fala, /ombro/i)
+    assert.match(body.fala, /cuidado|ajusto|ajust/i)
+    assert.doesNotMatch(body.fala, /Como posso te ajudar hoje/i)
+  })
+
+  it("GET /guto/proactive?force=1 com viagem protegida não repete pergunta semanal", async () => {
+    mockGutoModel({ fala: "Olá! Como posso te ajudar hoje?", acao: "none", expectedResponse: null })
+    const tripDate = dateKey(2)
+    writeUserMemory(USER_ID, {
+      name: "Maria",
+      hasSeenChatOpening: true,
+      trainedToday: false,
+      proactiveSent: {},
+      proactiveMemories: [],
+      weeklyConversation: null,
+      lastWorkoutPlan: missionPlan("Corpo inteiro sem impacto"),
+      trainingPathology: "sem dor",
+      trainingLimitations: "sem dor",
+      proactiveImpacts: [
+        {
+          id: "impact-trip-protected",
+          memoryId: "memory-trip-protected",
+          status: "active",
+          surfaces: ["chat", "workout", "mission"],
+          priority: 90,
+          affectedDates: [tripDate],
+          workoutEffect: "protected",
+          missionEffect: "protected",
+          pushEffect: "avoid_blind_charge",
+          xpEffect: "no_free_xp_context_only",
+          arenaEffect: "validation_required",
+          pathEffect: "adapted_context",
+          evolutionEffect: "adapted_context",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          decision: {
+            id: "decision-trip-protected",
+            memoryId: "memory-trip-protected",
+            kind: "adapt_day",
+            reason: "travel",
+            priority: 90,
+            affectedDates: [tripDate],
+            workoutEffect: "protected",
+            missionEffect: "protected",
+            message: "Viagem protegida.",
+            createdAt: new Date().toISOString(),
+          },
+        },
+      ],
+    })
+
+    const res = await fetch(`${baseUrl}/guto/proactive?language=pt-BR&force=1`, { headers: authHeaders() })
+    const body = (await res.json()) as { fala: string }
+    assert.match(body.fala, /viagem/i)
+    assert.match(body.fala, /proteg/i)
+    assert.match(body.fala, /Corpo inteiro|miss[aã]o/i)
+    assert.doesNotMatch(body.fala, /como t[aá] tua semana|Tem viagem/i)
+    assert.doesNotMatch(body.fala, /Como posso te ajudar hoje/i)
   })
 })

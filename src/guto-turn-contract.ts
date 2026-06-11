@@ -26,9 +26,9 @@ export function isWorkoutExecutionRequest(value: string): boolean {
   // e "não gostei do treino" caíam no fallback técnico que PROMOVIA treino
   // ("Bora começar" + updateWorkout) — ignorando a recusa/feedback do usuário.
   const refusalOrDislike =
-    /\b(nao quero|nao vou|nao estou a fim|nao to a fim|nao gostei|nao curti|nem a fim|sem vontade|sem saco|odiei|detestei|preguica)\b/.test(normalized) ||
-    /\b(dont want|do not want|wont|not feeling|didnt like|did not like|hate|boring|lame)\b/.test(normalized) ||
-    /\b(non voglio|non vado|non mi va|non mi piace|odio|noioso|zero sbatti|non ho voglia)\b/.test(normalized) ||
+    /\b(nao quero|nao vou|nao consigo|nao vou conseguir|nao tem como|nao estou a fim|nao to a fim|nao gostei|nao curti|nem a fim|sem vontade|sem saco|odiei|detestei|preguica)\b/.test(normalized) ||
+    /\b(dont want|do not want|wont|won t|cant|can not|cannot|not able|not feeling|didnt like|did not like|hate|boring|lame)\b/.test(normalized) ||
+    /\b(non voglio|non vado|non posso|non riesco|non ce la faccio|non mi va|non mi piace|odio|noioso|zero sbatti|non ho voglia)\b/.test(normalized) ||
     /\b(chato|chata|entediante|pessimo|horrivel)\b/.test(normalized);
   return !refusalOrDislike;
 }
