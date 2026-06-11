@@ -226,6 +226,40 @@ describe("POST_CONFIRMATION_REDIRECT", () => {
     assert.equal(body.workoutPlan ?? null, null);
   });
 
+  it("proactive_context + travel_cannot_train protege o dia e redireciona para hoje", async () => {
+    writeUserMemory(USER_ID, {
+      lastWorkoutPlan: missionPlan("Corpo Inteiro com cuidado no ombro"),
+    });
+
+    const before = readUserMemory();
+    const body = await postGuto("viajo sexta, não consigo treinar nesse dia");
+    const afterMemory = readUserMemory();
+
+    assert.match(body.fala, /proteg|indispon|reorganiz/i);
+    assert.match(body.fala, /Agora volta comigo para hoje/i);
+    assert.match(body.fala, /miss[aã]o|Pr[oó]xima a[cç][aã]o/i);
+    assert.notEqual(body.acao, "updateWorkout");
+    assert.equal(body.workoutPlan ?? null, null);
+    assert.equal(afterMemory.totalXp, before.totalXp);
+    assert.deepEqual(afterMemory.xpEvents, before.xpEvents);
+    assert.deepEqual(afterMemory.completedWorkoutDates, before.completedWorkoutDates);
+    assert.equal(afterMemory.lastWorkoutPlan?.title, before.lastWorkoutPlan?.title);
+    assert.deepEqual(afterMemory.proactiveImpacts || [], before.proactiveImpacts || []);
+  });
+
+  it("ask_critical de viagem sem dado de treino nao redireciona", async () => {
+    writeUserMemory(USER_ID, {
+      lastWorkoutPlan: missionPlan("Corpo Inteiro com cuidado no ombro"),
+    });
+
+    const body = await postGuto("viajo sexta");
+
+    assert.match(body.fala, /vai ter algum tempo|imposs[ií]vel/i);
+    assert.doesNotMatch(body.fala, /Agora volta comigo para hoje/i);
+    assert.notEqual(body.acao, "updateWorkout");
+    assert.equal(body.workoutPlan ?? null, null);
+  });
+
   it("sem missao ativa nao inventa missao e usa redirecionamento neutro", async () => {
     writeUserMemory(USER_ID, {
       lastWorkoutPlan: null,
