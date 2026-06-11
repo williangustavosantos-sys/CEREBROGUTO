@@ -7854,6 +7854,39 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
     };
   }
 
+  // Feedback negativo sobre o treino: o Gemini caiu mas o GUTO pode perguntar
+  // o que não agradou — abre ajuste em vez de retornar erro genérico.
+  if (/\b(nao gostei|nao curti|odiei|detestei|chato|chata|horrivel|horrível|pessimo|did not like|didnt like|hate the workout|hated the workout|non mi [eè] piaciut|non mi piace)\b/.test(text)) {
+    return {
+      fala: selectedLanguage === "en-US"
+        ? "Tell me what you didn't like — the intensity, the exercises, or something else? I'll adjust."
+        : selectedLanguage === "it-IT"
+          ? "Dimmi cosa non ti è piaciuto: l'intensità, gli esercizi o altro? Aggiusto."
+          : "Me diz o que não gostou: a intensidade, os exercícios ou outra coisa? Ajusto.",
+      acao: "none",
+      expectedResponse: null,
+    };
+  }
+
+  // Pergunta sobre a dieta: responde com o plano persistido em vez de retornar
+  // erro genérico (o Gemini caiu mas a memória tem o plano disponível).
+  if (/\b(dieta|diet|piano alimentare)\b/.test(text)) {
+    const dietData = (memory?.weeklyDietPlan as unknown) as { meals?: Array<{ name?: string; totalKcal?: number }> } | undefined;
+    const firstMeal = dietData?.meals?.[0];
+    const fala = selectedLanguage === "en-US"
+      ? firstMeal?.name
+        ? `Your diet is set: ${firstMeal.name} (${firstMeal.totalKcal ?? "?"} kcal) and more meals. Adjust anything?`
+        : "Your diet plan is set. Which meal do you want to check?"
+      : selectedLanguage === "it-IT"
+        ? firstMeal?.name
+          ? `La tua dieta è pronta: ${firstMeal.name} (${firstMeal.totalKcal ?? "?"} kcal) e altri pasti. Vuoi cambiare qualcosa?`
+          : "Il tuo piano dieta è pronto. Quale pasto vuoi controllare?"
+        : firstMeal?.name
+          ? `Tua dieta está pronta: ${firstMeal.name} (${firstMeal.totalKcal ?? "?"} kcal) e mais refeições. Quer ajustar alguma?`
+          : "Tua dieta está montada. Quer checar as refeições ou macros do dia?";
+    return { fala, acao: "none", expectedResponse: null };
+  }
+
   // Calibragem fechada e nenhum ramo específico combinou: o Gemini caiu e não
   // dá pra responder a pergunta com o fallback determinístico. Honesto, sem
   // regredir intake (não pergunta local/ritmo que já estão na memória).
