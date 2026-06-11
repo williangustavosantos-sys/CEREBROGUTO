@@ -6408,6 +6408,10 @@ export function buildProactiveContinuityFala(
   return (byLang[language] || byLang["pt-BR"])[signal];
 }
 
+function shouldRedirectAfterProactiveContextSignal(signal: ProactiveContinuitySignal): boolean {
+  return signal === "busy_week" || signal === "short_window" || signal === "travel_cannot_train";
+}
+
 function buildNoMissionShortWindowFala(language: GutoLanguage, name: string): string {
   return pickByLanguage(language, {
     "pt-BR": `Janela curta registrada, ${name}. Eu trabalho com o mínimo seguro de hoje sem inventar plano que não está ativo.`,
@@ -6816,7 +6820,7 @@ function enforceTrainingFlowCertainty(
       expectedResponse: null,
       workoutPlan: null,
     });
-    if (signal === "busy_week" || signal === "short_window") {
+    if (shouldRedirectAfterProactiveContextSignal(signal)) {
       appendPostConfirmationRedirect(response, memory, language);
     }
     return;
@@ -8220,7 +8224,7 @@ async function askGutoModel({
         workoutPlan: null,
         avatarEmotion: "default",
       });
-      if (signal === "busy_week" || signal === "short_window") {
+      if (shouldRedirectAfterProactiveContextSignal(signal)) {
         appendPostConfirmationRedirect(parsedResponse, memory, selectedLanguage);
       }
       commitMemoryDecision(memory);
