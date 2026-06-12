@@ -36,9 +36,20 @@ describe("GUTO turn contract", () => {
     assert.equal(isWorkoutExecutionRequest("esse treino tá chato"), false);
     assert.equal(isWorkoutExecutionRequest("I don't want to train today"), false);
     assert.equal(isWorkoutExecutionRequest("non voglio allenarmi"), false);
+    // Regressão it-IT (real-user-scenarios): feedback negativo e conclusão de
+    // treino contêm "allenamento" mas NÃO são pedido de execução — antes caíam no
+    // ramo de execução do fallback e perdiam o ajuste/validação.
+    assert.equal(isWorkoutExecutionRequest("non mi è piaciuto l'allenamento"), false);
+    assert.equal(isWorkoutExecutionRequest("non mi è piaciuta la scheda"), false);
+    assert.equal(isWorkoutExecutionRequest("ho fatto l'allenamento"), false);
+    assert.equal(isWorkoutExecutionRequest("allenamento fatto"), false);
+    assert.equal(isWorkoutExecutionRequest("fiz o treino"), false);
+    // Pedido REAL em italiano continua sendo execução.
+    assert.equal(isWorkoutExecutionRequest("prepara il mio allenamento di oggi"), true);
     // E o roteador de intenção operacional não classifica recusa como workout.
     assert.notEqual(detectImmediateOperationalIntent("não quero treinar hoje"), "workout");
     assert.notEqual(detectImmediateOperationalIntent("não gostei do treino"), "workout");
+    assert.notEqual(detectImmediateOperationalIntent("non mi è piaciuto l'allenamento"), "workout");
   });
 
   it("normaliza locais curtos sem virar motor principal de comportamento", () => {

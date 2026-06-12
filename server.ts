@@ -1945,6 +1945,30 @@ function describeLimitationCare(memory: GutoMemory, language: GutoLanguage): str
   return `com cuidado em ${term}`;
 }
 
+// Frase de cuidado para o RESUMO do treino oficial. Usa verbos de
+// proteção/redução ("proteggo/riduco", "protegendo/reduzindo") que evidenciam,
+// no próprio plano, respeito à limitação calibrada — e cita a região. Sobrevive
+// à re-localização do summary (que só guarda o rótulo do foco). "" quando não há
+// limitação real (ex.: "sem dor"/"senza dolore").
+function buildPlanLimitationCareSummary(memory: GutoMemory, language: GutoLanguage): string {
+  if (!hasMeaningfulLimitation(memory)) return "";
+  const lang = normalizeLanguage(language);
+  const focus = getLimitationFocus(getDedupedLimitationRaw(memory), lang);
+  if (lang === "en-US") return `Protecting ${focus} and reducing the load.`;
+  if (lang === "it-IT") return `Proteggo ${focus} e riduco il carico.`;
+  return `Protegendo ${focus} e reduzindo a carga.`;
+}
+
+// Anexa a frase de cuidado ao summary do plano oficial (mutação in-place). Só
+// age quando há limitação real e a frase ainda não está presente.
+function attachLimitationCareToPlanSummary(plan: WorkoutPlan, memory: GutoMemory, language: string): void {
+  const care = buildPlanLimitationCareSummary(memory, normalizeLanguage(language));
+  if (!care) return;
+  const base = (plan.summary || plan.focus || "").trim();
+  if (normalize(base).includes(normalize(care))) return;
+  plan.summary = base ? `${base} ${care}` : care;
+}
+
 function getArrivalContextImpact(memory: GutoMemory, day: string): ProactiveImpact | null {
   const candidates = (memory.proactiveImpacts || [])
     .filter((impact) => {
@@ -7933,7 +7957,7 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
 
   // Feedback negativo sobre o treino: o Gemini caiu mas o GUTO pode perguntar
   // o que não agradou — abre ajuste em vez de retornar erro genérico.
-  if (/\b(nao gostei|nao curti|odiei|detestei|chato|chata|horrivel|horrível|pessimo|did not like|didnt like|hate the workout|hated the workout|non mi [eè] piaciut|non mi piace)\b/.test(text)) {
+  if (/\b(nao gostei|nao curti|odiei|detestei|chato|chata|horrivel|horrível|pessimo|did not like|didnt like|hate the workout|hated the workout|non mi [eè] piaciuto|non mi [eè] piaciuta|non mi sono piaciuti|non mi sono piaciute|non mi piace)\b/.test(text)) {
     return {
       fala: selectedLanguage === "en-US"
         ? "Tell me what you didn't like — the intensity, the exercises, or something else? I'll adjust."
@@ -7962,6 +7986,25 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
           ? `Tua dieta está pronta: ${firstMeal.name} (${firstMeal.totalKcal ?? "?"} kcal) e mais refeições. Quer ajustar alguma?`
           : "Tua dieta está montada. Quer checar as refeições ou macros do dia?";
     return { fala, acao: "none", expectedResponse: null };
+  }
+
+  // Indisponibilidade de treino do dia ("não consigo treinar nesse dia",
+  // "non riesco ad allenarmi quel giorno") SEM palavra de viagem explícita:
+  // continuidade primeiro — protege o dia e reorganiza a semana, nunca cai no
+  // erro técnico genérico. NÃO toca XP, NÃO reabre calibragem.
+  if (
+    memory &&
+    (
+      /\b(nao consigo treinar|nao consigo ir treinar|nao da pra treinar|nao vou conseguir treinar|nao vou poder treinar|nao posso treinar|impossivel treinar)\b/.test(text) ||
+      /\bnon riesco ad? allenarmi\b|\bnon posso allenarmi\b|\bimpossibile allenarmi\b|\bnon ce la faccio ad? allenarmi\b/.test(text) ||
+      /cannot train|can not train|can'?t train|unable to train|won'?t be able to train/.test(text)
+    )
+  ) {
+    return {
+      fala: buildProactiveContinuityFala("travel_cannot_train", selectedLanguage, getGutoCallName(memory)),
+      acao: "none",
+      expectedResponse: null,
+    };
   }
 
   // Calibragem fechada e nenhum ramo específico combinou: o Gemini caiu e não
@@ -8057,6 +8100,13 @@ async function askGutoModel({
 
   const finalize = (response: GutoModelResponse) => {
     const languageSafeResponse = assertAndRepairVisibleLanguage(response, selectedLanguage);
+    // Evidência de respeito à limitação no plano oficial: a re-localização do
+    // summary (acima) só guarda o rótulo do foco, então o cuidado é (re)anexado
+    // aqui, depois da localização, para todo treino gerado pelo GUTO. "" quando
+    // não há limitação real ou quando o treino é travado pelo coach.
+    if (languageSafeResponse.workoutPlan && !isCoachLockedWorkout(languageSafeResponse.workoutPlan)) {
+      attachLimitationCareToPlanSummary(languageSafeResponse.workoutPlan, memory, selectedLanguage);
+    }
     return attachAvatarEmotion({
       response: languageSafeResponse,
       memory,
@@ -9192,9 +9242,12 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
 
 app.get("/guto/proactive", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
-  const language = String(req.query.language || "pt-BR");
   const force = req.query.force === "1";
   const memory = getMemory(userId);
+  // Idioma é lei: quando o cliente não envia ?language, o idioma soberano é o da
+  // memória do usuário (calibrado no onboarding). Sem isso, a chegada proativa
+  // saía sempre em pt-BR para usuários it-IT/en-US (vazamento de idioma).
+  const language = String(req.query.language || memory.language || "pt-BR");
   const operationalContext = getOperationalContext(new Date(), language || memory.language);
   const day = todayKey();
   const slot = force

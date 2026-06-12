@@ -223,6 +223,37 @@ function resolveKnownFoodRestrictionLocally(rawValue: string, now: string): Reso
     };
   }
 
+  // Padrões alimentares estruturados e inequívocos (vegetariano/vegano) — são
+  // escolhas dietéticas conhecidas, NÃO restrições confusas que precisam de
+  // esclarecimento. O gerador de dieta já sabe montar plano vegetariano/vegano.
+  const veganPatterns = ["vegano", "vegana", "vegan", "veganismo", "plant based", "plantbased"];
+  if (hasPattern(veganPatterns)) {
+    return {
+      field: "foodRestriction",
+      rawValue,
+      rawValueHash: hashRaw(rawValue),
+      normalizedValue: "vegan",
+      riskTags: ["dietary_choice"],
+      confidence: 0.95,
+      status: "clear",
+      resolvedAt: now,
+    };
+  }
+
+  const vegetarianPatterns = ["vegetariano", "vegetariana", "vegetarian", "vegetarianismo", "ovo lacto vegetariano", "lacto ovo vegetarian"];
+  if (hasPattern(vegetarianPatterns)) {
+    return {
+      field: "foodRestriction",
+      rawValue,
+      rawValueHash: hashRaw(rawValue),
+      normalizedValue: "vegetarian",
+      riskTags: ["dietary_choice"],
+      confidence: 0.95,
+      status: "clear",
+      resolvedAt: now,
+    };
+  }
+
   return null;
 }
 
@@ -263,11 +294,16 @@ export function resolveKnownPathologyLocally(rawValue: string, now: string): Res
     "estou livre",
     "no pain",
     "pain free",
+    "no limitation",
     "no limitations",
     "non ho dolori",
+    "senza dolore",
     "senza dolori",
+    "senza fastidio",
     "nessun dolore",
+    "nessun fastidio",
     "nessuna",
+    "libero",
   ];
 
   if (noLimitationPatterns.some((pattern) => normalized.includes(pattern))) {
