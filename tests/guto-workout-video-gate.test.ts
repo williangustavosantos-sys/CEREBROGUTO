@@ -635,9 +635,17 @@ describe("workout catalog video gate", () => {
       body: JSON.stringify({ ...basePayload, imageBase64: validImageBase64 }),
     });
     assert.equal(validated.status, 200);
-    const validatedBody = await validated.json() as { validation: { status: string; xp: number } };
+    const validatedBody = await validated.json() as { validation: { status: string; xp: number; gutoMessage: string } };
     assert.equal(validatedBody.validation.status, "validated");
     assert.equal(validatedBody.validation.xp, 100);
+
+    // P0 — pós-validação fecha o ciclo de condução (doc: "nunca deixe o usuário
+    // em decisão aberta; defina a próxima ação"). A mensagem deve (1) reconhecer
+    // a conquista, (2) orientar recuperação e (3) apontar a próxima ação.
+    const postMsg = validatedBody.validation.gutoMessage;
+    assert.match(postMsg, /fechad|validad|conta/i, `pós-validação deve reconhecer a conquista: ${postMsg}`);
+    assert.match(postMsg, /hidrat|água|prote[íi]na|recupera/i, `pós-validação deve orientar recuperação: ${postMsg}`);
+    assert.match(postMsg, /amanh[ãa]|pr[óo]xim|te puxo/i, `pós-validação deve definir a próxima ação: ${postMsg}`);
 
     store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, any>;
     memory = store["student-video-gate"];
