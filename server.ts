@@ -1861,30 +1861,88 @@ function getTodayMissionPlan(memory: GutoMemory, now = new Date()): WorkoutPlan 
   return null;
 }
 
-function getMeaningfulLimitation(memory: GutoMemory): string {
-  const raw = `${memory.trainingPathology || ""} ${memory.trainingLimitations || ""}`.trim();
+const CLEAR_NO_LIMITATION_TOKENS = [
+  "sem dor",
+  "sem dores",
+  "sem limitacao",
+  "sem limitacoes",
+  "nenhuma",
+  "none",
+  "no pain",
+  "no pain or injury",
+  "nessuna",
+  "nessun dolore",
+  "senza dolore",
+];
+
+// Região do corpo -> termos reconhecidos (já normalizados: sem acento, minúsculo).
+// "ginoc?c?h?io" tolera o typo recorrente do modelo ("ginoccio" sem h).
+const LIMITATION_REGION_MATCHERS: Array<{ key: string; match: RegExp }> = [
+  { key: "knee", match: /\b(joelho|ginoc?c?hio|ginocch?io|ginoccio|knee|rodilla)\b/ },
+  { key: "shoulder", match: /\b(ombro|spalla|shoulder|hombro)\b/ },
+  { key: "lowerBack", match: /\b(lombar|coluna|costas|schiena|lower ?back|espalda)\b/ },
+  { key: "hip", match: /\b(quadril|anca|hip|cadera)\b/ },
+  { key: "ankle", match: /\b(tornozelo|caviglia|ankle|tobillo)\b/ },
+  { key: "wrist", match: /\b(punho|polso|wrist|muneca)\b/ },
+];
+
+// Fragmento de "cuidado" já com a preposição correta por idioma — evita o vazamento
+// do rótulo PT cru ("joelho") em frases it-IT/en-US e a gramática quebrada
+// ("con attenzione a il ginocchio"). pt-BR mantém saída idêntica à anterior.
+const LIMITATION_CARE_LABEL: Record<string, Record<GutoLanguage, string>> = {
+  knee: { "pt-BR": "com cuidado no joelho", "en-US": "with knee care", "it-IT": "con attenzione al ginocchio" },
+  shoulder: { "pt-BR": "com cuidado no ombro", "en-US": "with shoulder care", "it-IT": "con attenzione alla spalla" },
+  lowerBack: { "pt-BR": "com cuidado na lombar", "en-US": "with lower-back care", "it-IT": "con attenzione alla schiena" },
+  hip: { "pt-BR": "com cuidado no quadril", "en-US": "with hip care", "it-IT": "con attenzione all'anca" },
+  ankle: { "pt-BR": "com cuidado no tornozelo", "en-US": "with ankle care", "it-IT": "con attenzione alla caviglia" },
+  wrist: { "pt-BR": "com cuidado no punho", "en-US": "with wrist care", "it-IT": "con attenzione al polso" },
+};
+
+function collapseRepeatedWords(value: string): string {
+  return value.replace(/\b(\p{L}+)(\s+\1\b)+/giu, "$1");
+}
+
+// Junta patologia + limitação SEM duplicar quando os dois campos guardam o mesmo
+// valor (origem do "ginoccio ginoccio"), e colapsa palavras repetidas no texto.
+function getDedupedLimitationRaw(memory: GutoMemory): string {
+  const a = collapseRepeatedWords(String(memory.trainingPathology || "").trim());
+  const b = collapseRepeatedWords(String(memory.trainingLimitations || "").trim());
+  if (!a && !b) return "";
+  if (!a) return b;
+  if (!b) return a;
+  const na = normalize(a);
+  const nb = normalize(b);
+  if (na === nb || na.includes(nb)) return a;
+  if (nb.includes(na)) return b;
+  return collapseRepeatedWords(`${a} ${b}`);
+}
+
+function isClearNoLimitation(normalized: string): boolean {
+  return CLEAR_NO_LIMITATION_TOKENS.includes(normalized);
+}
+
+/** Há limitação corporal real (não vazia, não "sem dor")? */
+function hasMeaningfulLimitation(memory: GutoMemory): boolean {
+  const normalized = normalize(getDedupedLimitationRaw(memory));
+  return Boolean(normalized) && !isClearNoLimitation(normalized);
+}
+
+/**
+ * Frase de cuidado localizada e gramaticalmente correta no idioma escolhido.
+ * Retorna "" quando não há limitação real. "Idioma é lei": nunca devolve rótulo PT
+ * cru em frase it-IT/en-US.
+ */
+function describeLimitationCare(memory: GutoMemory, language: GutoLanguage): string {
+  const raw = getDedupedLimitationRaw(memory);
   const normalized = normalize(raw);
-  if (!normalized) return "";
-  if (
-    [
-      "sem dor",
-      "sem dores",
-      "sem limitacao",
-      "sem limitacoes",
-      "nenhuma",
-      "none",
-      "no pain",
-      "no pain or injury",
-      "nessuna",
-      "nessun dolore",
-    ].includes(normalized)
-  ) {
-    return "";
-  }
-  if (/\b(ombro|shoulder|spalla)\b/.test(normalized)) return "ombro";
-  if (/\b(joelho|knee|ginocchio)\b/.test(normalized)) return "joelho";
-  if (/\b(lombar|coluna|back|schiena)\b/.test(normalized)) return "lombar";
-  return raw.split(/[,.]/)[0]?.trim() || raw;
+  if (!normalized || isClearNoLimitation(normalized)) return "";
+  const lang = normalizeLanguage(language);
+  const region = LIMITATION_REGION_MATCHERS.find((item) => item.match.test(normalized));
+  if (region) return LIMITATION_CARE_LABEL[region.key][lang];
+  const term = raw.split(/[,.;]/)[0]?.trim() || raw;
+  if (lang === "en-US") return `with care on ${term}`;
+  if (lang === "it-IT") return `con attenzione a ${term}`;
+  return `com cuidado em ${term}`;
 }
 
 function getArrivalContextImpact(memory: GutoMemory, day: string): ProactiveImpact | null {
@@ -1929,17 +1987,17 @@ function buildArrivalMissionFala({
   const name = sanitizeDisplayName(memory.name ?? "");
   const prefix = name ? `${name}, ` : "";
   const mission = formatMissionLabel(plan);
-  const limitation = getMeaningfulLimitation(memory);
+  const care = describeLimitationCare(memory, language);
   const impact = getArrivalContextImpact(memory, day);
   const impactDate = impact?.affectedDates.find((date) => date >= day);
   const weekday = formatDateWeekday(impactDate, language);
 
   if (language === "en-US") {
-    if (limitation && impact) {
-      return `${prefix}today's mission is ready with ${limitation} care. ${weekday ? `${weekday}'s ` : ""}${impact.decision.reason === "travel" ? "trip" : "schedule"} is already protected. Start now, or should I adjust more?`;
+    if (care && impact) {
+      return `${prefix}today's mission is ready ${care}. ${weekday ? `${weekday}'s ` : ""}${impact.decision.reason === "travel" ? "trip" : "schedule"} is already protected. Start now, or should I adjust more?`;
     }
-    if (limitation) {
-      return `${prefix}today's mission is ready: ${mission}, with ${limitation} care. Is it calm, or should I adjust more before we start?`;
+    if (care) {
+      return `${prefix}today's mission is ready: ${mission}, ${care}. Is it calm, or should I adjust more before we start?`;
     }
     if (impact) {
       return `${prefix}${weekday ? `${weekday}'s ` : "that "} ${impact.decision.reason === "travel" ? "trip" : "schedule"} is already protected. Today is another game: ${mission}.`;
@@ -1948,11 +2006,11 @@ function buildArrivalMissionFala({
   }
 
   if (language === "it-IT") {
-    if (limitation && impact) {
-      return `${prefix}la missione di oggi è pronta con attenzione a ${limitation}. ${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "il viaggio" : "l'agenda"} è già protetta. Partiamo o adatto ancora?`;
+    if (care && impact) {
+      return `${prefix}la missione di oggi è pronta ${care}. ${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "il viaggio" : "l'agenda"} è già protetta. Partiamo o adatto ancora?`;
     }
-    if (limitation) {
-      return `${prefix}la missione di oggi è pronta: ${mission}, con attenzione a ${limitation}. È tranquillo o adatto ancora prima di partire?`;
+    if (care) {
+      return `${prefix}la missione di oggi è pronta: ${mission}, ${care}. Va tutto bene o adatto ancora prima di iniziare?`;
     }
     if (impact) {
       return `${prefix}${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "il viaggio" : "l'agenda"} è già protetta. Oggi si cambia gioco: ${mission}.`;
@@ -1960,11 +2018,11 @@ function buildArrivalMissionFala({
     return `${prefix}la missione di oggi è aperta: ${mission}. Se hai 25 minuti, ti porto dentro adesso.`;
   }
 
-  if (limitation && impact) {
-    return `${prefix}tua missão de hoje já está pronta com cuidado no ${limitation}. ${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "a viagem" : "a agenda"} já está protegida. Começo contigo agora ou ajusto mais?`;
+  if (care && impact) {
+    return `${prefix}tua missão de hoje já está pronta ${care}. ${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "a viagem" : "a agenda"} já está protegida. Começo contigo agora ou ajusto mais?`;
   }
-  if (limitation) {
-    return `${prefix}tua missão de hoje já está pronta: ${mission}, com cuidado no ${limitation}. Antes de começar: está tranquilo ou ajusto mais?`;
+  if (care) {
+    return `${prefix}tua missão de hoje já está pronta: ${mission}, ${care}. Antes de começar: está tranquilo ou ajusto mais?`;
   }
   if (impact) {
     return `${prefix}${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "a viagem" : "a agenda"} já está protegida. Hoje o jogo é outro: ${mission}.`;
@@ -2013,24 +2071,24 @@ export function buildPostConfirmationRedirect(
 ): { priority: PostConfirmationRedirectPriority; fala: string } {
   const plan = getTodayMissionPlan(memory);
   const mission = plan && !memory.trainedToday ? formatMissionLabel(plan) : "";
-  const limitation = getMeaningfulLimitation(memory);
+  const care = describeLimitationCare(memory, language);
 
   if (mission) {
     if (language === "en-US") {
       return {
         priority: "daily_mission",
-        fala: `Now come back with me to today.\n\nYour mission is ${mission}${limitation ? `, with ${limitation} care` : ""}.\n\nOpen the mission and start with the warm-up; when you're ready I keep going from here.`,
+        fala: `Now come back with me to today.\n\nYour mission is ${mission}${care ? `, ${care}` : ""}.\n\nOpen the mission and start with the warm-up; when you're ready I keep going from here.`,
       };
     }
     if (language === "it-IT") {
       return {
         priority: "daily_mission",
-        fala: `Ora torna con me a oggi.\n\nLa tua missione è ${mission}${limitation ? `, con attenzione a ${limitation}` : ""}.\n\nApri la missione e parti dal riscaldamento; quando sei pronto continuo da qui.`,
+        fala: `Ora torna con me a oggi.\n\nLa tua missione è ${mission}${care ? `, ${care}` : ""}.\n\nApri la missione e parti dal riscaldamento; quando sei pronto continuo da qui.`,
       };
     }
     return {
       priority: "daily_mission",
-      fala: `Agora volta comigo para hoje.\n\nSua missão é ${mission}${limitation ? `, com cuidado no ${limitation}` : ""}.\n\nAbre a missão e começa pelo aquecimento; quando estiver pronto eu continuo daqui.`,
+      fala: `Agora volta comigo para hoje.\n\nSua missão é ${mission}${care ? `, ${care}` : ""}.\n\nAbre a missão e começa pelo aquecimento; quando estiver pronto eu continuo daqui.`,
     };
   }
 
@@ -4545,7 +4603,11 @@ function getUnresolvedTrainingPathology(memory: GutoMemory): string | null {
   if (typeof raw !== "string" || !raw.trim()) return null;
   const normalized = normalize(raw);
   if (isDeclaredNoTrainingLimitation(normalized)) return null;
-  if (hasAnyNormalized(normalized, ["joelho", "knee", "ombro", "shoulder", "spalla", "empurrar", "push", "spingere"])) return null;
+  // Região corporal clara em PT/EN/IT (joelho/ginocchio, ombro/spalla, lombar/schiena…)
+  // já é segura o suficiente p/ o gate — a proteção real vem de deriveBodyRegionFromPathology.
+  // Sem isto, "ginocchio" (it) caía como patologia não resolvida e o GUTO recobrava idade/dor.
+  if (deriveBodyRegionFromPathology(memory)) return null;
+  if (hasAnyNormalized(normalized, ["empurrar", "push", "spingere"])) return null;
   if (memory.resolvedFields?.pathology?.status === "clear") return null;
   return raw.trim();
 }
@@ -5254,6 +5316,13 @@ function resolveFullBodyTitle(goal: string | undefined, language: GutoLanguage):
   return FULL_BODY_TITLE_BY_GOAL[isStrengthGoal ? "strength" : "neutral"][language];
 }
 
+// POLÍTICA DE LOCALIZAÇÃO DE TREINO (idioma é lei, mas catálogo é trilho fechado):
+//  - grupo muscular, foco, resumo, cue e nota → 100% localizados no idioma escolhido;
+//  - NOME do exercício → string canônica por idioma vinda de exercise-catalog.ts
+//    (namesByLanguage[lang]). No it-IT o catálogo usa de propósito o jargão real de
+//    academia italiana com estrangeirismos ("Chest press", "Lat machine", "Leg curl") —
+//    isso NÃO é meia-tradução; não force tradução literal aqui (quebraria o trilho
+//    validado da Regra Soberana 4 e os testes de integridade do catálogo).
 function localizeWorkoutPlan(plan: WorkoutPlan, language: string, goalHint?: string): WorkoutPlan {
   const selectedLanguage = normalizeLanguage(language);
   const catalogPlan = normalizeWorkoutPlanAgainstCatalog(plan as unknown as Record<string, unknown>, selectedLanguage as CatalogLanguage) as unknown as WorkoutPlan;
@@ -6151,7 +6220,7 @@ async function classifyContractIntent(input: {
     "- postpone: user tries to push TODAY'S training to later/tomorrow (e.g. 'amanhã eu faço', 'depois eu treino', 'hoje não, amanhã'). NOT a future trip/commitment share for the week — that is proactive_context. NOT a short pre-training step — that is training_prep.",
     "- training_prep: user is doing a SHORT preparation step BEFORE training and clearly STILL intends to train today (e.g. 'vou tomar café primeiro', 'vou comer antes', 'vou beber água antes', 'vou tomar pré-treino', 'vou trocar de roupa', 'vou ao banheiro', 'tô indo pra academia', 'vou chegar na academia', 'deixa eu terminar de comer', 'espera 10 minutos'). This is NOT postpone and NOT resistance — the planned workout STAYS. Never classify a real refusal/cancel ('não vou treinar', 'não quero treinar', 'vou deixar pra amanhã') as training_prep.",
     "- nonsense: operationally useless/junk/playful input that should not be saved as profile.",
-    "- physical_pain: real pain/limitation that should be protected/adapted, not treated as missing status.",
+    "- physical_pain: real pain/limitation that should be protected/adapted, not treated as missing status. A future trip/commitment share (e.g. 'viaggio martedì', 'martedì ho un impegno') is NOT pain — it is proactive_context, even when the user has a known limitation like a knee.",
     "- emotional_collapse: real grief/bereavement or severe emotional crisis (death in the family, deep loss, devastating news). Must back off training fully with empathy. NEVER classify this as physical_pain or a training limitation.",
     "- training_status_answer: user answered training state/level/returning/current rhythm.",
     "- schedule_tomorrow: user chose tomorrow as schedule.",
@@ -6160,7 +6229,7 @@ async function classifyContractIntent(input: {
     "- clear_limitation: user answered age and/or clear operable limitation (e.g. shoulder when pushing, knee sensitivity).",
     "- history_reference: user reports they ALREADY trained a SPECIFIC muscle group on a past day to inform the next focus (e.g. 'ontem fiz peito', 'fiz costas anteontem'). Use this only when a specific muscle/day is the point.",
     "- workout_completed: user reports finishing TODAY'S prescribed session / the workout as a whole, as a conclusion (e.g. 'fiz o treino', 'terminei', 'acabei o treino', 'treino feito', 'done the workout'). Acknowledge and close continuity — do NOT re-ask age/pain.",
-    "- proactive_context: user SHARES a context change for the week — a future trip/commitment/schedule change, a busy week, a closed gym, rain, OR a limited time window / lack of time today (e.g. 'viajo na quarta', 'sexta tenho compromisso o dia todo', 'essa semana só consigo treinar às 6h', 'sábado tenho casamento', 'semana corrida', 'só tenho 10 minutos hoje', 'tô sem tempo', 'não vou ter tempo hoje'). Lack of time is CONTINUITY (adapt to a shorter mission), NOT resistance/refusal. This is PLANNING CONTEXT for proactivity, NOT a refusal/postpone. CONTINUITY FIRST: a context change is something to ADAPT around, never an automatic excuse to stop. Acknowledge it naturally so it can be confirmed and used to keep the user active — do NOT push cobrança, do NOT treat as resistance, and NEVER assume rest by default or 'max intensity to compensate'.",
+    "- proactive_context: user SHARES a context change for the week — a future trip/commitment/schedule change, a busy week, a closed gym, rain, OR a limited time window / lack of time today (e.g. 'viajo na quarta', 'sexta tenho compromisso o dia todo', 'essa semana só consigo treinar às 6h', 'sábado tenho casamento', 'semana corrida', 'só tenho 10 minutos hoje', 'tô sem tempo', 'não vou ter tempo hoje', and Italian like 'viaggio martedì', 'martedì ho un impegno tutto il giorno', 'settimana piena', 'ho solo 10 minuti oggi', 'non ho tempo oggi', and English like 'I travel on Tuesday', 'I have a commitment all day'). Lack of time is CONTINUITY (adapt to a shorter mission), NOT resistance/refusal. This is PLANNING CONTEXT for proactivity, NOT a refusal/postpone. CONTINUITY FIRST: a context change is something to ADAPT around, never an automatic excuse to stop. Acknowledge it naturally so it can be confirmed and used to keep the user active — do NOT push cobrança, do NOT treat as resistance, and NEVER assume rest by default or 'max intensity to compensate'.",
     "- off_topic_distraction: user asks for joke/entertainment/research instead of action.",
     "- identity_manipulation: user asks to corrupt name/persona or be called a joke name.",
     "- therapist_manipulation: user asks GUTO to act as therapist or abandon training for therapy role.",
@@ -6948,6 +7017,14 @@ function enforceTrainingFlowCertainty(
 
   if (/\b(fermo|ferma|ripresa|allenando)\b/.test(normalize(rawInput)) && language === "it-IT") {
     memory.trainingStatus = normalizeMemoryValue(rawInput);
+    // REGRA 2 — não pergunta idade/limitação que já vieram da calibragem (mesma
+    // proteção das branches irmãs; sem isso o it-IT recobrava "età e dolore").
+    if (hasSovereignCalibrationForTraining(memory)) {
+      enforceExecutionGateBeforeWorkout(response, memory, language, {
+        promoteWorkoutFala: getCloseNoLimitationFala(memory, language),
+      });
+      return;
+    }
     setContractResponse(response, {
       fala: "Ritmo capito. Ora mandami età e qualsiasi dolore o fastidio, così rispetto il tuo corpo.",
       acao: "none",
@@ -9391,16 +9468,24 @@ function applyLimitationToMemory(memory: GutoMemory, value: string, reason: stri
 const LIMITATION_BODY_PART_RE =
   /\b(joelho|ombro|lombar|coluna|quadril|tornozelo|punho|cotovelo|pescoco|pescoço|costas|perna|braco|braço|knee|shoulder|lower ?back|spine|hip|ankle|wrist|elbow|neck|back|leg|arm|ginocchio|spalla|schiena|anca|caviglia|polso|gomito|collo)\b/gi;
 
+function limitationRegionKey(value: string): string | undefined {
+  return LIMITATION_REGION_MATCHERS.find((item) => item.match.test(normalize(value)))?.key;
+}
+
 function mergeLimitation(existing: string | null | undefined, incoming: string): string {
-  const ex = String(existing || "").trim();
-  const inc = String(incoming || "").trim();
+  const ex = collapseRepeatedWords(String(existing || "").trim());
+  const inc = collapseRepeatedWords(String(incoming || "").trim());
   if (!inc || isClearNoLimitationFallback(inc)) return ex || inc; // nada novo → mantém
   if (!ex || isClearNoLimitationFallback(ex)) return inc;          // "sem dor" → substitui
+  // Mesma região do corpo (tolera typo: "ginocchio" vs "ginoccio") → não duplica.
+  const exRegion = limitationRegionKey(ex);
+  const incRegion = limitationRegionKey(inc);
+  if (exRegion && incRegion && exRegion === incRegion) return ex;
   const exParts = new Set((ex.toLowerCase().match(LIMITATION_BODY_PART_RE) || []).map((p) => p.replace(/\s+/g, " ")));
   const incParts = (inc.toLowerCase().match(LIMITATION_BODY_PART_RE) || []).map((p) => p.replace(/\s+/g, " "));
   if (incParts.length > 0 && incParts.every((p) => exParts.has(p))) return ex; // mesma(s) parte(s)
   if (ex.toLowerCase().includes(inc.toLowerCase()) || inc.toLowerCase().includes(ex.toLowerCase())) return ex;
-  return `${ex}; ${inc}`.slice(0, 200); // anexa sem apagar a anterior
+  return collapseRepeatedWords(`${ex}; ${inc}`).slice(0, 200); // anexa sem apagar a anterior
 }
 
 // Captura/atualiza a limitação a partir do relato de dor no chat (regras 1-3, 5):
@@ -10511,6 +10596,20 @@ app.get("/guto/diet", requireActiveUser, async (req, res) => {
     if (!plan) {
       return res.status(404).json({ error: "diet_not_found", message: "Nenhuma dieta gerada ainda." });
     }
+    // "Idioma é lei": uma dieta gerada noutro idioma não pode ser servida em
+    // português para um app italiano. Plano do coach/manual nunca é tocado.
+    const planIsAdjustable =
+      !plan.lockedByCoach && !plan.manualOverride && plan.source !== "coach_manual" && plan.source !== "mixed";
+    if (planIsAdjustable && plan.language) {
+      await readMemoryStoreAsync();
+      const memoryLanguage = normalizeLanguage(getMemory(userId).language);
+      if (normalizeLanguage(plan.language) !== memoryLanguage) {
+        return res.status(404).json({
+          error: "diet_language_mismatch",
+          message: "Dieta gerada em outro idioma. Gere novamente no idioma atual.",
+        });
+      }
+    }
     return res.json(plan);
   } catch (error) {
     console.error("[GUTO] diet GET error:", error);
@@ -10847,6 +10946,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
     source: "guto_generated",
     lockedByCoach: false,
     planSource: "ai_generated",
+    language,
     generatedAt: new Date().toISOString(),
     country: userCountry,
     macros,
