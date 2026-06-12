@@ -28,9 +28,17 @@ export function isWorkoutExecutionRequest(value: string): boolean {
   const refusalOrDislike =
     /\b(nao quero|nao vou|nao consigo|nao vou conseguir|nao tem como|nao estou a fim|nao to a fim|nao gostei|nao curti|nem a fim|sem vontade|sem saco|odiei|detestei|preguica)\b/.test(normalized) ||
     /\b(dont want|do not want|wont|won t|cant|can not|cannot|not able|not feeling|didnt like|did not like|hate|boring|lame)\b/.test(normalized) ||
-    /\b(non voglio|non vado|non posso|non riesco|non ce la faccio|non mi va|non mi piace|odio|noioso|zero sbatti|non ho voglia)\b/.test(normalized) ||
+    /\b(non voglio|non vado|non posso|non riesco|non ce la faccio|non mi va|non mi piace|non mi e piaciuto|non mi e piaciuta|non mi sono piaciuti|non mi sono piaciute|odio|noioso|zero sbatti|non ho voglia)\b/.test(normalized) ||
     /\b(chato|chata|entediante|pessimo|horrivel)\b/.test(normalized);
-  return !refusalOrDislike;
+  // Conclusão de treino ("fiz o treino", "ho fatto l'allenamento", "done the
+  // workout") relata algo JÁ FEITO — não é pedido de execução. Sem este guard o
+  // it-IT "ho fatto l'allenamento" e "non mi è piaciuto l'allenamento" caíam no
+  // ramo de execução (contêm "allenamento") e perdiam o reconhecimento/feedback.
+  const workoutAlreadyDone =
+    /\b(fiz|ja fiz|terminei|acabei|completei|treino feito|treino concluido)\b/.test(normalized) ||
+    /\b(done the workout|workout done|finished|already did|already trained)\b/.test(normalized) ||
+    /\b(ho fatto|ho gia fatto|gia fatto|allenamento fatto|finito l allenamento)\b/.test(normalized);
+  return !refusalOrDislike && !workoutAlreadyDone;
 }
 
 export type TrainingPrepKind = "meal" | "hydration" | "generic";
