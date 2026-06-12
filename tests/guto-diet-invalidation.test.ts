@@ -235,6 +235,44 @@ describe("diet invalidation when calibration changes", () => {
     assert.equal(hasProfileSyncAudit(memory, "dietGenerationStatus"), false);
   });
 
+  it("GET /guto/diet regenera (404) quando o idioma do plano difere do idioma do usuário", async () => {
+    const userId = "diet-language-mismatch";
+    writeMemory(userId, { language: "it-IT", dietGenerationStatus: "generated" });
+    await saveDietPlan({ ...makeDietPlan(userId), language: "pt-BR" });
+
+    const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
+    const res = await fetch(`${baseUrl}/guto/diet`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const body = (await res.json()) as { error?: string };
+    assert.equal(res.status, 404);
+    assert.equal(body.error, "diet_language_mismatch");
+  });
+
+  it("GET /guto/diet serve normalmente quando o idioma do plano bate com o usuário", async () => {
+    const userId = "diet-language-match";
+    writeMemory(userId, { language: "it-IT", dietGenerationStatus: "generated" });
+    await saveDietPlan({ ...makeDietPlan(userId), language: "it-IT" });
+
+    const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
+    const res = await fetch(`${baseUrl}/guto/diet`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(res.status, 200);
+  });
+
+  it("GET /guto/diet não invalida plano travado pelo coach por idioma", async () => {
+    const userId = "diet-language-coach-locked";
+    writeMemory(userId, { language: "it-IT", dietGenerationStatus: "generated" });
+    await saveDietPlan({ ...makeDietPlan(userId, true), language: "pt-BR" });
+
+    const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
+    const res = await fetch(`${baseUrl}/guto/diet`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(res.status, 200);
+  });
+
   it("também invalida quando a mudança vem do memoryPatch do chat", async () => {
     const userId = "diet-invalidation-chat-patch";
     writeMemory(userId, { weightKg: 82, dietGenerationStatus: "generated" });

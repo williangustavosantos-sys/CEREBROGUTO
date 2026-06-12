@@ -236,6 +236,9 @@ export interface DietMeal {
 export interface DietPlan {
   userId: string;
   title?: string;
+  // Idioma em que o conteúdo visível (refeições/alimentos/notas) foi gerado.
+  // Usado para invalidar/regenerar quando o idioma do usuário muda ("idioma é lei").
+  language?: string;
   generatedAt: string;
   country: string;
   countryCode?: string;

@@ -44,7 +44,7 @@ DO NOT extract:
 - Things the user expressed uncertainty about ("maybe I'll go")
 - Workout information (already handled by the main system)
 - General research questions, curiosity, trivia, weather questions, sports/team references or city mentions that are not an actual trip/commitment.
-- City/team ambiguity: "vou assistir o jogo da Roma" is about a football team, NOT a trip to Rome. "Roma é linda" is not a memory. "quinta viajo para Roma" is a trip.
+- City/team ambiguity: "vou assistir o jogo da Roma" is about a football team, NOT a trip to Rome. "Roma é linda" is not a memory. "quinta viajo para Roma" is a trip. In Italian, "martedì viaggio a Milano" / "martedì parto" is a trip; "non riesco ad allenarmi martedì" is a training-availability change for that day.
 - Anything that does not change training execution, availability, location, safety, travel preparation or routine continuity.
 - For weekly availability answers, use dateText: "esta semana" and leave dateParsed empty unless the user provided a specific day.
 

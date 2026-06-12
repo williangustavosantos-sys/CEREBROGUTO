@@ -48,15 +48,30 @@ const HEALTHY = {
 const BODY_QUESTION = /tem dor ou limita|último check|ultimo check|any pain or limitation|dolore o limite/i;
 const REINTAKE = /onde (você|voce) (vai )?treina|me diz onde|teu ritmo|qual.*ritmo atual|me manda tua idade|give me your age/i;
 
-async function chat(userId: string, input: string) {
+async function chat(userId: string, input: string, language = "pt-BR", name = "Will") {
   const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
   const r = await fetch(`${baseUrl}/guto`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ language: "pt-BR", profile: { userId, name: "Will" }, history: [], input }),
+    body: JSON.stringify({ language, profile: { userId, name }, history: [], input }),
   });
   return (await r.json()) as { fala?: string; acao?: string };
 }
+
+// Perfil italiano calibrado (Leandro) — exatamente o caso do bug reportado.
+const LEANDRO_IT = {
+  name: "Leandro", language: "it-IT", biologicalSex: "male", userAge: 23,
+  heightCm: 178, weightKg: 80,
+  trainingLevel: "consistent", trainingStatus: "consistent",
+  trainingGoal: "fat_loss",
+  preferredTrainingLocation: "gym", trainingLocation: "gym",
+  trainingPathology: "ginocchio", trainingLimitations: "ginocchio",
+  foodRestrictions: "vegetariano",
+  country: "Italia", countryCode: "IT", city: "Milano",
+  initialXpGranted: true, totalXp: 100,
+};
+
+const IT_AGE_PAIN_REASK = /mandami età|mandami eta|qualsiasi dolore|dolore o fastidio|dolore o limite/i;
 
 before(async () => {
   process.env.GUTO_MEMORY_FILE = file;
@@ -98,5 +113,24 @@ describe("Calibragem trava p/ usuário saudável (CM-1: 'sem dor' não é incomp
     const r = await chat("cal-nobody", "monta meu treino de hoje pra mim");
     // Quando GUTO genuinamente não sabe do corpo, ele pergunta uma vez — não chuta.
     assert.match(r.fala || "", BODY_QUESTION, "sem body context deve perguntar dor/limitação antes de gerar");
+  });
+
+  it("it-IT calibrado NÃO recobra idade/dor ao falar do ritmo (branch fermo/ripresa/allenando)", async () => {
+    seed("cal-leandro-it", { ...LEANDRO_IT });
+    const r = await chat("cal-leandro-it", "sto già allenando, sono in ripresa", "it-IT", "Leandro");
+    // età=23, dolore=ginocchio já calibrados → não pode reperguntar "mandami età e dolore".
+    assert.doesNotMatch(r.fala || "", IT_AGE_PAIN_REASK, "it-IT calibrado não pode recobrar idade/dor já calibradas");
+  });
+
+  it("it-IT SEM idade pergunta uma vez (regra preservada p/ intake genuinamente incompleto)", async () => {
+    const noAge = { ...LEANDRO_IT };
+    delete (noAge as any).userAge;
+    delete (noAge as any).trainingAge;
+    delete (noAge as any).trainingPathology;
+    delete (noAge as any).trainingLimitations;
+    seed("cal-leandro-noage", noAge);
+    const r = await chat("cal-leandro-noage", "sto già allenando, sono in ripresa", "it-IT", "Leandro");
+    // Sem idade/dor reais, perguntar uma vez continua correto (não é regressão).
+    assert.match(r.fala || "", IT_AGE_PAIN_REASK, "it-IT incompleto deve pedir idade/dor uma vez");
   });
 });

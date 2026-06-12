@@ -53,6 +53,9 @@ const forbiddenPortuguese: Record<Exclude<GutoLanguage, "pt-BR">, string[]> = {
     "amanhã", "hoje", "peito", "costas", "bíceps", "pernas", "ombros", "abdômen",
     "treino", "treinar", "academia", "limitação", "me manda", "me responde",
     "fechado", "boa", "sem dor", "ontem", "anteontem",
+    // Rótulos de limitação em PT (regression guard do fix it-IT 2026-06: "joelho"
+    // vazava no lugar de "ginocchio"):
+    "joelho", "ombro", "lombar",
     // Nomes de exercícios em PT (mesmo regression guard que en-US):
     "agachamento", "puxada", "remada", "supino", "rosca", "elevação",
     "abdução", "adução", "panturrilha", "afundo", "abdominal",
