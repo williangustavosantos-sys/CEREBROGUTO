@@ -143,6 +143,20 @@ describe("Continuidade Primeiro — caso 3: 'viajo quarta, não vou conseguir tr
     assert.match(fala, /proteg|indispon|reorganiz/i);
     assert.equal(falaHasPassiveMindset(fala), false);
   });
+
+  // P1 — eliminar confirmação mole: proteger o dia / adaptar é DECISÃO do GUTO,
+  // não pedido de licença. Nada de "Confirmo o dia como protegido?" / "Confirmo
+  // assim?". O padrão é comando assertivo (o usuário corrige depois, se quiser).
+  it("comando assertivo: cannot/can-train NÃO pedem confirmação (sem '?')", () => {
+    for (const lang of ["pt-BR", "en-US", "it-IT"] as const) {
+      const cannot = buildProactiveContinuityFala("travel_cannot_train", lang, "Will");
+      assert.doesNotMatch(cannot, /\?/, `cannot_train (${lang}) não pode pedir confirmação: ${cannot}`);
+      assert.match(cannot, /protegi|protected|protetto|reorganiz|riorganizz/i, `cannot_train (${lang}) deve afirmar a decisão: ${cannot}`);
+
+      const can = buildProactiveContinuityFala("travel_can_train", lang, "Will");
+      assert.doesNotMatch(can, /\?/, `can_train (${lang}) não pode pedir confirmação: ${can}`);
+    }
+  });
 });
 
 describe("Continuidade Primeiro — caso 4: 'reunião quarta à noite'", () => {

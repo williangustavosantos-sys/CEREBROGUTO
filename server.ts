@@ -2018,10 +2018,10 @@ function buildArrivalMissionFala({
 
   if (language === "en-US") {
     if (care && impact) {
-      return `${prefix}today's mission is ready ${care}. ${weekday ? `${weekday}'s ` : ""}${impact.decision.reason === "travel" ? "trip" : "schedule"} is already protected. Start now, or should I adjust more?`;
+      return `${prefix}today's mission is ready ${care}. ${weekday ? `${weekday}'s ` : ""}${impact.decision.reason === "travel" ? "trip" : "schedule"} is already protected. We start now — tell me only if you want a change.`;
     }
     if (care) {
-      return `${prefix}today's mission is ready: ${mission}, ${care}. Is it calm, or should I adjust more before we start?`;
+      return `${prefix}today's mission is ready: ${mission}, ${care}. Start with the warm-up — if something feels off, tell me and I adjust.`;
     }
     if (impact) {
       return `${prefix}${weekday ? `${weekday}'s ` : "that "} ${impact.decision.reason === "travel" ? "trip" : "schedule"} is already protected. Today is another game: ${mission}.`;
@@ -2031,10 +2031,10 @@ function buildArrivalMissionFala({
 
   if (language === "it-IT") {
     if (care && impact) {
-      return `${prefix}la missione di oggi è pronta ${care}. ${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "il viaggio" : "l'agenda"} è già protetta. Partiamo o adatto ancora?`;
+      return `${prefix}la missione di oggi è pronta ${care}. ${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "il viaggio" : "l'agenda"} è già protetta. Partiamo adesso — dimmi solo se vuoi cambiare qualcosa.`;
     }
     if (care) {
-      return `${prefix}la missione di oggi è pronta: ${mission}, ${care}. Va tutto bene o adatto ancora prima di iniziare?`;
+      return `${prefix}la missione di oggi è pronta: ${mission}, ${care}. Parti dal riscaldamento — se qualcosa non va, dimmelo e adatto.`;
     }
     if (impact) {
       return `${prefix}${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "il viaggio" : "l'agenda"} è già protetta. Oggi si cambia gioco: ${mission}.`;
@@ -2043,10 +2043,10 @@ function buildArrivalMissionFala({
   }
 
   if (care && impact) {
-    return `${prefix}tua missão de hoje já está pronta ${care}. ${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "a viagem" : "a agenda"} já está protegida. Começo contigo agora ou ajusto mais?`;
+    return `${prefix}tua missão de hoje já está pronta ${care}. ${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "a viagem" : "a agenda"} já está protegida. Começo contigo agora — me avisa só se quiser mudar algo.`;
   }
   if (care) {
-    return `${prefix}tua missão de hoje já está pronta: ${mission}, ${care}. Antes de começar: está tranquilo ou ajusto mais?`;
+    return `${prefix}tua missão de hoje já está pronta: ${mission}, ${care}. Começa pelo aquecimento — se algo travar, me avisa que eu ajusto.`;
   }
   if (impact) {
     return `${prefix}${weekday ? `${weekday} ` : ""}${impact.decision.reason === "travel" ? "a viagem" : "a agenda"} já está protegida. Hoje o jogo é outro: ${mission}.`;
@@ -6475,8 +6475,8 @@ export function buildProactiveContinuityFala(
   const byLang: Record<GutoLanguage, Record<ProactiveContinuitySignal, string>> = {
     "pt-BR": {
       travel_unknown: `Fechado, ${name}. Viajar não é desculpa pra sumir — eu consigo adaptar o treino pra hotel, quarto, academia ou uma missão curta. Só me diz: você vai ter algum tempo pra treinar nesse dia ou vai ser impossível mesmo?`,
-      travel_can_train: `Perfeito, ${name}. Então eu não vou bloquear esse dia. Vou adaptar o treino pra hotel/quarto e manter tua sequência viva, curto e direto. Confirmo assim?`,
-      travel_cannot_train: `Fechado, ${name}. Aí sim eu considero esse dia indisponível e reorganizo a semana, sem inventar intensidade máxima pra compensar. Confirmo o dia como protegido?`,
+      travel_can_train: `Perfeito, ${name}. Não vou bloquear esse dia: adapto o treino pra hotel/quarto e mantenho tua sequência viva, curto e direto.`,
+      travel_cannot_train: `Fechado, ${name}. Já protegi esse dia e reorganizei a semana, sem inventar intensidade máxima pra compensar.`,
       commitment: `Fechado, ${name}. Esse período fica bloqueado, então eu puxo o treino pra antes ou deixo uma missão curta — a gente não para. Prefere de manhã, de tarde, ou eu decido o melhor horário?`,
       busy_week: `Então a semana vai ser executável, não perfeita, ${name}. Eu reduzo o plano e seguro o mínimo que mantém tua evolução viva.`,
       short_window: `Então hoje é missão curta, ${name}. Direta e sem desculpa — a gente mantém a sequência viva mesmo com pouco tempo.`,
@@ -6484,8 +6484,8 @@ export function buildProactiveContinuityFala(
     },
     "en-US": {
       travel_unknown: `Got it, ${name}. Traveling is no excuse to disappear — I can adapt the workout for a hotel, your room, a gym or a short mission. Just tell me: will you have any time to train that day, or is it truly impossible?`,
-      travel_can_train: `Perfect, ${name}. Then I won't block that day. I'll adapt the workout for the hotel/room and keep your streak alive — short and clean. Confirm it like this?`,
-      travel_cannot_train: `Got it, ${name}. Then I treat that day as unavailable and reorganize the week — no made-up max intensity to compensate. Confirm the day as protected?`,
+      travel_can_train: `Perfect, ${name}. I won't block that day: I adapt the workout for the hotel/room and keep your streak alive — short and clean.`,
+      travel_cannot_train: `Got it, ${name}. I've already protected that day and reorganized the week — no made-up max intensity to compensate.`,
       commitment: `Got it, ${name}. That window is blocked, so I pull the workout earlier or leave a short mission — we don't stop. Morning, afternoon, or should I pick the best time?`,
       busy_week: `So the week will be doable, not perfect, ${name}. I cut the plan down and hold the minimum that keeps your progress alive.`,
       short_window: `Then today is a short mission, ${name}. Direct and no excuses — we keep the streak alive even with little time.`,
@@ -6493,8 +6493,8 @@ export function buildProactiveContinuityFala(
     },
     "it-IT": {
       travel_unknown: `Chiaro, ${name}. Viaggiare non è una scusa per sparire — posso adattare l'allenamento per hotel, camera, palestra o una missione corta. Dimmi solo: avrai un po' di tempo per allenarti quel giorno o è davvero impossibile?`,
-      travel_can_train: `Perfetto, ${name}. Allora non blocco quel giorno. Adatto l'allenamento per hotel/camera e tengo viva la tua striscia, corto e pulito. Confermo così?`,
-      travel_cannot_train: `Chiaro, ${name}. Allora considero quel giorno non disponibile e riorganizzo la settimana, senza inventare intensità massima per compensare. Confermo il giorno come protetto?`,
+      travel_can_train: `Perfetto, ${name}. Non blocco quel giorno: adatto l'allenamento per hotel/camera e tengo viva la tua striscia, corto e pulito.`,
+      travel_cannot_train: `Chiaro, ${name}. Ho già protetto quel giorno e riorganizzato la settimana, senza inventare intensità massima per compensare.`,
       commitment: `Chiaro, ${name}. Quella fascia è bloccata, quindi anticipo l'allenamento o lascio una missione corta — non ci fermiamo. Preferisci mattina, pomeriggio, o scelgo io l'orario migliore?`,
       busy_week: `Allora la settimana sarà fattibile, non perfetta, ${name}. Riduco il piano e tengo il minimo che mantiene viva la tua evoluzione.`,
       short_window: `Allora oggi è una missione corta, ${name}. Diretta e senza scuse — teniamo viva la striscia anche con poco tempo.`,
@@ -9977,6 +9977,21 @@ async function keepLastFiveValidations(memory: GutoMemory): Promise<void> {
   }
 }
 
+// Pós-validação: fecha o ciclo de condução. Doc canônico: "Sempre que o usuário
+// terminar uma atividade, defina a próxima ação imediatamente; nunca deixe o
+// usuário em decisão aberta." Reconhece a conquista, orienta recuperação e
+// aponta o próximo foco. NÃO gera XP, NÃO toca Arena, NÃO cria missão — só fala.
+function buildPostValidationFala(language: GutoLanguage, callName: string, nextFocusLabel: string): string {
+  const who = callName || (language === "it-IT" ? "socio" : language === "en-US" ? "partner" : "parceiro");
+  if (language === "en-US") {
+    return `Mission closed, ${who}. What was done counts. Now hydrate and get protein in your next meal — recovery is training too. Tomorrow I pull you into ${nextFocusLabel}.`;
+  }
+  if (language === "it-IT") {
+    return `Missione chiusa, ${who}. Quello che è stato fatto conta. Ora idratati e prendi proteine nel prossimo pasto — anche il recupero è allenamento. Domani ti porto dentro ${nextFocusLabel}.`;
+  }
+  return `Missão fechada, ${who}. O que foi feito conta. Agora hidrata e garante proteína na próxima refeição — recuperação também é treino. Amanhã eu te puxo pro ${nextFocusLabel}.`;
+}
+
 app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15mb" }), async (req, res) => {
   const body = req.body as {
     imageBase64?: string;
@@ -10137,6 +10152,16 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
 
     if (!Array.isArray(memory.validationHistory)) {
       memory.validationHistory = [];
+    }
+    // Treino validado de verdade: fecha o ciclo conduzindo (conquista →
+    // recuperação → próxima ação). Rótulo do próximo foco derivado read-only
+    // (chooseNextWorkoutFocus é puro; não persiste, não cria treino).
+    if (hasSelfieEvidence) {
+      const nextFocus = chooseNextWorkoutFocus(memory);
+      const nextFocusLabel = nextFocus === "full_body"
+        ? resolveFullBodyTitle(memory.trainingGoal, selectedLanguage)
+        : (WORKOUT_TITLE_BY_LANG[nextFocus]?.[selectedLanguage] ?? localizeMuscleGroup(nextFocus, selectedLanguage));
+      record.gutoMessage = buildPostValidationFala(selectedLanguage, getGutoCallName(memory), nextFocusLabel);
     }
     memory.validationHistory.push(record);
     await keepLastFiveValidations(memory);
