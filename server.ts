@@ -7591,9 +7591,20 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
     const fala = selectedLanguage === "en-US"
       ? "Stay with me now. Breathe, do not stay alone, and call emergency support if you may hurt yourself."
       : selectedLanguage === "it-IT"
-        ? "Resta con me adesso. Respira, non stare solo, e chiama emergenza se puoi farti male."
+        ? "Resta con me adesso. Respira, non stare solo, e chiama emergenza se puoi farti fare del male."
         : "Fica comigo agora. Respira, não fica sozinho e chama emergência se você pode se machucar.";
     return { fala, acao: "none", expectedResponse: null };
+  }
+
+  // Estado emocional sem crise: o Gemini pode estar indisponível, mas o GUTO
+  // não pode ignorar o que a pessoa disse. Acolhe sem prometer análise completa.
+  if (/\b(triste|ansios[ao]|estressad[ao]|esgotad[ao]|difícil|dificil|pesad[ao]|frustrad[ao]|chateado|chateada|sad|anxious|stressed|exhausted|overwhelmed|frustrated|depressed|triste|stres[s]at[ao]|esaurit[ao]|frustrat[ao])\b/.test(text)) {
+    const fala = selectedLanguage === "en-US"
+      ? "I'm here. Say more — what's going on? Then we figure out what today looks like."
+      : selectedLanguage === "it-IT"
+        ? "Ci sono. Dimmi — cosa sta succedendo? Poi troviamo insieme cosa ha senso fare oggi."
+        : "Tô aqui. Me conta — o que tá acontecendo? A gente decide junto o que faz sentido hoje.";
+    return { fala, acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
 
   // Fase 3L — mensagem curta interpretada pelo CONTEXTO ATIVO (antes de qualquer
