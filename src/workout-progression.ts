@@ -200,6 +200,13 @@ function progressionTechnique(locationMode?: WorkoutLocationMode) {
   return "Progressao tecnica liberada so se a execucao continuar limpa.";
 }
 
+function substitutionNote(language?: CatalogLanguage, bodyRegion?: string): string {
+  const region = bodyRegion || (language === "it-IT" ? "la tua limitazione" : language === "en-US" ? "your limitation" : "sua limitação");
+  if (language === "it-IT") return `Sostituito da GUTO per rispettare ${region}.`;
+  if (language === "en-US") return `Substituted by GUTO to respect ${region}.`;
+  return `Substituído pelo GUTO para respeitar ${region}.`;
+}
+
 export function applySafeExerciseSubstitutions<T extends ProgressionWorkoutPlan>(
   plan: T,
   options: {
@@ -235,7 +242,7 @@ export function applySafeExerciseSubstitutions<T extends ProgressionWorkoutPlan>
       videoUrl: entry.videoUrl,
       videoProvider: "local",
       sourceFileName: entry.sourceFileName,
-      note: appendNote(exercise.note, `Substituido pelo GUTO para respeitar ${options.userBodyRegion || "sua limitacao"}.`),
+      note: appendNote(exercise.note, substitutionNote(options.language, options.userBodyRegion)),
     });
   }
 
