@@ -274,6 +274,7 @@ interface WorkoutPlan {
   weekDay?: string;
   goal?: string;
   location?: string;
+  locationMode?: "gym" | "home" | "park";
   dateLabel: string;
   scheduledFor: string;
   summary: string;
@@ -3667,7 +3668,7 @@ Usuário quebra a regra:
 
 Usuário entrega contexto fora de ordem:
 [user] tenho 32 anos, sem dor, vou em casa, voltando depois de 2 meses parado
-[guto] {"fala":"Pacote completo, eu gostei. Volta leve, sem heroísmo. Treino tá montando.","acao":"updateWorkout","expectedResponse":null,"avatarEmotion":"reward","memoryPatch":{"trainingAge":32,"trainingLimitations":"sem dor","trainingLocation":"casa","trainingStatus":"voltando depois de 2 meses parado","nextWorkoutFocus":"full_body"}}
+[guto] {"fala":"Pacote completo, eu gostei. Volta leve, sem heroísmo. Treino tá montando.","acao":"updateWorkout","expectedResponse":null,"avatarEmotion":"reward","memoryPatch":{"trainingAge":32,"trainingLimitations":"sem dor","trainingLocation":"casa","trainingStatus":"voltando depois de 2 meses parado","nextWorkoutFocus":"chest_triceps"}}
 
 Usuário dá local com equipamento, mas ainda falta estado:
 [user] vou treinar no condomínio, tenho halteres e banco
@@ -3688,6 +3689,18 @@ Usuário tenta adiar:
 Usuário fecha sem dor:
 [user] tenho 35 e estou sem dor
 [guto] {"fala":"Bora começar: aquecimento na aba treino do dia e depois bloco principal. Sem dor, sem desculpa.","acao":"updateWorkout","expectedResponse":null,"avatarEmotion":"reward","memoryPatch":{"trainingAge":35,"trainingLimitations":"sem dor"}}
+
+Usuário calibrado confirma com afirmação curta (pt-BR):
+[user] bora
+[guto] {"fala":"Peito e tríceps hoje. Aquecimento na aba, depois bloco principal. Sem pausa.","acao":"updateWorkout","expectedResponse":null,"avatarEmotion":"reward","memoryPatch":{}}
+
+Usuário calibrado confirma com afirmação curta (it-IT):
+[user] andiamo
+[guto] {"fala":"Petto e tricipiti oggi. Riscaldamento nella scheda, poi blocco principale. Senza sosta.","acao":"updateWorkout","expectedResponse":null,"avatarEmotion":"reward","memoryPatch":{}}
+
+Usuário calibrado confirma (en-US):
+[user] let's go
+[guto] {"fala":"Chest and triceps today. Warm-up first, then the main block. No breaks.","acao":"updateWorkout","expectedResponse":null,"avatarEmotion":"reward","memoryPatch":{}}
 
 Usuário entrega limitação clara:
 [user] tenho 35 e um ombro direito chato em empurrar
@@ -3847,7 +3860,10 @@ function chooseNextWorkoutFocus(memory: GutoMemory, preferred?: WorkoutFocus | n
   // Regra Soberana 2 — não repetir treino recente. Um foco preferido (sugerido
   // pelo modelo ou herdado de nextWorkoutFocus) só é respeitado se NÃO foi
   // treinado recentemente; caso contrário a rotação determinística manda.
-  if (preferred && isWorkoutFocus(preferred) && !blocked.has(preferred)) {
+  // full_body é o fallback da rotação (quando todos os splits estão bloqueados),
+  // nunca uma preferência legítima — aceitar full_body como preferred quebraria
+  // a rotação de splits toda vez que o modelo sugere full_body por viés.
+  if (preferred && isWorkoutFocus(preferred) && preferred !== "full_body" && !blocked.has(preferred)) {
     return preferred;
   }
 
@@ -4007,8 +4023,14 @@ async function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["m
     );
   }
   if (isWorkoutFocus(patch.nextWorkoutFocus) && !trainedRef) {
-    if (memory.nextWorkoutFocus !== patch.nextWorkoutFocus) changedFields.add("nextWorkoutFocus");
-    memory.nextWorkoutFocus = patch.nextWorkoutFocus;
+    // Nunca aceitar full_body como sugestão direta do modelo — é o fallback
+    // da rotação determinística, não uma preferência válida. Se o modelo
+    // sugerir full_body, a rotação em chooseNextWorkoutFocus decide o que usar.
+    const resolvedFocus = patch.nextWorkoutFocus === "full_body"
+      ? chooseNextWorkoutFocus(memory, null)
+      : patch.nextWorkoutFocus;
+    if (memory.nextWorkoutFocus !== resolvedFocus) changedFields.add("nextWorkoutFocus");
+    memory.nextWorkoutFocus = resolvedFocus;
   }
   const previousRecentHistory = memory.recentTrainingHistory || [];
   memory.recentTrainingHistory = normalizeRecentTrainingHistory(patch.recentTrainingHistory, previousRecentHistory);
@@ -7461,7 +7483,7 @@ function enforceTrainingFlowCertainty(
     if (contractIntent.kind === "clear_limitation" && contractIntent.age) {
       memory.trainingLimitations = normalizeMemoryValue(contractIntent.limitationText || rawInput);
       memory.userAge = contractIntent.age;
-      memory.nextWorkoutFocus = memory.nextWorkoutFocus || "full_body";
+      memory.nextWorkoutFocus = chooseNextWorkoutFocus(memory, memory.nextWorkoutFocus || null);
       response.memoryPatch = {
         ...(response.memoryPatch || {}),
         trainingLimitations: memory.trainingLimitations,
@@ -7591,9 +7613,20 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
     const fala = selectedLanguage === "en-US"
       ? "Stay with me now. Breathe, do not stay alone, and call emergency support if you may hurt yourself."
       : selectedLanguage === "it-IT"
-        ? "Resta con me adesso. Respira, non stare solo, e chiama emergenza se puoi farti male."
+        ? "Resta con me adesso. Respira, non stare solo, e chiama emergenza se puoi farti fare del male."
         : "Fica comigo agora. Respira, não fica sozinho e chama emergência se você pode se machucar.";
     return { fala, acao: "none", expectedResponse: null };
+  }
+
+  // Estado emocional sem crise: o Gemini pode estar indisponível, mas o GUTO
+  // não pode ignorar o que a pessoa disse. Acolhe sem prometer análise completa.
+  if (/\b(triste|ansios[ao]|estressad[ao]|esgotad[ao]|difícil|dificil|pesad[ao]|frustrad[ao]|chateado|chateada|sad|anxious|stressed|exhausted|overwhelmed|frustrated|depressed|triste|stres[s]at[ao]|esaurit[ao]|frustrat[ao])\b/.test(text)) {
+    const fala = selectedLanguage === "en-US"
+      ? "I'm here. Say more — what's going on? Then we figure out what today looks like."
+      : selectedLanguage === "it-IT"
+        ? "Ci sono. Dimmi — cosa sta succedendo? Poi troviamo insieme cosa ha senso fare oggi."
+        : "Tô aqui. Me conta — o que tá acontecendo? A gente decide junto o que faz sentido hoje.";
+    return { fala, acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
 
   // Fase 3L — mensagem curta interpretada pelo CONTEXTO ATIVO (antes de qualquer
@@ -8168,16 +8201,19 @@ async function askGutoModel({
         memory.preferredTrainingLocation || memory.trainingLocation || "casa"
       );
       const locationMode = getLocationMode(locationRaw) as CuratorLocationMode;
-      let fallbackPlan = buildWorkoutPlanFromSemanticFocus({
-        language: selectedLanguage,
-        location: locationRaw,
-        status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
-        limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
-        age: memory.userAge ?? memory.trainingAge,
-        scheduleIntent: memory.trainingSchedule,
-        focus: semanticFocus,
-        trainingGoal: memory.trainingGoal,
-      });
+      let fallbackPlan: WorkoutPlan = {
+        ...buildWorkoutPlanFromSemanticFocus({
+          language: selectedLanguage,
+          location: locationRaw,
+          status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
+          limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
+          age: memory.userAge ?? memory.trainingAge,
+          scheduleIntent: memory.trainingSchedule,
+          focus: semanticFocus,
+          trainingGoal: memory.trainingGoal,
+        }),
+        locationMode,
+      };
       fallbackPlan = dedupeAndRepairWorkoutPlan(safetyFilterWorkoutPlan(fallbackPlan, memory), {
         focus: semanticFocus,
         locationMode,
@@ -8481,6 +8517,7 @@ async function askGutoModel({
           workoutPlan = {
             focus: curated.summary ? curated.summary.split(".")[0] : localizeMuscleGroup(semanticFocus, selectedLanguage),
             focusKey: semanticFocus,
+            locationMode,
             dateLabel: getWorkoutDateLabel(selectedLanguage, new Date()),
             scheduledFor: new Date().toISOString(),
             summary: curated.summary || "",
@@ -8493,16 +8530,19 @@ async function askGutoModel({
       // Fallback determinístico se o Curator falhar
       if (!workoutPlan) {
         console.warn(`[GUTO] curator failed — falling back to template for ${semanticFocus}/${locationMode}`);
-        workoutPlan = buildWorkoutPlanFromSemanticFocus({
-          language: selectedLanguage,
-          location: locationRaw,
-          status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
-          limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
-          age: memory.userAge ?? memory.trainingAge,
-          scheduleIntent: memory.trainingSchedule,
-          focus: semanticFocus,
-          trainingGoal: memory.trainingGoal,
-        });
+        workoutPlan = {
+          ...buildWorkoutPlanFromSemanticFocus({
+            language: selectedLanguage,
+            location: locationRaw,
+            status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
+            limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
+            age: memory.userAge ?? memory.trainingAge,
+            scheduleIntent: memory.trainingSchedule,
+            focus: semanticFocus,
+            trainingGoal: memory.trainingGoal,
+          }),
+          locationMode,
+        };
       }
 
       workoutPlan = safetyFilterWorkoutPlan(workoutPlan, memory);
@@ -8517,7 +8557,7 @@ async function askGutoModel({
         hasLimitation: Boolean(deriveBodyRegionFromPathology(memory)),
         language: selectedLanguage as WorkoutLanguage,
       }) as WorkoutPlan;
-      workoutPlan = applyWorkoutProgression(workoutPlan, memory.workoutFeedbackHistory) as WorkoutPlan;
+      workoutPlan = applyWorkoutProgression(workoutPlan, memory.workoutFeedbackHistory, selectedLanguage as CatalogLanguage) as WorkoutPlan;
       workoutPlan = dedupeAndRepairWorkoutPlan(workoutPlan, {
         focus: semanticFocus,
         locationMode,
@@ -8669,16 +8709,19 @@ async function askGutoModel({
         memory.preferredTrainingLocation || memory.trainingLocation || "casa"
       );
       const locationMode = getLocationMode(locationRaw) as CuratorLocationMode;
-      let fallbackPlan = buildWorkoutPlanFromSemanticFocus({
-        language: selectedLanguage,
-        location: locationRaw,
-        status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
-        limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
-        age: memory.userAge ?? memory.trainingAge,
-        scheduleIntent: memory.trainingSchedule,
-        focus: semanticFocus,
-        trainingGoal: memory.trainingGoal,
-      });
+      let fallbackPlan: WorkoutPlan = {
+        ...buildWorkoutPlanFromSemanticFocus({
+          language: selectedLanguage,
+          location: locationRaw,
+          status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
+          limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
+          age: memory.userAge ?? memory.trainingAge,
+          scheduleIntent: memory.trainingSchedule,
+          focus: semanticFocus,
+          trainingGoal: memory.trainingGoal,
+        }),
+        locationMode,
+      };
       fallbackPlan = dedupeAndRepairWorkoutPlan(safetyFilterWorkoutPlan(fallbackPlan, memory), {
         focus: semanticFocus,
         locationMode,

@@ -35,8 +35,27 @@ function hasToken(haystack: string, tokens: string[]): boolean {
  * (`trainingLevel`) e/ou do `trainingStatus` (texto livre). Reconhece os 4
  * níveis canônicos em pt/en/it. Default = "consistent" (usuário ativo), que
  * preserva o baseline histórico — nunca rebaixa para iniciante por engano.
+ *
+ * Precedência: `trainingLevel` (enum canônico) > `trainingStatus` (texto livre).
+ * Um aluno "consistent" que está "voltando" continua sendo consistent —
+ * trainingStatus descreve o momento atual, não redefine a experiência acumulada.
  */
 export function resolveTrainingLevel(level?: string, status?: string): TrainingLevel {
+  // Enum canônico tem precedência absoluta sobre texto livre de status.
+  // "voltando" em trainingStatus não deve rebaixar um "consistent" para "returning".
+  const CANONICAL: Readonly<Record<string, TrainingLevel>> = {
+    advanced: "advanced",
+    consistent: "consistent",
+    returning: "returning",
+    beginner: "beginner",
+  };
+  const normalizedLevel = normalize(level || "");
+  if (normalizedLevel in CANONICAL) {
+    return CANONICAL[normalizedLevel];
+  }
+
+  // Fallback: texto livre de level + status para o caso de trainingLevel ser
+  // texto livre (onboarding antigo) ou não ter sido preenchido.
   const n = normalize(`${level || ""} ${status || ""}`);
   if (!n) return "consistent";
   if (hasToken(n, ["advanced", "avancado", "avanzato", "avanzado", "experiente", "expert", "atleta"])) {

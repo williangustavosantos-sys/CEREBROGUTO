@@ -142,9 +142,23 @@ export function summarizeWorkoutFeedback(history: WorkoutFeedbackRecord[] | unde
   return `Sinal V1: ${signal}. Feedback recente: ${readable}`;
 }
 
+function progressionNote(language?: CatalogLanguage, technique?: string): string {
+  const tech = technique ? ` ${technique}` : "";
+  if (language === "it-IT") return `Progressione GUTO: oggi aggiungiamo una serie perché gli allenamenti validati erano leggeri.${tech}`;
+  if (language === "en-US") return `GUTO progression: adding one set today because the last validated sessions felt light.${tech}`;
+  return `Progressao GUTO: hoje sobe uma serie porque os treinos validados ficaram leves.${tech}`;
+}
+
+function deloadNote(language?: CatalogLanguage): string {
+  if (language === "it-IT") return "Adeguamento GUTO: dose ridotta per evolvere senza combattere con dolore o fatica.";
+  if (language === "en-US") return "GUTO adjustment: reduced dose to evolve without fighting pain or fatigue.";
+  return "Ajuste GUTO: dose reduzida para evoluir sem brigar com dor ou fadiga.";
+}
+
 export function applyWorkoutProgression<T extends ProgressionWorkoutPlan>(
   plan: T,
-  history: WorkoutFeedbackRecord[] | undefined
+  history: WorkoutFeedbackRecord[] | undefined,
+  language?: CatalogLanguage
 ): T {
   const signal = getProgressionSignal(history);
   if (signal === "hold") return plan;
@@ -160,10 +174,7 @@ export function applyWorkoutProgression<T extends ProgressionWorkoutPlan>(
       return {
         ...exercise,
         sets: Math.min(5, currentSets + 1),
-        note: appendNote(
-          exercise.note,
-          `Progressao GUTO: hoje sobe uma serie porque os treinos validados ficaram leves. ${progressionTechnique(lastLocation)}`
-        ),
+        note: appendNote(exercise.note, progressionNote(language, progressionTechnique(lastLocation))),
       };
     }
 
@@ -172,7 +183,7 @@ export function applyWorkoutProgression<T extends ProgressionWorkoutPlan>(
         ...exercise,
         sets: Math.max(2, (Number(exercise.sets) || 3) - 1),
         rest: increaseRest(exercise.rest),
-        note: appendNote(exercise.note, "Ajuste GUTO: dose reduzida para evoluir sem brigar com dor ou fadiga."),
+        note: appendNote(exercise.note, deloadNote(language)),
       };
     }
 
@@ -198,6 +209,13 @@ function progressionTechnique(locationMode?: WorkoutLocationMode) {
     return "Em casa, progride com descida de 3s e pausa de 1s, mantendo controle total.";
   }
   return "Progressao tecnica liberada so se a execucao continuar limpa.";
+}
+
+function substitutionNote(language?: CatalogLanguage, bodyRegion?: string): string {
+  const region = bodyRegion || (language === "it-IT" ? "la tua limitazione" : language === "en-US" ? "your limitation" : "sua limitação");
+  if (language === "it-IT") return `Sostituito da GUTO per rispettare ${region}.`;
+  if (language === "en-US") return `Substituted by GUTO to respect ${region}.`;
+  return `Substituído pelo GUTO para respeitar ${region}.`;
 }
 
 export function applySafeExerciseSubstitutions<T extends ProgressionWorkoutPlan>(
@@ -235,7 +253,7 @@ export function applySafeExerciseSubstitutions<T extends ProgressionWorkoutPlan>
       videoUrl: entry.videoUrl,
       videoProvider: "local",
       sourceFileName: entry.sourceFileName,
-      note: appendNote(exercise.note, `Substituido pelo GUTO para respeitar ${options.userBodyRegion || "sua limitacao"}.`),
+      note: appendNote(exercise.note, substitutionNote(options.language, options.userBodyRegion)),
     });
   }
 

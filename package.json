@@ -9,6 +9,7 @@
     "test": "npm run test:guto",
     "test:guto": "node scripts/run-guto-tests.mjs",
     "founder-scenarios": "tsx tests/founder-scenarios/run-founder-scenarios.ts",
+    "real-user-scenarios": "tsx tests/real-user-scenarios/run-real-user-scenarios.ts",
     "typecheck": "tsc --noEmit",
     "eval:guto": "tsx scripts/run-guto-evals.ts",
     "release:gate": "node scripts/guto-release-gate.mjs",
