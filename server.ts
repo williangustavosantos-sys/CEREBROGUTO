@@ -1919,7 +1919,7 @@ function getDedupedLimitationRaw(memory: GutoMemory): string {
 }
 
 function isClearNoLimitation(normalized: string): boolean {
-  return CLEAR_NO_LIMITATION_TOKENS.includes(normalized);
+  return CLEAR_NO_LIMITATION_TOKENS.some((token) => normalized.includes(token));
 }
 
 /** Há limitação corporal real (não vazia, não "sem dor")? */
@@ -5476,7 +5476,7 @@ function buildWorkoutPlan({
   const normalizedLimitation = normalize(limitation);
   const hasNoLimitation =
     !normalizedLimitation ||
-    ["sem dor", "nao", "não", "livre", "nenhuma", "zero", "nada", "senza dolore", "nessun dolore", "nessun fastidio", "libero"].some((term) =>
+    ["sem dor", "sem limitacoes", "sem limitacao", "nao", "não", "livre", "nenhuma", "zero", "nada", "senza dolore", "senza limitazioni", "nessun dolore", "nessun fastidio", "libero", "without limitation"].some((term) =>
       normalizedLimitation.includes(normalize(term))
     );
   const limitationFocus = getLimitationFocus(limitation, selectedLanguage);
@@ -5694,7 +5694,7 @@ export function buildWorkoutPlanFromSemanticFocus({
   const normalizedLimitation = normalize(limitation);
   const hasNoLimitation =
     !normalizedLimitation ||
-    ["sem dor", "nao", "não", "livre", "nenhuma", "zero", "nada", "senza dolore", "nessun dolore", "nessun fastidio", "libero"].some((term) =>
+    ["sem dor", "sem limitacoes", "sem limitacao", "nao", "não", "livre", "nenhuma", "zero", "nada", "senza dolore", "senza limitazioni", "nessun dolore", "nessun fastidio", "libero", "without limitation"].some((term) =>
       normalizedLimitation.includes(normalize(term))
     );
   const limitationFocus = getLimitationFocus(limitation, selectedLanguage);
@@ -5967,10 +5967,6 @@ function dedupeAndRepairWorkoutPlan(
       const replacement = pickReplacement(exercise);
       if (!replacement) continue;
       next = catalogEntryToWorkoutExercise(replacement, exercise, options.language);
-      next.note = appendWorkoutNote(
-        exercise.note,
-        "GUTO ajustou este exercício para manter vídeo local, local correto e plano sem duplicidade."
-      );
     }
 
     usedIds.add(next.id);
@@ -8219,6 +8215,13 @@ async function askGutoModel({
         locationMode,
         language: selectedLanguage,
       });
+      fallbackPlan = applyLevelStructure(fallbackPlan as any, {
+        level: memory.trainingLevel,
+        status: memory.trainingStatus,
+        goal: memory.trainingGoal,
+        hasLimitation: Boolean(deriveBodyRegionFromPathology(memory)),
+        language: selectedLanguage as WorkoutLanguage,
+      }) as WorkoutPlan;
       const proactiveAdaptation = getAdaptationForDate(memory, todayKey());
       fallbackPlan = applyProactiveWorkoutAdaptation(fallbackPlan, proactiveAdaptation, selectedLanguage);
       const validation = validateWorkoutPlan(fallbackPlan, memory.recentTrainingHistory || [], locationMode);
@@ -8727,6 +8730,13 @@ async function askGutoModel({
         locationMode,
         language: selectedLanguage,
       });
+      fallbackPlan = applyLevelStructure(fallbackPlan as any, {
+        level: memory.trainingLevel,
+        status: memory.trainingStatus,
+        goal: memory.trainingGoal,
+        hasLimitation: Boolean(deriveBodyRegionFromPathology(memory)),
+        language: selectedLanguage as WorkoutLanguage,
+      }) as WorkoutPlan;
       const proactiveAdaptation = getAdaptationForDate(memory, todayKey());
       fallbackPlan = applyProactiveWorkoutAdaptation(fallbackPlan, proactiveAdaptation, selectedLanguage);
       const validation = validateWorkoutPlan(fallbackPlan, memory.recentTrainingHistory || [], locationMode);
