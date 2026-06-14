@@ -161,6 +161,33 @@ function buildCuratorPrompt(ctx: CuratorContext, pool: CatalogExercise[]): strin
     .map((h) => `- ${h.date}: ${h.exerciseIds.join(", ")}`)
     .join("\n") || "(sem treinos recentes registrados)";
 
+  const goalBlock = (() => {
+    if (ctx.goal === "fat_loss") {
+      return `\n═══ PRESCRIÇÃO PARA OBJETIVO: FAT_LOSS ═══
+Emagrecimento exige DENSIDADE METABÓLICA, não hipertrofia clássica. Regras obrigatórias:
+- Descanso ≤ 45s entre séries na maioria dos exercícios. Máximo 60s nos compostos pesados.
+- Organize 2–3 pares de exercícios como supersets (A→B sem descanso entre eles, descanso de 40s depois do par).
+- Priorize exercícios que movem mais massa corporal (compostos, multiarticulares) sobre isolados.
+- Reps: 12–20 por série (volume metabólico, não força máxima).
+- O treino deve manter a frequência cardíaca elevada. Não é bodybuilding clássico.
+- O summary deve comunicar densidade e condicionamento, não força.`;
+    }
+    if (ctx.goal === "muscle_gain" || ctx.goal === "hypertrophy") {
+      return `\n═══ PRESCRIÇÃO PARA OBJETIVO: MUSCLE_GAIN ═══
+Hipertrofia exige TEMPO SOB TENSÃO e recuperação entre séries. Regras obrigatórias:
+- Descanso 75–90s entre séries nos compostos principais, 60s nos isolados.
+- Priorize movimentos compostos (maior ativação neural) no início do treino.
+- Reps: 8–12 compostos / 12–15 isolados. Controle a fase excêntrica (descida em 2–3s).
+- NÃO transforme em circuito — descanso adequado é parte da dose, não opcional.
+- O summary deve comunicar volume, força e progressão muscular.`;
+    }
+    return "";
+  })();
+
+  const levelBlock = ctx.level && ctx.level.includes(" — ")
+    ? `\nNOTA SOBRE NÍVEL: O campo "Nível atual" tem formato "nível_experiência — status_atual". O primeiro valor (antes do " — ") é o nível de EXPERIÊNCIA física acumulada do aluno. O segundo é o status atual (ex: "voltando de pausa"). Um aluno "consistent — voltando" tem experiência de consistente: use volume e complexidade de consistente, apenas reduza a intensidade máxima desta sessão por ser retorno.`
+    : "";
+
   return `Você é o cérebro de treino do GUTO. Sua tarefa: montar o treino de hoje para o aluno usando APENAS exercícios da lista de candidatos abaixo.
 
 ═══ ALUNO ═══
@@ -169,9 +196,9 @@ Idade: ${ctx.age ?? "?"} | Altura: ${ctx.heightCm ?? "?"}cm | Peso: ${ctx.weight
 Patologia/limitação: ${ctx.pathology || "nenhuma"}
 Restrições alimentares: ${ctx.foodRestrictions || "nenhuma"}
 Objetivo declarado: ${ctx.goal || "consistência geral"}
-Nível atual: ${ctx.level || "iniciante"}
+Nível atual: ${ctx.level || "iniciante"}${levelBlock}
 Feedback da semana passada: ${ctx.lastWeekFeedback || "(sem feedback ainda)"}
-
+${goalBlock}
 ═══ TREINO DE HOJE ═══
 Foco: ${ctx.focus}
 Local: ${ctx.location}
@@ -190,7 +217,8 @@ ${poolList}
 5. Adapte volume/intensidade ao nível e ao feedback. Se aluno disse "tava fácil" ou "pega mais firme", aumente. Se disse "tava pesado" ou "tô morto", suavize.
 6. Se aluno tem patologia, REMOVA exercícios que carregam a articulação afetada. Use seu critério como personal real — não precisa de lista, leia o texto.
 7. Para cada exercício, defina sets, reps, rest, cue (instrução técnica curta) e note (porque está usando esse exercício hoje).
-8. Escreva tudo em ${langLabel}.
+8. Siga OBRIGATORIAMENTE as regras do bloco de PRESCRIÇÃO DO OBJETIVO (fat_loss ou muscle_gain) acima, se houver.
+9. Escreva tudo em ${langLabel}.
 
 ═══ FORMATO DE SAÍDA (JSON estrito) ═══
 {

@@ -274,6 +274,7 @@ interface WorkoutPlan {
   weekDay?: string;
   goal?: string;
   location?: string;
+  locationMode?: "gym" | "home" | "park";
   dateLabel: string;
   scheduledFor: string;
   summary: string;
@@ -8200,16 +8201,19 @@ async function askGutoModel({
         memory.preferredTrainingLocation || memory.trainingLocation || "casa"
       );
       const locationMode = getLocationMode(locationRaw) as CuratorLocationMode;
-      let fallbackPlan = buildWorkoutPlanFromSemanticFocus({
-        language: selectedLanguage,
-        location: locationRaw,
-        status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
-        limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
-        age: memory.userAge ?? memory.trainingAge,
-        scheduleIntent: memory.trainingSchedule,
-        focus: semanticFocus,
-        trainingGoal: memory.trainingGoal,
-      });
+      let fallbackPlan: WorkoutPlan = {
+        ...buildWorkoutPlanFromSemanticFocus({
+          language: selectedLanguage,
+          location: locationRaw,
+          status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
+          limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
+          age: memory.userAge ?? memory.trainingAge,
+          scheduleIntent: memory.trainingSchedule,
+          focus: semanticFocus,
+          trainingGoal: memory.trainingGoal,
+        }),
+        locationMode,
+      };
       fallbackPlan = dedupeAndRepairWorkoutPlan(safetyFilterWorkoutPlan(fallbackPlan, memory), {
         focus: semanticFocus,
         locationMode,
@@ -8513,6 +8517,7 @@ async function askGutoModel({
           workoutPlan = {
             focus: curated.summary ? curated.summary.split(".")[0] : localizeMuscleGroup(semanticFocus, selectedLanguage),
             focusKey: semanticFocus,
+            locationMode,
             dateLabel: getWorkoutDateLabel(selectedLanguage, new Date()),
             scheduledFor: new Date().toISOString(),
             summary: curated.summary || "",
@@ -8525,16 +8530,19 @@ async function askGutoModel({
       // Fallback determinístico se o Curator falhar
       if (!workoutPlan) {
         console.warn(`[GUTO] curator failed — falling back to template for ${semanticFocus}/${locationMode}`);
-        workoutPlan = buildWorkoutPlanFromSemanticFocus({
-          language: selectedLanguage,
-          location: locationRaw,
-          status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
-          limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
-          age: memory.userAge ?? memory.trainingAge,
-          scheduleIntent: memory.trainingSchedule,
-          focus: semanticFocus,
-          trainingGoal: memory.trainingGoal,
-        });
+        workoutPlan = {
+          ...buildWorkoutPlanFromSemanticFocus({
+            language: selectedLanguage,
+            location: locationRaw,
+            status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
+            limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
+            age: memory.userAge ?? memory.trainingAge,
+            scheduleIntent: memory.trainingSchedule,
+            focus: semanticFocus,
+            trainingGoal: memory.trainingGoal,
+          }),
+          locationMode,
+        };
       }
 
       workoutPlan = safetyFilterWorkoutPlan(workoutPlan, memory);
@@ -8701,16 +8709,19 @@ async function askGutoModel({
         memory.preferredTrainingLocation || memory.trainingLocation || "casa"
       );
       const locationMode = getLocationMode(locationRaw) as CuratorLocationMode;
-      let fallbackPlan = buildWorkoutPlanFromSemanticFocus({
-        language: selectedLanguage,
-        location: locationRaw,
-        status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
-        limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
-        age: memory.userAge ?? memory.trainingAge,
-        scheduleIntent: memory.trainingSchedule,
-        focus: semanticFocus,
-        trainingGoal: memory.trainingGoal,
-      });
+      let fallbackPlan: WorkoutPlan = {
+        ...buildWorkoutPlanFromSemanticFocus({
+          language: selectedLanguage,
+          location: locationRaw,
+          status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
+          limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
+          age: memory.userAge ?? memory.trainingAge,
+          scheduleIntent: memory.trainingSchedule,
+          focus: semanticFocus,
+          trainingGoal: memory.trainingGoal,
+        }),
+        locationMode,
+      };
       fallbackPlan = dedupeAndRepairWorkoutPlan(safetyFilterWorkoutPlan(fallbackPlan, memory), {
         focus: semanticFocus,
         locationMode,
