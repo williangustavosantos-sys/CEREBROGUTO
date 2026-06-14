@@ -3667,7 +3667,7 @@ Usuário quebra a regra:
 
 Usuário entrega contexto fora de ordem:
 [user] tenho 32 anos, sem dor, vou em casa, voltando depois de 2 meses parado
-[guto] {"fala":"Pacote completo, eu gostei. Volta leve, sem heroísmo. Treino tá montando.","acao":"updateWorkout","expectedResponse":null,"avatarEmotion":"reward","memoryPatch":{"trainingAge":32,"trainingLimitations":"sem dor","trainingLocation":"casa","trainingStatus":"voltando depois de 2 meses parado","nextWorkoutFocus":"full_body"}}
+[guto] {"fala":"Pacote completo, eu gostei. Volta leve, sem heroísmo. Treino tá montando.","acao":"updateWorkout","expectedResponse":null,"avatarEmotion":"reward","memoryPatch":{"trainingAge":32,"trainingLimitations":"sem dor","trainingLocation":"casa","trainingStatus":"voltando depois de 2 meses parado","nextWorkoutFocus":"chest_triceps"}}
 
 Usuário dá local com equipamento, mas ainda falta estado:
 [user] vou treinar no condomínio, tenho halteres e banco
@@ -3688,6 +3688,18 @@ Usuário tenta adiar:
 Usuário fecha sem dor:
 [user] tenho 35 e estou sem dor
 [guto] {"fala":"Bora começar: aquecimento na aba treino do dia e depois bloco principal. Sem dor, sem desculpa.","acao":"updateWorkout","expectedResponse":null,"avatarEmotion":"reward","memoryPatch":{"trainingAge":35,"trainingLimitations":"sem dor"}}
+
+Usuário calibrado confirma com afirmação curta (pt-BR):
+[user] bora
+[guto] {"fala":"Peito e tríceps hoje. Aquecimento na aba, depois bloco principal. Sem pausa.","acao":"updateWorkout","expectedResponse":null,"avatarEmotion":"reward","memoryPatch":{}}
+
+Usuário calibrado confirma com afirmação curta (it-IT):
+[user] andiamo
+[guto] {"fala":"Petto e tricipiti oggi. Riscaldamento nella scheda, poi blocco principale. Senza sosta.","acao":"updateWorkout","expectedResponse":null,"avatarEmotion":"reward","memoryPatch":{}}
+
+Usuário calibrado confirma (en-US):
+[user] let's go
+[guto] {"fala":"Chest and triceps today. Warm-up first, then the main block. No breaks.","acao":"updateWorkout","expectedResponse":null,"avatarEmotion":"reward","memoryPatch":{}}
 
 Usuário entrega limitação clara:
 [user] tenho 35 e um ombro direito chato em empurrar
@@ -3847,7 +3859,10 @@ function chooseNextWorkoutFocus(memory: GutoMemory, preferred?: WorkoutFocus | n
   // Regra Soberana 2 — não repetir treino recente. Um foco preferido (sugerido
   // pelo modelo ou herdado de nextWorkoutFocus) só é respeitado se NÃO foi
   // treinado recentemente; caso contrário a rotação determinística manda.
-  if (preferred && isWorkoutFocus(preferred) && !blocked.has(preferred)) {
+  // full_body é o fallback da rotação (quando todos os splits estão bloqueados),
+  // nunca uma preferência legítima — aceitar full_body como preferred quebraria
+  // a rotação de splits toda vez que o modelo sugere full_body por viés.
+  if (preferred && isWorkoutFocus(preferred) && preferred !== "full_body" && !blocked.has(preferred)) {
     return preferred;
   }
 
@@ -4007,8 +4022,14 @@ async function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["m
     );
   }
   if (isWorkoutFocus(patch.nextWorkoutFocus) && !trainedRef) {
-    if (memory.nextWorkoutFocus !== patch.nextWorkoutFocus) changedFields.add("nextWorkoutFocus");
-    memory.nextWorkoutFocus = patch.nextWorkoutFocus;
+    // Nunca aceitar full_body como sugestão direta do modelo — é o fallback
+    // da rotação determinística, não uma preferência válida. Se o modelo
+    // sugerir full_body, a rotação em chooseNextWorkoutFocus decide o que usar.
+    const resolvedFocus = patch.nextWorkoutFocus === "full_body"
+      ? chooseNextWorkoutFocus(memory, null)
+      : patch.nextWorkoutFocus;
+    if (memory.nextWorkoutFocus !== resolvedFocus) changedFields.add("nextWorkoutFocus");
+    memory.nextWorkoutFocus = resolvedFocus;
   }
   const previousRecentHistory = memory.recentTrainingHistory || [];
   memory.recentTrainingHistory = normalizeRecentTrainingHistory(patch.recentTrainingHistory, previousRecentHistory);
@@ -7461,7 +7482,7 @@ function enforceTrainingFlowCertainty(
     if (contractIntent.kind === "clear_limitation" && contractIntent.age) {
       memory.trainingLimitations = normalizeMemoryValue(contractIntent.limitationText || rawInput);
       memory.userAge = contractIntent.age;
-      memory.nextWorkoutFocus = memory.nextWorkoutFocus || "full_body";
+      memory.nextWorkoutFocus = chooseNextWorkoutFocus(memory, memory.nextWorkoutFocus || null);
       response.memoryPatch = {
         ...(response.memoryPatch || {}),
         trainingLimitations: memory.trainingLimitations,
