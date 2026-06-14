@@ -8549,7 +8549,7 @@ async function askGutoModel({
         hasLimitation: Boolean(deriveBodyRegionFromPathology(memory)),
         language: selectedLanguage as WorkoutLanguage,
       }) as WorkoutPlan;
-      workoutPlan = applyWorkoutProgression(workoutPlan, memory.workoutFeedbackHistory) as WorkoutPlan;
+      workoutPlan = applyWorkoutProgression(workoutPlan, memory.workoutFeedbackHistory, selectedLanguage as CatalogLanguage) as WorkoutPlan;
       workoutPlan = dedupeAndRepairWorkoutPlan(workoutPlan, {
         focus: semanticFocus,
         locationMode,
