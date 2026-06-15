@@ -54,13 +54,16 @@ function isSameMonth(dateA: Date, dateB: Date): boolean {
 export function projectPeriodCounters(
   profile: Pick<
     ArenaProfile,
-    "weeklyXp" | "monthlyXp" | "validatedWorkoutsWeek" | "validatedWorkoutsMonth" | "lastWorkoutValidatedAt"
+    "weeklyXp" | "monthlyXp" | "validatedWorkoutsWeek" | "validatedWorkoutsMonth" | "lastWorkoutValidatedAt" | "lastXpAt"
   >,
   now: Date = new Date()
 ): { weeklyXp: number; monthlyXp: number; validatedWorkoutsWeek: number; validatedWorkoutsMonth: number } {
   let { weeklyXp, monthlyXp, validatedWorkoutsWeek, validatedWorkoutsMonth } = profile;
-  if (profile.lastWorkoutValidatedAt) {
-    const lastDate = new Date(profile.lastWorkoutValidatedAt);
+  // Âncora = última atividade de XP (qualquer tipo). Fallback p/ lastWorkoutValidatedAt
+  // em perfis antigos sem lastXpAt.
+  const periodAnchor = profile.lastXpAt ?? profile.lastWorkoutValidatedAt;
+  if (periodAnchor) {
+    const lastDate = new Date(periodAnchor);
     if (!Number.isNaN(lastDate.getTime())) {
       if (!isSameWeek(lastDate, now)) {
         weeklyXp = 0;
@@ -176,9 +179,12 @@ export function awardArenaXp(options: AwardXpOptions): AwardXpResult {
   const previousStage = profile.avatarStage;
   const now = new Date();
 
-  // Reset weekly/monthly counters if crossing week/month boundary
-  if (profile.lastWorkoutValidatedAt) {
-    const lastDate = new Date(profile.lastWorkoutValidatedAt);
+  // Reset weekly/monthly counters if crossing week/month boundary.
+  // Âncora = última atividade de XP (qualquer tipo), não só treino: assim o
+  // pacto/bônus também reseta no fim do ciclo. Fallback p/ perfis antigos.
+  const periodAnchor = profile.lastXpAt ?? profile.lastWorkoutValidatedAt;
+  if (periodAnchor) {
+    const lastDate = new Date(periodAnchor);
     if (!isSameWeek(lastDate, now)) {
       profile.weeklyXp = 0;
       profile.validatedWorkoutsWeek = 0;
@@ -191,22 +197,21 @@ export function awardArenaXp(options: AwardXpOptions): AwardXpResult {
 
   profile.totalXp = Math.max(0, profile.totalXp + xp);
 
-  // O bônus do Pacto é um buffer SÓ de totalXp: NÃO infla weekly/mensal nem gera
-  // streak (Regra AR-5 "buffer não infla Semanal/Mensal" + X-4 "pacto não vira
-  // streak"). Só presença validada / penalidade conta no período e na sequência.
-  const countsForPeriod = type !== "bonus";
-  if (countsForPeriod) {
-    profile.weeklyXp = Math.max(0, profile.weeklyXp + xp);
-    profile.monthlyXp = Math.max(0, profile.monthlyXp + xp);
-  }
+  // REGRA DE PRODUTO (revisão do fundador — substitui AR-5/X-4): TODO XP ganho
+  // aparece em Semana, Mês e Individual. A ÚNICA diferença entre as superfícies é
+  // o reset (semana zera na virada da semana, mês na virada do mês, individual
+  // nunca). Portanto o pacto (type "bonus") agora conta no período como qualquer XP.
+  profile.weeklyXp = Math.max(0, profile.weeklyXp + xp);
+  profile.monthlyXp = Math.max(0, profile.monthlyXp + xp);
 
-  if (type === "workout_validated" || type === "reduced_mission_validated") {
+  // Contagem de treinos e streak continuam atreladas à PRESENÇA DE TREINO, não ao
+  // XP em si: o pacto/bônus não vira treino validado nem sequência; a falta zera.
+  const isValidatedWorkout = type === "workout_validated" || type === "reduced_mission_validated";
+  if (isValidatedWorkout) {
     profile.validatedWorkoutsTotal += 1;
     profile.validatedWorkoutsWeek += 1;
     profile.validatedWorkoutsMonth += 1;
-  }
 
-  if (countsForPeriod) {
     if (profile.lastWorkoutValidatedAt) {
       const lastDate = new Date(profile.lastWorkoutValidatedAt);
       const diffDays = Math.floor((now.getTime() - lastDate.getTime()) / (1000 * 60 * 60 * 24));
@@ -215,7 +220,13 @@ export function awardArenaXp(options: AwardXpOptions): AwardXpResult {
       profile.currentStreak = 1;
     }
     profile.lastWorkoutValidatedAt = now.toISOString();
+  } else if (type === "miss_penalty") {
+    // Faltar quebra a sequência (espelha memory.streak = 0 no server).
+    profile.currentStreak = 0;
   }
+
+  // Toda concessão marca a âncora genérica de período.
+  profile.lastXpAt = now.toISOString();
   profile.avatarStage = getAvatarStage(profile.totalXp);
   profile.updatedAt = now.toISOString();
 
