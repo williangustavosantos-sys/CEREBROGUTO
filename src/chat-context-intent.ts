@@ -101,6 +101,16 @@ const EQUIPMENT_BUSY_PHRASES = [
   "occupato", "occupata", "preso", "busy", "taken", "in use", "occupied",
 ];
 
+// "Qual a troca? / por qual? / com o que substituo?" — follow-up pedindo o
+// substituto CONCRETO. Casado com fronteira de palavra (não pega "qualidade").
+const SUBSTITUTE_ASK_PHRASES = [
+  "qual", "quais", "qual troca", "qual a troca", "por qual", "troca por qual",
+  "qual substituto", "qual substituicao", "com o que", "com o que troco",
+  "o que uso", "o que usar", "o que como", "que como no lugar",
+  "which", "which one", "what do i use", "what can i use", "what instead",
+  "con cosa", "con quale", "quale", "quale alternativa",
+];
+
 function matchesAny(userMessageNormalized: string, phrases: string[]): boolean {
   return phrases.some((p) => userMessageNormalized.includes(normalize(p)));
 }
@@ -123,8 +133,35 @@ export function isEquipmentUnavailableMessage(userMessage: string): boolean {
   return matchesAny(n, EQUIPMENT_BUSY_PHRASES) || matchesAny(n, UNAVAILABILITY_PHRASES);
 }
 
+/**
+ * Pergunta de follow-up "qual a troca?" — usa fronteira de palavra para "qual"
+ * não casar dentro de "qualidade"/"qualquer".
+ */
+export function isSubstituteAskMessage(userMessage: string): boolean {
+  const n = normalize(userMessage);
+  if (!n) return false;
+  const padded = ` ${n.replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim()} `;
+  return SUBSTITUTE_ASK_PHRASES.some((p) => padded.includes(` ${normalize(p)} `));
+}
+
+/**
+ * Extrai foodName e mealName do bloco `[DIET CONTEXT … Food in question: "X" …
+ * Meal: "Y" …]` que o app injeta. Usado para manter o contexto do alimento entre
+ * turnos (BUG 3: "Qual?" no 2º turno ainda sabe qual alimento trocar).
+ */
+export function parseDietContext(rawInput: string): { foodName?: string; mealName?: string } | null {
+  if (!rawInput || !rawInput.includes(DIET_CONTEXT_MARKER)) return null;
+  const foodMatch = rawInput.match(/Food in question:\s*"([^"]+)"/i);
+  const mealMatch = rawInput.match(/Meal:\s*"([^"]+)"/i);
+  const foodName = foodMatch?.[1]?.trim();
+  const mealName = mealMatch?.[1]?.trim();
+  if (!foodName && !mealName) return null;
+  return { foodName, mealName };
+}
+
 export type ShortContextIntent =
   | "food_unavailable"
+  | "food_substitute_request"
   | "equipment_unavailable"
   | "needs_clarification"
   | "pathology"
@@ -149,6 +186,13 @@ export function classifyShortContextIntent(params: {
   // 2) Contexto de alimento + indisponibilidade → alimento indisponível.
   if (context === "food" && isUnavailabilityMessage(userMessage)) {
     return { intent: "food_unavailable", context, userMessage };
+  }
+
+  // 2b) Contexto de alimento + "qual a troca?" → pedido de substituto concreto.
+  //     É o 2º turno do BUG 3 ("Qual?"), que antes caía em "none" e respondia
+  //     genérico. Agora mantém o contexto do alimento e entrega a substituição.
+  if (context === "food" && isSubstituteAskMessage(userMessage)) {
+    return { intent: "food_substitute_request", context, userMessage };
   }
 
   // 3) Contexto de exercício + indisponibilidade/ocupado → equipamento.

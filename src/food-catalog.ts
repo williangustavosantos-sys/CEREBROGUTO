@@ -456,6 +456,47 @@ export function getFoodById(id: string): FoodItem | undefined {
   return foodById.get(id);
 }
 
+/**
+ * Resolve o ID estável de um alimento a partir do NOME de exibição (o que o chat
+ * envia, ex.: "Aveia em flocos"). Normaliza acentos/caixa e casa contra os nomes
+ * em todos os idiomas e os aliases. Tenta match exato e, depois, substring
+ * (preferindo o nome mais específico). Sem match → undefined (o GUTO não chuta).
+ */
+export function resolveFoodIdByName(name: string): string | undefined {
+  const norm = (v: string) =>
+    v.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+  const n = norm(name);
+  if (!n) return undefined;
+
+  // 1) Match exato por nome (qualquer idioma) ou alias.
+  for (const food of foodCatalog) {
+    const names = Object.values(food.names).map(norm);
+    const aliases = Object.values(food.aliases ?? {})
+      .flat()
+      .filter((a): a is string => Boolean(a))
+      .map(norm);
+    if (names.includes(n) || aliases.includes(n)) return food.id;
+  }
+
+  // 2) Match aproximado por substring — escolhe o nome mais específico (mais longo)
+  //    para evitar falso-positivo ("pão" casando em "pão integral").
+  let best: { id: string; len: number } | undefined;
+  for (const food of foodCatalog) {
+    const names = Object.values(food.names).map(norm);
+    const aliases = Object.values(food.aliases ?? {})
+      .flat()
+      .filter((a): a is string => Boolean(a))
+      .map(norm);
+    for (const candidate of [...names, ...aliases]) {
+      if (!candidate) continue;
+      if (n.includes(candidate) || candidate.includes(n)) {
+        if (!best || candidate.length > best.len) best = { id: food.id, len: candidate.length };
+      }
+    }
+  }
+  return best?.id;
+}
+
 export function getMealBlockById(id: string): MealBlock | undefined {
   return mealBlocks.find((b) => b.id === id);
 }

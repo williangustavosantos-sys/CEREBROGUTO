@@ -23,6 +23,11 @@ export interface ArenaProfile {
   validatedWorkoutsMonth: number;
   currentStreak: number;
   lastWorkoutValidatedAt: string | null;
+  // Âncora genérica de "última atividade de XP" (pacto/bônus, treino, missão
+  // adaptada, penalidade). Dirige o reset preguiçoso de weekly/monthly para
+  // QUALQUER XP — não só treino — para que o pacto também resete no fim do
+  // ciclo. Opcional para compat com perfis já gravados (fallback p/ lastWorkoutValidatedAt).
+  lastXpAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }

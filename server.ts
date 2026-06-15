@@ -11,6 +11,7 @@ import { requestLog } from "./src/http/request-log";
 import { readMemoryStoreSync, writeMemoryStoreSync, readMemoryStoreAsync, writeMemoryStoreAsync, persistUserMemory } from "./src/memory-store";
 import {
   getCatalogById,
+  getAggregatedExerciseCatalog,
   getExerciseLocations,
   getExerciseName,
   filterExercisesBySafety,
@@ -74,15 +75,18 @@ import {
   summarizeWorkoutFeedback,
   type WorkoutFeedbackRecord,
 } from "./src/workout-progression.js";
-import { applyLevelStructure, resolveTrainingLevel, type WorkoutLanguage } from "./src/workout-level.js";
+import { applyLevelStructure, resolveTrainingLevel, type WorkoutLanguage, type TrainingLevel } from "./src/workout-level.js";
 import {
   classifyShortContextIntent,
   stripInjectedContext,
+  parseDietContext,
   foodUnavailableReply,
   equipmentUnavailableReply,
   clarificationReply,
   type ShortIntentLanguage,
 } from "./src/chat-context-intent.js";
+import { resolveFoodIdByName, getFoodById, type FoodCountry, type FoodLanguage } from "./src/food-catalog.js";
+import { suggestFoodSubstitutes, type UserFoodConstraints } from "./src/food-availability.js";
 import {
   resolveProfileFreeFields,
   resolveKnownPathologyLocally,
@@ -1710,6 +1714,28 @@ function grantInitialXp(memory: GutoMemory) {
   return memory;
 }
 
+// Ponto único de espelhamento memória→Arena: toda concessão de XP do ledger de
+// memória (xpEvents/totalXp) também atualiza o ledger da Arena (totalXp/weekly/
+// monthly), para os dois NUNCA divergirem. Era a causa do "Evoluir mostra X e a
+// Arena mostra Y para o mesmo XP". Nunca bloqueia o fluxo de memória.
+function mirrorXpToArena(
+  memory: GutoMemory,
+  type: "workout_validated" | "reduced_mission_validated" | "bonus" | "miss_penalty",
+  xp: number
+) {
+  try {
+    awardArenaXp({
+      userId: memory.userId,
+      displayName: (memory as { name?: string }).name || memory.userId,
+      arenaGroupId: getUserArenaGroup(memory.userId),
+      type,
+      xp,
+    });
+  } catch {
+    // Arena nunca bloqueia o fluxo de memória.
+  }
+}
+
 function completeWorkout(memory: GutoMemory) {
   const day = todayKey();
   const completedDays = new Set(memory.completedWorkoutDates || []);
@@ -1740,7 +1766,11 @@ function acceptAdaptedMission(memory: GutoMemory) {
   adaptedDays.add(day);
   memory.adaptedMissionDates = Array.from(adaptedDays).sort();
   memory.adaptedMissionToday = true;
-  appendXpEvent(memory, "accept_adapted_mission", 50, day);
+  // Missão adaptada (+50) também conta na Arena como presença reduzida validada,
+  // senão Evoluir/Percurso mostram +50 e a Arena Semana/Mês/Individual ficam 0.
+  if (appendXpEvent(memory, "accept_adapted_mission", 50, day)) {
+    mirrorXpToArena(memory, "reduced_mission_validated", 50);
+  }
   return memory;
 }
 
@@ -1758,7 +1788,11 @@ function applyDailyMissPenalty(memory: GutoMemory, day = todayKey()) {
   const missedDays = new Set(memory.missedMissionDates || []);
   missedDays.add(day);
   memory.missedMissionDates = Array.from(missedDays).sort();
-  appendXpEvent(memory, "apply_daily_miss_penalty", -20, day);
+  // Penalidade por falta (−20) também desce na Arena (Semana/Mês/Individual) e
+  // quebra a streak; senão a Arena fica defasada do Evoluir/Percurso.
+  if (appendXpEvent(memory, "apply_daily_miss_penalty", -20, day)) {
+    mirrorXpToArena(memory, "miss_penalty", -20);
+  }
   memory.streak = 0;
   return memory;
 }
@@ -4747,15 +4781,102 @@ function isEquipmentBusyMessage(input?: string) {
   return hasEquipmentContext && hasBusyContext;
 }
 
-function buildShortContextFallbackResponse(input: string | undefined, language: GutoLanguage): GutoModelResponse | null {
+// Mapeia país do usuário (countryCode ou nome livre) para o FoodCountry do
+// catálogo. Sem match → undefined (suggestFoodSubstitutes cai nos substitutes
+// explícitos do alimento, modo conservador).
+function resolveFoodCountry(memory: GutoMemory): FoodCountry | undefined {
+  const byCode: Record<string, FoodCountry> = {
+    br: "brazil", it: "italy", es: "spain", pt: "portugal", us: "usa",
+    gb: "uk", uk: "uk", de: "germany", fr: "france", ar: "argentina",
+  };
+  const code = (memory.countryCode || "").toLowerCase().trim();
+  if (byCode[code]) return byCode[code];
+  const byName: Record<string, FoodCountry> = {
+    brasil: "brazil", brazil: "brazil", italia: "italy", italy: "italy",
+    espanha: "spain", spain: "spain", portugal: "portugal",
+    "estados unidos": "usa", usa: "usa", eua: "usa", "reino unido": "uk",
+    alemanha: "germany", germany: "germany", franca: "france", france: "france",
+    argentina: "argentina",
+  };
+  return byName[normalize(memory.country || "")];
+}
+
+function memoryFoodConstraints(memory: GutoMemory): UserFoodConstraints {
+  const raw = (memory as { foodRestrictions?: unknown }).foodRestrictions;
+  let restrictions: string[] = [];
+  if (Array.isArray(raw)) restrictions = raw.map((r) => String(r));
+  else if (typeof raw === "string" && raw.trim()) {
+    restrictions = raw.split(/[,;/]+/).map((r) => r.trim()).filter(Boolean);
+  }
+  return { restrictions };
+}
+
+/**
+ * BUG 3 — entrega o substituto CONCRETO do alimento do card (Princípio 6: nunca
+ * genérico quando há contexto específico de alimento). Resolve o alimento pelo
+ * marcador de contexto + catálogo, respeitando país e restrições. Retorna null
+ * se não der pra resolver (aí o chamador mantém o contexto sem chutar).
+ */
+function buildFoodSubstituteResponse(
+  input: string | undefined,
+  memory: GutoMemory,
+  language: GutoLanguage
+): GutoModelResponse | null {
+  const dietCtx = parseDietContext(input || "");
+  if (!dietCtx?.foodName) return null;
+  const foodId = resolveFoodIdByName(dietCtx.foodName);
+  if (!foodId) return null;
+
+  const subs = suggestFoodSubstitutes({
+    originalFoodId: foodId,
+    country: resolveFoodCountry(memory),
+    constraints: memoryFoodConstraints(memory),
+    useContext: "meal_substitution",
+  });
+  if (subs.length === 0) return null;
+
+  const lang = language as FoodLanguage;
+  const names = subs.slice(0, 2).map((f) => f.names[lang] || f.names["pt-BR"]);
+  const foodLabel = getFoodById(foodId)?.names[lang] || dietCtx.foodName;
+  const options = names.length >= 2 ? { "pt-BR": `${names[0]} ou ${names[1]}`, en: `${names[0]} or ${names[1]}`, it: `${names[0]} o ${names[1]}` } : { "pt-BR": names[0], en: names[0], it: names[0] };
+  const meal = dietCtx.mealName;
+
+  const fala: Record<GutoLanguage, string> = {
+    "pt-BR": `Troca ${foodLabel} por ${options["pt-BR"]}${meal ? `, mantendo a energia do ${meal}` : ""}. Mesma função no prato, sem furar a dieta.`,
+    "en-US": `Swap ${foodLabel} for ${options.en}${meal ? `, keeping the energy of ${meal}` : ""}. Same role on the plate, diet intact.`,
+    "it-IT": `Cambia ${foodLabel} con ${options.it}${meal ? `, mantenendo l'energia di ${meal}` : ""}. Stessa funzione nel piatto, dieta intatta.`,
+  };
+  return { fala: fala[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
+}
+
+function buildShortContextFallbackResponse(
+  input: string | undefined,
+  memory: GutoMemory,
+  language: GutoLanguage
+): GutoModelResponse | null {
   const shortIntent = classifyShortContextIntent({ rawInput: input || "" });
   if (shortIntent.intent === "food_unavailable") {
+    // 1º turno ("não tem em casa"): acolhe e sinaliza a troca. O substituto
+    // CONCRETO vem no 2º turno ("Qual?") via food_substitute_request.
     return {
       fala: foodUnavailableReply(language as ShortIntentLanguage),
       acao: "none",
       expectedResponse: null,
       avatarEmotion: "default",
     };
+  }
+  if (shortIntent.intent === "food_substitute_request") {
+    // 2º turno ("Qual?"): mantém o contexto do alimento e entrega a substituição.
+    const concrete = buildFoodSubstituteResponse(input, memory, language);
+    if (concrete) return concrete;
+    // Não resolveu o alimento: pede precisão SEM perder o contexto (nunca genérico).
+    const foodLabel = parseDietContext(input || "")?.foodName;
+    const copy: Record<GutoLanguage, string> = {
+      "pt-BR": foodLabel ? `Pra trocar ${foodLabel} certo, me diz: alergia, não curte, ou só não tem em casa?` : "Me diz qual alimento você quer trocar que eu resolvo na hora.",
+      "en-US": foodLabel ? `To swap ${foodLabel} right, tell me: allergy, dislike, or just out of stock?` : "Tell me which food you want to swap and I'll handle it.",
+      "it-IT": foodLabel ? `Per cambiare ${foodLabel} bene, dimmi: allergia, non ti piace, o solo non ce l'hai?` : "Dimmi quale alimento vuoi cambiare e ci penso io.",
+    };
+    return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
   if (shortIntent.intent === "needs_clarification") {
     return {
@@ -4821,6 +4942,48 @@ function findExerciseFromContextMarker(input: string | undefined, plan?: Workout
   return null;
 }
 
+/**
+ * Resolve o exercício pelo CATÁLOGO validado a partir do marcador de contexto,
+ * sem depender de memory.lastWorkoutPlan. É a rede de segurança do BUG 2: quando
+ * o plano persistido está ausente/desatualizado, o card de contexto ainda diz
+ * qual exercício é — então o GUTO NUNCA precisa reperguntar "qual aparelho".
+ */
+function resolveCatalogExerciseFromContextMarker(
+  input: string | undefined
+): { id: string; name: string } | null {
+  if (!input || !input.includes(EXERCISE_CONTEXT_MARKER)) return null;
+  const nameMatch = input.match(/Exercise:\s*"([^"]+)"/i);
+  const canonicalMatch = input.match(/canonical PT:\s*([^).]+)\)/i);
+  const rawNames = [nameMatch?.[1], canonicalMatch?.[1]].filter(
+    (value): value is string => Boolean(value && value.trim())
+  );
+  if (rawNames.length === 0) return null;
+  const candidates = rawNames.map((value) => normalize(value));
+  const catalog = getAggregatedExerciseCatalog();
+
+  // 1) Match exato por nome canônico / nome por idioma / alias.
+  for (const candidate of candidates) {
+    const exact = catalog.find(
+      (entry) =>
+        normalize(entry.canonicalNamePt) === candidate ||
+        Object.values(entry.namesByLanguage).some((name) => normalize(name) === candidate) ||
+        Object.values(entry.aliasesByLanguage ?? {}).some((aliases) =>
+          (aliases ?? []).some((alias) => normalize(alias) === candidate)
+        )
+    );
+    if (exact) return { id: exact.id, name: exact.canonicalNamePt };
+  }
+  // 2) Match aproximado por substring de nome.
+  for (const candidate of candidates) {
+    const fuzzy = catalog.find((entry) => {
+      const names = [entry.canonicalNamePt, ...Object.values(entry.namesByLanguage)].map((name) => normalize(name));
+      return names.some((name) => name.includes(candidate) || candidate.includes(name));
+    });
+    if (fuzzy) return { id: fuzzy.id, name: fuzzy.canonicalNamePt };
+  }
+  return null;
+}
+
 function buildEquipmentBusyFallbackResponse({
   input,
   history,
@@ -4834,8 +4997,15 @@ function buildEquipmentBusyFallbackResponse({
 }): GutoModelResponse | null {
   if (!isEquipmentBusyMessage(input)) return null;
   const plan = memory.lastWorkoutPlan;
-  const exercise = findLastExerciseDoubt(history, plan) || findExerciseFromContextMarker(input, plan);
-  if (!exercise) {
+  const planExercise = findLastExerciseDoubt(history, plan) || findExerciseFromContextMarker(input, plan);
+  // Plano ausente/desatualizado: o card de contexto ainda diz qual exercício é →
+  // resolve pelo catálogo. Nunca repergunta "qual aparelho" se o contexto está ativo.
+  const catalogRef = planExercise ? null : resolveCatalogExerciseFromContextMarker(input);
+  const exerciseId = planExercise?.id ?? catalogRef?.id;
+  const exerciseName = planExercise?.name ?? catalogRef?.name;
+
+  if (!exerciseId || !exerciseName) {
+    // Só aqui — sem QUALQUER contexto de exercício — faz sentido perguntar qual.
     const copy: Record<GutoLanguage, string> = {
       "pt-BR": "Fechado. Me diz qual aparelho travou que eu te dou a troca agora, sem perder o treino.",
       "en-US": "Got it. Tell me which machine is taken and I will swap it now, no workout lost.",
@@ -4846,29 +5016,42 @@ function buildEquipmentBusyFallbackResponse({
 
   const location = getLocationMode(plan?.location || memory.preferredTrainingLocation || memory.trainingLocation) as CatalogLocation;
   const pathology = memory.resolvedFields?.pathology;
-  const substitutes = suggestExerciseSubstitutes(exercise.id, {
+  const substitutes = suggestExerciseSubstitutes(exerciseId, {
     location,
     userRiskTags: pathology?.status === "clear" ? pathology.riskTags : [],
     userBodyRegion: pathology?.status === "clear" ? pathology.bodyRegion : undefined,
   });
   const substitute = substitutes
     .map((id) => getCatalogById(id))
-    .find((entry) => entry && entry.id !== exercise.id);
+    .find((entry) => entry && entry.id !== exerciseId);
 
   if (!substitute) {
     const copy: Record<GutoLanguage, string> = {
-      "pt-BR": `${exercise.name} travou? Sem drama: pula ele por enquanto, faz o próximo exercício e volta nele no final. Se ainda estiver cheio, me chama de novo.`,
-      "en-US": `${exercise.name} is taken? No drama: skip it for now, do the next exercise, and come back at the end. If it is still busy, call me again.`,
-      "it-IT": `${exercise.name} è occupato? Nessun dramma: saltalo per ora, fai il prossimo esercizio e torna alla fine. Se è ancora pieno, chiamami di nuovo.`,
+      "pt-BR": `${exerciseName} travou? Sem drama: pula ele por enquanto, faz o próximo exercício e volta nele no final. Se ainda estiver cheio, me chama de novo.`,
+      "en-US": `${exerciseName} is taken? No drama: skip it for now, do the next exercise, and come back at the end. If it is still busy, call me again.`,
+      "it-IT": `${exerciseName} è occupato? Nessun dramma: saltalo per ora, fai il prossimo esercizio e torna alla fine. Se è ancora pieno, chiamami di nuovo.`,
     };
     return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
 
   const substituteName = substitute.namesByLanguage[language as CatalogLanguage] || substitute.canonicalNamePt;
+  // Com o exercício do plano citamos séries/reps/descanso reais; vindo só do
+  // catálogo (plano ausente), não inventamos números — mantemos o esquema do treino.
+  const scheme: Record<GutoLanguage, string> = planExercise
+    ? {
+        "pt-BR": `mantém ${planExercise.sets} séries, ${planExercise.reps}, descanso de ${planExercise.rest}`,
+        "en-US": `keep ${planExercise.sets} sets, ${planExercise.reps}, ${planExercise.rest} rest`,
+        "it-IT": `tieni ${planExercise.sets} serie, ${planExercise.reps}, recupero ${planExercise.rest}`,
+      }
+    : {
+        "pt-BR": "mantém o mesmo esquema de séries e descanso do teu treino",
+        "en-US": "keep the same sets and rest from your workout",
+        "it-IT": "tieni lo stesso schema di serie e recupero del tuo allenamento",
+      };
   const copy: Record<GutoLanguage, string> = {
-    "pt-BR": `${exercise.name} ocupado? Troca por ${substituteName}: mantém ${exercise.sets} séries, ${exercise.reps}, descanso de ${exercise.rest}. Mesma missão, sem ficar parado.`,
-    "en-US": `${exercise.name} is taken? Swap to ${substituteName}: keep ${exercise.sets} sets, ${exercise.reps}, ${exercise.rest} rest. Same mission, no standing around.`,
-    "it-IT": `${exercise.name} occupato? Cambia con ${substituteName}: tieni ${exercise.sets} serie, ${exercise.reps}, recupero ${exercise.rest}. Stessa missione, senza fermarti.`,
+    "pt-BR": `${exerciseName} ocupado? Troca por ${substituteName}: ${scheme["pt-BR"]}. Mesma missão, sem ficar parado.`,
+    "en-US": `${exerciseName} is taken? Swap to ${substituteName}: ${scheme["en-US"]}. Same mission, no standing around.`,
+    "it-IT": `${exerciseName} occupato? Cambia con ${substituteName}: ${scheme["it-IT"]}. Stessa missione, senza fermarti.`,
   };
   return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
 }
@@ -5923,6 +6106,79 @@ function catalogEntryToWorkoutExercise(
     videoProvider: "local",
     sourceFileName: entry.sourceFileName,
   };
+}
+
+// BUG 4 — piso de VOLUME por nível. O safetyFilter pode encolher o plano e, para
+// "treinando"/avançado, 4 exercícios é fraco. DEPOIS da segurança, recompomos o
+// número de exercícios principais com candidatos do MESMO foco que passam pelo
+// filtro de segurança da patologia — nunca reintroduz exercício perigoso. Mantém
+// os trilhos validados (Princípio 4/5): só entra o que está no catálogo e é seguro.
+const MIN_MAIN_EXERCISES_BY_LEVEL: Record<TrainingLevel, number> = {
+  beginner: 4,
+  returning: 4,
+  consistent: 5,
+  advanced: 6,
+};
+
+export function enforceMinimumWorkoutVolume(
+  plan: WorkoutPlan,
+  options: {
+    focus: WorkoutFocus;
+    locationMode: CuratorLocationMode;
+    language: GutoLanguage;
+    memory: GutoMemory;
+  }
+): WorkoutPlan {
+  const level = resolveTrainingLevel(options.memory.trainingLevel, options.memory.trainingStatus);
+  const target = MIN_MAIN_EXERCISES_BY_LEVEL[level] ?? 4;
+
+  const isWarmup = (ex: WorkoutExercise) => ex.muscleGroup === "aquecimento" || ex.muscleGroup === "warmup";
+  const mainExercises = plan.exercises.filter((ex) => !isWarmup(ex));
+  if (mainExercises.length >= target) return plan;
+
+  const pathology = options.memory.resolvedFields?.pathology;
+  const riskTags = pathology?.status === "clear" ? pathology.riskTags : [];
+  const bodyRegion =
+    (pathology?.status === "clear" ? pathology.bodyRegion : undefined) ||
+    deriveBodyRegionFromPathology(options.memory);
+
+  const usedIds = new Set(plan.exercises.map((e) => e.id));
+  const usedVideos = new Set(plan.exercises.map((e) => e.videoUrl).filter(Boolean));
+
+  // Candidatos do foco, fora de aquecimento, ainda não usados.
+  const candidates = getCandidatePool(options.focus, options.locationMode).filter(
+    (c) => c.muscleGroup !== "aquecimento" && !usedIds.has(c.id) && !usedVideos.has(c.videoUrl)
+  );
+  // Só os que passam pelo filtro de segurança da patologia (ex.: ombro limitado
+  // nunca recebe exercício shoulder-risky de volta).
+  const safeIds = new Set(
+    filterExercisesBySafety(candidates.map((c) => c.id), {
+      userRiskTags: riskTags,
+      userBodyRegion: bodyRegion,
+    })
+  );
+  const safeCandidates = candidates.filter((c) => safeIds.has(c.id));
+
+  // Template de dose: usa o último principal (mantém o estilo do treino) — o
+  // applyLevelStructure logo a seguir reescreve séries/reps conforme o nível.
+  const template: WorkoutExercise =
+    mainExercises[mainExercises.length - 1] ??
+    plan.exercises[plan.exercises.length - 1];
+  if (!template) return plan;
+
+  const additions: WorkoutExercise[] = [];
+  for (const candidate of safeCandidates) {
+    if (mainExercises.length + additions.length >= target) break;
+    if (usedVideos.has(candidate.videoUrl)) continue;
+    usedVideos.add(candidate.videoUrl);
+    additions.push(catalogEntryToWorkoutExercise(candidate, template, options.language));
+  }
+  if (additions.length === 0) return plan;
+
+  // Reanexa preservando aquecimento no topo e renumerando a ordem.
+  const warmups = plan.exercises.filter(isWarmup);
+  const merged = [...warmups, ...mainExercises, ...additions].map((ex, i) => ({ ...ex, order: i + 1 }));
+  return { ...plan, exercises: merged };
 }
 
 function dedupeAndRepairWorkoutPlan(
@@ -8215,6 +8471,13 @@ async function askGutoModel({
         locationMode,
         language: selectedLanguage,
       });
+      // BUG 4 — piso de volume também no fallback degradado (modelo fora do ar).
+      fallbackPlan = enforceMinimumWorkoutVolume(fallbackPlan, {
+        focus: semanticFocus,
+        locationMode,
+        language: selectedLanguage,
+        memory,
+      });
       fallbackPlan = applyLevelStructure(fallbackPlan as any, {
         level: memory.trainingLevel,
         status: memory.trainingStatus,
@@ -8549,6 +8812,15 @@ async function askGutoModel({
       }
 
       workoutPlan = safetyFilterWorkoutPlan(workoutPlan, memory);
+      // BUG 4 — piso de volume por nível: se a segurança encolheu o plano abaixo do
+      // alvo do nível (treinando=5, avançado=6), recompõe com exercícios SEGUROS do
+      // mesmo foco antes de aplicar a dose. Garante treino robusto p/ "treinando".
+      workoutPlan = enforceMinimumWorkoutVolume(workoutPlan, {
+        focus: semanticFocus,
+        locationMode,
+        language: selectedLanguage,
+        memory,
+      });
       // Fase 3L — o nível vira dose real (avançado ≠ iniciante), aplicado ao
       // plano do curator OU do template, depois da segurança e antes da
       // progressão semanal. Avançado segue avançado mesmo com patologia (a
@@ -8729,6 +9001,13 @@ async function askGutoModel({
         focus: semanticFocus,
         locationMode,
         language: selectedLanguage,
+      });
+      // BUG 4 — piso de volume também no fallback degradado (modelo fora do ar).
+      fallbackPlan = enforceMinimumWorkoutVolume(fallbackPlan, {
+        focus: semanticFocus,
+        locationMode,
+        language: selectedLanguage,
+        memory,
       });
       fallbackPlan = applyLevelStructure(fallbackPlan as any, {
         level: memory.trainingLevel,
@@ -9748,7 +10027,7 @@ app.post("/guto", requireActiveUser, async (req, res) => {
       }));
     }
 
-    const shortContextResponse = buildShortContextFallbackResponse(input, selectedLanguage);
+    const shortContextResponse = buildShortContextFallbackResponse(input, memory, selectedLanguage);
     if (shortContextResponse) {
       const context = getOperationalContext(new Date(), selectedLanguage);
       return res.json(attachAvatarEmotion({
@@ -10252,14 +10531,21 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
     store[userId] = memory;
     writeMemoryStore(store);
 
-    // Award Arena XP
+    // Award Arena XP — espelha EXATAMENTE o delta creditado na memória por
+    // completeWorkout: se a missão adaptada já deu +50 hoje (e já contou como
+    // presença reduzida na Arena), a validação completa o ciclo com +50 como
+    // bônus (sem recontar treino/streak); senão, +100 como treino validado.
+    // Mantém os dois ledgers idênticos no caso adaptada→treino no mesmo dia.
+    const adaptedAlreadyToday = (memory.adaptedMissionDates || []).includes(todayKeyLocal);
+    const arenaXpAmount = adaptedAlreadyToday ? 50 : XP_AMOUNT;
+    const arenaType = adaptedAlreadyToday ? ("bonus" as const) : ("workout_validated" as const);
     const arenaResult = hasSelfieEvidence
       ? awardArenaXp({
           userId,
           displayName: (memory as { name?: string }).name || userId,
           arenaGroupId: getUserArenaGroup(userId),
-          type: "workout_validated",
-          xp: XP_AMOUNT,
+          type: arenaType,
+          xp: arenaXpAmount,
           workoutFocus,
           sourceValidationId: id,
         })
