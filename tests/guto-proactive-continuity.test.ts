@@ -10,6 +10,7 @@ import {
 } from "../src/proactivity/decision-engine.js";
 import type { ProactiveMemory } from "../src/proactivity/types.js";
 import {
+  buildProactiveExpectedResponse,
   buildProactiveContinuityFala,
   classifyContractIntentFallback,
   classifyProactiveContinuitySignal,
@@ -92,6 +93,15 @@ describe("Continuidade Primeiro — caso 1: 'viajo quarta' (sem dado crítico)",
     assert.match(fala, /adapt/i); // "consigo adaptar"
     assert.match(fala, /\?/); // pergunta o dado crítico
     assert.equal(falaHasPassiveMindset(fala), false);
+  });
+
+  it("expectedResponse: expõe SIM/NÃO para a UI registrar adaptação ou dia protegido", () => {
+    const expected = buildProactiveExpectedResponse("travel_unknown", "pt-BR");
+    assert.deepEqual(expected?.options, ["SIM", "NÃO"]);
+    assert.equal(expected?.context, "travel_training");
+    assert.match(expected?.instruction || "", /treinar|protegido/i);
+    assert.equal(buildProactiveExpectedResponse("travel_can_train", "pt-BR"), null);
+    assert.equal(buildProactiveExpectedResponse("travel_cannot_train", "pt-BR"), null);
   });
 });
 

@@ -218,7 +218,14 @@ interface ExpectedResponse {
   type: "text";
   options?: string[];
   instruction?: string;
-  context?: "training_schedule" | "training_location" | "training_status" | "training_limitations" | "limitation_check" | "exercise_swap";
+  context?:
+    | "training_schedule"
+    | "training_location"
+    | "training_status"
+    | "training_limitations"
+    | "limitation_check"
+    | "exercise_swap"
+    | "travel_training";
 }
 export type WeekDayKey = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
 
@@ -869,6 +876,7 @@ function expectedInstruction(context: NonNullable<ExpectedResponse["context"]>, 
       training_limitations: "Responder idade e dor, limitação ou dizer que está livre.",
       limitation_check: "Responder como a limitação reagiu ao treino.",
       exercise_swap: "Responder o motivo da troca: dor, equipamento ocupado ou dificuldade de execução.",
+      travel_training: "Responder se consegue treinar na viagem ou se o dia precisa ser protegido.",
     },
     "en-US": {
       training_schedule: "start with something small now, or lock a time for tomorrow",
@@ -877,6 +885,7 @@ function expectedInstruction(context: NonNullable<ExpectedResponse["context"]>, 
       training_limitations: "Reply with age and any pain, limitation, or say you are clear.",
       limitation_check: "Reply how the limitation reacted during training.",
       exercise_swap: "Reply the reason for the swap: pain, busy equipment, or trouble doing it.",
+      travel_training: "Answer whether you can train during the trip or the day must be protected.",
     },
     "it-IT": {
       training_schedule: "parti adesso con qualcosa di breve o fissiamo un orario preciso per domani",
@@ -885,6 +894,7 @@ function expectedInstruction(context: NonNullable<ExpectedResponse["context"]>, 
       training_limitations: "Dimmi la tua età e se c'è qualche fastidio.",
       limitation_check: "Dimmi se ti ha dato fastidio o è rimasto tranquillo.",
       exercise_swap: "Dimmi il motivo del cambio: dolore, attrezzo occupato o difficoltà di esecuzione.",
+      travel_training: "Rispondere se riesci ad allenarti in viaggio o se il giorno va protetto.",
     },
   };
   return copy[selectedLanguage][context];
@@ -2218,7 +2228,7 @@ export function buildPostConfirmationRedirect(
   if (language === "it-IT") {
     return {
       priority: "operational_next_action",
-      fala: "Ora torna con me a oggi.\n\nProssima azione: dimmi la tua finestra reale di oggi e incastro il minimo sicuro.",
+      fala: "Ora torna con me a oggi.\n\nProssima azione adesso: dimmi la tua finestra reale di oggi e incastro il minimo sicuro.",
     };
   }
   return {
@@ -6782,6 +6792,34 @@ function shouldRedirectAfterProactiveContextSignal(signal: ProactiveContinuitySi
   return signal === "busy_week" || signal === "short_window" || signal === "travel_cannot_train";
 }
 
+export function buildProactiveExpectedResponse(signal: ProactiveContinuitySignal, language: GutoLanguage): ExpectedResponse | null {
+  if (signal !== "travel_unknown") return null;
+  const copy: Record<GutoLanguage, { yes: string; no: string; instruction: string }> = {
+    "pt-BR": {
+      yes: "SIM",
+      no: "NÃO",
+      instruction: "Responder se consegue treinar na viagem ou se o dia precisa ser protegido.",
+    },
+    "en-US": {
+      yes: "YES",
+      no: "NO",
+      instruction: "Answer whether you can train during the trip or the day must be protected.",
+    },
+    "it-IT": {
+      yes: "SÌ",
+      no: "NO",
+      instruction: "Rispondere se riesci ad allenarti in viaggio o se il giorno va protetto.",
+    },
+  };
+  const selected = copy[language] || copy["pt-BR"];
+  return {
+    type: "text",
+    context: "travel_training",
+    options: [selected.yes, selected.no],
+    instruction: selected.instruction,
+  };
+}
+
 function buildNoMissionShortWindowFala(language: GutoLanguage, name: string): string {
   return pickByLanguage(language, {
     "pt-BR": `Janela curta registrada, ${name}. Eu trabalho com o mínimo seguro de hoje sem inventar plano que não está ativo.`,
@@ -7187,7 +7225,7 @@ function enforceTrainingFlowCertainty(
         ? buildNoMissionShortWindowFala(language, getGutoCallName(memory))
         : buildProactiveContinuityFala(signal, language, getGutoCallName(memory)),
       acao: "none",
-      expectedResponse: null,
+      expectedResponse: buildProactiveExpectedResponse(signal, language),
       workoutPlan: null,
     });
     if (shouldRedirectAfterProactiveContextSignal(signal)) {
@@ -8685,7 +8723,7 @@ async function askGutoModel({
       setContractResponse(parsedResponse, {
         fala,
         acao: "none",
-        expectedResponse: null,
+        expectedResponse: buildProactiveExpectedResponse(signal, selectedLanguage),
         workoutPlan: null,
         avatarEmotion: "default",
       });
