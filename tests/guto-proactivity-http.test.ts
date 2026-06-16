@@ -289,7 +289,7 @@ describe("proactivity HTTP cycle", () => {
       method: "POST",
       headers: authHeaders(),
       body: JSON.stringify({
-        conversationText: "USER: Quinta vou para Roma\nGUTO: Roma quinta a domingo, certo?",
+        conversationText: "USER: só passei para dar oi\nGUTO: Tô aqui. Me diz o que precisa.",
         language: "pt-BR",
       }),
     })
@@ -303,7 +303,37 @@ describe("proactivity HTTP cycle", () => {
     globalThis.fetch = originalFetch
   })
 
-  it("GET /guto/proactive?force=1 abre com missão pronta e não com saudação genérica", async () => {
+  it("POST extract salva viagem pendente mesmo quando Gemini retorna vazio", async () => {
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes("generativelanguage.googleapis.com")) {
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "[]" }] } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return originalFetch(input as RequestInfo, init)
+    }) as typeof globalThis.fetch
+
+    const res = await fetch(`${baseUrl}/guto/proactivity/extract`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        conversationText: "USER: viajo sexta\nGUTO: Consigo adaptar. Você consegue treinar?",
+        language: "pt-BR",
+      }),
+    })
+    assert.equal(res.status, 200)
+    const body = (await res.json()) as { extracted: number; memories: Array<{ status: string; type: string; dateParsed?: string }> }
+    assert.equal(body.extracted, 1)
+    assert.equal(body.memories[0]?.status, "pending_confirmation")
+    assert.equal(body.memories[0]?.type, "trip")
+    assert.equal(body.memories[0]?.dateParsed?.length, 10)
+
+    globalThis.fetch = originalFetch
+  })
+
+  it("GET /guto/proactive?force=1 abre contexto semanal antes de missão pronta", async () => {
     mockGutoModel({
       fala: "Olá! Como posso te ajudar hoje?",
       acao: "none",
@@ -334,7 +364,8 @@ describe("proactivity HTTP cycle", () => {
     assert.equal(body.due, true)
     assert.equal(body.slot, "arrival")
     assert.match(body.fala, /Maria/i)
-    assert.match(body.fala, /miss[aã]o/i)
+    assert.match(body.fala, /viagem|compromisso|dor|treinos/i)
+    assert.doesNotMatch(body.fala, /miss[aã]o/i)
     assert.doesNotMatch(body.fala, /Como posso te ajudar hoje/i)
 
     const second = await fetch(`${baseUrl}/guto/proactive?language=pt-BR&force=1`, { headers: authHeaders() })
@@ -352,8 +383,50 @@ describe("proactivity HTTP cycle", () => {
     assert.equal(store[USER_ID]?.lastWorkoutPlan?.title, "Corpo inteiro controlado")
   })
 
+  it("GET /guto/proactive?force=1 com semana aberta mostra missão pronta", async () => {
+    mockGutoModel({
+      fala: "Olá! Como posso te ajudar hoje?",
+      acao: "none",
+      expectedResponse: null,
+    })
+    const { getWeekKey } = await import("../src/proactivity/proactive-store.js")
+    writeUserMemory(USER_ID, {
+      name: "Maria",
+      hasSeenChatOpening: true,
+      trainedToday: false,
+      totalXp: 100,
+      xpEvents: [],
+      completedWorkoutDates: [],
+      proactiveSent: {},
+      proactiveMemories: [],
+      proactiveImpacts: [],
+      weeklyConversation: {
+        weekKey: getWeekKey(),
+        happenedAt: new Date().toISOString(),
+        extractionDone: false,
+        validationDone: false,
+      },
+      lastWorkoutPlan: missionPlan(),
+      trainingGoal: "fat_loss",
+      preferredTrainingLocation: "gym",
+      trainingLevel: "returning",
+      trainingPathology: "sem dor",
+      trainingLimitations: "sem dor",
+    })
+
+    const res = await fetch(`${baseUrl}/guto/proactive?language=pt-BR&force=1`, { headers: authHeaders() })
+    assert.equal(res.status, 200)
+    const body = (await res.json()) as { due: boolean; slot: string; fala: string }
+    assert.equal(body.due, true)
+    assert.equal(body.slot, "arrival")
+    assert.match(body.fala, /Maria/i)
+    assert.match(body.fala, /miss[aã]o/i)
+    assert.doesNotMatch(body.fala, /Como posso te ajudar hoje/i)
+  })
+
   it("GET /guto/proactive?force=1 com missão e ombro menciona cuidado físico", async () => {
     mockGutoModel({ fala: "Olá! Como posso te ajudar hoje?", acao: "none", expectedResponse: null })
+    const { getWeekKey } = await import("../src/proactivity/proactive-store.js")
     writeUserMemory(USER_ID, {
       name: "Maria",
       hasSeenChatOpening: true,
@@ -361,7 +434,12 @@ describe("proactivity HTTP cycle", () => {
       proactiveSent: {},
       proactiveMemories: [],
       proactiveImpacts: [],
-      weeklyConversation: null,
+      weeklyConversation: {
+        weekKey: getWeekKey(),
+        happenedAt: new Date().toISOString(),
+        extractionDone: false,
+        validationDone: false,
+      },
       lastWorkoutPlan: missionPlan("Corpo inteiro"),
       trainingPathology: "ombro direito sensível",
       trainingLimitations: "ombro direito sensível",

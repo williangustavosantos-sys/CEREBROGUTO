@@ -363,7 +363,6 @@ interface GutoModelResponse {
 interface GutoVoiceProfile {
   languageCode: GutoLanguage;
   primaryName: string;
-  fallbackName: string;
 }
 interface GutoMemory {
   userId: string;
@@ -537,22 +536,19 @@ const WORKOUTX_ANIMATION_BY_EXERCISE_ID: Record<string, string> = {
 
 // Vozes Gemini TTS (prebuilt). O modelo detecta o idioma pelo texto, então a
 // mesma voz serve pt-BR/en-US/it-IT. "Charon" preserva o caráter da voz antiga
-// (Chirp3-HD-Charon); "Orus" é o fallback masculino.
+// (Chirp3-HD-Charon). Não há fallback para outra voz: identidade vocal é fixa.
 const GUTO_VOICES: Record<GutoLanguage, GutoVoiceProfile> = {
   "pt-BR": {
     languageCode: "pt-BR",
     primaryName: "Charon",
-    fallbackName: "Orus",
   },
   "en-US": {
     languageCode: "en-US",
     primaryName: "Charon",
-    fallbackName: "Orus",
   },
   "it-IT": {
     languageCode: "it-IT",
     primaryName: "Charon",
-    fallbackName: "Orus",
   },
 };
 
@@ -2515,7 +2511,7 @@ function buildGutoSystemPrompt(language = "pt-BR") {
   ].join("\n");
 }
 
-function normalizeExpectedResponse(value: unknown): ExpectedResponse | null {
+export function normalizeExpectedResponse(value: unknown): ExpectedResponse | null {
   if (!value || typeof value !== "object") return null;
 
   const candidate = value as Partial<ExpectedResponse>;
@@ -2526,9 +2522,17 @@ function normalizeExpectedResponse(value: unknown): ExpectedResponse | null {
     candidate.context === "training_location" ||
     candidate.context === "training_status" ||
     candidate.context === "training_limitations" ||
-    candidate.context === "limitation_check"
+    candidate.context === "limitation_check" ||
+    candidate.context === "exercise_swap" ||
+    candidate.context === "travel_training"
       ? candidate.context
       : undefined;
+  const options = Array.isArray(candidate.options)
+    ? candidate.options
+        .filter((option): option is string => typeof option === "string" && option.trim().length > 0)
+        .map((option) => option.replace(/\s+/g, " ").trim().slice(0, 24))
+        .slice(0, 4)
+    : undefined;
 
   return {
     type: "text",
@@ -2537,6 +2541,7 @@ function normalizeExpectedResponse(value: unknown): ExpectedResponse | null {
         ? candidate.instruction.replace(/\s+/g, " ").trim().slice(0, 160)
         : undefined,
     context,
+    ...(options?.length ? { options } : {}),
   };
 }
 
@@ -4821,6 +4826,19 @@ function memoryFoodConstraints(memory: GutoMemory): UserFoodConstraints {
   return { restrictions };
 }
 
+function resolveUnavailableFoodName(rawInput: string): string | undefined {
+  const userMessage = stripInjectedContext(rawInput).replace(/\s+/g, " ").trim();
+  if (!userMessage) return undefined;
+  const normalized = normalize(userMessage);
+  if (
+    !/\b(nao tenho|nao tem|sem isso|acabou|to sem|estou sem|dont have|don t have|i don t have|non ho|non ce l)\b/.test(normalized)
+  ) {
+    return undefined;
+  }
+  const foodId = resolveFoodIdByName(userMessage);
+  return foodId ? (getFoodById(foodId)?.names["pt-BR"] || userMessage) : undefined;
+}
+
 /**
  * BUG 3 — entrega o substituto CONCRETO do alimento do card (Princípio 6: nunca
  * genérico quando há contexto específico de alimento). Resolve o alimento pelo
@@ -4833,8 +4851,9 @@ function buildFoodSubstituteResponse(
   language: GutoLanguage
 ): GutoModelResponse | null {
   const dietCtx = parseDietContext(input || "");
-  if (!dietCtx?.foodName) return null;
-  const foodId = resolveFoodIdByName(dietCtx.foodName);
+  const foodName = dietCtx?.foodName || resolveUnavailableFoodName(input || "");
+  if (!foodName) return null;
+  const foodId = resolveFoodIdByName(foodName);
   if (!foodId) return null;
 
   const subs = suggestFoodSubstitutes({
@@ -4847,9 +4866,9 @@ function buildFoodSubstituteResponse(
 
   const lang = language as FoodLanguage;
   const names = subs.slice(0, 2).map((f) => f.names[lang] || f.names["pt-BR"]);
-  const foodLabel = getFoodById(foodId)?.names[lang] || dietCtx.foodName;
+  const foodLabel = getFoodById(foodId)?.names[lang] || foodName;
   const options = names.length >= 2 ? { "pt-BR": `${names[0]} ou ${names[1]}`, en: `${names[0]} or ${names[1]}`, it: `${names[0]} o ${names[1]}` } : { "pt-BR": names[0], en: names[0], it: names[0] };
-  const meal = dietCtx.mealName;
+  const meal = dietCtx?.mealName;
 
   const fala: Record<GutoLanguage, string> = {
     "pt-BR": `Troca ${foodLabel} por ${options["pt-BR"]}${meal ? `, mantendo a energia do ${meal}` : ""}. Mesma função no prato, sem furar a dieta.`,
@@ -4866,8 +4885,9 @@ function buildShortContextFallbackResponse(
 ): GutoModelResponse | null {
   const shortIntent = classifyShortContextIntent({ rawInput: input || "" });
   if (shortIntent.intent === "food_unavailable") {
-    // 1º turno ("não tem em casa"): acolhe e sinaliza a troca. O substituto
-    // CONCRETO vem no 2º turno ("Qual?") via food_substitute_request.
+    // 1º turno ("não tem em casa"): resolve o substituto concreto na hora.
+    const concrete = buildFoodSubstituteResponse(input, memory, language);
+    if (concrete) return concrete;
     return {
       fala: foodUnavailableReply(language as ShortIntentLanguage),
       acao: "none",
@@ -4889,6 +4909,8 @@ function buildShortContextFallbackResponse(
     return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
   if (shortIntent.intent === "needs_clarification") {
+    const concrete = buildFoodSubstituteResponse(input, memory, language);
+    if (concrete) return concrete;
     return {
       fala: clarificationReply(language as ShortIntentLanguage),
       acao: "none",
@@ -6704,6 +6726,62 @@ function pickByLanguage(language: GutoLanguage, map: Record<GutoLanguage, string
   return map[language] ?? map["pt-BR"];
 }
 
+function getGutoWeekdayIndex(now = new Date()): number {
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: GUTO_TIME_ZONE,
+    weekday: "short",
+  }).format(now);
+  const index: Record<string, number> = {
+    Sun: 0,
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+  };
+  return index[weekday] ?? now.getUTCDay();
+}
+
+function weeklyWindowKey(now = new Date()): "week" | "weekend" | "next_week" | "next_days" {
+  const day = getGutoWeekdayIndex(now);
+  const hour = getGutoTimeParts(now).hour;
+  if (day === 1) return "week";
+  if (day === 5 || day === 6) return "weekend";
+  if (day === 0 && hour >= 17) return "next_week";
+  return "next_days";
+}
+
+export function buildContextualWeeklyOpeningQuestion(
+  language: GutoLanguage,
+  name = "",
+  now = new Date()
+): string {
+  const prefix = sanitizeDisplayName(name) ? `${sanitizeDisplayName(name)}, ` : "";
+  const windowKey = weeklyWindowKey(now);
+  const copy: Record<GutoLanguage, Record<ReturnType<typeof weeklyWindowKey>, string>> = {
+    "pt-BR": {
+      week: "antes de eu fechar tua semana, tem viagem, compromisso, dor ou algo que muda teus treinos?",
+      weekend: "antes de eu fechar teu final de semana, tem viagem, compromisso ou algo que muda teus treinos?",
+      next_week: "antes de eu organizar tua próxima semana, tem viagem, compromisso, dor ou algo que eu preciso considerar?",
+      next_days: "antes de eu fechar os próximos dias, tem viagem, compromisso, dor ou horário quebrado que muda teus treinos?",
+    },
+    "en-US": {
+      week: "before I lock in your week, any trip, commitment, pain, or anything that changes training?",
+      weekend: "before I lock in your weekend, any trip, commitment, or anything that changes training?",
+      next_week: "before I organize your next week, any trip, commitment, pain, or anything I need to factor in?",
+      next_days: "before I lock in the next few days, any trip, commitment, pain, or broken schedule that changes training?",
+    },
+    "it-IT": {
+      week: "prima di chiudere la tua settimana, c'è un viaggio, un impegno, dolore o qualcosa che cambia gli allenamenti?",
+      weekend: "prima di chiudere il weekend, c'è un viaggio, un impegno o qualcosa che cambia gli allenamenti?",
+      next_week: "prima di organizzare la prossima settimana, c'è un viaggio, un impegno, dolore o qualcosa da considerare?",
+      next_days: "prima di chiudere i prossimi giorni, c'è un viaggio, un impegno, dolore o orari rotti che cambiano gli allenamenti?",
+    },
+  };
+  return `${prefix}${copy[language]?.[windowKey] || copy["pt-BR"][windowKey]}`;
+}
+
 // ─── Prompt contextual para o modelo compor a resposta (Regra 3: sem "se X então Y") ───
 // O classificador ENTENDE a situação; o MODELO compõe a resposta usando contexto.
 // Frases fixas SÓ existem como fallback técnico (sem chave Gemini).
@@ -7925,12 +8003,20 @@ function buildTechnicalFallback(language: string, rawInput = "", memory?: GutoMe
   // esclarecimento. Nunca vira patologia sem região corporal explícita na fala.
   const shortIntent = classifyShortContextIntent({ rawInput });
   if (shortIntent.intent === "food_unavailable") {
+    if (memory) {
+      const concrete = buildFoodSubstituteResponse(rawInput, memory, selectedLanguage);
+      if (concrete) return concrete;
+    }
     return { fala: foodUnavailableReply(selectedLanguage as ShortIntentLanguage), acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
   if (shortIntent.intent === "equipment_unavailable") {
     return { fala: equipmentUnavailableReply(selectedLanguage as ShortIntentLanguage), acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
   if (shortIntent.intent === "needs_clarification") {
+    if (memory) {
+      const concrete = buildFoodSubstituteResponse(rawInput, memory, selectedLanguage);
+      if (concrete) return concrete;
+    }
     return { fala: clarificationReply(selectedLanguage as ShortIntentLanguage), acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
 
@@ -9644,6 +9730,47 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
     }
   }
 
+  if (slot === "arrival" && memory.hasSeenChatOpening && !memory.trainedToday) {
+    try {
+      const weekly = await getWeeklyCheckResult(userId, operationalContext.weekday);
+      const hasArrivalImpact = Boolean(getArrivalContextImpact(memory, day));
+      const hasPendingProactivity = (memory.proactiveMemories || []).some((item) =>
+        item.status === "pending_confirmation" || item.status === "pending_validation" || Boolean(item.discardRequestedAt)
+      );
+      if (weekly.shouldOpenWeekly && !hasArrivalImpact && !hasPendingProactivity) {
+        const freshMemory = getMemory(userId);
+        const selectedLang = normalizeLanguage(language || freshMemory.language);
+        const fala = buildContextualWeeklyOpeningQuestion(
+          selectedLang,
+          freshMemory.name || "",
+          new Date()
+        );
+        await openWeeklyConversation(userId);
+        freshMemory.proactiveSent[day] = [...(freshMemory.proactiveSent[day] || []), slot];
+        freshMemory.hasSeenChatOpening = true;
+        freshMemory.lastActiveAt = new Date().toISOString();
+        saveMemory(freshMemory);
+        return res.json({
+          due: true,
+          slot,
+          ...attachAvatarEmotion({
+            response: {
+              fala,
+              acao: "none",
+              expectedResponse: null,
+              avatarEmotion: "default",
+            },
+            memory: freshMemory,
+            context: operationalContext,
+            slot,
+          }),
+        });
+      }
+    } catch {
+      // Se a checagem semanal falhar, continua com a chegada normal.
+    }
+  }
+
   if (slot === "arrival" && missionPlanAtOpen && !memory.trainedToday) {
     const freshMemory = getMemory(userId);
     const selectedLang = normalizeLanguage(language || freshMemory.language);
@@ -9751,36 +9878,6 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
         result.workoutPlan = null;
       } else if (result.workoutPlan) {
         result.acao = "updateWorkout";
-      }
-    }
-
-    // Chegada do usuário recorrente: se a semana ainda não foi aberta com ele, a
-    // presença real (doc Proatividade, "Gatilho de Coleta Semanal") é PERGUNTAR
-    // sobre a semana — de forma DETERMINÍSTICA, não dependendo do modelo (que
-    // prioriza empurrar treino e ignora o sinal suave do injector). Dispara
-    // 1×/semana: openWeeklyConversation marca a semana como aberta.
-    if (slot === "arrival" && memory.hasSeenChatOpening && !memory.trainedToday && !missionArrivalFala) {
-      try {
-        const weekly = await getWeeklyCheckResult(userId, operationalContext.weekday);
-        if (weekly.shouldOpenWeekly) {
-          const wkName = sanitizeDisplayName(memory.name ?? "");
-          const wkLang = normalizeLanguage(language || memory.language);
-          const weeklyQuestion: Record<GutoLanguage, string> = {
-            "pt-BR": wkName
-              ? `${wkName}, antes da gente ir pra cima: como tá tua semana? Tem viagem, compromisso ou horário quebrado que eu preciso considerar pra montar tua missão direito?`
-              : `Antes da gente ir pra cima: como tá tua semana? Tem viagem, compromisso ou horário quebrado que eu preciso considerar?`,
-            "en-US": wkName
-              ? `${wkName}, before we get moving: how's your week looking? Any trip, commitment or tight schedule I should factor in to set your mission up right?`
-              : `Before we get moving: how's your week looking? Any trip, commitment or tight schedule I should factor in?`,
-            "it-IT": wkName
-              ? `${wkName}, prima di partire: com'è la tua settimana? C'è un viaggio, un impegno o un orario complicato che devo considerare per preparare la tua missione?`
-              : `Prima di partire: com'è la tua settimana? C'è un viaggio, un impegno o un orario complicato che devo considerare?`,
-          };
-          result.fala = weeklyQuestion[wkLang] || weeklyQuestion["pt-BR"];
-          await openWeeklyConversation(userId);
-        }
-      } catch {
-        // se a checagem semanal falhar, não bloqueia a chegada
       }
     }
 
@@ -10196,7 +10293,6 @@ app.post("/voz", requireActiveUser, async (req, res) => {
     language: selectedLanguage,
     textLength: text.length,
     primaryName: voice.primaryName,
-    fallbackName: voice.fallbackName,
   });
 
   // ── Helper: respond with synthesized audio ─────────────────────────────────
@@ -10218,42 +10314,19 @@ app.post("/voz", requireActiveUser, async (req, res) => {
       return respondWithAudio(primary.data.audioContent!, primary.voiceUsed, primary.languageCode);
     }
 
-    // ── 4. Fallback voice ──────────────────────────────────────────────────
-    const fallback = await synthesizeGutoVoice({
-      text: voiceText,
-      language: selectedLanguage,
-      voiceName: voice.fallbackName,
-    });
-
-    if (fallback.ok) {
-      console.info("[GUTO_VOICE] synth_ok_fallback", { userId, language: selectedLanguage, voiceUsed: fallback.voiceUsed });
-      return respondWithAudio(fallback.data.audioContent!, fallback.voiceUsed, fallback.languageCode);
-    }
-
-    // ── 5. Native male (last resort) ───────────────────────────────────────
-    const nativeMale = await synthesizeGutoVoice({
-      text: voiceText,
-      language: selectedLanguage,
-      useNamedVoice: false,
-    });
-
-    if (nativeMale.ok) {
-      console.info("[GUTO_VOICE] synth_ok_native", { userId, language: selectedLanguage, voiceUsed: nativeMale.voiceUsed });
-      return respondWithAudio(nativeMale.data.audioContent!, nativeMale.voiceUsed, nativeMale.languageCode);
-    }
-
-    // ── 6. All attempts failed ─────────────────────────────────────────────
+    // ── 4. All attempts failed ─────────────────────────────────────────────
+    // Não troca para outra voz. A identidade vocal do GUTO é parte do produto:
+    // se Charon falha, é melhor ficar sem áudio neste turno do que virar outra
+    // entidade no meio da conversa.
     console.error("[GUTO_VOICE] synth_failed", {
       userId,
       language: selectedLanguage,
       primaryStatus: primary.status,
-      fallbackStatus: fallback.status,
-      nativeMaleStatus: nativeMale.status,
-      detail: nativeMale.data?.error?.message || fallback.data?.error?.message || primary.data?.error?.message,
+      detail: primary.data?.error?.message,
     });
-    return res.status(nativeMale.status || 502).json({
+    return res.status(primary.status || 502).json({
       message: localizedHttpMessage("voice_error", selectedLanguage),
-      detail: nativeMale.data?.error?.message || fallback.data?.error?.message || primary.data?.error?.message,
+      detail: primary.data?.error?.message,
     });
   } catch (error) {
     console.error("[GUTO_VOICE] synth_connect_failed", { userId, language: selectedLanguage, error });

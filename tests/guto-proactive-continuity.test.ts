@@ -10,11 +10,14 @@ import {
 } from "../src/proactivity/decision-engine.js";
 import type { ProactiveMemory } from "../src/proactivity/types.js";
 import {
+  buildContextualWeeklyOpeningQuestion,
   buildProactiveExpectedResponse,
   buildProactiveContinuityFala,
   classifyContractIntentFallback,
   classifyProactiveContinuitySignal,
+  normalizeExpectedResponse,
 } from "../server.js";
+import { extractDeterministicEvents } from "../src/proactivity/memory-extractor.js";
 
 // ─── Regressão de PRODUTO: Continuidade Primeiro ─────────────────────────────
 // Bug observado ao vivo: "viajo na quarta" → "Quarta é dia de descanso ou treino
@@ -102,6 +105,54 @@ describe("Continuidade Primeiro — caso 1: 'viajo quarta' (sem dado crítico)",
     assert.match(expected?.instruction || "", /treinar|protegido/i);
     assert.equal(buildProactiveExpectedResponse("travel_can_train", "pt-BR"), null);
     assert.equal(buildProactiveExpectedResponse("travel_cannot_train", "pt-BR"), null);
+  });
+
+  it("normalizeExpectedResponse preserva travel_training e opções SIM/NÃO", () => {
+    const expected = normalizeExpectedResponse({
+      type: "text",
+      context: "travel_training",
+      options: ["SIM", "NÃO"],
+      instruction: "Responder se consegue treinar na viagem.",
+    });
+    assert.deepEqual(expected, {
+      type: "text",
+      context: "travel_training",
+      options: ["SIM", "NÃO"],
+      instruction: "Responder se consegue treinar na viagem.",
+    });
+  });
+});
+
+describe("Abertura semanal contextual — antes de fechar missão", () => {
+  it("muda a pergunta conforme o dia atual no fuso do GUTO", () => {
+    const monday = buildContextualWeeklyOpeningQuestion("pt-BR", "Will", new Date("2026-06-15T10:00:00.000Z"));
+    const friday = buildContextualWeeklyOpeningQuestion("pt-BR", "Will", new Date("2026-06-19T10:00:00.000Z"));
+    const sundayNight = buildContextualWeeklyOpeningQuestion("pt-BR", "Will", new Date("2026-06-21T18:00:00.000Z"));
+
+    assert.match(monday, /fechar tua semana/i);
+    assert.match(friday, /final de semana/i);
+    assert.match(sundayNight, /pr[oó]xima semana/i);
+  });
+});
+
+describe("Eventos temporais — não morrem no chat", () => {
+  it("extractor determinístico cria memória pendente para viagem futura com data provável", () => {
+    const events = extractDeterministicEvents("USER: viajo sexta", "pt-BR", "2026-06-16");
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.type, "trip");
+    assert.equal(events[0]?.dateParsed, "2026-06-19");
+    assert.match(events[0]?.understood || "", /Viagem provável/i);
+  });
+
+  it("viagem por 3 dias gera impacto visual nos 3 dias afetados", () => {
+    const memory = makeMemory(
+      "range-trip",
+      "trip",
+      "Daqui duas semanas vou viajar por 3 dias",
+      { dateText: "daqui duas semanas por 3 dias", dateParsed: "2026-06-21" }
+    );
+    const decision = decideFromProactiveMemory({ memory, now: NOW, language: "pt-BR" });
+    assert.deepEqual(decision?.affectedDates, ["2026-06-21", "2026-06-22", "2026-06-23"]);
   });
 });
 
