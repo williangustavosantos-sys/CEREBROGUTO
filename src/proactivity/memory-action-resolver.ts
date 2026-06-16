@@ -119,7 +119,17 @@ const AMBIGUOUS_TERMS: string[] = [
 
 // ── Correction prefixes (negation + comma → "no, it's Friday") ──
 const CORRECTION_STARTS: string[] = [
-  'nao,', 'no,', 'non,', 'nao e', 'no it', 'no its', "no it's", 'non e',
+  'nao,', 'no,', 'non,', 'nao e', 'nao vai ser', 'no it', 'no its', "no it's", 'non e',
+]
+
+const WEEKDAY_CORRECTIONS: Array<{ terms: string[]; day: number; pt: string; en: string; it: string }> = [
+  { terms: ['domingo', 'sunday', 'domenica'], day: 0, pt: 'domingo', en: 'Sunday', it: 'domenica' },
+  { terms: ['segunda', 'segunda feira', 'monday', 'lunedi'], day: 1, pt: 'segunda-feira', en: 'Monday', it: 'lunedi' },
+  { terms: ['terca', 'terca feira', 'tuesday', 'martedi'], day: 2, pt: 'terça-feira', en: 'Tuesday', it: 'martedi' },
+  { terms: ['quarta', 'quarta feira', 'wednesday', 'mercoledi'], day: 3, pt: 'quarta-feira', en: 'Wednesday', it: 'mercoledi' },
+  { terms: ['quinta', 'quinta feira', 'thursday', 'giovedi'], day: 4, pt: 'quinta-feira', en: 'Thursday', it: 'giovedi' },
+  { terms: ['sexta', 'sexta feira', 'friday', 'venerdi'], day: 5, pt: 'sexta-feira', en: 'Friday', it: 'venerdi' },
+  { terms: ['sabado', 'saturday', 'sabato'], day: 6, pt: 'sábado', en: 'Saturday', it: 'sabato' },
 ]
 
 // ── Validation: happened ──
@@ -170,6 +180,96 @@ function isCorrection(normalized: string): boolean {
     normalized
   )
   return withoutPrefix.length > 1
+}
+
+function dateFromISO(date: string | undefined): Date | null {
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null
+  const parsed = new Date(`${date}T12:00:00.000Z`)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+function isoDate(date: Date): string {
+  return date.toISOString().slice(0, 10)
+}
+
+function addUtcDays(date: Date, days: number): Date {
+  const next = new Date(date)
+  next.setUTCDate(next.getUTCDate() + days)
+  return next
+}
+
+function resolveWeekdayDate(targetDay: number, memory: ProactiveMemory): string {
+  const base = dateFromISO(memory.dateParsed) || new Date()
+  const currentDay = base.getUTCDay()
+  const delta = (targetDay - currentDay + 7) % 7
+  return isoDate(addUtcDays(base, delta))
+}
+
+function labelForWeekday(
+  weekday: { pt: string; en: string; it: string },
+  language: string
+): string {
+  if (language === 'en-US') return weekday.en
+  if (language === 'it-IT') return weekday.it
+  return weekday.pt
+}
+
+function titleCasePlace(value: string): string {
+  return value
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .map((part) => part ? part.charAt(0).toLocaleUpperCase('pt-BR') + part.slice(1) : part)
+    .join(' ')
+    .slice(0, 80)
+}
+
+function buildCorrectionUnderstood(
+  memory: ProactiveMemory,
+  language: string,
+  patch: Partial<Pick<ProactiveMemory, 'dateText' | 'dateParsed' | 'location'>>
+): string {
+  const date = patch.dateText || memory.dateText || memory.dateParsed || ''
+  const location = patch.location || memory.location || ''
+
+  if (memory.type === 'trip') {
+    if (language === 'en-US') {
+      return `Probable trip${date ? ` on ${date}` : ''}${location ? ` to ${location}` : ''}`.trim()
+    }
+    if (language === 'it-IT') {
+      return `Viaggio probabile${date ? ` ${date}` : ''}${location ? ` a ${location}` : ''}`.trim()
+    }
+    return `Viagem provável${date ? ` em ${date}` : ''}${location ? ` para ${location}` : ''}`.trim()
+  }
+
+  if (memory.type === 'commitment') {
+    return `${memory.understood || 'Compromisso provável'}${date ? ` — ${date}` : ''}`.slice(0, 300)
+  }
+
+  return `${memory.understood || memory.rawText || 'Evento provável'}${date ? ` — ${date}` : ''}`.slice(0, 300)
+}
+
+function correctionPatch(
+  memory: ProactiveMemory,
+  userInput: string,
+  normalized: string,
+  language: string
+): Partial<Pick<ProactiveMemory, 'understood' | 'dateText' | 'dateParsed' | 'location'>> | null {
+  const patch: Partial<Pick<ProactiveMemory, 'understood' | 'dateText' | 'dateParsed' | 'location'>> = {}
+  const weekday = WEEKDAY_CORRECTIONS.find((candidate) => hasAny(normalized, candidate.terms))
+  if (weekday) {
+    patch.dateText = labelForWeekday(weekday, language)
+    patch.dateParsed = resolveWeekdayDate(weekday.day, memory)
+  }
+
+  const locationMatch = userInput.match(/\b(?:para|pra|to|a)\s+([\p{L}\p{M}\s.'-]{2,80})$/iu)
+  if (locationMatch?.[1]) {
+    patch.location = titleCasePlace(locationMatch[1])
+  }
+
+  if (Object.keys(patch).length === 0) return null
+  patch.understood = buildCorrectionUnderstood(memory, language, patch)
+  return patch
 }
 
 // ─── Fallback messages — GUTO voice (direct, no apologies, no chatbot) ────────
@@ -364,9 +464,9 @@ function sanitizeSemanticAction(raw: unknown, memories: ProactiveMemory[], langu
     if (Object.keys(patch).length === 0) return null
     return {
       engaged: true,
-      action: null,
+      action: { type: 'update', memoryId, patch },
       fallbackMessage: clarification || correctionFallback({ ...memory, ...patch }, language),
-      reason: 'correction_no_endpoint',
+      reason,
     }
   }
   if (
@@ -440,6 +540,19 @@ export async function resolveProactiveMemoryActionFromUserReply(
       getProactiveMemoriesByStatus(userId, ['pending_confirmation']),
       getProactiveMemoriesByStatus(userId, ['pending_validation']),
     ])
+
+    if (pendingConfirmation.length === 1 && isCorrection(normalized)) {
+      const target = pendingConfirmation[0]!
+      const patch = correctionPatch(target, userInput, normalized, language)
+      if (patch) {
+        return {
+          engaged: true,
+          action: { type: 'update', memoryId: target.id, patch },
+          fallbackMessage: correctionFallback({ ...target, ...patch }, language),
+          reason: 'correction_update',
+        }
+      }
+    }
 
     const semantic = await resolveSemantically(
       userInput,
@@ -562,6 +675,15 @@ export async function resolveProactiveMemoryActionFromUserReply(
 
       // Correction must be checked BEFORE discard and confirm
       if (isCorrection(normalized)) {
+        const patch = correctionPatch(target, userInput, normalized, language)
+        if (patch) {
+          return {
+            engaged: true,
+            action: { type: 'update', memoryId: target.id, patch },
+            fallbackMessage: correctionFallback({ ...target, ...patch }, language),
+            reason: 'correction_update',
+          }
+        }
         return {
           engaged: true,
           action: null,
