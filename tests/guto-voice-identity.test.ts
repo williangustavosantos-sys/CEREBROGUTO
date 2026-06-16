@@ -101,3 +101,11 @@ describe("Idioma SEMPRE canônico, nunca autodetectado", () => {
     }
   });
 });
+
+describe("Identidade vocal fixa", () => {
+  it("backend não alterna para outra voz quando a voz oficial falha", () => {
+    const server = readFileSync(join(process.cwd(), "server.ts"), "utf8");
+    assert.doesNotMatch(server, /\bOrus\b/, "não pode cair para outra voz prebuilt");
+    assert.doesNotMatch(server, /synth_ok_fallback|synth_ok_native/, "não pode registrar troca de voz em fallback");
+  });
+});

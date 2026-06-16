@@ -254,7 +254,8 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     const res = await postGuto(userId, input);
 
     assert.equal(res.acao, "none");
-    assert.match(res.fala || "", /alimento|equivalente local/i);
+    assert.match(res.fala || "", /troca|substitu/i);
+    assert.doesNotMatch(res.fala || "", /posso substituir|posso trocar/i);
     assert.doesNotMatch(res.fala || "", /ombro entendido|joelho entendido/i);
     assert.doesNotMatch(res.fala || "", EXECUTION_CUE_RE);
   });

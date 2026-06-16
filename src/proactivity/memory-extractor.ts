@@ -17,6 +17,166 @@ export interface ExtractedEvent {
   location?: string     // city/place if relevant
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000
+
+function normalize(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s/-]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+function addDays(date: Date, amount: number): Date {
+  return new Date(date.getTime() + amount * DAY_MS)
+}
+
+function toIsoDate(date: Date): string {
+  return date.toISOString().slice(0, 10)
+}
+
+function parseToday(todayISO: string): Date {
+  const parsed = new Date(`${todayISO.slice(0, 10)}T12:00:00.000Z`)
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed
+}
+
+function numberWordPt(value: string): number | null {
+  const map: Record<string, number> = {
+    uma: 1,
+    um: 1,
+    duas: 2,
+    dois: 2,
+    tres: 3,
+    três: 3,
+    quatro: 4,
+  }
+  const normalized = normalize(value)
+  if (/^\d+$/.test(normalized)) return Number(normalized)
+  return map[normalized] ?? null
+}
+
+function weekdayDate(text: string, today: Date): { dateParsed: string; dateText: string } | null {
+  const weekdays: Array<{ day: number; tokens: string[]; label: string }> = [
+    { day: 0, tokens: ['domingo', 'sunday', 'domenica'], label: 'domingo' },
+    { day: 1, tokens: ['segunda', 'monday', 'lunedi'], label: 'segunda' },
+    { day: 2, tokens: ['terca', 'terça', 'tuesday', 'martedi'], label: 'terça' },
+    { day: 3, tokens: ['quarta', 'wednesday', 'mercoledi'], label: 'quarta' },
+    { day: 4, tokens: ['quinta', 'thursday', 'giovedi'], label: 'quinta' },
+    { day: 5, tokens: ['sexta', 'friday', 'venerdi'], label: 'sexta' },
+    { day: 6, tokens: ['sabado', 'sábado', 'saturday', 'sabato'], label: 'sábado' },
+  ]
+  const match = weekdays.find((weekday) => weekday.tokens.some((token) => text.includes(normalize(token))))
+  if (!match) return null
+  const current = today.getUTCDay()
+  const delta = (match.day - current + 7) % 7
+  return {
+    dateParsed: toIsoDate(addDays(today, delta)),
+    dateText: match.label,
+  }
+}
+
+function relativeDate(text: string, today: Date): { dateParsed: string; dateText: string } | null {
+  const weeks = text.match(/\bdaqui\s+(\d+|uma|um|duas|dois|tres|três|quatro)\s+semanas?\b/)
+  if (weeks) {
+    const amount = numberWordPt(weeks[1] || '')
+    if (amount && amount > 0 && amount <= 8) {
+      return {
+        dateParsed: toIsoDate(addDays(today, amount * 7)),
+        dateText: weeks[0],
+      }
+    }
+  }
+  const days = text.match(/\bdaqui\s+(\d+|uma|um|duas|dois|tres|três|quatro)\s+dias?\b/)
+  if (days) {
+    const amount = numberWordPt(days[1] || '')
+    if (amount && amount > 0 && amount <= 30) {
+      return {
+        dateParsed: toIsoDate(addDays(today, amount)),
+        dateText: days[0],
+      }
+    }
+  }
+  return null
+}
+
+function durationDays(text: string): number {
+  const match = text.match(/\bpor\s+(\d+|uma|um|duas|dois|tres|três|quatro)\s+dias?\b/)
+  const amount = match ? numberWordPt(match[1] || '') : null
+  return amount && amount > 1 && amount <= 14 ? amount : 1
+}
+
+function likelyDestination(raw: string): string | undefined {
+  const match = raw.match(/\b(?:para|pra|to|a)\s+([\p{L}][\p{L}\s'-]{1,40})/iu)
+  const value = match?.[1]?.replace(/\b(sexta|quinta|quarta|terça|terca|segunda|domingo|sábado|sabado|por|dias?)\b.*$/i, '').trim()
+  return value || undefined
+}
+
+function travelEventFromLine(rawLine: string, todayISO: string, userLanguage: string): ExtractedEvent | null {
+  const rawText = rawLine.replace(/^(USER|USUARIO|USUÁRIO|GUTO):\s*/i, '').trim()
+  const text = normalize(rawText)
+  if (!text) return null
+  if (/\b(talvez|maybe|forse|quem sabe)\b/.test(text)) return null
+  const isTravel = /\b(viajo|viajar|viagem|vou viajar|viajando|parto|viaggio|travel|trip|flight)\b/.test(text)
+  if (!isTravel) return null
+
+  const today = parseToday(todayISO)
+  const resolved = relativeDate(text, today) || weekdayDate(text, today)
+  if (!resolved) return null
+
+  const days = durationDays(text)
+  const endDate = days > 1 ? toIsoDate(addDays(new Date(`${resolved.dateParsed}T12:00:00.000Z`), days - 1)) : undefined
+  const understood =
+    userLanguage === 'en-US'
+      ? days > 1
+        ? `Probable trip from ${resolved.dateParsed} to ${endDate}`
+        : `Probable trip on ${resolved.dateParsed}`
+      : userLanguage === 'it-IT'
+        ? days > 1
+          ? `Viaggio probabile dal ${resolved.dateParsed} al ${endDate}`
+          : `Viaggio probabile il ${resolved.dateParsed}`
+        : days > 1
+          ? `Viagem provável entre ${resolved.dateParsed} e ${endDate}`
+          : `Viagem provável em ${resolved.dateParsed}`
+
+  return {
+    type: 'trip',
+    rawText,
+    understood,
+    dateText: days > 1 ? `${resolved.dateText} por ${days} dias` : resolved.dateText,
+    dateParsed: resolved.dateParsed,
+    location: likelyDestination(rawText),
+  }
+}
+
+export function extractDeterministicEvents(
+  conversationText: string,
+  userLanguage: string,
+  todayISO: string
+): ExtractedEvent[] {
+  const lines = conversationText
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const events: ExtractedEvent[] = []
+  for (const line of lines) {
+    if (/^GUTO:/i.test(line)) continue
+    const event = travelEventFromLine(line, todayISO, userLanguage)
+    if (event) events.push(event)
+  }
+  return events
+}
+
+function eventSignature(event: ExtractedEvent): string {
+  return [
+    event.type,
+    event.dateParsed || normalize(event.dateText || ''),
+    normalize(event.location || ''),
+    normalize(event.rawText),
+  ].join('|')
+}
+
 // ─── Extraction via Gemini ────────────────────────────────────────────────────
 
 function buildExtractorPrompt(
@@ -74,7 +234,8 @@ export async function extractEventsFromConversation(
   userLanguage: string,
   todayISO: string
 ): Promise<ExtractedEvent[]> {
-  if (!config.geminiApiKey || !conversationText.trim()) return []
+  const deterministic = extractDeterministicEvents(conversationText, userLanguage, todayISO)
+  if (!config.geminiApiKey || !conversationText.trim()) return deterministic
 
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.geminiModel}:generateContent?key=${config.geminiApiKey}`
@@ -107,7 +268,7 @@ export async function extractEventsFromConversation(
     if (!Array.isArray(parsed)) return []
 
     // Validate and sanitize
-    return parsed
+    const semantic: ExtractedEvent[] = parsed
       .filter((item): item is ExtractedEvent => {
         return (
           typeof item === 'object' &&
@@ -129,8 +290,19 @@ export async function extractEventsFromConversation(
           : undefined,
         location: typeof item.location === 'string' ? item.location : undefined,
       }))
+
+    const seen = new Set(semantic.map(eventSignature))
+    const merged = [...semantic]
+    for (const event of deterministic) {
+      const signature = eventSignature(event)
+      if (!seen.has(signature)) {
+        seen.add(signature)
+        merged.push(event)
+      }
+    }
+    return merged
   } catch {
-    return []
+    return deterministic
   }
 }
 

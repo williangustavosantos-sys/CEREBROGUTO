@@ -159,8 +159,8 @@ describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
     assert.match(res.fala || "", /supino|troca por|pula ele|swap/i);
   });
 
-  // ── BUG 3 — alimento: 1º turno acolhe, 2º turno entrega substituto concreto ──
-  it("contexto de alimento: 'não tem em casa' → acolhe; 'Qual?' → substituto CONCRETO, não genérico", async () => {
+  // ── BUG 3 — alimento: 1º turno já entrega substituto concreto ───────────────
+  it("contexto de alimento: 'não tem em casa' → substituto CONCRETO imediato, não genérico", async () => {
     const userId = "food-followup";
     writeUserMemory(userId, {
       trainingGoal: "muscle_gain",
@@ -180,10 +180,12 @@ describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
         `User question: ${msg}`,
       ].join(" ");
 
-    // Turno 1: acolhe (ack), sem genérico de café da manhã.
+    // Turno 1: já nomeia substituto real, sem postergar para "Qual?".
     const turn1 = await postGuto(userId, ctxLines("não tem em casa"));
     assert.equal(turn1.acao, "none");
-    assert.match(turn1.fala || "", /troco|equivalente|substitu/i);
+    assert.match(turn1.fala || "", /troca/i);
+    assert.match(turn1.fala || "", /p[ãa]o integral|biscoito de arroz|rice cake/i);
+    assert.doesNotMatch(turn1.fala || "", /posso substituir|posso trocar/i);
 
     // Turno 2: "Qual?" → substituto CONCRETO nomeado, mantendo o contexto.
     const turn2 = await postGuto(userId, ctxLines("Qual?"));
@@ -193,5 +195,24 @@ describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
     assert.match(turn2.fala || "", /p[ãa]o integral|biscoito de arroz|rice cake/i);
     // E NÃO cai no texto genérico do modelo (mockado acima).
     assert.doesNotMatch(turn2.fala || "", GENERIC_BREAKFAST_RE, "não pode responder genérico no 2º turno");
+  });
+
+  it("sem contexto explícito: 'não tenho banana' → substituto direto, sem perguntar 'o que?'", async () => {
+    const userId = "food-banana-direct";
+    writeUserMemory(userId, {
+      trainingGoal: "fat_loss",
+      trainingLevel: "beginner",
+      country: "Brasil",
+      countryCode: "BR",
+      foodRestrictions: "sem restrição alimentar",
+    });
+    clearMemoryStoreCache();
+
+    const res = await postGuto(userId, "não tenho banana");
+
+    assert.equal(res.acao, "none");
+    assert.match(res.fala || "", /troca/i);
+    assert.match(res.fala || "", /ma[çc][aã]|frutas vermelhas/i);
+    assert.doesNotMatch(res.fala || "", /Não tem o qu[eê]|alimento ou aparelho|posso substituir/i);
   });
 });

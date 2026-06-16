@@ -261,9 +261,9 @@ test('D — ambiguidade em pending_validation retorna fallback', async () => {
   assert.match(result.fallbackMessage!, /aconteceu|adiado|cancelado/i)
 })
 
-// ─── Cenário E — Correção sem endpoint ───────────────────────────────────────
+// ─── Cenário E — Correção atualiza memória pendente ──────────────────────────
 
-test('E — "não, é sexta" não chama endpoint, retorna fallback de correção', async () => {
+test('E — "não, é sexta" atualiza data da memória pendente', async () => {
   const memoryId = 'pm_E1_correction'
   await seedMemory(USER_A, {
     userId: USER_A,
@@ -271,12 +271,14 @@ test('E — "não, é sexta" não chama endpoint, retorna fallback de correção
   })
   const result = await resolve(USER_A, 'não, é sexta')
   assert.equal(result.engaged, true)
-  assert.equal(result.action, null, 'nenhum endpoint de memória')
-  assert.ok(result.fallbackMessage, 'deve ter fallback de correção')
-  assert.equal(result.reason, 'correction_no_endpoint')
+  assert.equal(result.action?.type, 'update')
+  assert.equal(result.action?.memoryId, memoryId)
+  assert.equal(result.action?.type === 'update' ? result.action.patch.dateText : undefined, 'sexta-feira')
+  assert.equal(result.action?.type === 'update' ? result.action.patch.dateParsed : undefined, '2026-05-15')
+  assert.equal(result.reason, 'correction_update')
 })
 
-test('E — "no, it\'s Friday" detecta correção (en-US)', async () => {
+test('E — "no, it\'s Friday" atualiza data (en-US)', async () => {
   const memoryId = 'pm_E2_correction'
   await seedMemory(USER_A, {
     userId: USER_A,
@@ -284,8 +286,10 @@ test('E — "no, it\'s Friday" detecta correção (en-US)', async () => {
   })
   const result = await resolve(USER_A, "no, it's Friday", 'en-US')
   assert.equal(result.engaged, true)
-  assert.equal(result.action, null)
-  assert.equal(result.reason, 'correction_no_endpoint')
+  assert.equal(result.action?.type, 'update')
+  assert.equal(result.action?.type === 'update' ? result.action.patch.dateText : undefined, 'Friday')
+  assert.equal(result.action?.type === 'update' ? result.action.patch.dateParsed : undefined, '2026-05-15')
+  assert.equal(result.reason, 'correction_update')
 })
 
 test('E — "não, vai ser sábado" detecta correção', async () => {
@@ -296,8 +300,10 @@ test('E — "não, vai ser sábado" detecta correção', async () => {
   })
   const result = await resolve(USER_A, 'não, vai ser sábado')
   assert.equal(result.engaged, true)
-  assert.equal(result.action, null)
-  assert.equal(result.reason, 'correction_no_endpoint')
+  assert.equal(result.action?.type, 'update')
+  assert.equal(result.action?.type === 'update' ? result.action.patch.dateText : undefined, 'sábado')
+  assert.equal(result.action?.type === 'update' ? result.action.patch.dateParsed : undefined, '2026-05-16')
+  assert.equal(result.reason, 'correction_update')
 })
 
 test('E — "não, é para Milão" detecta correção de destino', async () => {
@@ -308,8 +314,9 @@ test('E — "não, é para Milão" detecta correção de destino', async () => {
   })
   const result = await resolve(USER_A, 'não, é para Milão')
   assert.equal(result.engaged, true)
-  assert.equal(result.action, null)
-  assert.equal(result.reason, 'correction_no_endpoint')
+  assert.equal(result.action?.type, 'update')
+  assert.equal(result.action?.type === 'update' ? result.action.patch.location : undefined, 'Milão')
+  assert.equal(result.reason, 'correction_update')
 })
 
 // ─── Cenário F — Timezone: resolver não usa UTC puro ─────────────────────────

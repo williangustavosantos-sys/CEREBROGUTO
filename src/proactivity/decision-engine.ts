@@ -98,6 +98,29 @@ function addDays(date: Date, days: number): Date {
   return new Date(date.getTime() + days * DAY_MS)
 }
 
+function durationDaysFromText(text: string): number {
+  const match = text.match(/\bpor\s+(\d+|uma|um|duas|dois|tres|três|quatro)\s+dias?\b/)
+  if (!match) return 1
+  const raw = match[1] || ''
+  const words: Record<string, number> = {
+    uma: 1,
+    um: 1,
+    duas: 2,
+    dois: 2,
+    tres: 3,
+    três: 3,
+    quatro: 4,
+  }
+  const amount = /^\d+$/.test(raw) ? Number(raw) : words[raw]
+  return amount && amount > 1 && amount <= 14 ? amount : 1
+}
+
+function rangeFromStart(dateKeyValue: string, days: number): string[] {
+  const start = new Date(`${dateKeyValue.slice(0, 10)}T12:00:00.000Z`)
+  if (Number.isNaN(start.getTime())) return [dateKeyValue]
+  return Array.from({ length: days }, (_, index) => dateKey(addDays(start, index)))
+}
+
 function weekDatesFrom(now: Date): string[] {
   return Array.from({ length: 7 }, (_, index) => dateKey(addDays(now, index)))
 }
@@ -122,10 +145,10 @@ function matchWeekdayDate(text: string, now: Date): string | null {
 function resolveAffectedDates(memory: ProactiveMemory, text: string, now: Date, weekly = false): string[] {
   if (weekly) return weekDatesFrom(now)
   if (memory.dateParsed && /^\d{4}-\d{2}-\d{2}$/.test(memory.dateParsed)) {
-    return [memory.dateParsed]
+    return rangeFromStart(memory.dateParsed, durationDaysFromText(text))
   }
   const byWeekday = matchWeekdayDate(text, now)
-  if (byWeekday) return [byWeekday]
+  if (byWeekday) return rangeFromStart(byWeekday, durationDaysFromText(text))
   return [dateKey(now)]
 }
 

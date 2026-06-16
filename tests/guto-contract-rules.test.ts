@@ -56,7 +56,7 @@ test('contrato: alergia/intolerancia separada sobrevive quando restricao diz que
   assert.equal(getPendingClarification(resolved, 'diet'), null)
 })
 
-test('contrato: correcao proativa ambigua nao executa update direto', async () => {
+test('contrato: correcao proativa clara executa update deterministico', async () => {
   const { resolveProactiveMemoryActionFromUserReply } = await import('../src/proactivity/memory-action-resolver.js')
   const { writeMemoryStoreAsync } = await import('../src/memory-store.js')
 
@@ -86,8 +86,9 @@ test('contrato: correcao proativa ambigua nao executa update direto', async () =
   const result = await resolveProactiveMemoryActionFromUserReply(userId, 'não, é sexta', 'pt-BR')
 
   assert.equal(result.engaged, true)
-  assert.equal(result.action, null)
-  assert.match(result.fallbackMessage || '', /mudou|exato|confirma|certeza/i)
+  assert.equal(result.action?.type, 'update')
+  assert.equal(result.action?.type === 'update' ? result.action.patch.dateText : undefined, 'sexta-feira')
+  assert.equal(result.action?.type === 'update' ? result.action.patch.dateParsed : undefined, '2026-05-15')
 })
 
 // ─── Fase 3 — esclarecimento de limitação física (dor) ──────────────────────

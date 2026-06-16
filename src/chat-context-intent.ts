@@ -211,9 +211,9 @@ export function classifyShortContextIntent(params: {
 // ─── Copy determinística (curta, no idioma do usuário) ────────────────────────
 
 export function foodUnavailableReply(language: ShortIntentLanguage): string {
-  if (language === "en-US") return "No problem. I will swap this food for a local equivalent.";
-  if (language === "it-IT") return "Nessun problema. Lo cambio con un equivalente locale.";
-  return "Sem problema. Eu troco esse alimento por um equivalente local.";
+  if (language === "en-US") return "No problem. Tell me what you have at home and I will validate the swap.";
+  if (language === "it-IT") return "Nessun problema. Dimmi cosa hai in casa e valido il cambio.";
+  return "Sem problema. Me diz o que você tem em casa e eu valido a troca.";
 }
 
 export function equipmentUnavailableReply(language: ShortIntentLanguage): string {
