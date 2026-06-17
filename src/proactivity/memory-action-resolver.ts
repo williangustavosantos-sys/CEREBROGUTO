@@ -699,6 +699,17 @@ export async function resolveProactiveMemoryActionFromUserReply(
       if (target.type === 'trip') {
         const travelTrainingSignal = detectTravelTrainingSignal(userInput)
         if (travelTrainingSignal !== 'unknown') {
+          if (travelTrainingSignal === 'cannot_train') {
+            return {
+              engaged: true,
+              action: {
+                type: 'update',
+                memoryId: target.id,
+                patch: appendUserReplyToMemoryPatch(target, userInput),
+              },
+              reason: 'pending_trip_protected_confirmation',
+            }
+          }
           return {
             engaged: true,
             action: {

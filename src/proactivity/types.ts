@@ -162,6 +162,34 @@ export interface WeeklyConversation {
   validationDone: boolean    // true quando a validação da semana anterior foi feita
 }
 
+export type ProactivePromptKind =
+  | 'weekly_opening'
+  | 'travel_training'
+  | 'memory_reminder'
+  | 'memory_validation'
+
+export interface ProactivePromptExpectedResponse {
+  type: 'text'
+  options?: string[]
+  instruction?: string
+  context?: string
+}
+
+export interface ProactivePrompt {
+  id: string
+  kind: ProactivePromptKind
+  status: 'active' | 'resolved'
+  fala: string
+  expectedResponse?: ProactivePromptExpectedResponse | null
+  relatedMemoryId?: string
+  weekKey?: string
+  dayKey?: string
+  createdAt: string
+  updatedAt: string
+  surfacedAt?: string
+  answeredAt?: string
+}
+
 export interface ProactivityContext {
   weeklyConversationNeeded: boolean   // é segunda e ainda não aconteceu esta semana
   validationNeeded: boolean            // há memórias pending_validation da semana passada

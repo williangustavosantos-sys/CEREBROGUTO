@@ -256,7 +256,7 @@ const scenarios: FounderScenario[] = [
   },
   {
     id: 2,
-    name: "viagem indisponível protege e redireciona",
+    name: "viagem indisponível abre card antes de proteger",
     run: async (ctx) => {
       const userId = "founder-02-trip-unavailable";
       await ctx.seedPendingTrip(userId);
@@ -264,13 +264,15 @@ const scenarios: FounderScenario[] = [
       const response = await ctx.chat(userId, "não consigo treinar nesse dia");
       const after = ctx.readMemory(userId);
 
-      assertSpeaks(response, /proteg|indispon|reorganiz/i, "indisponibilidade precisa proteger o dia");
-      assertSpeaks(response, /Agora volta comigo para hoje/i, "confirmação importante precisa redirecionar para hoje");
-      assertSpeaks(response, /miss[aã]o|Pr[oó]xima a[cç][aã]o/i, "redirect precisa dar próxima ação");
+      assertSpeaks(response, /confirma|card|proteg/i, "indisponibilidade precisa abrir confirmação visual");
+      assertDoesNotSpeak(response, /Agora volta comigo para hoje/i, "sem confirmação no card ainda não redireciona");
       assertNoWorkoutGeneration(response);
       assert.equal(after.totalXp, before.totalXp, "redirect não deve criar XP");
       assert.deepEqual(after.xpEvents, before.xpEvents, "redirect não deve criar evento de XP");
       assert.deepEqual(after.completedWorkoutDates, before.completedWorkoutDates, "redirect não deve validar treino");
+      const afterMemories = (after.proactiveMemories || []) as Array<{ status?: string }>;
+      assert.equal(afterMemories[0]?.status, "pending_confirmation", "card mantém memória pendente até confirmação");
+      assert.deepEqual(after.proactiveImpacts || [], before.proactiveImpacts || [], "impacto protegido só nasce após confirmar card");
     },
   },
   {

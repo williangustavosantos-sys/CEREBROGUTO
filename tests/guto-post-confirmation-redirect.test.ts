@@ -172,25 +172,20 @@ describe("POST_CONFIRMATION_REDIRECT", () => {
     rmSync(testMemoryFile, { force: true });
   });
 
-  it("viagem + cannot_train protege o dia e redireciona para a missao de hoje", async () => {
+  it("viagem + cannot_train abre card e não protege antes da confirmação", async () => {
     await seedPendingTripCannotTrain();
 
     const body = await postGuto("Não vou conseguir treinar.");
 
-    assert.match(body.fala, /proteg|indispon|reorganiz/i);
-    assert.match(body.fala, /Agora volta comigo para hoje/i);
-    assert.match(body.fala, /miss[aã]o/i);
-    assert.match(body.fala, /Corpo Inteiro com cuidado no ombro/i);
+    assert.match(body.fala, /confirma|card|proteg/i);
+    assert.doesNotMatch(body.fala, /Agora volta comigo para hoje/i);
     assert.notEqual(body.acao, "updateWorkout");
     assert.equal(body.workoutPlan ?? null, null);
 
     const memory = readUserMemory();
-    assert.equal(memory.proactiveMemories?.[0]?.status, "confirmed");
+    assert.equal(memory.proactiveMemories?.[0]?.status, "pending_confirmation");
     assert.match(memory.proactiveMemories?.[0]?.rawText || "", /não vou conseguir treinar/i);
-    assert.equal(memory.proactiveImpacts?.[0]?.workoutEffect, "protected");
-    assert.equal(memory.proactiveImpacts?.[0]?.missionEffect, "protected");
-    assert.equal(memory.proactiveImpacts?.[0]?.xpEffect, "no_free_xp_context_only");
-    assert.equal(memory.proactiveImpacts?.[0]?.arenaEffect, "validation_required");
+    assert.deepEqual(memory.proactiveImpacts || [], []);
   });
 
   it("dor confirmada registra, adapta a fala e direciona para a proxima acao", async () => {
@@ -226,7 +221,7 @@ describe("POST_CONFIRMATION_REDIRECT", () => {
     assert.equal(body.workoutPlan ?? null, null);
   });
 
-  it("proactive_context + travel_cannot_train protege o dia e redireciona para hoje", async () => {
+  it("proactive_context + travel_cannot_train cria pendência e não protege ainda", async () => {
     writeUserMemory(USER_ID, {
       lastWorkoutPlan: missionPlan("Corpo Inteiro com cuidado no ombro"),
     });
@@ -235,15 +230,15 @@ describe("POST_CONFIRMATION_REDIRECT", () => {
     const body = await postGuto("viajo sexta, não consigo treinar nesse dia");
     const afterMemory = readUserMemory();
 
-    assert.match(body.fala, /proteg|indispon|reorganiz/i);
-    assert.match(body.fala, /Agora volta comigo para hoje/i);
-    assert.match(body.fala, /miss[aã]o|Pr[oó]xima a[cç][aã]o/i);
+    assert.match(body.fala, /confirma|card|proteg/i);
+    assert.doesNotMatch(body.fala, /Agora volta comigo para hoje/i);
     assert.notEqual(body.acao, "updateWorkout");
     assert.equal(body.workoutPlan ?? null, null);
     assert.equal(afterMemory.totalXp, before.totalXp);
     assert.deepEqual(afterMemory.xpEvents, before.xpEvents);
     assert.deepEqual(afterMemory.completedWorkoutDates, before.completedWorkoutDates);
     assert.equal(afterMemory.lastWorkoutPlan?.title, before.lastWorkoutPlan?.title);
+    assert.equal(afterMemory.proactiveMemories?.[0]?.status, "pending_confirmation");
     assert.deepEqual(afterMemory.proactiveImpacts || [], before.proactiveImpacts || []);
   });
 
@@ -277,20 +272,21 @@ describe("POST_CONFIRMATION_REDIRECT", () => {
     assert.equal(body.workoutPlan ?? null, null);
   });
 
-  it("redirecionar nao gera XP, Arena ou treino novo por conta propria", async () => {
+  it("card pendente nao gera XP, Arena ou treino novo por conta propria", async () => {
     await seedPendingTripCannotTrain();
 
     const before = readUserMemory();
     const body = await postGuto("Não vou conseguir treinar.");
     const afterMemory = readUserMemory();
 
-    assert.match(body.fala, /Agora volta comigo para hoje/i);
+    assert.match(body.fala, /confirma|card|proteg/i);
+    assert.doesNotMatch(body.fala, /Agora volta comigo para hoje/i);
     assert.notEqual(body.acao, "updateWorkout");
     assert.equal(body.workoutPlan ?? null, null);
     assert.equal(afterMemory.totalXp, before.totalXp);
     assert.deepEqual(afterMemory.xpEvents, before.xpEvents);
     assert.deepEqual(afterMemory.completedWorkoutDates, before.completedWorkoutDates);
     assert.equal(afterMemory.lastWorkoutPlan?.title, before.lastWorkoutPlan?.title);
-    assert.equal(afterMemory.proactiveImpacts?.[0]?.arenaEffect, "validation_required");
+    assert.deepEqual(afterMemory.proactiveImpacts || [], []);
   });
 });

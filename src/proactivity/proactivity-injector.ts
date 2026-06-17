@@ -6,7 +6,6 @@
 import {
   getProactiveMemoriesByStatus,
   markPastActiveMemoriesPendingValidation,
-  updateProactiveMemory,
 } from './proactive-store'
 
 import { getWeeklyCheckResult } from './weekly-conversation'
@@ -264,10 +263,6 @@ export async function buildProactivityContextBlock(
         )
       }
 
-      await Promise.all(activeMemories
-        .filter((memory) => memory.status !== 'surfaced')
-        .map((memory) => updateProactiveMemory(userId, memory.id, { status: 'surfaced' }).catch(() => null))
-      )
     }
 
     // ── Pending confirmation (one at a time) ──────────────────────────────────

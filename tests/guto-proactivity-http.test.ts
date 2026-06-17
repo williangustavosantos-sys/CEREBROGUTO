@@ -44,6 +44,16 @@ function dateKey(offsetDays = 0) {
   }).format(date)
 }
 
+function currentWeekKey() {
+  const [year, month, day] = dateKey(0).split("-").map(Number) as [number, number, number]
+  const tmp = new Date(Date.UTC(year, month - 1, day))
+  const dayOfWeek = tmp.getUTCDay() || 7
+  tmp.setUTCDate(tmp.getUTCDate() + 4 - dayOfWeek)
+  const yearStart = new Date(Date.UTC(tmp.getUTCFullYear(), 0, 1))
+  const week = Math.ceil(((tmp.getTime() - yearStart.getTime()) / 86400000 + 1) / 7)
+  return `${tmp.getUTCFullYear()}-W${String(week).padStart(2, "0")}`
+}
+
 function missionPlan(title = "Corpo inteiro controlado") {
   return {
     title,
@@ -333,7 +343,7 @@ describe("proactivity HTTP cycle", () => {
     globalThis.fetch = originalFetch
   })
 
-  it("GET /guto/proactive?force=1 abre contexto semanal antes de missão pronta", async () => {
+  it("GET /guto/proactive?force=1 pergunta contexto semanal antes da missão e persiste", async () => {
     mockGutoModel({
       fala: "Olá! Como posso te ajudar hoje?",
       acao: "none",
@@ -364,23 +374,34 @@ describe("proactivity HTTP cycle", () => {
     assert.equal(body.due, true)
     assert.equal(body.slot, "arrival")
     assert.match(body.fala, /Maria/i)
-    assert.match(body.fala, /viagem|compromisso|dor|treinos/i)
-    assert.doesNotMatch(body.fala, /miss[aã]o/i)
+    assert.match(body.fala, /semana|pr[oó]ximos dias|resto da semana/i)
+    assert.match(body.fala, /viagem|compromisso|dor|hor[aá]rio/i)
+    assert.doesNotMatch(body.fala, /Corpo inteiro controlado|Missão do dia pronta/i)
     assert.doesNotMatch(body.fala, /Como posso te ajudar hoje/i)
 
     const second = await fetch(`${baseUrl}/guto/proactive?language=pt-BR&force=1`, { headers: authHeaders() })
     assert.equal(second.status, 200)
-    const secondBody = (await second.json()) as { due: boolean }
-    assert.equal(secondBody.due, false, "arrival não deve repetir no mesmo dia")
+    const secondBody = (await second.json()) as { due: boolean; slot?: string; fala?: string }
+    assert.equal(secondBody.due, true, "prompt ativo deve persistir até o usuário responder")
+    assert.equal(secondBody.slot, "arrival")
+    assert.equal(secondBody.fala, body.fala)
 
     const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<
       string,
-      { totalXp?: number; xpEvents?: unknown[]; completedWorkoutDates?: unknown[]; lastWorkoutPlan?: { title?: string } }
+      {
+        totalXp?: number
+        xpEvents?: unknown[]
+        completedWorkoutDates?: unknown[]
+        lastWorkoutPlan?: { title?: string }
+        proactivePrompt?: { status?: string; fala?: string }
+      }
     >
     assert.equal(store[USER_ID]?.totalXp, 100)
     assert.equal(store[USER_ID]?.xpEvents?.length, 0)
     assert.equal(store[USER_ID]?.completedWorkoutDates?.length, 0)
     assert.equal(store[USER_ID]?.lastWorkoutPlan?.title, "Corpo inteiro controlado")
+    assert.equal(store[USER_ID]?.proactivePrompt?.status, "active")
+    assert.equal(store[USER_ID]?.proactivePrompt?.fala, body.fala)
   })
 
   it("GET /guto/proactive?force=1 com semana aberta mostra missão pronta", async () => {
@@ -426,7 +447,6 @@ describe("proactivity HTTP cycle", () => {
 
   it("GET /guto/proactive?force=1 com missão e ombro menciona cuidado físico", async () => {
     mockGutoModel({ fala: "Olá! Como posso te ajudar hoje?", acao: "none", expectedResponse: null })
-    const { getWeekKey } = await import("../src/proactivity/proactive-store.js")
     writeUserMemory(USER_ID, {
       name: "Maria",
       hasSeenChatOpening: true,
@@ -435,9 +455,9 @@ describe("proactivity HTTP cycle", () => {
       proactiveMemories: [],
       proactiveImpacts: [],
       weeklyConversation: {
-        weekKey: getWeekKey(),
+        weekKey: currentWeekKey(),
         happenedAt: new Date().toISOString(),
-        extractionDone: false,
+        extractionDone: true,
         validationDone: false,
       },
       lastWorkoutPlan: missionPlan("Corpo inteiro"),
@@ -460,7 +480,22 @@ describe("proactivity HTTP cycle", () => {
       hasSeenChatOpening: true,
       trainedToday: false,
       proactiveSent: {},
-      proactiveMemories: [],
+      proactiveMemories: [
+        {
+          id: "memory-trip-protected",
+          userId: USER_ID,
+          type: "trip",
+          status: "confirmed",
+          rawText: "viagem amanhã",
+          understood: "Viagem protegida.",
+          dateText: "amanhã",
+          dateParsed: tripDate,
+          weekKey: "2026-W20",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          confirmedAt: new Date().toISOString(),
+        },
+      ],
       weeklyConversation: null,
       lastWorkoutPlan: missionPlan("Corpo inteiro sem impacto"),
       trainingPathology: "sem dor",
@@ -505,5 +540,56 @@ describe("proactivity HTTP cycle", () => {
     assert.match(body.fala, /Corpo inteiro|miss[aã]o/i)
     assert.doesNotMatch(body.fala, /como t[aá] tua semana|Tem viagem/i)
     assert.doesNotMatch(body.fala, /Como posso te ajudar hoje/i)
+  })
+
+  it("GET /guto/proactive?force=1 traz memória futura confirmada de volta como fala visível", async () => {
+    const tripDate = dateKey(1)
+    writeUserMemory(USER_ID, {
+      name: "Maria",
+      hasSeenChatOpening: true,
+      trainedToday: false,
+      proactiveSent: {},
+      proactiveMemories: [
+        {
+          id: "memory-trip-tomorrow",
+          userId: USER_ID,
+          type: "trip",
+          status: "confirmed",
+          rawText: "vou viajar amanhã",
+          understood: "Viagem amanhã.",
+          dateText: "amanhã",
+          dateParsed: tripDate,
+          weekKey: currentWeekKey(),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          confirmedAt: new Date().toISOString(),
+        },
+      ],
+      proactiveImpacts: [],
+      weeklyConversation: null,
+      lastWorkoutPlan: missionPlan("Corpo inteiro antes da viagem"),
+      trainingPathology: "sem dor",
+      trainingLimitations: "sem dor",
+    })
+
+    const res = await fetch(`${baseUrl}/guto/proactive?language=pt-BR&force=1`, { headers: authHeaders() })
+    assert.equal(res.status, 200)
+    const body = (await res.json()) as { due: boolean; slot: string; fala: string }
+    assert.equal(body.due, true)
+    assert.equal(body.slot, "memory_reminder")
+    assert.match(body.fala, /Amanh[aã].*viagem/i)
+    assert.doesNotMatch(body.fala, /como t[aá] tua semana|Tem viagem/i)
+
+    const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<
+      string,
+      {
+        proactiveMemories?: Array<{ id: string; status: string }>
+        proactivePrompt?: { status?: string; kind?: string; relatedMemoryId?: string }
+      }
+    >
+    assert.equal(store[USER_ID]?.proactiveMemories?.find((item) => item.id === "memory-trip-tomorrow")?.status, "surfaced")
+    assert.equal(store[USER_ID]?.proactivePrompt?.status, "active")
+    assert.equal(store[USER_ID]?.proactivePrompt?.kind, "memory_reminder")
+    assert.equal(store[USER_ID]?.proactivePrompt?.relatedMemoryId, "memory-trip-tomorrow")
   })
 })

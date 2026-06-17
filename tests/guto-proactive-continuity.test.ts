@@ -199,20 +199,19 @@ describe("Continuidade Primeiro — caso 3: 'viajo quarta, não vou conseguir tr
     assert.equal(detectTravelTrainingSignal("consigo treinar no hotel"), "can_train");
   });
 
-  it("fala: protege o dia e nega intensidade máxima (não afirma)", () => {
+  it("fala: abre confirmação no card antes de proteger o dia", () => {
     const fala = buildProactiveContinuityFala("travel_cannot_train", "pt-BR", "Will");
-    assert.match(fala, /proteg|indispon|reorganiz/i);
+    assert.match(fala, /confirma|card|proteg/i);
     assert.equal(falaHasPassiveMindset(fala), false);
   });
 
-  // P1 — eliminar confirmação mole: proteger o dia / adaptar é DECISÃO do GUTO,
-  // não pedido de licença. Nada de "Confirmo o dia como protegido?" / "Confirmo
-  // assim?". O padrão é comando assertivo (o usuário corrige depois, se quiser).
-  it("comando assertivo: cannot/can-train NÃO pedem confirmação (sem '?')", () => {
+  // P1 — o usuário dizer que não treina cria pendência operacional, mas o impacto
+  // protegido só nasce no card. Ainda assim, a fala é assertiva e não fica em loop.
+  it("can-train é assertivo; cannot-train exige card sem perguntar de novo", () => {
     for (const lang of ["pt-BR", "en-US", "it-IT"] as const) {
       const cannot = buildProactiveContinuityFala("travel_cannot_train", lang, "Will");
-      assert.doesNotMatch(cannot, /\?/, `cannot_train (${lang}) não pode pedir confirmação: ${cannot}`);
-      assert.match(cannot, /protegi|protected|protetto|reorganiz|riorganizz/i, `cannot_train (${lang}) deve afirmar a decisão: ${cannot}`);
+      assert.doesNotMatch(cannot, /\?/, `cannot_train (${lang}) não pode repetir pergunta: ${cannot}`);
+      assert.match(cannot, /card|confirm|conferma|prote/i, `cannot_train (${lang}) deve apontar para confirmação visual: ${cannot}`);
 
       const can = buildProactiveContinuityFala("travel_can_train", lang, "Will");
       assert.doesNotMatch(can, /\?/, `can_train (${lang}) não pode pedir confirmação: ${can}`);
