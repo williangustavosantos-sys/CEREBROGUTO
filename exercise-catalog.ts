@@ -2228,10 +2228,108 @@ export function filterExercisesBySafety(
   });
 }
 
+const PRIMARY_TARGET_TAGS = [
+  "triceps",
+  "biceps",
+  "peito",
+  "costas",
+  "ombro",
+  "quadriceps",
+  "posteriores",
+  "gluteos",
+  "panturrilha",
+  "abdomen",
+  "core",
+] as const;
+
+export type ExerciseSubstitutionRejectionReason =
+  | "target_mismatch"
+  | "movement_mismatch";
+
+export interface ExerciseSubstitutionValidation {
+  valid: boolean;
+  reason?: ExerciseSubstitutionRejectionReason;
+  originalTargets: string[];
+  substituteTargets: string[];
+}
+
+function normalizeCatalogToken(value?: string): string {
+  return (value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function exercisePrimaryTargets(exercise: CatalogExercise): string[] {
+  const tags = new Set((exercise.tags || []).map(normalizeCatalogToken));
+
+  if (exercise.muscleGroup === "bracos") {
+    if (tags.has("triceps")) return ["triceps"];
+    if (tags.has("biceps")) return ["biceps"];
+  }
+
+  const explicit = PRIMARY_TARGET_TAGS.filter((target) => tags.has(target));
+  if (explicit.length > 0) return explicit;
+
+  if (exercise.muscleGroup === "abdomen") return ["abdomen", "core"];
+  return [exercise.muscleGroup];
+}
+
+function movementIsCompatibleForTarget(targets: string[], candidate: CatalogExercise): boolean {
+  const movement = normalizeCatalogToken(candidate.movementPattern);
+
+  if (targets.includes("triceps")) {
+    return movement === "extensao" || movement === "empurrar";
+  }
+
+  if (targets.includes("biceps")) {
+    return movement === "flexao";
+  }
+
+  return true;
+}
+
+/**
+ * Professional gate for workout substitutions.
+ *
+ * `muscleGroup: "bracos"` is too broad: biceps and triceps are not equivalent
+ * training targets. This validation is the canonical blocker that prevents a
+ * text/model suggestion from swapping one arm target for the other.
+ */
+export function validateExerciseSubstitute(
+  original: CatalogExercise,
+  substitute: CatalogExercise
+): ExerciseSubstitutionValidation {
+  const originalTargets = exercisePrimaryTargets(original);
+  const substituteTargets = exercisePrimaryTargets(substitute);
+  const sameTarget = originalTargets.some((target) => substituteTargets.includes(target));
+
+  if (!sameTarget) {
+    return {
+      valid: false,
+      reason: "target_mismatch",
+      originalTargets,
+      substituteTargets,
+    };
+  }
+
+  if (!movementIsCompatibleForTarget(originalTargets, substitute)) {
+    return {
+      valid: false,
+      reason: "movement_mismatch",
+      originalTargets,
+      substituteTargets,
+    };
+  }
+
+  return { valid: true, originalTargets, substituteTargets };
+}
+
 /**
  * Suggests substitute exercise IDs for one given exercise. Prefers explicit
  * substitutes declared on the catalog entry; falls back to the same muscle
- * group with compatible locations.
+ * group with compatible locations and professional target validation.
  */
 export function suggestExerciseSubstitutes(
   id: string,
@@ -2247,6 +2345,7 @@ export function suggestExerciseSubstitutes(
     : getCatalogByGroup(ex.muscleGroup).filter((c) => c.id !== id);
 
   const filtered = candidates.filter((c) => {
+    if (!validateExerciseSubstitute(ex, c).valid) return false;
     if (options.location && !getExerciseLocations(c).includes(options.location)) return false;
     return true;
   });

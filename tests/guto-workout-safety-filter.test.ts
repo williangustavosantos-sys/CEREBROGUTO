@@ -5,7 +5,9 @@ import {
   filterExercisesBySafety,
   getExerciseRiskTags,
   getCatalogById,
+  suggestExerciseSubstitutes,
   toSafetyRegion,
+  validateExerciseSubstitute,
   type CatalogLocation,
 } from "../exercise-catalog";
 import {
@@ -204,6 +206,33 @@ describe("Fase 3C — filterExercisesBySafety (remoção por região)", () => {
     const safe = filterExercisesBySafety(["id_inexistente_xyz", "agachamento_livre"], { userBodyRegion: "knee" });
     assert.ok(safe.includes("id_inexistente_xyz"));
     assert.ok(!safe.includes("agachamento_livre"));
+  });
+});
+
+describe("Fase 3C — validação profissional de substituição", () => {
+  it("não permite trocar exercício de tríceps por bíceps", () => {
+    const original = getCatalogById("triceps_polia_alta")!;
+    const invalid = getCatalogById("biceps_maquina")!;
+    const valid = getCatalogById("triceps_barra_v_cabo")!;
+
+    assert.equal(validateExerciseSubstitute(original, invalid).valid, false);
+    assert.equal(validateExerciseSubstitute(original, invalid).reason, "target_mismatch");
+    assert.equal(validateExerciseSubstitute(original, valid).valid, true);
+  });
+
+  it("sugestões para tríceps mantêm alvo tríceps e nunca retornam bíceps", () => {
+    const original = getCatalogById("triceps_polia_alta")!;
+    const substitutes = suggestExerciseSubstitutes("triceps_polia_alta", { location: "gym" });
+
+    assert.ok(substitutes.length > 0, "tríceps precisa ter substitutos válidos");
+    assert.ok(!substitutes.includes("biceps_maquina"));
+    assert.ok(!substitutes.some((id) => id.startsWith("biceps") || id.startsWith("rosca")));
+
+    for (const id of substitutes) {
+      const substitute = getCatalogById(id);
+      assert.ok(substitute, `${id} deve existir no catálogo`);
+      assert.equal(validateExerciseSubstitute(original, substitute!).valid, true, `${id} precisa manter alvo tríceps`);
+    }
   });
 });
 

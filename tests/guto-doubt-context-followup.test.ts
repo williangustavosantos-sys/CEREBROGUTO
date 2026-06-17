@@ -11,6 +11,7 @@ import {
   parseDietContext,
   isSubstituteAskMessage,
 } from "../src/chat-context-intent.js";
+import { getCatalogById } from "../exercise-catalog.js";
 import { resolveFoodIdByName } from "../src/food-catalog.js";
 import { suggestFoodSubstitutes } from "../src/food-availability.js";
 
@@ -48,6 +49,45 @@ async function postGuto(userId: string, input: string) {
 
 const RE_ASK_RE = /qual aparelho|qual m[áa]quina|which machine|quale attrezzo/i;
 const GENERIC_BREAKFAST_RE = /primeira (alimenta|refei)|sagrad|caf[ée] da manh[ãa] é/i;
+const INVALID_ARM_SWAP_RE = /troca por\s+b[íi]ceps|b[íi]ceps m[aá]quina|rosca/i;
+
+function catalogExercise(id: string, overrides: Record<string, unknown> = {}) {
+  const entry = getCatalogById(id);
+  assert.ok(entry, `${id} deve existir no catálogo`);
+  return {
+    id: entry.id,
+    name: entry.canonicalNamePt,
+    canonicalNamePt: entry.canonicalNamePt,
+    muscleGroup: entry.muscleGroup,
+    sets: 3,
+    reps: "10-12",
+    rest: "60s",
+    cue: "Controle a execução.",
+    note: "Base do treino.",
+    videoUrl: entry.videoUrl,
+    videoProvider: "local",
+    sourceFileName: entry.sourceFileName,
+    ...overrides,
+  };
+}
+
+function chestTricepsPlan() {
+  return {
+    title: "Peito, ombro e tríceps",
+    focus: "Peito, ombro e tríceps",
+    focusKey: "chest_triceps",
+    location: "academia",
+    locationMode: "gym",
+    dateLabel: "Hoje",
+    scheduledFor: new Date().toISOString(),
+    summary: "Peito, ombro e tríceps.",
+    exercises: [
+      catalogExercise("supino_reto"),
+      catalogExercise("desenvolvimento_sentado"),
+      catalogExercise("triceps_polia_alta", { sets: 4, reps: "12", rest: "60s" }),
+    ],
+  };
+}
 
 describe("BUG 2/3 — contexto de dúvida persiste no 2º turno (puro)", () => {
   it("resolveFoodIdByName('Aveia em flocos') resolve para o id do catálogo (oats)", () => {
@@ -157,6 +197,47 @@ describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
     assert.doesNotMatch(res.fala || "", RE_ASK_RE, "não pode reperguntar qual aparelho com o card ativo");
     // Nomeia o exercício do contexto (não responde genérico/vazio).
     assert.match(res.fala || "", /supino|troca por|pula ele|swap/i);
+  });
+
+  it("mensagem direta 'Tríceps polia alta ocupado' → substituto validado de tríceps, nunca bíceps", async () => {
+    const userId = "triceps-busy-direct";
+    writeUserMemory(userId, {
+      trainingGoal: "muscle_gain",
+      trainingLevel: "consistent",
+      preferredTrainingLocation: "gym",
+      trainingLocation: "academia",
+      lastWorkoutPlan: chestTricepsPlan(),
+    });
+    clearMemoryStoreCache();
+
+    const res = await postGuto(userId, "Tríceps polia alta ocupado");
+
+    assert.equal(res.acao, "none");
+    assert.match(res.fala || "", /tr[íi]ceps/i);
+    assert.match(res.fala || "", /troca por|pula ele/i);
+    assert.doesNotMatch(res.fala || "", INVALID_ARM_SWAP_RE, "não pode trocar tríceps por bíceps/rosca");
+    assert.doesNotMatch(res.fala || "", RE_ASK_RE, "não pode perguntar qual aparelho quando o exercício veio no texto");
+  });
+
+  it("objeção 'tríceps por bíceps' → admite erro e corrige, sem continuar perguntando motivo", async () => {
+    const userId = "triceps-objection";
+    writeUserMemory(userId, {
+      trainingGoal: "muscle_gain",
+      trainingLevel: "consistent",
+      preferredTrainingLocation: "gym",
+      trainingLocation: "academia",
+      lastWorkoutPlan: chestTricepsPlan(),
+    });
+    clearMemoryStoreCache();
+
+    const res = await postGuto(userId, "Mas como eu vou trocar o exercício de tríceps por bíceps se o treino é de tríceps?");
+
+    assert.equal(res.acao, "none");
+    assert.match(res.fala || "", /voc[êe] tem raz[ãa]o|boa observa/i);
+    assert.match(res.fala || "", /n[aã]o faz sentido/i);
+    assert.match(res.fala || "", /tr[íi]ceps/i);
+    assert.doesNotMatch(res.fala || "", /trocar por qu[êe]|dor, equipamento ocupado|dificuldade de execu/i);
+    assert.doesNotMatch(res.fala || "", INVALID_ARM_SWAP_RE, "correção não pode insistir em bíceps/rosca");
   });
 
   // ── BUG 3 — alimento: 1º turno já entrega substituto concreto ───────────────
