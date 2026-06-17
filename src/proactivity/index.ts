@@ -35,6 +35,8 @@ export type {
   ProactiveImpact,
   ProactiveImpactStatus,
   ProactiveImpactSurface,
+  ProactivePrompt,
+  ProactivePromptKind,
   WeeklyConversation,
   ProactivityContext,
 } from './types'

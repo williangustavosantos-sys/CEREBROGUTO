@@ -132,6 +132,8 @@ import {
   requestDiscardProactiveMemory,
   cancelDiscardRequest,
   markWeeklyConversationDone,
+  markPastActiveMemoriesPendingValidation,
+  getWeekKey,
   resolveProactiveMemoryActionFromUserReply,
 } from "./src/proactivity/index.js";
 import {
@@ -143,7 +145,7 @@ import {
 import type {
   ProactiveAdaptationForDate,
 } from "./src/proactivity/decision-engine.js";
-import type { ProactiveImpact, ProactiveMemory, WeeklyConversation } from "./src/proactivity/types.js";
+import type { ProactiveImpact, ProactiveMemory, ProactivePrompt, WeeklyConversation } from "./src/proactivity/types.js";
 import type { ResolverResult } from "./src/proactivity/memory-action-resolver.js";
 
 type Acao = "none" | "updateWorkout" | "lock" | "changeLanguage" | "requestDeleteAccount" | "showProfile";
@@ -423,6 +425,7 @@ interface GutoMemory {
   proactiveMemories?: ProactiveMemory[];
   proactiveImpacts?: ProactiveImpact[];
   weeklyConversation?: WeeklyConversation;
+  proactivePrompt?: ProactivePrompt | null;
   /**
    * Result of the dirty-data resolver applied to the 3 free fields
    * (country / pathology / foodRestrictions). Cached by rawValue hash.
@@ -1179,6 +1182,12 @@ export function getMemory(userId: string): GutoMemory {
         !Array.isArray(existing.weeklyConversation)
           ? existing.weeklyConversation
           : undefined,
+      proactivePrompt:
+        existing.proactivePrompt &&
+        typeof existing.proactivePrompt === "object" &&
+        !Array.isArray(existing.proactivePrompt)
+          ? existing.proactivePrompt
+          : null,
       initialXpRewardSeen: Boolean(existing.initialXpRewardSeen),
     });
   }
@@ -1213,6 +1222,7 @@ export function getMemory(userId: string): GutoMemory {
     proactiveSent: {},
     proactiveMemories: [],
     proactiveImpacts: [],
+    proactivePrompt: null,
     activeExercise: null,
   };
 }
@@ -1230,6 +1240,7 @@ export function saveMemory(memory: GutoMemory) {
       ? memory.proactiveImpacts
       : existing?.proactiveImpacts,
     weeklyConversation: memory.weeklyConversation ?? existing?.weeklyConversation,
+    proactivePrompt: memory.proactivePrompt === undefined ? existing?.proactivePrompt : memory.proactivePrompt,
   };
   delete nextMemory.phone;
   nextMemory.userAge = normalizeUserAge(nextMemory.userAge);
@@ -1262,6 +1273,7 @@ function buildProactiveMemoryPatch(memory: GutoMemory): GutoMemoryPatch {
   return {
     proactiveMemories: memory.proactiveMemories || [],
     proactiveImpacts: memory.proactiveImpacts || [],
+    proactivePrompt: memory.proactivePrompt || null,
   };
 }
 
@@ -1320,6 +1332,34 @@ function persistDecisionImpactForMemory(userId: string, proactiveMemory: Proacti
     impact,
     memoryPatch: buildProactiveMemoryPatch(memory),
   };
+}
+
+function persistDecisionImpactInMemoryObject(
+  memory: GutoMemory,
+  proactiveMemory: ProactiveMemory | null,
+  language: GutoLanguage
+): ProactiveImpact | null {
+  if (!proactiveMemory) return null;
+  const decision = decideFromProactiveMemory({
+    memory: proactiveMemory,
+    language,
+    coachLocked: isCoachLockedWorkout(memory.lastWorkoutPlan),
+  });
+  if (!decision) return null;
+  const memoryWithDecision: ProactiveMemory = { ...proactiveMemory, decision };
+  memory.proactiveMemories = (memory.proactiveMemories || []).map((item) =>
+    item.id === proactiveMemory.id ? memoryWithDecision : item
+  );
+  const impact = buildImpactFromDecision(decision, memory);
+  if (!impact) return null;
+  memory.proactiveImpacts = upsertProactiveImpact(memory.proactiveImpacts || [], impact);
+  appendMemoryAudit(
+    memory,
+    "proactivity_action",
+    ["proactiveMemories", "proactiveImpacts"],
+    `Impacto operacional criado para memória proativa ${proactiveMemory.id}.`
+  );
+  return impact;
 }
 
 function setProactiveImpactsStatusForMemory(
@@ -6838,7 +6878,7 @@ export function buildProactiveContinuityFala(
     "pt-BR": {
       travel_unknown: `Fechado, ${name}. Viajar não é desculpa pra sumir — eu consigo adaptar o treino pra hotel, quarto, academia ou uma missão curta. Só me diz: você vai ter algum tempo pra treinar nesse dia ou vai ser impossível mesmo?`,
       travel_can_train: `Perfeito, ${name}. Não vou bloquear esse dia: adapto o treino pra hotel/quarto e mantenho tua sequência viva, curto e direto.`,
-      travel_cannot_train: `Fechado, ${name}. Já protegi esse dia e reorganizei a semana, sem inventar intensidade máxima pra compensar.`,
+      travel_cannot_train: `Entendi, ${name}. Antes de proteger esse dia de vez, confirma no card. Se a data mudou, altera ali e eu reorganizo certo.`,
       commitment: `Fechado, ${name}. Esse período fica bloqueado, então eu puxo o treino pra antes ou deixo uma missão curta — a gente não para. Prefere de manhã, de tarde, ou eu decido o melhor horário?`,
       busy_week: `Então a semana vai ser executável, não perfeita, ${name}. Eu reduzo o plano e seguro o mínimo que mantém tua evolução viva.`,
       short_window: `Então hoje é missão curta, ${name}. Direta e sem desculpa — a gente mantém a sequência viva mesmo com pouco tempo.`,
@@ -6847,7 +6887,7 @@ export function buildProactiveContinuityFala(
     "en-US": {
       travel_unknown: `Got it, ${name}. Traveling is no excuse to disappear — I can adapt the workout for a hotel, your room, a gym or a short mission. Just tell me: will you have any time to train that day, or is it truly impossible?`,
       travel_can_train: `Perfect, ${name}. I won't block that day: I adapt the workout for the hotel/room and keep your streak alive — short and clean.`,
-      travel_cannot_train: `Got it, ${name}. I've already protected that day and reorganized the week — no made-up max intensity to compensate.`,
+      travel_cannot_train: `Got it, ${name}. Before I protect that day for real, confirm it on the card. If the date changed, adjust it there and I reorganize it right.`,
       commitment: `Got it, ${name}. That window is blocked, so I pull the workout earlier or leave a short mission — we don't stop. Morning, afternoon, or should I pick the best time?`,
       busy_week: `So the week will be doable, not perfect, ${name}. I cut the plan down and hold the minimum that keeps your progress alive.`,
       short_window: `Then today is a short mission, ${name}. Direct and no excuses — we keep the streak alive even with little time.`,
@@ -6856,7 +6896,7 @@ export function buildProactiveContinuityFala(
     "it-IT": {
       travel_unknown: `Chiaro, ${name}. Viaggiare non è una scusa per sparire — posso adattare l'allenamento per hotel, camera, palestra o una missione corta. Dimmi solo: avrai un po' di tempo per allenarti quel giorno o è davvero impossibile?`,
       travel_can_train: `Perfetto, ${name}. Non blocco quel giorno: adatto l'allenamento per hotel/camera e tengo viva la tua striscia, corto e pulito.`,
-      travel_cannot_train: `Chiaro, ${name}. Ho già protetto quel giorno e riorganizzato la settimana, senza inventare intensità massima per compensare.`,
+      travel_cannot_train: `Chiaro, ${name}. Prima di proteggere quel giorno davvero, conferma nel card. Se la data è cambiata, correggila lì e riorganizzo bene.`,
       commitment: `Chiaro, ${name}. Quella fascia è bloccata, quindi anticipo l'allenamento o lascio una missione corta — non ci fermiamo. Preferisci mattina, pomeriggio, o scelgo io l'orario migliore?`,
       busy_week: `Allora la settimana sarà fattibile, non perfetta, ${name}. Riduco il piano e tengo il minimo che mantiene viva la tua evoluzione.`,
       short_window: `Allora oggi è una missione corta, ${name}. Diretta e senza scuse — teniamo viva la striscia anche con poco tempo.`,
@@ -6867,7 +6907,7 @@ export function buildProactiveContinuityFala(
 }
 
 function shouldRedirectAfterProactiveContextSignal(signal: ProactiveContinuitySignal): boolean {
-  return signal === "busy_week" || signal === "short_window" || signal === "travel_cannot_train";
+  return signal === "busy_week" || signal === "short_window";
 }
 
 export function buildProactiveExpectedResponse(signal: ProactiveContinuitySignal, language: GutoLanguage): ExpectedResponse | null {
@@ -6898,6 +6938,285 @@ export function buildProactiveExpectedResponse(signal: ProactiveContinuitySignal
   };
 }
 
+function activeProactivePrompt(memory: GutoMemory): ProactivePrompt | null {
+  return memory.proactivePrompt?.status === "active" ? memory.proactivePrompt : null;
+}
+
+function clearActiveProactivePrompt(memory: GutoMemory, answeredAt = new Date().toISOString()) {
+  const prompt = activeProactivePrompt(memory);
+  if (!prompt) return;
+  memory.proactivePrompt = {
+    ...prompt,
+    status: "resolved",
+    answeredAt,
+    updatedAt: answeredAt,
+  };
+}
+
+function activateProactivePrompt(
+  memory: GutoMemory,
+  prompt: Pick<ProactivePrompt, "kind" | "fala"> & Partial<Omit<ProactivePrompt, "id" | "kind" | "fala" | "status" | "createdAt" | "updatedAt">>
+): ProactivePrompt {
+  const now = new Date().toISOString();
+  const active: ProactivePrompt = {
+    id: `pp_${memory.userId.slice(0, 8)}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+    kind: prompt.kind,
+    status: "active",
+    fala: prompt.fala,
+    expectedResponse: prompt.expectedResponse ?? null,
+    relatedMemoryId: prompt.relatedMemoryId,
+    weekKey: prompt.weekKey,
+    dayKey: prompt.dayKey,
+    createdAt: now,
+    updatedAt: now,
+  };
+  memory.proactivePrompt = active;
+  return active;
+}
+
+function responseFromProactivePrompt(prompt: ProactivePrompt): GutoModelResponse {
+  return {
+    fala: prompt.fala,
+    acao: "none",
+    expectedResponse: prompt.expectedResponse as ExpectedResponse | null,
+    avatarEmotion: prompt.kind === "memory_validation" ? "alert" : "default",
+  };
+}
+
+function getPresenceWindowLabel(language: GutoLanguage, now = new Date()) {
+  const weekday = getWeekDayKey(now);
+  const { hour } = getGutoTimeParts(now);
+  if (weekday === "monday" || weekday === "tuesday") {
+    return language === "en-US" ? "this week" : language === "it-IT" ? "questa settimana" : "tua semana";
+  }
+  if (weekday === "wednesday" || weekday === "thursday") {
+    return language === "en-US" ? "the rest of the week" : language === "it-IT" ? "il resto della settimana" : "o resto da semana";
+  }
+  if (weekday === "friday" || weekday === "saturday") {
+    return language === "en-US" ? "the next few days" : language === "it-IT" ? "i prossimi giorni" : "teus próximos dias";
+  }
+  if (weekday === "sunday" && hour >= 18) {
+    return language === "en-US" ? "next week" : language === "it-IT" ? "la prossima settimana" : "a próxima semana";
+  }
+  return language === "en-US" ? "the next few days" : language === "it-IT" ? "i prossimi giorni" : "os próximos dias";
+}
+
+function buildWeeklyPresenceQuestion(memory: GutoMemory, language: GutoLanguage, now = new Date()) {
+  const name = sanitizeDisplayName(memory.name ?? "");
+  const prefix = name ? `${name}, ` : "";
+  const windowLabel = getPresenceWindowLabel(language, now);
+  if (language === "en-US") {
+    return `${prefix}before I pull your mission on autopilot, I need to understand ${windowLabel}: any trip, commitment, pain, tight schedule, or impossible day I should consider?`;
+  }
+  if (language === "it-IT") {
+    return `${prefix}prima di tirare la missione in automatico, devo capire ${windowLabel}: hai viaggi, impegni, dolore, orari stretti o un giorno impossibile che devo considerare?`;
+  }
+  return `${prefix}antes de eu puxar tua missão no automático, preciso entender ${windowLabel}: tem viagem, compromisso, dor, horário apertado ou algum dia impossível que eu preciso considerar?`;
+}
+
+function hasFutureProactiveContext(memory: GutoMemory, day = todayKey()) {
+  const visibleStatuses = new Set(["pending_confirmation", "confirmed", "enriched", "surfaced", "pending_validation"]);
+  const hasMemory = (memory.proactiveMemories || []).some((item) =>
+    visibleStatuses.has(item.status) && Boolean(item.dateParsed) && item.dateParsed! >= day
+  );
+  if (hasMemory) return true;
+  return (memory.proactiveImpacts || []).some((impact) =>
+    (impact.status === "active" || impact.status === "validated") &&
+    (impact.affectedDates || []).some((date) => date >= day)
+  );
+}
+
+function shouldOpenPresenceWeek(memory: GutoMemory, now = new Date()) {
+  const active = activeProactivePrompt(memory);
+  if (active?.kind === "weekly_opening") return true;
+  const weekKey = getWeekKey(now);
+  if (memory.weeklyConversation?.weekKey === weekKey) return false;
+  if (hasFutureProactiveContext(memory, todayKey(now))) return false;
+  return true;
+}
+
+const PROACTIVE_DATE_TOKENS: Array<{ day: number; tokens: string[] }> = [
+  { day: 0, tokens: ["domingo", "sunday", "domenica"] },
+  { day: 1, tokens: ["segunda", "monday", "lunedi", "lunedi feira"] },
+  { day: 2, tokens: ["terca", "terça", "tuesday", "martedi"] },
+  { day: 3, tokens: ["quarta", "wednesday", "mercoledi"] },
+  { day: 4, tokens: ["quinta", "thursday", "giovedi"] },
+  { day: 5, tokens: ["sexta", "friday", "venerdi"] },
+  { day: 6, tokens: ["sabado", "sábado", "saturday", "sabato"] },
+];
+
+function dateFromLocalKey(key: string) {
+  const [year, month, day] = key.split("-").map(Number) as [number, number, number];
+  return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+}
+
+function resolveDateText(rawInput: string): string | undefined {
+  const text = normalize(rawInput);
+  if (/\b(amanha|tomorrow|domani)\b/.test(text)) return rawInput.match(/amanh[ãa]|tomorrow|domani/i)?.[0] || "amanhã";
+  if (/\b(hoje|today|oggi)\b/.test(text)) return rawInput.match(/hoje|today|oggi/i)?.[0] || "hoje";
+  for (const item of PROACTIVE_DATE_TOKENS) {
+    const token = item.tokens.find((candidate) => text.includes(candidate));
+    if (token) return token;
+  }
+  const explicit = rawInput.match(/\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/);
+  return explicit?.[0];
+}
+
+function resolveFutureDateKey(rawInput: string, now = new Date()): string | undefined {
+  const text = normalize(rawInput);
+  const today = todayKey(now);
+  if (/\b(hoje|today|oggi)\b/.test(text)) return today;
+  if (/\b(amanha|tomorrow|domani)\b/.test(text)) return addDaysToKey(today, 1);
+
+  const base = dateFromLocalKey(today);
+  const currentDay = base.getUTCDay();
+  for (const item of PROACTIVE_DATE_TOKENS) {
+    if (!item.tokens.some((candidate) => text.includes(candidate))) continue;
+    const diff = (item.day - currentDay + 7) % 7;
+    return addDaysToKey(today, diff === 0 ? 7 : diff);
+  }
+  return undefined;
+}
+
+function inferImmediateProactiveMemoryType(rawInput: string): ProactiveMemory["type"] | null {
+  const text = normalize(rawInput);
+  if (/\b(viajo|viajar|viagem|viajando|trip|travel|traveling|viaggio|viaggi|parto)\b/.test(text)) return "trip";
+  if (/\b(compromisso|compromissos|reuniao|reunião|consulta|evento|casamento|appointment|meeting|commitment|impegno|riunione)\b/.test(text)) return "commitment";
+  if (/\b(semana corrida|semana apertada|busy week|packed week|settimana piena|settimana pesante)\b/.test(text)) return "other";
+  if (/\b\d{1,2}\s*(min|mins|minuto|minutos|minutes|minuti)\b/.test(text) || isLackOfTimeSignal(text)) return "schedule";
+  return null;
+}
+
+function buildImmediateProactiveMemory(memory: GutoMemory, rawInput: string, signal: ProactiveContinuitySignal): ProactiveMemory | null {
+  const type = inferImmediateProactiveMemoryType(rawInput);
+  if (!type) return null;
+  const dateText = resolveDateText(rawInput);
+  const dateParsed = resolveFutureDateKey(rawInput);
+  const normalizedInput = normalizeMemoryValue(rawInput);
+  const understood = type === "trip"
+    ? `Viagem informada: ${normalizedInput}`
+    : type === "commitment"
+      ? `Compromisso informado: ${normalizedInput}`
+      : `Contexto informado: ${normalizedInput}`;
+  const candidate: ProactiveMemory = {
+    id: `pm_${memory.userId.slice(0, 6)}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+    userId: memory.userId,
+    type,
+    status: signal === "travel_can_train" ? "confirmed" : "pending_confirmation",
+    rawText: normalizedInput,
+    understood,
+    dateText,
+    dateParsed,
+    weekKey: getWeekKey(),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...(signal === "travel_can_train" ? { confirmedAt: new Date().toISOString() } : {}),
+  };
+
+  const current = memory.proactiveMemories || [];
+  const existing = current.find((item) => hasMatchingProactiveMemory([item], candidate));
+  if (existing) return existing;
+  memory.proactiveMemories = [...current, candidate];
+  appendMemoryAudit(memory, "proactivity_action", ["proactiveMemories"], "Contexto futuro criado imediatamente pelo chat.");
+  return candidate;
+}
+
+function buildTravelTrainingPrompt(memory: GutoMemory, proactiveMemory: ProactiveMemory, language: GutoLanguage): ProactivePrompt {
+  return activateProactivePrompt(memory, {
+    kind: "travel_training",
+    relatedMemoryId: proactiveMemory.id,
+    weekKey: proactiveMemory.weekKey,
+    dayKey: proactiveMemory.dateParsed || todayKey(),
+    fala: buildProactiveContinuityFala("travel_unknown", language, getGutoCallName(memory)),
+    expectedResponse: buildProactiveExpectedResponse("travel_unknown", language),
+  });
+}
+
+function formatRelativeProactiveDay(dateKeyValue: string, language: GutoLanguage, today = todayKey()) {
+  if (dateKeyValue === today) return language === "en-US" ? "today" : language === "it-IT" ? "oggi" : "hoje";
+  if (dateKeyValue === addDaysToKey(today, 1)) return language === "en-US" ? "tomorrow" : language === "it-IT" ? "domani" : "amanhã";
+  return new Intl.DateTimeFormat(language, { timeZone: GUTO_TIME_ZONE, weekday: "long" }).format(dateFromLocalKey(dateKeyValue));
+}
+
+function buildMemoryReminderFala(memory: GutoMemory, item: ProactiveMemory, language: GutoLanguage, today = todayKey()) {
+  const when = item.dateParsed ? formatRelativeProactiveDay(item.dateParsed, language, today) : "";
+  const impact = (memory.proactiveImpacts || []).find((candidate) =>
+    candidate.memoryId === item.id &&
+    candidate.status === "active" &&
+    (!item.dateParsed || candidate.affectedDates.includes(item.dateParsed))
+  );
+  const protectedDay = impact?.workoutEffect === "protected" || impact?.missionEffect === "protected";
+  const isToday = item.dateParsed === today;
+  const isTomorrow = item.dateParsed === addDaysToKey(today, 1);
+
+  if (language === "en-US") {
+    if (isTomorrow) return `Tomorrow is your ${item.type === "trip" ? "trip" : "commitment"}. Today we use the window better before it hits.`;
+    if (isToday) return protectedDay
+      ? `Today is your ${item.type === "trip" ? "trip" : "commitment"}. I keep the day protected as confirmed.`
+      : `Today is your ${item.type === "trip" ? "trip" : "commitment"}. I adapt the mission around it.`;
+    return `${when ? `${when} ` : ""}${item.type === "trip" ? "the trip" : "that commitment"} is on my radar. I won't charge blind.`;
+  }
+  if (language === "it-IT") {
+    if (isTomorrow) return `Domani c'è ${item.type === "trip" ? "il tuo viaggio" : "il tuo impegno"}. Oggi usiamo meglio la finestra prima che arrivi.`;
+    if (isToday) return protectedDay
+      ? `Oggi c'è ${item.type === "trip" ? "il tuo viaggio" : "il tuo impegno"}. Tengo il giorno protetto come confermato.`
+      : `Oggi c'è ${item.type === "trip" ? "il tuo viaggio" : "il tuo impegno"}. Adatto la missione attorno a questo.`;
+    return `${when ? `${when} ` : ""}${item.type === "trip" ? "il viaggio" : "quell'impegno"} è nel mio radar. Non ti carico alla cieca.`;
+  }
+  if (isTomorrow) return `Amanhã é tua ${item.type === "trip" ? "viagem" : "agenda"}. Hoje vamos aproveitar melhor antes dela.`;
+  if (isToday) return protectedDay
+    ? `Hoje é tua ${item.type === "trip" ? "viagem" : "agenda"}. Eu mantenho o dia protegido como confirmado.`
+    : `Hoje é tua ${item.type === "trip" ? "viagem" : "agenda"}. Eu adapto a missão em cima disso.`;
+  return `${when ? `${when} ` : ""}${item.type === "trip" ? "a viagem" : "esse compromisso"} está no meu radar. Eu não vou te cobrar no escuro.`;
+}
+
+function buildDueMemoryPrompt(memory: GutoMemory, language: GutoLanguage, today = todayKey()): ProactivePrompt | null {
+  const pendingValidation = (memory.proactiveMemories || [])
+    .filter((item) => item.status === "pending_validation")
+    .sort((a, b) => (a.dateParsed || "").localeCompare(b.dateParsed || ""));
+  const validation = pendingValidation[0];
+  if (validation) {
+    const fala = language === "en-US"
+      ? `Before today's mission: how did "${validation.understood}" go? Did it happen, change, or get cancelled?`
+      : language === "it-IT"
+        ? `Prima della missione di oggi: com'è andata "${validation.understood}"? È successo, è cambiato o è saltato?`
+        : `Antes da missão de hoje: como foi "${validation.understood}"? Aconteceu, mudou ou foi cancelado?`;
+    return activateProactivePrompt(memory, {
+      kind: "memory_validation",
+      relatedMemoryId: validation.id,
+      weekKey: validation.weekKey,
+      dayKey: today,
+      fala,
+      expectedResponse: { type: "text", instruction: "Responder se aconteceu, adiou ou cancelou." },
+    });
+  }
+
+  const reminders = (memory.proactiveMemories || [])
+    .filter((item) =>
+      ["confirmed", "enriched", "surfaced"].includes(item.status) &&
+      Boolean(item.dateParsed) &&
+      item.dateParsed! >= today &&
+      item.dateParsed! <= addDaysToKey(today, 1)
+    )
+    .sort((a, b) => (a.dateParsed || "").localeCompare(b.dateParsed || ""));
+  const reminder = reminders[0];
+  if (!reminder) return null;
+  const prompt = activateProactivePrompt(memory, {
+    kind: "memory_reminder",
+    relatedMemoryId: reminder.id,
+    weekKey: reminder.weekKey,
+    dayKey: reminder.dateParsed,
+    fala: buildMemoryReminderFala(memory, reminder, language, today),
+    expectedResponse: null,
+  });
+  if (reminder.status !== "surfaced") {
+    memory.proactiveMemories = (memory.proactiveMemories || []).map((item) =>
+      item.id === reminder.id ? { ...item, status: "surfaced", updatedAt: prompt.createdAt } : item
+    );
+  }
+  return prompt;
+}
+
 function buildNoMissionShortWindowFala(language: GutoLanguage, name: string): string {
   return pickByLanguage(language, {
     "pt-BR": `Janela curta registrada, ${name}. Eu trabalho com o mínimo seguro de hoje sem inventar plano que não está ativo.`,
@@ -6924,7 +7243,7 @@ function buildProactiveContinuityContextPrompt(
     travel_can_train:
       "Ele CONSEGUE treinar viajando. Confirme que o dia NÃO será bloqueado e que você adapta pra hotel/quarto (curto e direto). NÃO marque descanso, NÃO fale em intensidade máxima.",
     travel_cannot_train:
-      "Ele NÃO vai conseguir treinar. Trate o dia como protegido/indisponível e diga que reorganiza a semana. NUNCA fale em intensidade máxima pra compensar, nem prometa XP/Arena grátis.",
+      "Ele NÃO vai conseguir treinar. NÃO crie impacto definitivo na fala. Diga que vai abrir a confirmação para proteger o dia; só depois da confirmação o dia vira protegido. NUNCA fale em intensidade máxima, XP ou Arena grátis.",
     commitment:
       "Há um período bloqueado. PRESERVE continuidade: puxe o treino pra antes ou deixe uma missão curta. NUNCA cancele o dia inteiro. Ofereça escolher o horário ou decidir pelo melhor.",
     busy_week:
@@ -7297,15 +7616,26 @@ function enforceTrainingFlowCertainty(
   // continuidade e sai — nunca cai na escada nem no "descanso por padrão".
   if (contractIntent.kind === "proactive_context") {
     const signal = classifyProactiveContinuitySignal(rawInput);
+    const proactiveMemory = buildImmediateProactiveMemory(memory, rawInput, signal);
+    if (proactiveMemory && signal === "travel_can_train") {
+      persistDecisionImpactInMemoryObject(memory, proactiveMemory, language);
+    }
+    const travelPrompt = proactiveMemory && signal === "travel_unknown"
+      ? buildTravelTrainingPrompt(memory, proactiveMemory, language)
+      : null;
     const noMissionShortWindow = signal === "short_window" && !getTodayMissionPlan(memory);
     setContractResponse(response, {
       fala: noMissionShortWindow
         ? buildNoMissionShortWindowFala(language, getGutoCallName(memory))
-        : buildProactiveContinuityFala(signal, language, getGutoCallName(memory)),
+        : travelPrompt?.fala || buildProactiveContinuityFala(signal, language, getGutoCallName(memory)),
       acao: "none",
-      expectedResponse: buildProactiveExpectedResponse(signal, language),
+      expectedResponse: (travelPrompt?.expectedResponse as ExpectedResponse | null) || buildProactiveExpectedResponse(signal, language),
       workoutPlan: null,
     });
+    response.memoryPatch = {
+      ...(response.memoryPatch || {}),
+      ...buildProactiveMemoryPatch(memory),
+    };
     if (shouldRedirectAfterProactiveContextSignal(signal)) {
       appendPostConfirmationRedirect(response, memory, language);
     }
@@ -8799,20 +9129,31 @@ async function askGutoModel({
     } else if (isProactiveContext) {
       resetChatRefusalStage(memory);
       const signal = classifyProactiveContinuitySignal(input || "");
+      const proactiveMemory = buildImmediateProactiveMemory(memory, input || "", signal);
+      if (proactiveMemory && signal === "travel_can_train") {
+        persistDecisionImpactInMemoryObject(memory, proactiveMemory, selectedLanguage);
+      }
+      const travelPrompt = proactiveMemory && signal === "travel_unknown"
+        ? buildTravelTrainingPrompt(memory, proactiveMemory, selectedLanguage)
+        : null;
       const composed = await composeContextualResponse(
         buildProactiveContinuityContextPrompt(memory, selectedLanguage, input || "", signal),
       );
       const noMissionShortWindow = signal === "short_window" && !getTodayMissionPlan(memory);
       const fala = noMissionShortWindow
         ? buildNoMissionShortWindowFala(selectedLanguage, getGutoCallName(memory))
-        : (composed || buildProactiveContinuityFala(signal, selectedLanguage, getGutoCallName(memory)));
+        : (travelPrompt?.fala || composed || buildProactiveContinuityFala(signal, selectedLanguage, getGutoCallName(memory)));
       setContractResponse(parsedResponse, {
         fala,
         acao: "none",
-        expectedResponse: buildProactiveExpectedResponse(signal, selectedLanguage),
+        expectedResponse: (travelPrompt?.expectedResponse as ExpectedResponse | null) || buildProactiveExpectedResponse(signal, selectedLanguage),
         workoutPlan: null,
         avatarEmotion: "default",
       });
+      parsedResponse.memoryPatch = {
+        ...(parsedResponse.memoryPatch || {}),
+        ...buildProactiveMemoryPatch(memory),
+      };
       if (shouldRedirectAfterProactiveContextSignal(signal)) {
         appendPostConfirmationRedirect(parsedResponse, memory, selectedLanguage);
       }
@@ -9699,7 +10040,8 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
 app.get("/guto/proactive", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
   const force = req.query.force === "1";
-  const memory = getMemory(userId);
+  await markPastActiveMemoriesPendingValidation(userId).catch(() => []);
+  let memory = getMemory(userId);
   // Idioma é lei: quando o cliente não envia ?language, o idioma soberano é o da
   // memória do usuário (calibrado no onboarding). Sem isso, a chegada proativa
   // saía sempre em pt-BR para usuários it-IT/en-US (vazamento de idioma).
@@ -9713,8 +10055,69 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
       : getProactiveSlot();
   const missionPlanAtOpen = getTodayMissionPlan(memory);
 
+  const activePrompt = activeProactivePrompt(memory);
+  if (activePrompt) {
+    return res.json({
+      due: true,
+      slot: activePrompt.kind === "weekly_opening" ? "arrival" : activePrompt.kind,
+      ...attachAvatarEmotion({
+        response: responseFromProactivePrompt(activePrompt),
+        memory,
+        context: operationalContext,
+        slot: activePrompt.kind,
+      }),
+    });
+  }
+
   if (!slot || (memory.trainedToday && slot !== "limitation_check" && slot !== "arrival")) {
     return res.json({ due: false });
+  }
+
+  const memoryPrompt = buildDueMemoryPrompt(memory, normalizeLanguage(language || memory.language), day);
+  if (memoryPrompt) {
+    saveMemory(memory);
+    return res.json({
+      due: true,
+      slot: memoryPrompt.kind,
+      ...attachAvatarEmotion({
+        response: responseFromProactivePrompt(memoryPrompt),
+        memory,
+        context: operationalContext,
+        slot: memoryPrompt.kind,
+      }),
+    });
+  }
+
+  if (slot === "arrival" && shouldOpenPresenceWeek(memory)) {
+    const weeklyPrompt = activateProactivePrompt(memory, {
+      kind: "weekly_opening",
+      weekKey: getWeekKey(),
+      dayKey: day,
+      fala: buildWeeklyPresenceQuestion(memory, normalizeLanguage(language || memory.language)),
+      expectedResponse: {
+        type: "text",
+        instruction: "Responder em uma frase se há viagem, compromisso, dor, horário apertado ou nada relevante.",
+      },
+    });
+    memory.weeklyConversation = memory.weeklyConversation?.weekKey === weeklyPrompt.weekKey
+      ? memory.weeklyConversation
+      : {
+          weekKey: weeklyPrompt.weekKey || getWeekKey(),
+          happenedAt: weeklyPrompt.createdAt,
+          extractionDone: false,
+          validationDone: false,
+        };
+    saveMemory(memory);
+    return res.json({
+      due: true,
+      slot: "arrival",
+      ...attachAvatarEmotion({
+        response: responseFromProactivePrompt(weeklyPrompt),
+        memory,
+        context: operationalContext,
+        slot: "arrival",
+      }),
+    });
   }
 
   const sentToday = memory.proactiveSent[day] || [];
@@ -10104,6 +10507,14 @@ app.post("/guto", requireActiveUser, async (req, res) => {
 
   const memory = getMemory(userId);
   const selectedLanguage = normalizeLanguage(language || memory.language || "pt-BR");
+  const promptAtTurnStart = activeProactivePrompt(memory);
+  if (promptAtTurnStart && promptAtTurnStart.kind !== "travel_training") {
+    clearActiveProactivePrompt(memory);
+    saveMemory(memory);
+    if (promptAtTurnStart.kind === "weekly_opening") {
+      await markWeeklyConversationDone(userId, "extractionDone").catch(() => {});
+    }
+  }
 
   // P0 — SEGURANÇA ANTES DOS GATES. Roda o risk-classifier e captura dor/limitação
   // ANTES de montar o `profile` abaixo, para que o askGutoModel já enxergue a
@@ -10219,6 +10630,17 @@ app.post("/guto", requireActiveUser, async (req, res) => {
           ...result.memoryPatch,
           ...proactiveActionResult.memoryPatch,
         };
+      }
+      if (proactiveActionResult?.status || proactiveActionResult?.memoryPatch) {
+        const promptedMemory = getMemory(userId);
+        if (activeProactivePrompt(promptedMemory)?.kind === "travel_training") {
+          clearActiveProactivePrompt(promptedMemory);
+          saveMemory(promptedMemory);
+          result.memoryPatch = {
+            ...result.memoryPatch,
+            ...buildProactiveMemoryPatch(promptedMemory),
+          };
+        }
       }
       if (proactiveActionResult?.impact?.decision.message) {
         result.fala = proactiveActionResult.impact.decision.message;
