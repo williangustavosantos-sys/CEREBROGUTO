@@ -16,7 +16,9 @@ import {
   getExerciseName,
   filterExercisesBySafety,
   suggestExerciseSubstitutes,
+  validateExerciseSubstitute,
   ValidatedExerciseCatalog,
+  type CatalogExercise,
   type CatalogLanguage,
   type CatalogLocation,
 } from "./exercise-catalog";
@@ -5056,6 +5058,147 @@ function resolveCatalogExerciseFromContextMarker(
   return null;
 }
 
+function catalogExerciseTextCandidates(entry: CatalogExercise): string[] {
+  return [
+    entry.canonicalNamePt,
+    ...Object.values(entry.namesByLanguage),
+    ...Object.values(entry.aliasesByLanguage || {}).flat(),
+  ]
+    .map((value) => normalize(value || ""))
+    .filter((value, index, list) => value.length >= 4 && list.indexOf(value) === index)
+    .sort((a, b) => b.length - a.length);
+}
+
+function resolveCatalogExerciseFromFreeText(input: string | undefined): { id: string; name: string } | null {
+  const userMessage = normalize(extractUserMessageFromContext(input || ""));
+  if (!userMessage) return null;
+
+  const matches = getAggregatedExerciseCatalog()
+    .map((entry) => ({
+      entry,
+      matchedLength: catalogExerciseTextCandidates(entry).find((candidate) => userMessage.includes(candidate))?.length || 0,
+    }))
+    .filter((item) => item.matchedLength > 0)
+    .sort((a, b) => b.matchedLength - a.matchedLength);
+
+  const match = matches[0]?.entry;
+  return match ? { id: match.id, name: match.canonicalNamePt } : null;
+}
+
+function findExerciseFromFreeText(input: string | undefined, plan?: WorkoutPlan | null): WorkoutExercise | null {
+  if (!plan?.exercises?.length || !input) return null;
+  const userMessage = normalize(extractUserMessageFromContext(input));
+  if (!userMessage) return null;
+
+  return [...plan.exercises]
+    .map((exercise) => ({
+      exercise,
+      normalizedName: normalize(exercise.name || exercise.canonicalNamePt || ""),
+    }))
+    .filter((item) => item.normalizedName.length >= 4 && userMessage.includes(item.normalizedName))
+    .sort((a, b) => b.normalizedName.length - a.normalizedName.length)[0]?.exercise || null;
+}
+
+function resolveWorkoutExerciseForSubstitution({
+  input,
+  history,
+  memory,
+}: {
+  input?: string;
+  history?: GutoHistoryItem[];
+  memory: GutoMemory;
+}): { id: string; name: string; planExercise?: WorkoutExercise | null; catalogEntry?: CatalogExercise } | null {
+  const plan = memory.lastWorkoutPlan;
+  const planExercise =
+    findLastExerciseDoubt(history || [], plan) ||
+    findExerciseFromContextMarker(input, plan) ||
+    findExerciseFromFreeText(input, plan);
+  const catalogRef = planExercise
+    ? null
+    : resolveCatalogExerciseFromContextMarker(input) || resolveCatalogExerciseFromFreeText(input);
+  const exerciseId = planExercise?.id ?? catalogRef?.id;
+  const exerciseName = planExercise?.name ?? catalogRef?.name;
+
+  if (!exerciseId || !exerciseName) return null;
+
+  let catalogEntry = getCatalogById(exerciseId);
+  if (!catalogEntry) {
+    const matchedByName = resolveCatalogExerciseFromFreeText(exerciseName);
+    catalogEntry = matchedByName ? getCatalogById(matchedByName.id) : undefined;
+  }
+
+  return {
+    id: exerciseId,
+    name: exerciseName,
+    planExercise,
+    catalogEntry,
+  };
+}
+
+function pickValidatedExerciseSubstitute({
+  originalId,
+  memory,
+}: {
+  originalId: string;
+  memory: GutoMemory;
+}): CatalogExercise | null {
+  const plan = memory.lastWorkoutPlan;
+  const location = getLocationMode(plan?.location || memory.preferredTrainingLocation || memory.trainingLocation) as CatalogLocation;
+  const pathology = memory.resolvedFields?.pathology;
+  const original = getCatalogById(originalId);
+  const substitutes = suggestExerciseSubstitutes(originalId, {
+    location,
+    userRiskTags: pathology?.status === "clear" ? pathology.riskTags : [],
+    userBodyRegion: pathology?.status === "clear" ? pathology.bodyRegion : undefined,
+  });
+
+  return substitutes
+    .map((id) => getCatalogById(id))
+    .find((entry): entry is CatalogExercise =>
+      Boolean(entry && entry.id !== originalId && (!original || validateExerciseSubstitute(original, entry).valid))
+    ) || null;
+}
+
+function buildValidatedEquipmentBusyResponse({
+  original,
+  memory,
+  language,
+}: {
+  original: { id: string; name: string; planExercise?: WorkoutExercise | null };
+  memory: GutoMemory;
+  language: GutoLanguage;
+}): GutoModelResponse {
+  const substitute = pickValidatedExerciseSubstitute({ originalId: original.id, memory });
+
+  if (!substitute) {
+    const copy: Record<GutoLanguage, string> = {
+      "pt-BR": `${original.name} travou? Sem drama: pula ele por enquanto, faz o próximo exercício e volta nele no final. Se ainda estiver cheio, me chama de novo.`,
+      "en-US": `${original.name} is taken? No drama: skip it for now, do the next exercise, and come back at the end. If it is still busy, call me again.`,
+      "it-IT": `${original.name} è occupato? Nessun dramma: saltalo per ora, fai il prossimo esercizio e torna alla fine. Se è ancora pieno, chiamami di nuovo.`,
+    };
+    return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
+  }
+
+  const substituteName = substitute.namesByLanguage[language as CatalogLanguage] || substitute.canonicalNamePt;
+  const scheme: Record<GutoLanguage, string> = original.planExercise
+    ? {
+        "pt-BR": `mantém ${original.planExercise.sets} séries, ${original.planExercise.reps}, descanso de ${original.planExercise.rest}`,
+        "en-US": `keep ${original.planExercise.sets} sets, ${original.planExercise.reps}, ${original.planExercise.rest} rest`,
+        "it-IT": `tieni ${original.planExercise.sets} serie, ${original.planExercise.reps}, recupero ${original.planExercise.rest}`,
+      }
+    : {
+        "pt-BR": "mantém o mesmo esquema de séries e descanso do teu treino",
+        "en-US": "keep the same sets and rest from your workout",
+        "it-IT": "tieni lo stesso schema di serie e recupero del tuo allenamento",
+      };
+  const copy: Record<GutoLanguage, string> = {
+    "pt-BR": `${original.name} ocupado? Troca por ${substituteName}: ${scheme["pt-BR"]}. Mesma missão, sem ficar parado.`,
+    "en-US": `${original.name} is taken? Swap to ${substituteName}: ${scheme["en-US"]}. Same mission, no standing around.`,
+    "it-IT": `${original.name} occupato? Cambia con ${substituteName}: ${scheme["it-IT"]}. Stessa missione, senza fermarti.`,
+  };
+  return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
+}
+
 function buildEquipmentBusyFallbackResponse({
   input,
   history,
@@ -5068,15 +5211,9 @@ function buildEquipmentBusyFallbackResponse({
   language: GutoLanguage;
 }): GutoModelResponse | null {
   if (!isEquipmentBusyMessage(input)) return null;
-  const plan = memory.lastWorkoutPlan;
-  const planExercise = findLastExerciseDoubt(history, plan) || findExerciseFromContextMarker(input, plan);
-  // Plano ausente/desatualizado: o card de contexto ainda diz qual exercício é →
-  // resolve pelo catálogo. Nunca repergunta "qual aparelho" se o contexto está ativo.
-  const catalogRef = planExercise ? null : resolveCatalogExerciseFromContextMarker(input);
-  const exerciseId = planExercise?.id ?? catalogRef?.id;
-  const exerciseName = planExercise?.name ?? catalogRef?.name;
+  const original = resolveWorkoutExerciseForSubstitution({ input, history, memory });
 
-  if (!exerciseId || !exerciseName) {
+  if (!original) {
     // Só aqui — sem QUALQUER contexto de exercício — faz sentido perguntar qual.
     const copy: Record<GutoLanguage, string> = {
       "pt-BR": "Fechado. Me diz qual aparelho travou que eu te dou a troca agora, sem perder o treino.",
@@ -5086,46 +5223,125 @@ function buildEquipmentBusyFallbackResponse({
     return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
 
-  const location = getLocationMode(plan?.location || memory.preferredTrainingLocation || memory.trainingLocation) as CatalogLocation;
-  const pathology = memory.resolvedFields?.pathology;
-  const substitutes = suggestExerciseSubstitutes(exerciseId, {
-    location,
-    userRiskTags: pathology?.status === "clear" ? pathology.riskTags : [],
-    userBodyRegion: pathology?.status === "clear" ? pathology.bodyRegion : undefined,
-  });
-  const substitute = substitutes
+  return buildValidatedEquipmentBusyResponse({ original, memory, language });
+}
+
+function detectArmTargetMismatchObjection(input?: string): "triceps" | "biceps" | null {
+  const normalized = normalize(input || "");
+  if (!normalized || !normalized.includes("triceps") || !normalized.includes("biceps")) return null;
+
+  const isObjection = hasAnyTerm(normalized, [
+    "mas como",
+    "como eu vou trocar",
+    "como vou trocar",
+    "como que eu vou trocar",
+    "nao faz sentido",
+    "não faz sentido",
+    "voce trocou",
+    "você trocou",
+    "ta errado",
+    "tá errado",
+    "errado",
+  ]);
+  if (!isObjection) return null;
+
+  const tricepsToBiceps = /triceps[\s\S]{0,80}\bpor\b[\s\S]{0,80}biceps/.test(normalized);
+  const bicepsToTriceps = /biceps[\s\S]{0,80}\bpor\b[\s\S]{0,80}triceps/.test(normalized);
+
+  if (tricepsToBiceps) return "triceps";
+  if (bicepsToTriceps) return "biceps";
+
+  return normalized.indexOf("triceps") < normalized.indexOf("biceps") ? "triceps" : "biceps";
+}
+
+function buildTargetSubstituteNames(target: "triceps" | "biceps", memory: GutoMemory, language: GutoLanguage): string[] {
+  const baseId = target === "triceps" ? "triceps_polia_alta" : "biceps_maquina";
+  const base = getCatalogById(baseId);
+  if (!base) return [];
+
+  return suggestExerciseSubstitutes(baseId, {
+    location: getLocationMode(memory.lastWorkoutPlan?.location || memory.preferredTrainingLocation || memory.trainingLocation) as CatalogLocation,
+    userRiskTags: memory.resolvedFields?.pathology?.status === "clear" ? memory.resolvedFields.pathology.riskTags : [],
+    userBodyRegion: memory.resolvedFields?.pathology?.status === "clear" ? memory.resolvedFields.pathology.bodyRegion : undefined,
+  })
     .map((id) => getCatalogById(id))
-    .find((entry) => entry && entry.id !== exerciseId);
+    .filter((entry): entry is CatalogExercise => Boolean(entry && validateExerciseSubstitute(base, entry).valid))
+    .slice(0, 2)
+    .map((entry) => entry.namesByLanguage[language as CatalogLanguage] || entry.canonicalNamePt);
+}
 
-  if (!substitute) {
-    const copy: Record<GutoLanguage, string> = {
-      "pt-BR": `${exerciseName} travou? Sem drama: pula ele por enquanto, faz o próximo exercício e volta nele no final. Se ainda estiver cheio, me chama de novo.`,
-      "en-US": `${exerciseName} is taken? No drama: skip it for now, do the next exercise, and come back at the end. If it is still busy, call me again.`,
-      "it-IT": `${exerciseName} è occupato? Nessun dramma: saltalo per ora, fai il prossimo esercizio e torna alla fine. Se è ancora pieno, chiamami di nuovo.`,
-    };
-    return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
-  }
+function buildExerciseSubstitutionObjectionResponse({
+  input,
+  memory,
+  language,
+}: {
+  input?: string;
+  memory: GutoMemory;
+  language: GutoLanguage;
+}): GutoModelResponse | null {
+  const target = detectArmTargetMismatchObjection(input);
+  if (!target) return null;
 
-  const substituteName = substitute.namesByLanguage[language as CatalogLanguage] || substitute.canonicalNamePt;
-  // Com o exercício do plano citamos séries/reps/descanso reais; vindo só do
-  // catálogo (plano ausente), não inventamos números — mantemos o esquema do treino.
-  const scheme: Record<GutoLanguage, string> = planExercise
-    ? {
-        "pt-BR": `mantém ${planExercise.sets} séries, ${planExercise.reps}, descanso de ${planExercise.rest}`,
-        "en-US": `keep ${planExercise.sets} sets, ${planExercise.reps}, ${planExercise.rest} rest`,
-        "it-IT": `tieni ${planExercise.sets} serie, ${planExercise.reps}, recupero ${planExercise.rest}`,
-      }
-    : {
-        "pt-BR": "mantém o mesmo esquema de séries e descanso do teu treino",
-        "en-US": "keep the same sets and rest from your workout",
-        "it-IT": "tieni lo stesso schema di serie e recupero del tuo allenamento",
-      };
+  const names = buildTargetSubstituteNames(target, memory, language);
+  const fallbackNames =
+    target === "triceps"
+      ? ["Tríceps barra V cabo", "Tríceps francês cabo"]
+      : ["Rosca alternada", "Rosca martelo alternada"];
+  const options = names.length >= 2 ? names : fallbackNames;
+
   const copy: Record<GutoLanguage, string> = {
-    "pt-BR": `${exerciseName} ocupado? Troca por ${substituteName}: ${scheme["pt-BR"]}. Mesma missão, sem ficar parado.`,
-    "en-US": `${exerciseName} is taken? Swap to ${substituteName}: ${scheme["en-US"]}. Same mission, no standing around.`,
-    "it-IT": `${exerciseName} occupato? Cambia con ${substituteName}: ${scheme["it-IT"]}. Stessa missione, senza fermarti.`,
+    "pt-BR": `Boa observação. Você tem razão. Não faz sentido trocar ${target === "triceps" ? "tríceps por bíceps" : "bíceps por tríceps"}. Vou manter o foco do treino: troca por ${options[0]} ou ${options[1]}. Se esses também estiverem ocupados, me diz o que está livre e eu valido antes de mandar.`,
+    "en-US": `Good catch. You're right. Swapping ${target === "triceps" ? "triceps for biceps" : "biceps for triceps"} makes no sense. I keep the session target: use ${options[0]} or ${options[1]}. If those are taken too, tell me what is free and I will validate it first.`,
+    "it-IT": `Osservazione giusta. Hai ragione. Non ha senso cambiare ${target === "triceps" ? "tricipite con bicipite" : "bicipite con tricipite"}. Mantengo il focus: fai ${options[0]} o ${options[1]}. Se sono occupati, dimmi cosa è libero e lo valido prima.`,
   };
-  return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
+
+  return {
+    fala: copy[language],
+    acao: "none",
+    expectedResponse: null,
+    avatarEmotion: "alert",
+  };
+}
+
+function extractSubstituteFromResponseText(text?: string): CatalogExercise | null {
+  if (!text) return null;
+  const normalized = normalize(text);
+  const markers = ["troca por", "swap to", "swap for", "cambia con", "cambia per"];
+  const marker = markers
+    .map((value) => ({ value, index: normalized.indexOf(normalize(value)) }))
+    .filter((item) => item.index >= 0)
+    .sort((a, b) => a.index - b.index)[0];
+  if (!marker) return null;
+
+  const segment = text.slice(marker.index).split(/[.:;\n]/)[0] || text.slice(marker.index);
+  const ref = resolveCatalogExerciseFromFreeText(segment);
+  return ref ? getCatalogById(ref.id) || null : null;
+}
+
+function repairInvalidExerciseSubstitutionResponse({
+  input,
+  history,
+  memory,
+  language,
+  response,
+}: {
+  input?: string;
+  history?: GutoHistoryItem[];
+  memory: GutoMemory;
+  language: GutoLanguage;
+  response: GutoModelResponse;
+}): GutoModelResponse {
+  if (!response?.fala) return response;
+
+  const substitute = extractSubstituteFromResponseText(response.fala);
+  if (!substitute) return response;
+
+  const original = resolveWorkoutExerciseForSubstitution({ input, history, memory });
+  const originalEntry = original ? getCatalogById(original.id) || original.catalogEntry : null;
+  if (!original || !originalEntry) return response;
+
+  if (validateExerciseSubstitute(originalEntry, substitute).valid) return response;
+  return buildValidatedEquipmentBusyResponse({ original, memory, language });
 }
 
 // ─── Fase 3 — Intenção de troca / dúvida de exercício (determinístico) ────────
@@ -10557,6 +10773,21 @@ app.post("/guto", requireActiveUser, async (req, res) => {
     engaged: false, action: null, reason: 'not_run',
   };
   try {
+    const substitutionObjectionResponse = buildExerciseSubstitutionObjectionResponse({
+      input,
+      memory,
+      language: selectedLanguage,
+    });
+    if (substitutionObjectionResponse) {
+      const context = getOperationalContext(new Date(), selectedLanguage);
+      return res.json(attachAvatarEmotion({
+        response: substitutionObjectionResponse,
+        memory,
+        context,
+        input: input || "",
+      }));
+    }
+
     const equipmentBusyResponse = buildEquipmentBusyFallbackResponse({
       input,
       history: history || [],
@@ -10653,7 +10884,13 @@ app.post("/guto", requireActiveUser, async (req, res) => {
       }
     }
     result.proactiveMemoryAction = null;
-    res.json(result);
+    res.json(repairInvalidExerciseSubstitutionResponse({
+      input,
+      history: history || [],
+      memory,
+      language: selectedLanguage,
+      response: result,
+    }));
   } catch (e) {
     console.error('Erro na rota /guto:', e);
     const fallbackMemory = mergeMemory(profile, selectedLanguage);
