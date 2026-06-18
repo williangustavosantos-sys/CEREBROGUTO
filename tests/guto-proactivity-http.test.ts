@@ -145,14 +145,16 @@ describe("proactivity HTTP cycle", () => {
     assert.match(body.memories[0]?.understood ?? "", /Roma/i)
   })
 
-  it("POST confirm → status confirmed, decision e proactiveImpact", async () => {
+  it("POST confirm de viagem confirma evento e abre pergunta de treino adaptado, sem impacto no Percurso", async () => {
     const { addProactiveMemory } = await import("../src/proactivity/proactive-store.js")
+    const tripDate = dateKey(1)
     const memory = await addProactiveMemory(USER_ID, {
       type: "trip",
       status: "pending_confirmation",
-      rawText: "viajo quarta",
-      understood: "Viagem na quarta",
-      dateText: "quarta",
+      rawText: "viajo amanhã",
+      understood: "Viagem amanhã",
+      dateText: "amanhã",
+      dateParsed: tripDate,
       weekKey: "2026-W20",
     })
 
@@ -164,34 +166,46 @@ describe("proactivity HTTP cycle", () => {
     assert.equal(res.status, 200)
     const body = (await res.json()) as {
       ok: boolean
-      memory: { status: string; confirmedAt?: string; decision?: { reason: string } }
-      impact?: { status: string; memoryId: string; workoutEffect: string; missionEffect: string }
-      memoryPatch?: { proactiveImpacts?: Array<{ memoryId: string; status: string; workoutEffect: string }> }
+      memory: { status: string; confirmedAt?: string; confirmationStage?: string }
+      impact?: { status: string; memoryId: string; workoutEffect: string; missionEffect: string } | null
+      expectedResponse?: { context?: string; options?: string[] } | null
+      memoryPatch?: {
+        proactiveImpacts?: Array<{ memoryId: string; status: string; workoutEffect: string }>
+        proactivePrompt?: { kind?: string; relatedMemoryId?: string; status?: string }
+        activeConversationContext?: { kind?: string; relatedMemoryId?: string } | null
+      }
       fala?: string
     }
     assert.equal(body.ok, true)
     assert.equal(body.memory.status, "confirmed")
     assert.ok(body.memory.confirmedAt)
-    assert.equal(body.memory.decision?.reason, "travel")
-    assert.equal(body.impact?.status, "active")
-    assert.equal(body.impact?.memoryId, memory.id)
-    // Continuidade primeiro: confirmar a VIAGEM não basta para criar impacto
-    // definitivo — sem saber se consegue treinar, fica ask_critical (pergunta o
-    // dado crítico antes de marcar descanso/treino).
-    assert.equal(body.impact?.workoutEffect, "ask_critical")
-    assert.equal(body.impact?.missionEffect, "ask_critical")
-    assert.equal(body.fala, undefined, "ask_critical ainda precisa do dado crítico; não redireciona para missão")
-    assert.equal(body.memoryPatch?.proactiveImpacts?.[0]?.memoryId, memory.id)
+    assert.equal(body.memory.confirmationStage, "event")
+    assert.equal(body.impact, null)
+    assert.match(body.fala || "", /treino adaptado de 20 minutos/i)
+    assert.match(body.fala || "", new RegExp(tripDate.slice(8, 10) + "/" + tripDate.slice(5, 7)))
+    assert.equal(body.expectedResponse?.context, "travel_training")
+    assert.deepEqual(body.expectedResponse?.options, ["SIM", "NÃO"])
+    assert.equal(body.memoryPatch?.proactivePrompt?.kind, "travel_training")
+    assert.equal(body.memoryPatch?.proactivePrompt?.relatedMemoryId, memory.id)
+    assert.equal(body.memoryPatch?.activeConversationContext?.kind, "travel_impact_confirmation")
+    assert.equal(body.memoryPatch?.activeConversationContext?.relatedMemoryId, memory.id)
+    assert.deepEqual(body.memoryPatch?.proactiveImpacts || [], [])
 
     const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<
       string,
-      { proactiveImpacts?: Array<{ memoryId: string; status: string; workoutEffect: string }> }
+      {
+        proactivePrompt?: { kind?: string; relatedMemoryId?: string; status?: string }
+        activeConversationContext?: { kind?: string; relatedMemoryId?: string } | null
+        proactiveImpacts?: Array<{ memoryId: string; status: string; workoutEffect: string }>
+      }
     >
-    assert.equal(store[USER_ID]?.proactiveImpacts?.[0]?.memoryId, memory.id)
-    assert.equal(store[USER_ID]?.proactiveImpacts?.[0]?.workoutEffect, "ask_critical")
+    assert.equal(store[USER_ID]?.proactivePrompt?.status, "active")
+    assert.equal(store[USER_ID]?.proactivePrompt?.relatedMemoryId, memory.id)
+    assert.equal(store[USER_ID]?.activeConversationContext?.kind, "travel_impact_confirmation")
+    assert.deepEqual(store[USER_ID]?.proactiveImpacts || [], [])
   })
 
-  it("POST discard confirmed memory → proactiveImpact discarded", async () => {
+  it("POST discard confirmed trip before impact → memory discarded and no proactiveImpact created", async () => {
     const { addProactiveMemory } = await import("../src/proactivity/proactive-store.js")
     const memory = await addProactiveMemory(USER_ID, {
       type: "trip",
@@ -224,10 +238,18 @@ describe("proactivity HTTP cycle", () => {
     assert.equal(discardRes.status, 200)
     const body = (await discardRes.json()) as {
       ok: boolean
-      memoryPatch?: { proactiveImpacts?: Array<{ memoryId: string; status: string }> }
+      memoryPatch?: {
+        proactiveMemories?: Array<{ id: string; status: string }>
+        proactiveImpacts?: Array<{ memoryId: string; status: string }>
+        proactivePrompt?: { status?: string } | null
+        activeConversationContext?: { kind?: string } | null
+      }
     }
     assert.equal(body.ok, true)
-    assert.equal(body.memoryPatch?.proactiveImpacts?.find((impact) => impact.memoryId === memory.id)?.status, "discarded")
+    assert.equal(body.memoryPatch?.proactiveMemories?.find((item) => item.id === memory.id)?.status, "discarded")
+    assert.notEqual(body.memoryPatch?.proactivePrompt?.status, "active")
+    assert.equal(body.memoryPatch?.activeConversationContext, null)
+    assert.deepEqual(body.memoryPatch?.proactiveImpacts || [], [])
   })
 
   it("POST discard remove pending_confirmation", async () => {
@@ -389,7 +411,7 @@ describe("proactivity HTTP cycle", () => {
     globalThis.fetch = originalFetch
   })
 
-  it("viagem + impossível mantém memória pendente e pergunta confirmação final sem criar dia protegido", async () => {
+  it("pendência de evento de viagem bloqueia resposta paralela antes do card ser confirmado", async () => {
     const { addProactiveMemory } = await import("../src/proactivity/proactive-store.js")
     const tripDate = dateKey(1)
     const memory = await addProactiveMemory(USER_ID, {
@@ -418,16 +440,94 @@ describe("proactivity HTTP cycle", () => {
       }),
     })
     assert.equal(res.status, 200)
-    const body = (await res.json()) as { fala?: string; memoryPatch?: { proactiveImpacts?: Array<{ workoutEffect: string }> } }
-    assert.match(body.fala || "", new RegExp(`Confirmo amanhã, dia ${tripDate.slice(8, 10)}/${tripDate.slice(5, 7)}`, "i"))
+    const body = (await res.json()) as {
+      fala?: string
+      expectedResponse?: unknown
+      memoryPatch?: {
+        activeConversationContext?: { kind?: string; relatedMemoryId?: string } | null
+        proactiveImpacts?: Array<{ workoutEffect: string }>
+      }
+    }
+    assert.match(body.fala || "", /confirma.*viagem.*card/i)
+    assert.equal(body.expectedResponse, null)
+    assert.equal(body.memoryPatch?.activeConversationContext?.kind, "travel_confirmation")
+    assert.equal(body.memoryPatch?.activeConversationContext?.relatedMemoryId, memory.id)
     assert.equal(body.memoryPatch?.proactiveImpacts?.some((impact) => impact.workoutEffect === "protected"), false)
 
     const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<
       string,
-      { proactiveMemories?: Array<{ id: string; status: string }>; proactiveImpacts?: Array<{ workoutEffect: string }> }
+      {
+        proactiveMemories?: Array<{ id: string; status: string; confirmationStage?: string; rawText?: string }>
+        proactiveImpacts?: Array<{ workoutEffect: string }>
+      }
     >
     assert.equal(store[USER_ID]?.proactiveMemories?.find((item) => item.id === memory.id)?.status, "pending_confirmation")
+    assert.equal(store[USER_ID]?.proactiveMemories?.find((item) => item.id === memory.id)?.confirmationStage, "event")
+    assert.doesNotMatch(store[USER_ID]?.proactiveMemories?.find((item) => item.id === memory.id)?.rawText || "", /imposs[ií]vel treinar/i)
     assert.equal(store[USER_ID]?.proactiveImpacts?.some((impact) => impact.workoutEffect === "protected"), false)
+  })
+
+  it("viagem confirmada + impossível cria um único card final de impacto sem proteger direto", async () => {
+    const { addProactiveMemory } = await import("../src/proactivity/proactive-store.js")
+    const tripDate = dateKey(1)
+    const memory = await addProactiveMemory(USER_ID, {
+      type: "trip",
+      status: "confirmed",
+      rawText: "eu viajo amanhã",
+      understood: "Viagem amanhã",
+      dateText: "amanhã",
+      dateParsed: tripDate,
+      weekKey: currentWeekKey(),
+      confirmationStage: "event",
+    })
+    writeUserMemory(USER_ID, {
+      proactiveMemories: [memory],
+      proactiveImpacts: [],
+      proactivePrompt: {
+        id: "prompt-travel-training",
+        kind: "travel_training",
+        relatedMemoryId: memory.id,
+        status: "active",
+        fala: `Will, viagem confirmada. Você vai conseguir fazer um treino adaptado de 20 minutos amanhã, dia ${tripDate.slice(8, 10)}/${tripDate.slice(5, 7)}?`,
+        expectedResponse: { type: "text", context: "travel_training", options: ["SIM", "NÃO"] },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      activeConversationContext: {
+        kind: "travel_impact_confirmation",
+        source: "proactive_prompt",
+        relatedMemoryId: memory.id,
+        updatedAt: new Date().toISOString(),
+      },
+    })
+
+    const res = await fetch(`${baseUrl}/guto`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        language: "pt-BR",
+        profile: { userId: USER_ID, name: "Will" },
+        history: [],
+        input: "impossível treinar",
+      }),
+    })
+    assert.equal(res.status, 200)
+    const body = (await res.json()) as {
+      fala?: string
+      memoryPatch?: {
+        proactiveMemories?: Array<{ id: string; status: string; confirmationStage?: string }>
+        proactiveImpacts?: Array<{ workoutEffect: string }>
+        proactivePrompt?: { status?: string } | null
+        activeConversationContext?: { kind?: string; relatedMemoryId?: string } | null
+      }
+    }
+    assert.match(body.fala || "", new RegExp(`Confirmo amanhã, dia ${tripDate.slice(8, 10)}/${tripDate.slice(5, 7)}`, "i"))
+    assert.equal(body.memoryPatch?.proactiveMemories?.filter((item) => item.id === memory.id).length, 1)
+    assert.equal(body.memoryPatch?.proactiveMemories?.find((item) => item.id === memory.id)?.status, "pending_confirmation")
+    assert.equal(body.memoryPatch?.proactiveMemories?.find((item) => item.id === memory.id)?.confirmationStage, "impact")
+    assert.equal(body.memoryPatch?.activeConversationContext?.kind, "travel_impact_confirmation")
+    assert.equal(body.memoryPatch?.activeConversationContext?.relatedMemoryId, memory.id)
+    assert.equal(body.memoryPatch?.proactiveImpacts?.some((impact) => impact.workoutEffect === "protected"), false)
   })
 
   it("confirmar dia protegido atualiza Percurso com impacto definitivo", async () => {
@@ -446,6 +546,7 @@ describe("proactivity HTTP cycle", () => {
       rawText: "eu viajo amanhã; impossível treinar",
       understood: "Viagem amanhã; impossível treinar",
       status: "pending_confirmation",
+      confirmationStage: "impact",
     })
 
     const res = await fetch(`${baseUrl}/guto/proactivity/confirm`, {

@@ -103,6 +103,7 @@ type MemoryRecord = Record<string, unknown> & {
   validationHistory?: Array<{ status?: string; xp?: number; createdAt?: string }>;
   lastWorkoutPlan?: WorkoutPlan | null;
   dietGenerationStatus?: string;
+  proactiveMemories?: Array<{ id?: string; type?: string; status?: string; confirmationStage?: string }>;
   proactiveImpacts?: Array<{ workoutEffect?: string; missionEffect?: string; pathEffect?: string; status?: string }>;
 };
 
@@ -166,6 +167,7 @@ type ScenarioState = {
   workoutResponse?: GutoResponse;
   workoutPlan?: WorkoutPlan;
   dietPlan?: DietPlan;
+  travelMemoryId?: string;
   validationResponse?: unknown;
   voiceResponse?: GutoResponse;
 };
@@ -1087,10 +1089,27 @@ async function runProfile(ctx: ScenarioContext, profile: ScenarioProfile): Promi
     expect(!hasLanguageLeak(response.fala || "", profile.language), `dúvida de dieta misturou idioma: ${response.fala}`);
   });
 
-  await recordCheck(report, "viagem", "travel_asks_availability_without_reasking_calibration", async () => {
+  await recordCheck(report, "viagem", "travel_creates_event_card_before_impact_question", async () => {
     const response = await ctx.chat(profile, profile.prompts.travel);
-    expect(hasAny(response.fala || "", profile.language === "it-IT" ? ["tempo", "allen", "possibile", "riesci", "viaggio"] : ["tempo", "treinar", "consegue", "impossível", "viagem"]), `viagem não perguntou disponibilidade/adaptação: ${response.fala}`);
+    expect(hasAny(response.fala || "", profile.language === "it-IT" ? ["card", "conferma", "viaggio", "impatto"] : ["card", "confirma", "viagem", "impacto"]), `viagem não criou card de evento antes do impacto: ${response.fala}`);
     expect(!hasCalibrationReask(response.fala || "", profile.language), `viagem reperguntou calibragem: ${response.fala}`);
+
+    const memory = await ctx.getMemory(profile);
+    const trip = memory.proactiveMemories?.find((item) => item.type === "trip" && item.status === "pending_confirmation");
+    expect(Boolean(trip?.id), `viagem não criou memória pendente: ${JSON.stringify(memory.proactiveMemories)}`);
+    expect(trip?.confirmationStage === "event", `viagem não ficou no estágio de evento: ${JSON.stringify(trip)}`);
+    state.travelMemoryId = trip?.id;
+
+    const confirm = await ctx.postJson<{
+      ok?: boolean;
+      fala?: string;
+      expectedResponse?: ExpectedResponse;
+      memoryPatch?: { activeConversationContext?: { kind?: string } | null };
+    }>(profile, "/guto/proactivity/confirm", { memoryId: state.travelMemoryId });
+    expect(confirm.status === 200 && confirm.body.ok === true, `confirmar viagem respondeu ${confirm.status}: ${JSON.stringify(confirm.body)}`);
+    expect(hasAny(confirm.body.fala || "", profile.language === "it-IT" ? ["20 minuti", "adattato", "allenamento"] : ["20 minutos", "adaptado", "treino"]), `confirmar viagem não perguntou treino adaptado: ${confirm.body.fala}`);
+    expect(confirm.body.expectedResponse?.context === "travel_training", `confirmar viagem não abriu contexto travel_training: ${JSON.stringify(confirm.body)}`);
+    expect(confirm.body.memoryPatch?.activeConversationContext?.kind === "travel_impact_confirmation", `confirmar viagem não abriu estado de impacto: ${JSON.stringify(confirm.body.memoryPatch)}`);
   });
 
   await recordCheck(report, "viagem", "travel_unavailable_asks_final_confirmation_without_protecting_directly", async () => {
@@ -1101,6 +1120,14 @@ async function runProfile(ctx: ScenarioContext, profile: ScenarioProfile): Promi
     expect(!hasCalibrationReask(response.fala || "", profile.language), `indisponibilidade reperguntou calibragem: ${response.fala}`);
     expect(after.totalXp === before.totalXp, `viagem alterou XP: antes=${before.totalXp}, depois=${after.totalXp}`);
     expect(!after.proactiveImpacts?.some((impact) => impact.status === "active" && impact.workoutEffect === "protected"), "viagem criou dia protegido antes da confirmação final");
+
+    const pendingImpact = after.proactiveMemories?.find(
+      (item) => item.type === "trip" && item.status === "pending_confirmation" && item.confirmationStage === "impact"
+    );
+    if (pendingImpact?.id) {
+      const discard = await ctx.postJson<Record<string, unknown>>(profile, "/guto/proactivity/discard", { memoryId: pendingImpact.id });
+      expect(discard.status === 200, `limpeza do card de impacto respondeu ${discard.status}: ${JSON.stringify(discard.body)}`);
+    }
   });
 
   await recordCheck(report, "tempo_curto", "short_time_adapts_not_cancel", async () => {

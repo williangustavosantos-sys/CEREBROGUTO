@@ -338,5 +338,6 @@ export function buildPendingMemoryData(
     dateParsed: event.dateParsed,
     location: event.location,
     weekKey: getWeekKey(),
+    ...(event.type === 'trip' ? { confirmationStage: 'event' as const } : {}),
   }
 }

@@ -177,14 +177,15 @@ describe("POST_CONFIRMATION_REDIRECT", () => {
 
     const body = await postGuto("Não vou conseguir treinar.");
 
-    assert.match(body.fala, /confirma|card|proteg/i);
+    assert.match(body.fala, /confirma|card|impacto/i);
     assert.doesNotMatch(body.fala, /Agora volta comigo para hoje/i);
     assert.notEqual(body.acao, "updateWorkout");
     assert.equal(body.workoutPlan ?? null, null);
 
     const memory = readUserMemory();
     assert.equal(memory.proactiveMemories?.[0]?.status, "pending_confirmation");
-    assert.match(memory.proactiveMemories?.[0]?.rawText || "", /não vou conseguir treinar/i);
+    assert.equal(memory.proactiveMemories?.[0]?.confirmationStage, "event");
+    assert.doesNotMatch(memory.proactiveMemories?.[0]?.rawText || "", /não vou conseguir treinar/i);
     assert.deepEqual(memory.proactiveImpacts || [], []);
   });
 
@@ -230,7 +231,7 @@ describe("POST_CONFIRMATION_REDIRECT", () => {
     const body = await postGuto("viajo sexta, não consigo treinar nesse dia");
     const afterMemory = readUserMemory();
 
-    assert.match(body.fala, /confirma|card|proteg/i);
+    assert.match(body.fala, /confirma|card|impacto/i);
     assert.doesNotMatch(body.fala, /Agora volta comigo para hoje/i);
     assert.notEqual(body.acao, "updateWorkout");
     assert.equal(body.workoutPlan ?? null, null);
@@ -239,20 +240,28 @@ describe("POST_CONFIRMATION_REDIRECT", () => {
     assert.deepEqual(afterMemory.completedWorkoutDates, before.completedWorkoutDates);
     assert.equal(afterMemory.lastWorkoutPlan?.title, before.lastWorkoutPlan?.title);
     assert.equal(afterMemory.proactiveMemories?.[0]?.status, "pending_confirmation");
+    assert.equal(afterMemory.proactiveMemories?.[0]?.confirmationStage, "event");
     assert.deepEqual(afterMemory.proactiveImpacts || [], before.proactiveImpacts || []);
   });
 
-  it("ask_critical de viagem sem dado de treino nao redireciona", async () => {
+  it("viagem nova abre card de evento antes de perguntar impacto", async () => {
     writeUserMemory(USER_ID, {
       lastWorkoutPlan: missionPlan("Corpo Inteiro com cuidado no ombro"),
     });
 
     const body = await postGuto("viajo sexta");
 
-    assert.match(body.fala, /vai ter algum tempo|imposs[ií]vel/i);
+    assert.match(body.fala, /confirma primeiro no card|impacto no treino/i);
     assert.doesNotMatch(body.fala, /Agora volta comigo para hoje/i);
     assert.notEqual(body.acao, "updateWorkout");
     assert.equal(body.workoutPlan ?? null, null);
+
+    const memory = readUserMemory();
+    assert.equal(memory.proactiveMemories?.length, 1);
+    assert.equal(memory.proactiveMemories?.[0]?.status, "pending_confirmation");
+    assert.equal(memory.proactiveMemories?.[0]?.confirmationStage, "event");
+    assert.equal(memory.activeConversationContext?.kind, "travel_confirmation");
+    assert.deepEqual(memory.proactiveImpacts || [], []);
   });
 
   it("sem missao ativa nao inventa missao e usa redirecionamento neutro", async () => {

@@ -288,6 +288,13 @@ function ambiguousConfirmFallback(memory: ProactiveMemory, language: string): st
   return `"${item}" — confirma ou cancela? Me fala direto.`
 }
 
+function tripEventCardFirstFallback(memory: ProactiveMemory, language: string): string {
+  const item = memory.dateParsed || memory.dateText || memory.understood
+  if (language === 'it-IT') return `Prima conferma il viaggio nel card (${item}). Dopo ti chiedo dell'allenamento adattato.`
+  if (language === 'en-US') return `First confirm the trip on the card (${item}). After that I ask about the adapted workout.`
+  return `Primeiro confirma a viagem no card (${item}). Depois eu pergunto sobre o treino adaptado.`
+}
+
 function correctionFallback(memory: ProactiveMemory, language: string): string {
   const item = memory.understood
   if (language === 'it-IT') return `Qualcosa è cambiato con "${item}"? Dimmi esattamente cosa.`
@@ -558,6 +565,14 @@ export async function resolveProactiveMemoryActionFromUserReply(
       const target = pendingConfirmation[0]!
       const travelTrainingSignal = detectTravelTrainingSignal(userInput)
       if (travelTrainingSignal !== 'unknown') {
+        if (target.confirmationStage !== 'impact') {
+          return {
+            engaged: true,
+            action: null,
+            fallbackMessage: tripEventCardFirstFallback(target, language),
+            reason: 'pending_trip_event_card_first',
+          }
+        }
         if (travelTrainingSignal === 'cannot_train') {
           return {
             engaged: true,
@@ -726,6 +741,14 @@ export async function resolveProactiveMemoryActionFromUserReply(
       if (target.type === 'trip') {
         const travelTrainingSignal = detectTravelTrainingSignal(userInput)
         if (travelTrainingSignal !== 'unknown') {
+          if (target.confirmationStage !== 'impact') {
+            return {
+              engaged: true,
+              action: null,
+              fallbackMessage: tripEventCardFirstFallback(target, language),
+              reason: 'pending_trip_event_card_first',
+            }
+          }
           if (travelTrainingSignal === 'cannot_train') {
             return {
               engaged: true,

@@ -153,6 +153,7 @@ export interface ProactiveMemory {
   discardedAt?: string
   discardRequestedAt?: string
   decision?: ProactiveDecision
+  confirmationStage?: 'event' | 'impact'
 }
 
 export interface WeeklyConversation {

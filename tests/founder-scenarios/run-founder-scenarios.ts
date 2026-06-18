@@ -25,6 +25,7 @@ type MemoryRecord = Record<string, unknown>;
 
 type FounderContext = {
   chat: (userId: string, input: string) => Promise<GutoResponse>;
+  confirmProactiveMemory: (userId: string, memoryId: string) => Promise<GutoResponse & { ok?: boolean; memoryPatch?: MemoryRecord }>;
   readMemory: (userId: string) => MemoryRecord;
   seedMemory: (userId: string, data?: MemoryRecord) => void;
   seedDiet: (userId: string) => Promise<void>;
@@ -172,6 +173,16 @@ async function chat(userId: string, input: string): Promise<GutoResponse> {
   return (await response.json()) as GutoResponse;
 }
 
+async function confirmProactiveMemory(userId: string, memoryId: string): Promise<GutoResponse & { ok?: boolean; memoryPatch?: MemoryRecord }> {
+  const response = await fetch(`${baseUrl}/guto/proactivity/confirm`, {
+    method: "POST",
+    headers: authHeaders(userId),
+    body: JSON.stringify({ memoryId }),
+  });
+  assert.equal(response.status, 200, `POST /guto/proactivity/confirm deveria responder 200, veio ${response.status}`);
+  return (await response.json()) as GutoResponse & { ok?: boolean; memoryPatch?: MemoryRecord };
+}
+
 async function seedDiet(userId: string) {
   const plan: DietPlanSeed = {
     userId,
@@ -244,14 +255,22 @@ function assertNoWorkoutGeneration(response: GutoResponse) {
 const scenarios: FounderScenario[] = [
   {
     id: 1,
-    name: "viagem pergunta dado crítico",
+    name: "viagem cria card e só depois pergunta dado crítico",
     run: async (ctx) => {
       const userId = "founder-01-trip";
       ctx.seedMemory(userId);
       const response = await ctx.chat(userId, "viajo sexta");
 
-      assertSpeaks(response, /vai ter algum tempo|consegue treinar|imposs[ií]vel|tempo para treinar/i, "viagem precisa perguntar se há treino possível");
+      assertSpeaks(response, /confirma.*card|card.*impacto|viagem.*card/i, "viagem precisa criar card antes de perguntar impacto");
       assertNoWorkoutGeneration(response);
+      const memory = ctx.readMemory(userId);
+      const trip = ((memory.proactiveMemories || []) as Array<{ id?: string; status?: string; confirmationStage?: string }>)[0];
+      assert.equal(trip?.status, "pending_confirmation", "viagem precisa ficar pendente no card");
+      assert.equal(trip?.confirmationStage, "event", "primeiro card precisa confirmar o evento");
+
+      const confirm = await ctx.confirmProactiveMemory(userId, String(trip.id));
+      assertSpeaks(confirm, /20 minutos|treino adaptado|conseguir fazer/i, "confirmar viagem precisa perguntar se há treino possível");
+      assert.equal((confirm.expectedResponse as { context?: string } | null)?.context, "travel_training");
     },
   },
   {
@@ -264,14 +283,16 @@ const scenarios: FounderScenario[] = [
       const response = await ctx.chat(userId, "não consigo treinar nesse dia");
       const after = ctx.readMemory(userId);
 
-      assertSpeaks(response, /confirma|card|proteg/i, "indisponibilidade precisa abrir confirmação visual");
+      assertSpeaks(response, /confirma|card|impacto/i, "indisponibilidade antes do card precisa manter confirmação visual do evento");
       assertDoesNotSpeak(response, /Agora volta comigo para hoje/i, "sem confirmação no card ainda não redireciona");
       assertNoWorkoutGeneration(response);
       assert.equal(after.totalXp, before.totalXp, "redirect não deve criar XP");
       assert.deepEqual(after.xpEvents, before.xpEvents, "redirect não deve criar evento de XP");
       assert.deepEqual(after.completedWorkoutDates, before.completedWorkoutDates, "redirect não deve validar treino");
-      const afterMemories = (after.proactiveMemories || []) as Array<{ status?: string }>;
+      const afterMemories = (after.proactiveMemories || []) as Array<{ status?: string; confirmationStage?: string; rawText?: string }>;
       assert.equal(afterMemories[0]?.status, "pending_confirmation", "card mantém memória pendente até confirmação");
+      assert.equal(afterMemories[0]?.confirmationStage, "event", "não pode pular para impacto antes de confirmar viagem");
+      assert.doesNotMatch(afterMemories[0]?.rawText || "", /não consigo treinar/i, "não deve salvar impacto antes de confirmar evento");
       assert.deepEqual(after.proactiveImpacts || [], before.proactiveImpacts || [], "impacto protegido só nasce após confirmar card");
     },
   },
@@ -412,6 +433,7 @@ async function setup(): Promise<FounderContext> {
 
   return {
     chat,
+    confirmProactiveMemory,
     readMemory,
     seedMemory,
     seedDiet,
