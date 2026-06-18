@@ -78,6 +78,24 @@ function weekdayDate(text: string, today: Date): { dateParsed: string; dateText:
 }
 
 function relativeDate(text: string, today: Date): { dateParsed: string; dateText: string } | null {
+  if (/\b(hoje|today|oggi)\b/.test(text)) {
+    return {
+      dateParsed: toIsoDate(today),
+      dateText: text.match(/\b(hoje|today|oggi)\b/)?.[0] || 'hoje',
+    }
+  }
+  if (/\b(amanha|tomorrow|domani)\b/.test(text)) {
+    return {
+      dateParsed: toIsoDate(addDays(today, 1)),
+      dateText: text.match(/\b(amanha|tomorrow|domani)\b/)?.[0] || 'amanhã',
+    }
+  }
+  if (/\b(semana que vem|proxima semana|next week|settimana prossima|prossima settimana)\b/.test(text)) {
+    return {
+      dateParsed: toIsoDate(addDays(today, 7)),
+      dateText: text.match(/\b(semana que vem|proxima semana|next week|settimana prossima|prossima settimana)\b/)?.[0] || 'semana que vem',
+    }
+  }
   const weeks = text.match(/\bdaqui\s+(\d+|uma|um|duas|dois|tres|três|quatro)\s+semanas?\b/)
   if (weeks) {
     const amount = numberWordPt(weeks[1] || '')
@@ -173,7 +191,6 @@ function eventSignature(event: ExtractedEvent): string {
     event.type,
     event.dateParsed || normalize(event.dateText || ''),
     normalize(event.location || ''),
-    normalize(event.rawText),
   ].join('|')
 }
 

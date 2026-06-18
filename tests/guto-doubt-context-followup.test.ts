@@ -51,6 +51,14 @@ const RE_ASK_RE = /qual aparelho|qual m[áa]quina|which machine|quale attrezzo/i
 const GENERIC_BREAKFAST_RE = /primeira (alimenta|refei)|sagrad|caf[ée] da manh[ãa] é/i;
 const INVALID_ARM_SWAP_RE = /troca por\s+b[íi]ceps|b[íi]ceps m[aá]quina|rosca/i;
 
+function captureExerciseSubstitute(text: string) {
+  return text.match(/troca por\s+([^:.]+)(?:[:.])/i)?.[1]?.trim() || "";
+}
+
+function captureFoodSubstitute(text: string) {
+  return text.match(/por\s+([^,.]+)(?:[,.\n]|$)/i)?.[1]?.trim() || "";
+}
+
 function catalogExercise(id: string, overrides: Record<string, unknown> = {}) {
   const entry = getCatalogById(id);
   assert.ok(entry, `${id} deve existir no catálogo`);
@@ -219,6 +227,29 @@ describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
     assert.doesNotMatch(res.fala || "", RE_ASK_RE, "não pode perguntar qual aparelho quando o exercício veio no texto");
   });
 
+  it("exercício ocupado → rejeição curta no turno seguinte sugere outro substituto e não repete", async () => {
+    const userId = "triceps-busy-reject-next";
+    writeUserMemory(userId, {
+      trainingGoal: "muscle_gain",
+      trainingLevel: "consistent",
+      preferredTrainingLocation: "gym",
+      trainingLocation: "academia",
+      lastWorkoutPlan: chestTricepsPlan(),
+    });
+    clearMemoryStoreCache();
+
+    const turn1 = await postGuto(userId, "Tríceps polia alta ocupado");
+    const firstSubstitute = captureExerciseSubstitute(turn1.fala || "");
+    assert.ok(firstSubstitute, `primeira resposta deveria nomear substituto: ${turn1.fala}`);
+
+    const turn2 = await postGuto(userId, "também está ocupado");
+    assert.equal(turn2.acao, "none");
+    assert.match(turn2.fala || "", /tr[íi]ceps/i);
+    assert.doesNotMatch(turn2.fala || "", INVALID_ARM_SWAP_RE, "não pode trocar tríceps por bíceps/rosca");
+    assert.doesNotMatch(turn2.fala || "", new RegExp(firstSubstitute.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"), "não pode repetir o substituto rejeitado");
+    assert.doesNotMatch(turn2.fala || "", RE_ASK_RE, "não pode perder contexto e perguntar qual aparelho");
+  });
+
   it("objeção 'tríceps por bíceps' → admite erro e corrige, sem continuar perguntando motivo", async () => {
     const userId = "triceps-objection";
     writeUserMemory(userId, {
@@ -276,6 +307,37 @@ describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
     assert.match(turn2.fala || "", /p[ãa]o integral|biscoito de arroz|rice cake/i);
     // E NÃO cai no texto genérico do modelo (mockado acima).
     assert.doesNotMatch(turn2.fala || "", GENERIC_BREAKFAST_RE, "não pode responder genérico no 2º turno");
+  });
+
+  it("dieta: 'não tenho aveia' → sugestão A; 'não tenho também' → sugestão B ou pergunta disponíveis", async () => {
+    const userId = "food-reject-next";
+    writeUserMemory(userId, {
+      trainingGoal: "muscle_gain",
+      trainingLevel: "consistent",
+      country: "Brasil",
+      countryCode: "BR",
+      foodRestrictions: "vegano",
+    });
+    clearMemoryStoreCache();
+
+    const ctxLines = (msg: string) =>
+      [
+        "[DIET CONTEXT — language: pt-BR — nutrition only]",
+        'Food in question: "Aveia em flocos" (40g, 150 kcal).',
+        'Meal: "Café da manhã" (08:00).',
+        "Food restrictions (what they avoid eating, incl. intolerances/allergies): vegano.",
+        `User question: ${msg}`,
+      ].join(" ");
+
+    const turn1 = await postGuto(userId, ctxLines("não tenho em casa"));
+    const firstSubstitute = captureFoodSubstitute(turn1.fala || "");
+    assert.ok(firstSubstitute, `primeira resposta deveria nomear substituto alimentar: ${turn1.fala}`);
+
+    const turn2 = await postGuto(userId, ctxLines("não tenho também"));
+    assert.equal(turn2.acao, "none");
+    assert.doesNotMatch(turn2.fala || "", GENERIC_BREAKFAST_RE, "não pode cair no texto genérico do modelo");
+    assert.doesNotMatch(turn2.fala || "", new RegExp(firstSubstitute.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"), "não pode repetir alimento rejeitado");
+    assert.match(turn2.fala || "", /troca|dispon[ií]vel|tem em casa|available/i);
   });
 
   it("sem contexto explícito: 'não tenho banana' → substituto direto, sem perguntar 'o que?'", async () => {

@@ -554,6 +554,33 @@ export async function resolveProactiveMemoryActionFromUserReply(
       }
     }
 
+    if (pendingConfirmation.length === 1 && pendingConfirmation[0]?.type === 'trip') {
+      const target = pendingConfirmation[0]!
+      const travelTrainingSignal = detectTravelTrainingSignal(userInput)
+      if (travelTrainingSignal !== 'unknown') {
+        if (travelTrainingSignal === 'cannot_train') {
+          return {
+            engaged: true,
+            action: {
+              type: 'update',
+              memoryId: target.id,
+              patch: appendUserReplyToMemoryPatch(target, userInput),
+            },
+            reason: 'pending_trip_protected_confirmation',
+          }
+        }
+        return {
+          engaged: true,
+          action: {
+            type: 'confirm',
+            memoryId: target.id,
+            patch: appendUserReplyToMemoryPatch(target, userInput),
+          },
+          reason: `confirmed_trip_training_${travelTrainingSignal}`,
+        }
+      }
+    }
+
     const semantic = await resolveSemantically(
       userInput,
       relevantMemoriesForSemantic(allMemories),

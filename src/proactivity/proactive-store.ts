@@ -71,12 +71,11 @@ function normalizeSignatureText(value?: string): string {
 
 function proactiveMemorySignature(memory: ProactiveMemoryCandidate): string {
   const date = memory.dateParsed || normalizeSignatureText(memory.dateText)
-  return [
-    memory.type,
-    date,
-    normalizeSignatureText(memory.location),
-    normalizeSignatureText(memory.understood),
-  ].join('|')
+  const location = normalizeSignatureText(memory.location)
+  if (date || location) {
+    return [memory.type, date, location].join('|')
+  }
+  return [memory.type, normalizeSignatureText(memory.understood)].join('|')
 }
 
 export function hasMatchingProactiveMemory(

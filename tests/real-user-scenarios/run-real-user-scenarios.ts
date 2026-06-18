@@ -103,6 +103,7 @@ type MemoryRecord = Record<string, unknown> & {
   validationHistory?: Array<{ status?: string; xp?: number; createdAt?: string }>;
   lastWorkoutPlan?: WorkoutPlan | null;
   dietGenerationStatus?: string;
+  proactiveImpacts?: Array<{ workoutEffect?: string; missionEffect?: string; pathEffect?: string; status?: string }>;
 };
 
 type ScenarioProfile = {
@@ -1092,13 +1093,14 @@ async function runProfile(ctx: ScenarioContext, profile: ScenarioProfile): Promi
     expect(!hasCalibrationReask(response.fala || "", profile.language), `viagem reperguntou calibragem: ${response.fala}`);
   });
 
-  await recordCheck(report, "viagem", "travel_unavailable_protects_day_and_redirects_today", async () => {
+  await recordCheck(report, "viagem", "travel_unavailable_asks_final_confirmation_without_protecting_directly", async () => {
     const before = await ctx.getMemory(profile);
     const response = await ctx.chat(profile, profile.prompts.travelCannotTrain);
     const after = await ctx.getMemory(profile);
-    expect(hasAny(response.fala || "", profile.language === "it-IT" ? ["proteg", "riorganiz", "oggi", "adesso"] : ["proteg", "reorganiz", "hoje", "agora"]), `indisponibilidade não protegeu/redirecionou: ${response.fala}`);
+    expect(hasAny(response.fala || "", profile.language === "it-IT" ? ["confermo", "giorno", "allenamento"] : ["confirma", "card", "dia", "sem treino"]), `indisponibilidade não pediu confirmação final: ${response.fala}`);
     expect(!hasCalibrationReask(response.fala || "", profile.language), `indisponibilidade reperguntou calibragem: ${response.fala}`);
     expect(after.totalXp === before.totalXp, `viagem alterou XP: antes=${before.totalXp}, depois=${after.totalXp}`);
+    expect(!after.proactiveImpacts?.some((impact) => impact.status === "active" && impact.workoutEffect === "protected"), "viagem criou dia protegido antes da confirmação final");
   });
 
   await recordCheck(report, "tempo_curto", "short_time_adapts_not_cancel", async () => {

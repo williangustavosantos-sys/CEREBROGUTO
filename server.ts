@@ -443,6 +443,7 @@ interface GutoMemory {
    * Expira por TTL na leitura (ver ACTIVE_EXERCISE_TTL_MS).
    */
   activeExercise?: ActiveExerciseContext | null;
+  substitutionContext?: SubstitutionContext | null;
 }
 
 interface ActiveExerciseContext {
@@ -455,6 +456,17 @@ interface ActiveExerciseContext {
   currentSet?: number;
   totalSets?: number;
   note?: string;
+  updatedAt: string;
+}
+
+interface SubstitutionContext {
+  kind: "exercise" | "food";
+  originalId: string;
+  originalName: string;
+  lastSuggestedId?: string;
+  rejectedIds: string[];
+  mealName?: string;
+  planExercise?: Pick<WorkoutExercise, "sets" | "reps" | "rest">;
   updatedAt: string;
 }
 
@@ -1178,6 +1190,7 @@ export function getMemory(userId: string): GutoMemory {
       proactiveMemories: Array.isArray(existing.proactiveMemories) ? existing.proactiveMemories : [],
       proactiveImpacts: Array.isArray(existing.proactiveImpacts) ? existing.proactiveImpacts : [],
       activeExercise: normalizeActiveExerciseContext(existing.activeExercise),
+      substitutionContext: normalizeSubstitutionContext(existing.substitutionContext),
       weeklyConversation:
         existing.weeklyConversation &&
         typeof existing.weeklyConversation === "object" &&
@@ -1226,6 +1239,7 @@ export function getMemory(userId: string): GutoMemory {
     proactiveImpacts: [],
     proactivePrompt: null,
     activeExercise: null,
+    substitutionContext: null,
   };
 }
 
@@ -3359,6 +3373,7 @@ function formatHistoryForPrompt(history: GutoHistoryItem[] = []) {
 // Exercício ativo vira contexto morto após algumas horas (sessão antiga / dúvida
 // abandonada). TTL de segurança: não injeta exercício velho como se fosse o atual.
 const ACTIVE_EXERCISE_TTL_MS = 3 * 60 * 60 * 1000;
+const SUBSTITUTION_CONTEXT_TTL_MS = 3 * 60 * 60 * 1000;
 
 function normalizeActiveExerciseContext(value: unknown): ActiveExerciseContext | null | undefined {
   if (value === null) return null;
@@ -3384,6 +3399,53 @@ function normalizeActiveExerciseContext(value: unknown): ActiveExerciseContext |
     note: str(raw.note),
     updatedAt: updatedAt || new Date().toISOString(),
   };
+}
+
+function normalizeSubstitutionContext(value: unknown): SubstitutionContext | null | undefined {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Partial<SubstitutionContext>;
+  if (raw.kind !== "exercise" && raw.kind !== "food") return null;
+  if (typeof raw.originalId !== "string" || !raw.originalId.trim()) return null;
+  if (typeof raw.originalName !== "string" || !raw.originalName.trim()) return null;
+  const updatedAt = typeof raw.updatedAt === "string" ? raw.updatedAt : "";
+  const updated = Date.parse(updatedAt);
+  if (Number.isFinite(updated) && Date.now() - updated > SUBSTITUTION_CONTEXT_TTL_MS) return null;
+  const rejectedIds = Array.isArray(raw.rejectedIds)
+    ? raw.rejectedIds.filter((id): id is string => typeof id === "string" && Boolean(id.trim())).map((id) => id.trim())
+    : [];
+  const planExercise =
+    raw.planExercise &&
+    typeof raw.planExercise === "object" &&
+    typeof raw.planExercise.sets === "number" &&
+    typeof raw.planExercise.reps === "string" &&
+    typeof raw.planExercise.rest === "string"
+      ? {
+          sets: raw.planExercise.sets,
+          reps: raw.planExercise.reps,
+          rest: raw.planExercise.rest,
+        }
+      : undefined;
+  return {
+    kind: raw.kind,
+    originalId: raw.originalId.trim(),
+    originalName: raw.originalName.trim(),
+    lastSuggestedId: typeof raw.lastSuggestedId === "string" && raw.lastSuggestedId.trim() ? raw.lastSuggestedId.trim() : undefined,
+    rejectedIds: Array.from(new Set(rejectedIds)),
+    mealName: typeof raw.mealName === "string" && raw.mealName.trim() ? raw.mealName.trim() : undefined,
+    planExercise,
+    updatedAt: updatedAt || new Date().toISOString(),
+  };
+}
+
+function getFreshSubstitutionContext(memory: GutoMemory, kind: SubstitutionContext["kind"]): SubstitutionContext | null {
+  const normalized = normalizeSubstitutionContext(memory.substitutionContext);
+  if (!normalized || normalized.kind !== kind) return null;
+  return normalized;
+}
+
+function mergeRejectedIds(...groups: Array<Array<string | undefined> | undefined>): string[] {
+  return Array.from(new Set(groups.flatMap((group) => group || []).filter((id): id is string => Boolean(id && id.trim()))));
 }
 
 function buildActiveExerciseContextBlock(memory: GutoMemory): string | null {
@@ -4838,6 +4900,56 @@ function isEquipmentBusyMessage(input?: string) {
   return hasEquipmentContext && hasBusyContext;
 }
 
+function isSubstitutionRejectionFollowUp(input?: string) {
+  const normalized = normalize(stripInjectedContext(input || ""));
+  if (!normalized) return false;
+  return hasAnyTerm(normalized, [
+    "tambem ocupado",
+    "também ocupado",
+    "tambem esta ocupado",
+    "também está ocupado",
+    "tambem ocupada",
+    "também ocupada",
+    "tambem esta ocupada",
+    "também está ocupada",
+    "esse tambem",
+    "esse também",
+    "essa tambem",
+    "essa também",
+    "tambem nao da",
+    "também não dá",
+    "tambem nao tenho",
+    "também não tenho",
+    "nao tenho tambem",
+    "não tenho também",
+    "nao tenho esse",
+    "não tenho esse",
+    "nao tenho essa",
+    "não tenho essa",
+    "nao tem esse aparelho",
+    "não tem esse aparelho",
+    "esse tambem nao da",
+    "esse também não dá",
+    "essa tambem nao da",
+    "essa também não dá",
+    "esse nao rola",
+    "esse não rola",
+    "essa nao rola",
+    "essa não rola",
+    "also busy",
+    "that is busy too",
+    "that one is busy too",
+    "i dont have that either",
+    "i don't have that either",
+    "also dont have it",
+    "also don't have it",
+    "anche quello",
+    "anche questa",
+    "non ho anche quello",
+    "non ce l ho neanche",
+  ]);
+}
+
 // Mapeia país do usuário (countryCode ou nome livre) para o FoodCountry do
 // catálogo. Sem match → undefined (suggestFoodSubstitutes cai nos substitutes
 // explícitos do alimento, modo conservador).
@@ -4893,29 +5005,67 @@ function buildFoodSubstituteResponse(
   language: GutoLanguage
 ): GutoModelResponse | null {
   const dietCtx = parseDietContext(input || "");
-  const foodName = dietCtx?.foodName || resolveUnavailableFoodName(input || "");
+  const previous = getFreshSubstitutionContext(memory, "food");
+  const isRejectedFollowUp = Boolean(previous?.lastSuggestedId && isSubstitutionRejectionFollowUp(input));
+  const foodName = isRejectedFollowUp
+    ? previous?.originalName
+    : dietCtx?.foodName || resolveUnavailableFoodName(input || "");
   if (!foodName) return null;
-  const foodId = resolveFoodIdByName(foodName);
+  const foodId = isRejectedFollowUp ? previous?.originalId : resolveFoodIdByName(foodName);
   if (!foodId) return null;
+  const rejectedIds = isRejectedFollowUp
+    ? mergeRejectedIds(previous?.rejectedIds, [previous?.lastSuggestedId])
+    : mergeRejectedIds(previous?.originalId === foodId ? previous?.rejectedIds : undefined);
 
   const subs = suggestFoodSubstitutes({
     originalFoodId: foodId,
     country: resolveFoodCountry(memory),
     constraints: memoryFoodConstraints(memory),
     useContext: "meal_substitution",
-  });
-  if (subs.length === 0) return null;
+  }).filter((food) => !rejectedIds.includes(food.id));
+
+  if (subs.length === 0) {
+    memory.substitutionContext = {
+      kind: "food",
+      originalId: foodId,
+      originalName: getFoodById(foodId)?.names["pt-BR"] || foodName,
+      rejectedIds,
+      mealName: dietCtx?.mealName || previous?.mealName,
+      updatedAt: new Date().toISOString(),
+    };
+    appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Alimento sugerido foi rejeitado; aguardando alimentos disponíveis.");
+    saveMemory(memory);
+    const foodLabel = getFoodById(foodId)?.names[language as FoodLanguage] || foodName;
+    const fallback: Record<GutoLanguage, string> = {
+      "pt-BR": `Fechado. Não vou repetir ${foodLabel}. Me diz o que você tem disponível agora e eu encaixo mantendo a função da refeição.`,
+      "en-US": `Got it. I won't repeat ${foodLabel}. Tell me what you have available now and I will keep the same meal role.`,
+      "it-IT": `Chiaro. Non ripeto ${foodLabel}. Dimmi cosa hai disponibile ora e mantengo la stessa funzione del pasto.`,
+    };
+    return { fala: fallback[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
+  }
 
   const lang = language as FoodLanguage;
-  const names = subs.slice(0, 2).map((f) => f.names[lang] || f.names["pt-BR"]);
+  const selected = subs[0]!;
+  const selectedName = selected.names[lang] || selected.names["pt-BR"];
   const foodLabel = getFoodById(foodId)?.names[lang] || foodName;
-  const options = names.length >= 2 ? { "pt-BR": `${names[0]} ou ${names[1]}`, en: `${names[0]} or ${names[1]}`, it: `${names[0]} o ${names[1]}` } : { "pt-BR": names[0], en: names[0], it: names[0] };
-  const meal = dietCtx?.mealName;
+  const meal = dietCtx?.mealName || previous?.mealName;
+
+  memory.substitutionContext = {
+    kind: "food",
+    originalId: foodId,
+    originalName: getFoodById(foodId)?.names["pt-BR"] || foodName,
+    lastSuggestedId: selected.id,
+    rejectedIds,
+    mealName: meal,
+    updatedAt: new Date().toISOString(),
+  };
+  appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Substituto alimentar sugerido e mantido como contexto operacional.");
+  saveMemory(memory);
 
   const fala: Record<GutoLanguage, string> = {
-    "pt-BR": `Troca ${foodLabel} por ${options["pt-BR"]}${meal ? `, mantendo a energia do ${meal}` : ""}. Mesma função no prato, sem furar a dieta.`,
-    "en-US": `Swap ${foodLabel} for ${options.en}${meal ? `, keeping the energy of ${meal}` : ""}. Same role on the plate, diet intact.`,
-    "it-IT": `Cambia ${foodLabel} con ${options.it}${meal ? `, mantenendo l'energia di ${meal}` : ""}. Stessa funzione nel piatto, dieta intatta.`,
+    "pt-BR": `Troca ${foodLabel} por ${selectedName}${meal ? `, mantendo a energia do ${meal}` : ""}. Mesma função no prato, sem furar a dieta.`,
+    "en-US": `Swap ${foodLabel} for ${selectedName}${meal ? `, keeping the energy of ${meal}` : ""}. Same role on the plate, diet intact.`,
+    "it-IT": `Cambia ${foodLabel} con ${selectedName}${meal ? `, mantenendo l'energia di ${meal}` : ""}. Stessa funzione nel piatto, dieta intatta.`,
   };
   return { fala: fala[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
 }
@@ -5138,9 +5288,11 @@ function resolveWorkoutExerciseForSubstitution({
 function pickValidatedExerciseSubstitute({
   originalId,
   memory,
+  rejectedIds = [],
 }: {
   originalId: string;
   memory: GutoMemory;
+  rejectedIds?: string[];
 }): CatalogExercise | null {
   const plan = memory.lastWorkoutPlan;
   const location = getLocationMode(plan?.location || memory.preferredTrainingLocation || memory.trainingLocation) as CatalogLocation;
@@ -5153,6 +5305,7 @@ function pickValidatedExerciseSubstitute({
   });
 
   return substitutes
+    .filter((id) => !rejectedIds.includes(id))
     .map((id) => getCatalogById(id))
     .find((entry): entry is CatalogExercise =>
       Boolean(entry && entry.id !== originalId && (!original || validateExerciseSubstitute(original, entry).valid))
@@ -5163,18 +5316,32 @@ function buildValidatedEquipmentBusyResponse({
   original,
   memory,
   language,
+  rejectedIds = [],
 }: {
-  original: { id: string; name: string; planExercise?: WorkoutExercise | null };
+  original: { id: string; name: string; planExercise?: Pick<WorkoutExercise, "sets" | "reps" | "rest"> | null };
   memory: GutoMemory;
   language: GutoLanguage;
+  rejectedIds?: string[];
 }): GutoModelResponse {
-  const substitute = pickValidatedExerciseSubstitute({ originalId: original.id, memory });
+  const substitute = pickValidatedExerciseSubstitute({ originalId: original.id, memory, rejectedIds });
 
   if (!substitute) {
+    memory.substitutionContext = {
+      kind: "exercise",
+      originalId: original.id,
+      originalName: original.name,
+      rejectedIds,
+      planExercise: original.planExercise
+        ? { sets: original.planExercise.sets, reps: original.planExercise.reps, rest: original.planExercise.rest }
+        : undefined,
+      updatedAt: new Date().toISOString(),
+    };
+    appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Substitutos de exercício rejeitados; aguardando equipamentos livres.");
+    saveMemory(memory);
     const copy: Record<GutoLanguage, string> = {
-      "pt-BR": `${original.name} travou? Sem drama: pula ele por enquanto, faz o próximo exercício e volta nele no final. Se ainda estiver cheio, me chama de novo.`,
-      "en-US": `${original.name} is taken? No drama: skip it for now, do the next exercise, and come back at the end. If it is still busy, call me again.`,
-      "it-IT": `${original.name} è occupato? Nessun dramma: saltalo per ora, fai il prossimo esercizio e torna alla fine. Se è ancora pieno, chiamami di nuovo.`,
+      "pt-BR": `${original.name} segue indisponível. Não vou chutar troca fora do alvo. Me diz quais equipamentos estão livres agora que eu valido mantendo o mesmo músculo.`,
+      "en-US": `${original.name} is still unavailable. I won't guess outside the target. Tell me which equipment is free now and I will validate the same muscle target.`,
+      "it-IT": `${original.name} è ancora indisponibile. Non improvviso fuori target. Dimmi quali attrezzi sono liberi e valido lo stesso muscolo.`,
     };
     return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
@@ -5196,6 +5363,19 @@ function buildValidatedEquipmentBusyResponse({
     "en-US": `${original.name} is taken? Swap to ${substituteName}: ${scheme["en-US"]}. Same mission, no standing around.`,
     "it-IT": `${original.name} occupato? Cambia con ${substituteName}: ${scheme["it-IT"]}. Stessa missione, senza fermarti.`,
   };
+  memory.substitutionContext = {
+    kind: "exercise",
+    originalId: original.id,
+    originalName: original.name,
+    lastSuggestedId: substitute.id,
+    rejectedIds,
+    planExercise: original.planExercise
+      ? { sets: original.planExercise.sets, reps: original.planExercise.reps, rest: original.planExercise.rest }
+      : undefined,
+    updatedAt: new Date().toISOString(),
+  };
+  appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Substituto de exercício sugerido e mantido como contexto operacional.");
+  saveMemory(memory);
   return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
 }
 
@@ -5210,8 +5390,16 @@ function buildEquipmentBusyFallbackResponse({
   memory: GutoMemory;
   language: GutoLanguage;
 }): GutoModelResponse | null {
-  if (!isEquipmentBusyMessage(input)) return null;
-  const original = resolveWorkoutExerciseForSubstitution({ input, history, memory });
+  const previous = getFreshSubstitutionContext(memory, "exercise");
+  const isRejectedFollowUp = Boolean(previous?.lastSuggestedId && isSubstitutionRejectionFollowUp(input));
+  if (!isEquipmentBusyMessage(input) && !isRejectedFollowUp) return null;
+  const original = isRejectedFollowUp && previous
+    ? {
+        id: previous.originalId,
+        name: previous.originalName,
+        planExercise: previous.planExercise || null,
+      }
+    : resolveWorkoutExerciseForSubstitution({ input, history, memory });
 
   if (!original) {
     // Só aqui — sem QUALQUER contexto de exercício — faz sentido perguntar qual.
@@ -5223,7 +5411,10 @@ function buildEquipmentBusyFallbackResponse({
     return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
 
-  return buildValidatedEquipmentBusyResponse({ original, memory, language });
+  const rejectedIds = isRejectedFollowUp
+    ? mergeRejectedIds(previous?.rejectedIds, [previous?.lastSuggestedId])
+    : mergeRejectedIds(previous?.originalId === original.id ? previous?.rejectedIds : undefined);
+  return buildValidatedEquipmentBusyResponse({ original, memory, language, rejectedIds });
 }
 
 function detectArmTargetMismatchObjection(input?: string): "triceps" | "biceps" | null {
@@ -7154,6 +7345,30 @@ export function buildProactiveExpectedResponse(signal: ProactiveContinuitySignal
   };
 }
 
+function formatShortDateLabel(dateKeyValue?: string): string {
+  if (!dateKeyValue || !/^\d{4}-\d{2}-\d{2}$/.test(dateKeyValue)) return "";
+  const [, month, day] = dateKeyValue.split("-") as [string, string, string];
+  return `${day}/${month}`;
+}
+
+function buildProtectedDayFinalConfirmationFala(memory: ProactiveMemory | null | undefined, language: GutoLanguage): string {
+  const dateLabel = formatShortDateLabel(memory?.dateParsed);
+  const dateText = dateLabel || memory?.dateText || "";
+  if (language === "en-US") {
+    return dateText
+      ? `Confirm ${dateText} as a no-workout protected day?`
+      : "Confirm this as a no-workout protected day?";
+  }
+  if (language === "it-IT") {
+    return dateText
+      ? `Confermo il ${dateText} come giorno senza allenamento?`
+      : "Confermo questo come giorno senza allenamento?";
+  }
+  if (!dateText) return "Confirmo esse dia como dia sem treino?";
+  const prefix = memory?.dateParsed === addDaysToKey(todayKey(), 1) ? "amanhã, dia " : "dia ";
+  return `Confirma no card: Confirmo ${prefix}${dateText} como dia sem treino?`;
+}
+
 function activeProactivePrompt(memory: GutoMemory): ProactivePrompt | null {
   return memory.proactivePrompt?.status === "active" ? memory.proactivePrompt : null;
 }
@@ -7270,6 +7485,9 @@ function resolveDateText(rawInput: string): string | undefined {
   const text = normalize(rawInput);
   if (/\b(amanha|tomorrow|domani)\b/.test(text)) return rawInput.match(/amanh[ãa]|tomorrow|domani/i)?.[0] || "amanhã";
   if (/\b(hoje|today|oggi)\b/.test(text)) return rawInput.match(/hoje|today|oggi/i)?.[0] || "hoje";
+  if (/\b(semana que vem|proxima semana|next week|settimana prossima|prossima settimana)\b/.test(text)) {
+    return rawInput.match(/semana que vem|pr[oó]xima semana|next week|settimana prossima|prossima settimana/i)?.[0] || "semana que vem";
+  }
   for (const item of PROACTIVE_DATE_TOKENS) {
     const token = item.tokens.find((candidate) => text.includes(candidate));
     if (token) return token;
@@ -7283,6 +7501,9 @@ function resolveFutureDateKey(rawInput: string, now = new Date()): string | unde
   const today = todayKey(now);
   if (/\b(hoje|today|oggi)\b/.test(text)) return today;
   if (/\b(amanha|tomorrow|domani)\b/.test(text)) return addDaysToKey(today, 1);
+  if (/\b(semana que vem|proxima semana|next week|settimana prossima|prossima settimana)\b/.test(text)) {
+    return addDaysToKey(today, 7);
+  }
 
   const base = dateFromLocalKey(today);
   const currentDay = base.getUTCDay();
@@ -10872,6 +11093,16 @@ app.post("/guto", requireActiveUser, async (req, res) => {
             ...buildProactiveMemoryPatch(promptedMemory),
           };
         }
+      }
+      if (
+        resolverResultForRoute.reason === "pending_trip_protected_confirmation" &&
+        proactiveActionResult?.status === "pending_confirmation"
+      ) {
+        result.fala = buildProtectedDayFinalConfirmationFala(proactiveActionResult.memory, selectedLanguage);
+        result.acao = "none";
+        result.expectedResponse = null;
+        result.workoutPlan = null;
+        result.avatarEmotion = "alert";
       }
       if (proactiveActionResult?.impact?.decision.message) {
         result.fala = proactiveActionResult.impact.decision.message;

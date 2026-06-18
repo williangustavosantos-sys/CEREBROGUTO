@@ -343,6 +343,129 @@ describe("proactivity HTTP cycle", () => {
     globalThis.fetch = originalFetch
   })
 
+  it("POST extract resolve 'amanhã' em data real e não duplica card da mesma viagem", async () => {
+    const tomorrow = dateKey(1)
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes("generativelanguage.googleapis.com")) {
+        return new Response(JSON.stringify({
+          candidates: [{
+            content: {
+              parts: [{
+                text: JSON.stringify([
+                  {
+                    type: "trip",
+                    rawText: "eu viajo amanhã",
+                    understood: "Viagem amanhã",
+                    dateText: "amanhã",
+                    dateParsed: tomorrow,
+                  },
+                ]),
+              }],
+            },
+          }],
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return originalFetch(input as RequestInfo, init)
+    }) as typeof globalThis.fetch
+
+    const res = await fetch(`${baseUrl}/guto/proactivity/extract`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        conversationText: "USER: eu viajo amanhã\nGUTO: Você consegue treinar adaptado?",
+        language: "pt-BR",
+      }),
+    })
+    assert.equal(res.status, 200)
+    const body = (await res.json()) as { extracted: number; memories: Array<{ dateParsed?: string; status: string }> }
+    assert.equal(body.extracted, 1)
+    assert.equal(body.memories[0]?.status, "pending_confirmation")
+    assert.equal(body.memories[0]?.dateParsed, tomorrow)
+
+    globalThis.fetch = originalFetch
+  })
+
+  it("viagem + impossível mantém memória pendente e pergunta confirmação final sem criar dia protegido", async () => {
+    const { addProactiveMemory } = await import("../src/proactivity/proactive-store.js")
+    const tripDate = dateKey(1)
+    const memory = await addProactiveMemory(USER_ID, {
+      type: "trip",
+      status: "pending_confirmation",
+      rawText: "eu viajo amanhã",
+      understood: "Viagem amanhã",
+      dateText: "amanhã",
+      dateParsed: tripDate,
+      weekKey: currentWeekKey(),
+    })
+    mockGutoModel({
+      fala: "Vou seguir.",
+      acao: "none",
+      expectedResponse: null,
+    })
+
+    const res = await fetch(`${baseUrl}/guto`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        language: "pt-BR",
+        profile: { userId: USER_ID, name: "Will" },
+        history: [],
+        input: "impossível treinar",
+      }),
+    })
+    assert.equal(res.status, 200)
+    const body = (await res.json()) as { fala?: string; memoryPatch?: { proactiveImpacts?: Array<{ workoutEffect: string }> } }
+    assert.match(body.fala || "", new RegExp(`Confirmo amanhã, dia ${tripDate.slice(8, 10)}/${tripDate.slice(5, 7)}`, "i"))
+    assert.equal(body.memoryPatch?.proactiveImpacts?.some((impact) => impact.workoutEffect === "protected"), false)
+
+    const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<
+      string,
+      { proactiveMemories?: Array<{ id: string; status: string }>; proactiveImpacts?: Array<{ workoutEffect: string }> }
+    >
+    assert.equal(store[USER_ID]?.proactiveMemories?.find((item) => item.id === memory.id)?.status, "pending_confirmation")
+    assert.equal(store[USER_ID]?.proactiveImpacts?.some((impact) => impact.workoutEffect === "protected"), false)
+  })
+
+  it("confirmar dia protegido atualiza Percurso com impacto definitivo", async () => {
+    const { addProactiveMemory, updateProactiveMemory } = await import("../src/proactivity/proactive-store.js")
+    const tripDate = dateKey(1)
+    const memory = await addProactiveMemory(USER_ID, {
+      type: "trip",
+      status: "pending_confirmation",
+      rawText: "eu viajo amanhã",
+      understood: "Viagem amanhã",
+      dateText: "amanhã",
+      dateParsed: tripDate,
+      weekKey: currentWeekKey(),
+    })
+    await updateProactiveMemory(USER_ID, memory.id, {
+      rawText: "eu viajo amanhã; impossível treinar",
+      understood: "Viagem amanhã; impossível treinar",
+      status: "pending_confirmation",
+    })
+
+    const res = await fetch(`${baseUrl}/guto/proactivity/confirm`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ memoryId: memory.id }),
+    })
+    assert.equal(res.status, 200)
+    const body = (await res.json()) as {
+      ok: boolean
+      impact?: { workoutEffect: string; pathEffect: string; affectedDates?: string[] }
+      memoryPatch?: { proactiveImpacts?: Array<{ memoryId: string; workoutEffect: string; pathEffect: string; affectedDates?: string[] }> }
+    }
+    assert.equal(body.ok, true)
+    assert.equal(body.impact?.workoutEffect, "protected")
+    assert.equal(body.impact?.pathEffect, "adapted_context")
+    assert.deepEqual(body.impact?.affectedDates, [tripDate])
+    assert.equal(body.memoryPatch?.proactiveImpacts?.find((impact) => impact.memoryId === memory.id)?.workoutEffect, "protected")
+  })
+
   it("GET /guto/proactive?force=1 pergunta contexto semanal antes da missão e persiste", async () => {
     mockGutoModel({
       fala: "Olá! Como posso te ajudar hoje?",
