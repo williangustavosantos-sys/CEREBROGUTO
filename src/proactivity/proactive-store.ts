@@ -16,8 +16,10 @@ import type {
 
 type ProactiveMemoryCandidate = Pick<
   ProactiveMemory,
-  'type' | 'understood' | 'dateText' | 'dateParsed' | 'location'
+  'type' | 'understood' | 'dateText' | 'dateParsed' | 'location' | 'eventKey' | 'weekKey'
 >
+
+type NewProactiveMemory = Omit<ProactiveMemory, 'id' | 'userId' | 'createdAt' | 'updatedAt'>
 
 // ─── Write mutex ──────────────────────────────────────────────────────────────
 // Node.js is single-threaded but async writes can interleave.
@@ -72,10 +74,24 @@ function normalizeSignatureText(value?: string): string {
 function proactiveMemorySignature(memory: ProactiveMemoryCandidate): string {
   const date = memory.dateParsed || normalizeSignatureText(memory.dateText)
   const location = normalizeSignatureText(memory.location)
+  if (memory.type === 'trip' && date) {
+    return [memory.type, date].join('|')
+  }
   if (date || location) {
     return [memory.type, date, location].join('|')
   }
   return [memory.type, normalizeSignatureText(memory.understood)].join('|')
+}
+
+export function buildProactiveEventKey(
+  userId: string,
+  memory: ProactiveMemoryCandidate
+): string {
+  const dateScope = memory.dateParsed || normalizeSignatureText(memory.dateText) || memory.weekKey || 'undated'
+  const scope = memory.type === 'trip'
+    ? dateScope
+    : [dateScope, normalizeSignatureText(memory.location) || normalizeSignatureText(memory.understood)].filter(Boolean).join(':')
+  return [memory.type, userId, scope].join(':')
 }
 
 export function hasMatchingProactiveMemory(
@@ -83,7 +99,10 @@ export function hasMatchingProactiveMemory(
   candidate: ProactiveMemoryCandidate
 ): boolean {
   const candidateSignature = proactiveMemorySignature(candidate)
-  return memories.some((memory) => proactiveMemorySignature(memory) === candidateSignature)
+  return memories.some((memory) => {
+    if (candidate.eventKey && memory.eventKey === candidate.eventKey) return true
+    return proactiveMemorySignature(memory) === candidateSignature
+  })
 }
 
 export function getDateKey(date = new Date(), timeZone = config.timeZone): string {
@@ -124,25 +143,55 @@ export async function getProactiveMemories(userId: string): Promise<ProactiveMem
   })
 }
 
-export async function addProactiveMemory(
+export async function upsertProactiveMemory(
   userId: string,
-  data: Omit<ProactiveMemory, 'id' | 'userId' | 'createdAt' | 'updatedAt'>
-): Promise<ProactiveMemory> {
+  data: NewProactiveMemory
+): Promise<{ memory: ProactiveMemory; created: boolean }> {
   const now = new Date().toISOString()
-  // pending_confirmation expires after 24h if user never responds
   const expiresAt = data.status === 'pending_confirmation'
     ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
     : data.expiresAt
-  const newMemory: ProactiveMemory = {
+  const eventKey = buildProactiveEventKey(userId, data)
+  const candidate: ProactiveMemory = {
     ...data,
+    eventKey,
     id: generateId(userId),
     userId,
     createdAt: now,
     updatedAt: now,
     expiresAt,
   }
-  await atomicUpdateMemories(userId, (current) => [...current, newMemory])
-  return newMemory
+  let result = candidate
+  let created = true
+  await atomicUpdateMemories(userId, (current) => {
+    const index = current.findIndex((item) =>
+      item.eventKey === eventKey || proactiveMemorySignature(item) === proactiveMemorySignature(candidate)
+    )
+    if (index < 0) return [...current, candidate]
+
+    created = false
+    const existing = current[index]!
+    result = {
+      ...existing,
+      eventKey,
+      rawText: existing.rawText || candidate.rawText,
+      understood: existing.understood || candidate.understood,
+      dateText: existing.dateText || candidate.dateText,
+      dateParsed: existing.dateParsed || candidate.dateParsed,
+      location: existing.location || candidate.location,
+      sourceTurnId: existing.sourceTurnId || candidate.sourceTurnId,
+      updatedAt: now,
+    }
+    return current.map((item, itemIndex) => itemIndex === index ? result : item)
+  })
+  return { memory: result, created }
+}
+
+export async function addProactiveMemory(
+  userId: string,
+  data: NewProactiveMemory
+): Promise<ProactiveMemory> {
+  return (await upsertProactiveMemory(userId, data)).memory
 }
 
 export async function updateProactiveMemory(
@@ -173,6 +222,8 @@ export async function updateProactiveMemory(
           validatedAt: undefined,
         }
       }
+
+      merged.eventKey = buildProactiveEventKey(userId, merged)
 
       found = merged
       return found
@@ -222,6 +273,7 @@ export async function discardProactiveMemory(
   const now = new Date().toISOString()
   await updateProactiveMemory(userId, memoryId, {
     status: 'discarded',
+    stage: 'discarded',
     discardedAt: now,
   })
 }

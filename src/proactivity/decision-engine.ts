@@ -7,6 +7,7 @@ import type {
   ProactiveMissionEffect,
   ProactiveWorkoutEffect,
 } from './types'
+import { resolveProactiveDate } from './date-resolver'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -125,30 +126,13 @@ function weekDatesFrom(now: Date): string[] {
   return Array.from({ length: 7 }, (_, index) => dateKey(addDays(now, index)))
 }
 
-function matchWeekdayDate(text: string, now: Date): string | null {
-  const weekdays: Array<{ day: number; tokens: string[] }> = [
-    { day: 0, tokens: ['domingo', 'sunday', 'domenica'] },
-    { day: 1, tokens: ['segunda', 'monday', 'lunedi', 'lunedi feira'] },
-    { day: 2, tokens: ['terca', 'terça', 'tuesday', 'martedi'] },
-    { day: 3, tokens: ['quarta', 'wednesday', 'mercoledi'] },
-    { day: 4, tokens: ['quinta', 'thursday', 'giovedi'] },
-    { day: 5, tokens: ['sexta', 'friday', 'venerdi'] },
-    { day: 6, tokens: ['sabado', 'sábado', 'saturday', 'sabato'] },
-  ]
-  const target = weekdays.find((item) => item.tokens.some((token) => text.includes(token)))
-  if (!target) return null
-  const current = now.getUTCDay()
-  const delta = (target.day - current + 7) % 7
-  return dateKey(addDays(now, delta))
-}
-
 function resolveAffectedDates(memory: ProactiveMemory, text: string, now: Date, weekly = false): string[] {
   if (weekly) return weekDatesFrom(now)
   if (memory.dateParsed && /^\d{4}-\d{2}-\d{2}$/.test(memory.dateParsed)) {
     return rangeFromStart(memory.dateParsed, durationDaysFromText(text))
   }
-  const byWeekday = matchWeekdayDate(text, now)
-  if (byWeekday) return rangeFromStart(byWeekday, durationDaysFromText(text))
+  const resolved = resolveProactiveDate(text, dateKey(now))
+  if (resolved) return rangeFromStart(resolved.dateParsed, durationDaysFromText(text))
   return [dateKey(now)]
 }
 

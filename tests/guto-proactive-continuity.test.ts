@@ -18,6 +18,7 @@ import {
   normalizeExpectedResponse,
 } from "../server.js";
 import { extractDeterministicEvents } from "../src/proactivity/memory-extractor.js";
+import { resolveProactiveDate } from "../src/proactivity/date-resolver.js";
 
 // ─── Regressão de PRODUTO: Continuidade Primeiro ─────────────────────────────
 // Bug observado ao vivo: "viajo na quarta" → "Quarta é dia de descanso ou treino
@@ -136,6 +137,15 @@ describe("Abertura semanal contextual — antes de fechar missão", () => {
 });
 
 describe("Eventos temporais — não morrem no chat", () => {
+  it("próxima terça usa a mesma data canônica no turno e no extractor", () => {
+    const today = "2026-06-23"; // terça-feira
+    const canonical = resolveProactiveDate("viajo na próxima terça-feira", today);
+    const events = extractDeterministicEvents("USER: viajo na próxima terça-feira", "pt-BR", today);
+
+    assert.equal(canonical?.dateParsed, "2026-06-30");
+    assert.equal(events[0]?.dateParsed, canonical?.dateParsed);
+  });
+
   it("extractor determinístico cria memória pendente para viagem futura com data provável", () => {
     const events = extractDeterministicEvents("USER: viajo sexta", "pt-BR", "2026-06-16");
     assert.equal(events.length, 1);

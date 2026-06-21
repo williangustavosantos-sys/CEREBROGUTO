@@ -79,6 +79,7 @@ type GutoResponse = {
   languageCode?: string;
   mimeType?: string;
   voiceUsed?: string;
+  turnDecision?: { relatedMemoryId?: string; stage?: string; cards?: Array<{ memoryId?: string }> };
 };
 
 type MemoryRecord = Record<string, unknown> & {
@@ -103,8 +104,9 @@ type MemoryRecord = Record<string, unknown> & {
   validationHistory?: Array<{ status?: string; xp?: number; createdAt?: string }>;
   lastWorkoutPlan?: WorkoutPlan | null;
   dietGenerationStatus?: string;
-  proactiveMemories?: Array<{ id?: string; type?: string; status?: string; confirmationStage?: string }>;
+  proactiveMemories?: Array<{ id?: string; type?: string; status?: string; stage?: string; confirmationStage?: string }>;
   proactiveImpacts?: Array<{ workoutEffect?: string; missionEffect?: string; pathEffect?: string; status?: string }>;
+  activeConversationContext?: { kind?: string; relatedMemoryId?: string } | null;
 };
 
 type ScenarioProfile = {
@@ -1089,27 +1091,19 @@ async function runProfile(ctx: ScenarioContext, profile: ScenarioProfile): Promi
     expect(!hasLanguageLeak(response.fala || "", profile.language), `dúvida de dieta misturou idioma: ${response.fala}`);
   });
 
-  await recordCheck(report, "viagem", "travel_creates_event_card_before_impact_question", async () => {
+  await recordCheck(report, "viagem", "travel_creates_one_event_and_asks_continuity_without_card", async () => {
     const response = await ctx.chat(profile, profile.prompts.travel);
-    expect(hasAny(response.fala || "", profile.language === "it-IT" ? ["card", "conferma", "viaggio", "impatto"] : ["card", "confirma", "viagem", "impacto"]), `viagem não criou card de evento antes do impacto: ${response.fala}`);
+    expect(hasAny(response.fala || "", profile.language === "it-IT" ? ["20 minuti", "adattato", "allenamento"] : ["20 minutos", "adaptado", "treino"]), `viagem não perguntou continuidade do treino: ${response.fala}`);
     expect(!hasCalibrationReask(response.fala || "", profile.language), `viagem reperguntou calibragem: ${response.fala}`);
 
     const memory = await ctx.getMemory(profile);
     const trip = memory.proactiveMemories?.find((item) => item.type === "trip" && item.status === "pending_confirmation");
     expect(Boolean(trip?.id), `viagem não criou memória pendente: ${JSON.stringify(memory.proactiveMemories)}`);
-    expect(trip?.confirmationStage === "event", `viagem não ficou no estágio de evento: ${JSON.stringify(trip)}`);
+    expect(trip?.stage === "continuity_question", `viagem não ficou no estágio de continuidade: ${JSON.stringify(trip)}`);
+    expect(response.expectedResponse?.context === "travel_training", `viagem não abriu contexto travel_training: ${JSON.stringify(response)}`);
+    expect(memory.activeConversationContext?.kind === "travel_impact_confirmation", `viagem não persistiu contexto ativo: ${JSON.stringify(memory.activeConversationContext)}`);
+    expect((response.turnDecision?.cards || []).length === 0, `viagem abriu card paralelo antes do impacto: ${JSON.stringify(response.turnDecision)}`);
     state.travelMemoryId = trip?.id;
-
-    const confirm = await ctx.postJson<{
-      ok?: boolean;
-      fala?: string;
-      expectedResponse?: ExpectedResponse;
-      memoryPatch?: { activeConversationContext?: { kind?: string } | null };
-    }>(profile, "/guto/proactivity/confirm", { memoryId: state.travelMemoryId });
-    expect(confirm.status === 200 && confirm.body.ok === true, `confirmar viagem respondeu ${confirm.status}: ${JSON.stringify(confirm.body)}`);
-    expect(hasAny(confirm.body.fala || "", profile.language === "it-IT" ? ["20 minuti", "adattato", "allenamento"] : ["20 minutos", "adaptado", "treino"]), `confirmar viagem não perguntou treino adaptado: ${confirm.body.fala}`);
-    expect(confirm.body.expectedResponse?.context === "travel_training", `confirmar viagem não abriu contexto travel_training: ${JSON.stringify(confirm.body)}`);
-    expect(confirm.body.memoryPatch?.activeConversationContext?.kind === "travel_impact_confirmation", `confirmar viagem não abriu estado de impacto: ${JSON.stringify(confirm.body.memoryPatch)}`);
   });
 
   await recordCheck(report, "viagem", "travel_unavailable_asks_final_confirmation_without_protecting_directly", async () => {

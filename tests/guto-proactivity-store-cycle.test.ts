@@ -72,3 +72,29 @@ test("ciclo confirm — pending_confirmation vira confirmed com confirmedAt", as
   assert.ok(confirmed.some((item) => item.id === memory.id))
   assert.ok(confirmed.find((item) => item.id === memory.id)?.confirmedAt)
 })
+
+test("upsert idempotente serializa duas extrações do mesmo evento sem append cego", async () => {
+  const { upsertProactiveMemory, getProactiveMemories } = await import("../src/proactivity/proactive-store.js")
+  const userId = `${USER_ID}-idempotent`
+  const candidate = {
+    type: "trip" as const,
+    status: "pending_confirmation" as const,
+    stage: "continuity_question" as const,
+    rawText: "viajo na próxima terça",
+    understood: "Viagem na próxima terça",
+    dateText: "terça-feira",
+    dateParsed: "2026-06-30",
+    weekKey: "2026-W26",
+  }
+
+  const [first, second] = await Promise.all([
+    upsertProactiveMemory(userId, candidate),
+    upsertProactiveMemory(userId, { ...candidate, understood: "Viagem provável em 2026-06-30" }),
+  ])
+  const memories = await getProactiveMemories(userId)
+
+  assert.equal(memories.length, 1)
+  assert.equal(first.memory.id, second.memory.id)
+  assert.equal([first.created, second.created].filter(Boolean).length, 1)
+  assert.equal(memories[0]?.eventKey, `trip:${userId}:2026-06-30`)
+})

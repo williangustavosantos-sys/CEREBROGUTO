@@ -244,14 +244,14 @@ describe("POST_CONFIRMATION_REDIRECT", () => {
     assert.deepEqual(afterMemory.proactiveImpacts || [], before.proactiveImpacts || []);
   });
 
-  it("viagem nova abre card de evento antes de perguntar impacto", async () => {
+  it("viagem nova pergunta continuidade sem abrir card concorrente", async () => {
     writeUserMemory(USER_ID, {
       lastWorkoutPlan: missionPlan("Corpo Inteiro com cuidado no ombro"),
     });
 
     const body = await postGuto("viajo sexta");
 
-    assert.match(body.fala, /confirma primeiro no card|impacto no treino/i);
+    assert.match(body.fala, /treino adaptado/i);
     assert.doesNotMatch(body.fala, /Agora volta comigo para hoje/i);
     assert.notEqual(body.acao, "updateWorkout");
     assert.equal(body.workoutPlan ?? null, null);
@@ -259,8 +259,10 @@ describe("POST_CONFIRMATION_REDIRECT", () => {
     const memory = readUserMemory();
     assert.equal(memory.proactiveMemories?.length, 1);
     assert.equal(memory.proactiveMemories?.[0]?.status, "pending_confirmation");
+    assert.equal(memory.proactiveMemories?.[0]?.stage, "continuity_question");
     assert.equal(memory.proactiveMemories?.[0]?.confirmationStage, "event");
-    assert.equal(memory.activeConversationContext?.kind, "travel_confirmation");
+    assert.equal(memory.activeConversationContext?.kind, "travel_impact_confirmation");
+    assert.deepEqual(body.turnDecision?.cards || [], []);
     assert.deepEqual(memory.proactiveImpacts || [], []);
   });
 

@@ -19,6 +19,14 @@ export type ProactiveMemoryStatus =
   | 'validated_postponed'   // não aconteceu, mover para próxima semana
   | 'discarded'             // descartada
 
+export type ProactiveMemoryStage =
+  | 'event_confirmation'
+  | 'continuity_question'
+  | 'impact_confirmation'
+  | 'confirmed_adapted'
+  | 'confirmed_protected'
+  | 'discarded'
+
 export type ProactiveImpactSurface =
   | 'chat'
   | 'workout'
@@ -153,6 +161,10 @@ export interface ProactiveMemory {
   discardedAt?: string
   discardRequestedAt?: string
   decision?: ProactiveDecision
+  eventKey?: string
+  stage?: ProactiveMemoryStage
+  sourceTurnId?: string
+  /** Compatibilidade temporária com memórias gravadas antes do estágio operacional canônico. */
   confirmationStage?: 'event' | 'impact'
 }
 

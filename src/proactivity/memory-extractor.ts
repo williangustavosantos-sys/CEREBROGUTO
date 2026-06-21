@@ -4,6 +4,7 @@
 
 import { config } from '../config'
 import { getWeekKey } from './proactive-store'
+import { addDaysToDateKey, resolveProactiveDate } from './date-resolver'
 import type { ProactiveMemoryType } from './types'
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -17,8 +18,6 @@ export interface ExtractedEvent {
   location?: string     // city/place if relevant
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000
-
 function normalize(value: string): string {
   return value
     .normalize('NFD')
@@ -27,19 +26,6 @@ function normalize(value: string): string {
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase()
-}
-
-function addDays(date: Date, amount: number): Date {
-  return new Date(date.getTime() + amount * DAY_MS)
-}
-
-function toIsoDate(date: Date): string {
-  return date.toISOString().slice(0, 10)
-}
-
-function parseToday(todayISO: string): Date {
-  const parsed = new Date(`${todayISO.slice(0, 10)}T12:00:00.000Z`)
-  return Number.isNaN(parsed.getTime()) ? new Date() : parsed
 }
 
 function numberWordPt(value: string): number | null {
@@ -55,68 +41,6 @@ function numberWordPt(value: string): number | null {
   const normalized = normalize(value)
   if (/^\d+$/.test(normalized)) return Number(normalized)
   return map[normalized] ?? null
-}
-
-function weekdayDate(text: string, today: Date): { dateParsed: string; dateText: string } | null {
-  const weekdays: Array<{ day: number; tokens: string[]; label: string }> = [
-    { day: 0, tokens: ['domingo', 'sunday', 'domenica'], label: 'domingo' },
-    { day: 1, tokens: ['segunda', 'monday', 'lunedi'], label: 'segunda' },
-    { day: 2, tokens: ['terca', 'terça', 'tuesday', 'martedi'], label: 'terça' },
-    { day: 3, tokens: ['quarta', 'wednesday', 'mercoledi'], label: 'quarta' },
-    { day: 4, tokens: ['quinta', 'thursday', 'giovedi'], label: 'quinta' },
-    { day: 5, tokens: ['sexta', 'friday', 'venerdi'], label: 'sexta' },
-    { day: 6, tokens: ['sabado', 'sábado', 'saturday', 'sabato'], label: 'sábado' },
-  ]
-  const match = weekdays.find((weekday) => weekday.tokens.some((token) => text.includes(normalize(token))))
-  if (!match) return null
-  const current = today.getUTCDay()
-  const delta = (match.day - current + 7) % 7
-  return {
-    dateParsed: toIsoDate(addDays(today, delta)),
-    dateText: match.label,
-  }
-}
-
-function relativeDate(text: string, today: Date): { dateParsed: string; dateText: string } | null {
-  if (/\b(hoje|today|oggi)\b/.test(text)) {
-    return {
-      dateParsed: toIsoDate(today),
-      dateText: text.match(/\b(hoje|today|oggi)\b/)?.[0] || 'hoje',
-    }
-  }
-  if (/\b(amanha|tomorrow|domani)\b/.test(text)) {
-    return {
-      dateParsed: toIsoDate(addDays(today, 1)),
-      dateText: text.match(/\b(amanha|tomorrow|domani)\b/)?.[0] || 'amanhã',
-    }
-  }
-  if (/\b(semana que vem|proxima semana|next week|settimana prossima|prossima settimana)\b/.test(text)) {
-    return {
-      dateParsed: toIsoDate(addDays(today, 7)),
-      dateText: text.match(/\b(semana que vem|proxima semana|next week|settimana prossima|prossima settimana)\b/)?.[0] || 'semana que vem',
-    }
-  }
-  const weeks = text.match(/\bdaqui\s+(\d+|uma|um|duas|dois|tres|três|quatro)\s+semanas?\b/)
-  if (weeks) {
-    const amount = numberWordPt(weeks[1] || '')
-    if (amount && amount > 0 && amount <= 8) {
-      return {
-        dateParsed: toIsoDate(addDays(today, amount * 7)),
-        dateText: weeks[0],
-      }
-    }
-  }
-  const days = text.match(/\bdaqui\s+(\d+|uma|um|duas|dois|tres|três|quatro)\s+dias?\b/)
-  if (days) {
-    const amount = numberWordPt(days[1] || '')
-    if (amount && amount > 0 && amount <= 30) {
-      return {
-        dateParsed: toIsoDate(addDays(today, amount)),
-        dateText: days[0],
-      }
-    }
-  }
-  return null
 }
 
 function durationDays(text: string): number {
@@ -139,12 +63,11 @@ function travelEventFromLine(rawLine: string, todayISO: string, userLanguage: st
   const isTravel = /\b(viajo|viajar|viagem|vou viajar|viajando|parto|viaggio|travel|trip|flight)\b/.test(text)
   if (!isTravel) return null
 
-  const today = parseToday(todayISO)
-  const resolved = relativeDate(text, today) || weekdayDate(text, today)
+  const resolved = resolveProactiveDate(text, todayISO)
   if (!resolved) return null
 
   const days = durationDays(text)
-  const endDate = days > 1 ? toIsoDate(addDays(new Date(`${resolved.dateParsed}T12:00:00.000Z`), days - 1)) : undefined
+  const endDate = days > 1 ? addDaysToDateKey(resolved.dateParsed, days - 1) : undefined
   const understood =
     userLanguage === 'en-US'
       ? days > 1
@@ -297,16 +220,25 @@ export async function extractEventsFromConversation(
           item.understood.length > 0
         )
       })
-      .map((item) => ({
-        type: item.type as ProactiveMemoryType,
-        rawText: String(item.rawText).slice(0, 500),
-        understood: String(item.understood).slice(0, 300),
-        dateText: typeof item.dateText === 'string' ? item.dateText : undefined,
-        dateParsed: typeof item.dateParsed === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.dateParsed)
-          ? item.dateParsed
-          : undefined,
-        location: typeof item.location === 'string' ? item.location : undefined,
-      }))
+      .map((item) => {
+        const rawEventText = String(item.rawText).slice(0, 500)
+        const canonicalDate = resolveProactiveDate(
+          [rawEventText, typeof item.dateText === 'string' ? item.dateText : ''].filter(Boolean).join(' '),
+          todayISO
+        )
+        return {
+          type: item.type as ProactiveMemoryType,
+          rawText: rawEventText,
+          understood: String(item.understood).slice(0, 300),
+          dateText: canonicalDate?.dateText || (typeof item.dateText === 'string' ? item.dateText : undefined),
+          dateParsed: canonicalDate?.dateParsed || (
+            typeof item.dateParsed === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.dateParsed)
+              ? item.dateParsed
+              : undefined
+          ),
+          location: typeof item.location === 'string' ? item.location : undefined,
+        }
+      })
 
     const seen = new Set(semantic.map(eventSignature))
     const merged = [...semantic]
@@ -338,6 +270,8 @@ export function buildPendingMemoryData(
     dateParsed: event.dateParsed,
     location: event.location,
     weekKey: getWeekKey(),
-    ...(event.type === 'trip' ? { confirmationStage: 'event' as const } : {}),
+    ...(event.type === 'trip'
+      ? { stage: 'continuity_question' as const, confirmationStage: 'event' as const }
+      : { stage: 'event_confirmation' as const }),
   }
 }

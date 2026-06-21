@@ -411,6 +411,124 @@ describe("proactivity HTTP cycle", () => {
     globalThis.fetch = originalFetch
   })
 
+  it("turno atômico cria uma viagem, mantém o memoryId e só abre card no impacto", async () => {
+    const { resolveProactiveDate } = await import("../src/proactivity/date-resolver.js")
+    const resolved = resolveProactiveDate("viajo na próxima terça-feira", dateKey())
+    assert.ok(resolved)
+    writeUserMemory(USER_ID, {
+      proactiveMemories: [],
+      proactiveImpacts: [],
+      proactivePrompt: null,
+      preferredTrainingLocation: "gym",
+      trainingLocation: "gym",
+      trainingLevel: "returning",
+      trainingStatus: "returning",
+      trainingPathology: "sem dor",
+      trainingLimitations: "sem dor",
+      trainingGoal: "fat_loss",
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      country: "Italia",
+      countryCode: "IT",
+    })
+    mockGutoModel({ fala: "Entendi o contexto.", acao: "none", expectedResponse: null })
+
+    const first = await fetch(`${baseUrl}/guto`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        language: "pt-BR",
+        profile: { userId: USER_ID, name: "Will" },
+        history: [],
+        input: "Viajo na próxima terça-feira.",
+        turnId: "turn-trip-created",
+      }),
+    })
+    assert.equal(first.status, 200)
+    const firstBody = (await first.json()) as {
+      expectedResponse?: { context?: string }
+      turnDecision?: { relatedMemoryId?: string; stage?: string; cards?: unknown[] }
+      memoryPatch?: { proactiveMemories?: Array<{ id: string; dateParsed?: string; stage?: string }> }
+    }
+    const memoryId = firstBody.turnDecision?.relatedMemoryId
+    assert.ok(memoryId)
+    assert.equal(firstBody.turnDecision?.stage, "continuity_question")
+    assert.deepEqual(firstBody.turnDecision?.cards, [])
+    assert.equal(firstBody.expectedResponse?.context, "travel_training")
+    assert.equal(firstBody.memoryPatch?.proactiveMemories?.length, 1)
+    assert.equal(firstBody.memoryPatch?.proactiveMemories?.[0]?.dateParsed, resolved.dateParsed)
+
+    globalThis.fetch = originalFetch
+    const extracted = await fetch(`${baseUrl}/guto/proactivity/extract`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ conversationText: "USER: Viajo na próxima terça-feira.", language: "pt-BR" }),
+    })
+    const extractedBody = (await extracted.json()) as { extracted: number }
+    assert.equal(extractedBody.extracted, 0)
+
+    mockGutoModel({ fala: "Não deveria decidir fora do contexto.", acao: "none", expectedResponse: null })
+    const impossible = await fetch(`${baseUrl}/guto`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        language: "pt-BR",
+        profile: { userId: USER_ID, name: "Will" },
+        history: [],
+        input: "Impossível.",
+        turnId: "turn-trip-impossible",
+      }),
+    })
+    const impossibleBody = (await impossible.json()) as {
+      turnDecision?: { relatedMemoryId?: string; stage?: string; cards?: Array<{ memoryId: string }> }
+      memoryPatch?: { proactiveMemories?: Array<{ id: string; stage?: string }>; proactiveImpacts?: unknown[] }
+    }
+    assert.equal(impossibleBody.turnDecision?.relatedMemoryId, memoryId)
+    assert.equal(impossibleBody.turnDecision?.stage, "impact_confirmation")
+    assert.deepEqual(impossibleBody.turnDecision?.cards, [{ memoryId, stage: "impact_confirmation", dateParsed: resolved.dateParsed }])
+    assert.equal(impossibleBody.memoryPatch?.proactiveMemories?.filter((item) => item.id === memoryId).length, 1)
+    assert.equal(impossibleBody.memoryPatch?.proactiveImpacts?.length, 0)
+
+    const replay = await fetch(`${baseUrl}/guto`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        language: "pt-BR",
+        profile: { userId: USER_ID, name: "Will" },
+        history: [],
+        input: "Impossível.",
+        turnId: "turn-trip-impossible",
+      }),
+    })
+    const replayBody = (await replay.json()) as { turnDecision?: { relatedMemoryId?: string; stage?: string } }
+    assert.equal(replayBody.turnDecision?.relatedMemoryId, memoryId)
+    assert.equal(replayBody.turnDecision?.stage, "impact_confirmation")
+
+    const list = await fetch(`${baseUrl}/guto/proactivity/memories`, { headers: authHeaders() })
+    const listBody = (await list.json()) as { memories: Array<{ id: string; stage?: string }> }
+    assert.equal(listBody.memories.filter((item) => item.id === memoryId).length, 1)
+    assert.equal(listBody.memories.find((item) => item.id === memoryId)?.stage, "impact_confirmation")
+
+    const confirmed = await fetch(`${baseUrl}/guto/proactivity/confirm`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ memoryId }),
+    })
+    const confirmedBody = (await confirmed.json()) as {
+      memory?: { id?: string; stage?: string }
+      impact?: { memoryId?: string; workoutEffect?: string }
+      memoryPatch?: { proactiveMemories?: Array<{ id: string; stage?: string }>; proactiveImpacts?: Array<{ memoryId: string }> }
+    }
+    assert.equal(confirmedBody.memory?.id, memoryId)
+    assert.equal(confirmedBody.memory?.stage, "confirmed_protected")
+    assert.equal(confirmedBody.impact?.memoryId, memoryId)
+    assert.equal(confirmedBody.impact?.workoutEffect, "protected")
+    assert.equal(confirmedBody.memoryPatch?.proactiveMemories?.filter((item) => item.id === memoryId).length, 1)
+    assert.equal(confirmedBody.memoryPatch?.proactiveImpacts?.filter((item) => item.memoryId === memoryId).length, 1)
+  })
+
   it("pendência de evento de viagem bloqueia resposta paralela antes do card ser confirmado", async () => {
     const { addProactiveMemory } = await import("../src/proactivity/proactive-store.js")
     const tripDate = dateKey(1)
@@ -565,6 +683,107 @@ describe("proactivity HTTP cycle", () => {
     assert.equal(body.impact?.pathEffect, "adapted_context")
     assert.deepEqual(body.impact?.affectedDates, [tripDate])
     assert.equal(body.memoryPatch?.proactiveImpacts?.find((impact) => impact.memoryId === memory.id)?.workoutEffect, "protected")
+  })
+
+  it("gera treino base mesmo com card de viagem pendente", async () => {
+    const tripDate = dateKey(2)
+    const pendingTrip = {
+      id: "pm-workout-pending-trip",
+      userId: USER_ID,
+      type: "trip",
+      status: "pending_confirmation",
+      stage: "impact_confirmation",
+      confirmationStage: "impact",
+      rawText: "viajo terça; impossível treinar",
+      understood: "Viagem terça; dia protegido aguardando confirmação",
+      dateParsed: tripDate,
+      weekKey: currentWeekKey(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }
+    writeUserMemory(USER_ID, {
+      hasSeenChatOpening: true,
+      trainedToday: false,
+      proactiveSent: {},
+      proactiveMemories: [pendingTrip],
+      proactiveImpacts: [],
+      lastWorkoutPlan: null,
+      trainingGoal: "fat_loss",
+      preferredTrainingLocation: "gym",
+      trainingLocation: "gym",
+      trainingLevel: "returning",
+      trainingStatus: "returning",
+      trainingPathology: "sem dor",
+      trainingLimitations: "sem dor",
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      country: "Italia",
+      countryCode: "IT",
+    })
+    mockGutoModel({
+      fala: "Treino base pronto.",
+      acao: "updateWorkout",
+      expectedResponse: null,
+      workoutPlan: missionPlan("Treino base com viagem pendente"),
+    })
+
+    const res = await fetch(`${baseUrl}/guto/proactive?language=pt-BR&force=1`, { headers: authHeaders() })
+    assert.equal(res.status, 200)
+    const body = (await res.json()) as { acao?: string; workoutPlan?: { title?: string; exercises?: unknown[] } }
+    assert.equal(body.acao, "updateWorkout")
+    assert.ok((body.workoutPlan?.exercises?.length || 0) > 0)
+
+    const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, {
+      lastWorkoutPlan?: { title?: string }
+      proactiveMemories?: Array<{ id: string; stage?: string }>
+    }>
+    assert.ok(store[USER_ID]?.lastWorkoutPlan)
+    assert.equal(store[USER_ID]?.proactiveMemories?.find((item) => item.id === pendingTrip.id)?.stage, "impact_confirmation")
+  })
+
+  it("job de treino base não extrai viagem a partir do texto interno da calibragem", async () => {
+    writeUserMemory(USER_ID, {
+      hasSeenChatOpening: true,
+      trainedToday: false,
+      proactiveSent: {},
+      proactiveMemories: [],
+      proactiveImpacts: [],
+      weeklyConversation: null,
+      lastWorkoutPlan: null,
+      trainingGoal: "fat_loss",
+      preferredTrainingLocation: "mixed",
+      trainingLocation: "mixed",
+      trainingLevel: "returning",
+      trainingStatus: "viaggio questa settimana, in ripresa",
+      trainingPathology: "senza dolore",
+      trainingLimitations: "senza dolore",
+      biologicalSex: "male",
+      userAge: 40,
+      heightCm: 176,
+      weightKg: 84,
+      country: "Italia",
+      countryCode: "IT",
+      language: "it-IT",
+    })
+    mockGutoModel({
+      fala: "Allenamento base pronto.",
+      acao: "updateWorkout",
+      expectedResponse: null,
+      workoutPlan: missionPlan("Allenamento base"),
+    })
+
+    const res = await fetch(`${baseUrl}/guto/proactive?language=it-IT&force=1`, { headers: authHeaders() })
+    assert.equal(res.status, 200)
+    const body = (await res.json()) as { acao?: string; workoutPlan?: { exercises?: unknown[] } }
+    assert.equal(body.acao, "updateWorkout")
+    assert.ok((body.workoutPlan?.exercises?.length || 0) > 0)
+
+    const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, {
+      proactiveMemories?: unknown[]
+    }>
+    assert.deepEqual(store[USER_ID]?.proactiveMemories || [], [])
   })
 
   it("GET /guto/proactive?force=1 pergunta contexto semanal antes da missão e persiste", async () => {

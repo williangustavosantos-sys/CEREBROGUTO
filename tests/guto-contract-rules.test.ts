@@ -88,7 +88,14 @@ test('contrato: correcao proativa clara executa update deterministico', async ()
   assert.equal(result.engaged, true)
   assert.equal(result.action?.type, 'update')
   assert.equal(result.action?.type === 'update' ? result.action.patch.dateText : undefined, 'sexta-feira')
-  assert.equal(result.action?.type === 'update' ? result.action.patch.dateParsed : undefined, '2026-05-15')
+  const [{ resolveProactiveDate }, { getDateKey }] = await Promise.all([
+    import('../src/proactivity/date-resolver.js'),
+    import('../src/proactivity/proactive-store.js'),
+  ])
+  assert.equal(
+    result.action?.type === 'update' ? result.action.patch.dateParsed : undefined,
+    resolveProactiveDate('não, é sexta', getDateKey())?.dateParsed,
+  )
 })
 
 // ─── Fase 3 — esclarecimento de limitação física (dor) ──────────────────────

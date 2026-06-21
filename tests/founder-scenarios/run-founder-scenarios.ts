@@ -19,6 +19,7 @@ type GutoResponse = {
   acao?: string;
   expectedResponse?: unknown;
   workoutPlan?: unknown;
+  turnDecision?: { relatedMemoryId?: string; stage?: string; cards?: Array<{ memoryId?: string }> };
 };
 
 type MemoryRecord = Record<string, unknown>;
@@ -255,22 +256,34 @@ function assertNoWorkoutGeneration(response: GutoResponse) {
 const scenarios: FounderScenario[] = [
   {
     id: 1,
-    name: "viagem cria card e só depois pergunta dado crítico",
+    name: "viagem mantém um memoryId e só abre card no impacto",
     run: async (ctx) => {
       const userId = "founder-01-trip";
       ctx.seedMemory(userId);
       const response = await ctx.chat(userId, "viajo sexta");
 
-      assertSpeaks(response, /confirma.*card|card.*impacto|viagem.*card/i, "viagem precisa criar card antes de perguntar impacto");
+      assertSpeaks(response, /20 minutos|treino adaptado|conseguir fazer/i, "viagem precisa perguntar a continuidade do treino");
       assertNoWorkoutGeneration(response);
       const memory = ctx.readMemory(userId);
-      const trip = ((memory.proactiveMemories || []) as Array<{ id?: string; status?: string; confirmationStage?: string }>)[0];
-      assert.equal(trip?.status, "pending_confirmation", "viagem precisa ficar pendente no card");
-      assert.equal(trip?.confirmationStage, "event", "primeiro card precisa confirmar o evento");
+      const trip = ((memory.proactiveMemories || []) as Array<{ id?: string; status?: string; stage?: string }>)[0];
+      assert.equal(trip?.status, "pending_confirmation", "viagem precisa ficar em estado operacional pendente");
+      assert.equal(trip?.stage, "continuity_question", "primeiro estágio precisa coletar continuidade");
+      assert.equal((response.expectedResponse as { context?: string } | null)?.context, "travel_training");
+      assert.deepEqual(response.turnDecision?.cards || [], [], "pergunta de continuidade não abre card paralelo");
 
-      const confirm = await ctx.confirmProactiveMemory(userId, String(trip.id));
-      assertSpeaks(confirm, /20 minutos|treino adaptado|conseguir fazer/i, "confirmar viagem precisa perguntar se há treino possível");
-      assert.equal((confirm.expectedResponse as { context?: string } | null)?.context, "travel_training");
+      const impossible = await ctx.chat(userId, "impossível");
+      const afterImpossible = ctx.readMemory(userId);
+      const sameTrip = ((afterImpossible.proactiveMemories || []) as Array<{ id?: string; stage?: string }>)[0];
+      assert.equal(sameTrip?.id, trip?.id, "impacto precisa usar o mesmo memoryId");
+      assert.equal(sameTrip?.stage, "impact_confirmation", "impossível precisa abrir confirmação final do impacto");
+      assert.equal(impossible.turnDecision?.cards?.length, 1, "impacto precisa produzir no máximo um card");
+      assert.equal(impossible.turnDecision?.cards?.[0]?.memoryId, trip?.id);
+
+      await ctx.confirmProactiveMemory(userId, String(trip?.id));
+      const confirmed = ctx.readMemory(userId);
+      const finalTrip = ((confirmed.proactiveMemories || []) as Array<{ stage?: string }>)[0];
+      assert.equal(finalTrip?.stage, "confirmed_protected");
+      assert.equal((confirmed.proactiveImpacts as unknown[] | undefined)?.length, 1, "confirmação final cria um impacto agregado");
     },
   },
   {
