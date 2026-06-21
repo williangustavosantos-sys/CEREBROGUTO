@@ -4,6 +4,7 @@ export { buildProactivityContextBlock } from './proactivity-injector'
 export { resolveProactiveMemoryActionFromUserReply } from './memory-action-resolver'
 export type { ResolverResult, ResolvedAction } from './memory-action-resolver'
 export { extractEventsFromConversation, buildPendingMemoryData } from './memory-extractor'
+export { resolveProactiveDate, addDaysToDateKey } from './date-resolver'
 export { enrichPendingMemories } from './memory-enricher'
 export {
   decideFromProactiveMemory,
@@ -16,6 +17,8 @@ export {
   getProactiveMemories,
   getProactiveMemoriesByStatus,
   hasMatchingProactiveMemory,
+  buildProactiveEventKey,
+  upsertProactiveMemory,
   addProactiveMemory,
   updateProactiveMemory,
   discardProactiveMemory,
@@ -30,6 +33,7 @@ export {
 export type {
   ProactiveMemory,
   ProactiveMemoryStatus,
+  ProactiveMemoryStage,
   ProactiveMemoryType,
   ProactiveDecision,
   ProactiveImpact,

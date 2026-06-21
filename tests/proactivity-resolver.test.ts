@@ -37,6 +37,14 @@ async function resolve(userId: string, input: string, lang = 'pt-BR') {
   return resolveProactiveMemoryActionFromUserReply(userId, input, lang)
 }
 
+async function canonicalDate(input: string) {
+  const [{ resolveProactiveDate }, { getDateKey }] = await Promise.all([
+    import('../src/proactivity/date-resolver.js'),
+    import('../src/proactivity/proactive-store.js'),
+  ])
+  return resolveProactiveDate(input, getDateKey())
+}
+
 function makePendingConfirmation(id: string) {
   return {
     id,
@@ -93,6 +101,24 @@ test('A — "yes" confirma pending_confirmation (en-US)', async () => {
   const result = await resolve(USER_A, 'yes', 'en-US')
   assert.equal(result.engaged, true)
   assert.deepEqual(result.action, { type: 'confirm', memoryId })
+})
+
+test('A — contexto restaurado: "impossível" avança continuity_question no mesmo memoryId', async () => {
+  const memoryId = 'pm_A_continuity_impossible'
+  await seedMemory(USER_A, {
+    userId: USER_A,
+    proactiveMemories: [{
+      ...makePendingConfirmation(memoryId),
+      stage: 'continuity_question',
+      confirmationStage: 'event',
+    }],
+  })
+  const result = await resolve(USER_A, 'impossível')
+  assert.equal(result.engaged, true)
+  assert.equal(result.action?.type, 'update')
+  assert.equal(result.action?.memoryId, memoryId)
+  assert.equal(result.action?.type === 'update' ? result.action.patch.stage : undefined, 'impact_confirmation')
+  assert.equal(result.action?.type === 'update' ? result.action.patch.confirmationStage : undefined, 'impact')
 })
 
 test('A — "sì" confirma pending_confirmation (it-IT)', async () => {
@@ -270,11 +296,12 @@ test('E — "não, é sexta" atualiza data da memória pendente', async () => {
     proactiveMemories: [makePendingConfirmation(memoryId)],
   })
   const result = await resolve(USER_A, 'não, é sexta')
+  const expectedDate = await canonicalDate('não, é sexta')
   assert.equal(result.engaged, true)
   assert.equal(result.action?.type, 'update')
   assert.equal(result.action?.memoryId, memoryId)
-  assert.equal(result.action?.type === 'update' ? result.action.patch.dateText : undefined, 'sexta-feira')
-  assert.equal(result.action?.type === 'update' ? result.action.patch.dateParsed : undefined, '2026-05-15')
+  assert.equal(result.action?.type === 'update' ? result.action.patch.dateText : undefined, expectedDate?.dateText)
+  assert.equal(result.action?.type === 'update' ? result.action.patch.dateParsed : undefined, expectedDate?.dateParsed)
   assert.equal(result.reason, 'correction_update')
 })
 
@@ -285,10 +312,11 @@ test('E — "no, it\'s Friday" atualiza data (en-US)', async () => {
     proactiveMemories: [makePendingConfirmation(memoryId)],
   })
   const result = await resolve(USER_A, "no, it's Friday", 'en-US')
+  const expectedDate = await canonicalDate("no, it's Friday")
   assert.equal(result.engaged, true)
   assert.equal(result.action?.type, 'update')
-  assert.equal(result.action?.type === 'update' ? result.action.patch.dateText : undefined, 'Friday')
-  assert.equal(result.action?.type === 'update' ? result.action.patch.dateParsed : undefined, '2026-05-15')
+  assert.equal(result.action?.type === 'update' ? result.action.patch.dateText : undefined, expectedDate?.dateText)
+  assert.equal(result.action?.type === 'update' ? result.action.patch.dateParsed : undefined, expectedDate?.dateParsed)
   assert.equal(result.reason, 'correction_update')
 })
 
@@ -299,10 +327,11 @@ test('E — "não, vai ser sábado" detecta correção', async () => {
     proactiveMemories: [makePendingConfirmation(memoryId)],
   })
   const result = await resolve(USER_A, 'não, vai ser sábado')
+  const expectedDate = await canonicalDate('não, vai ser sábado')
   assert.equal(result.engaged, true)
   assert.equal(result.action?.type, 'update')
-  assert.equal(result.action?.type === 'update' ? result.action.patch.dateText : undefined, 'sábado')
-  assert.equal(result.action?.type === 'update' ? result.action.patch.dateParsed : undefined, '2026-05-16')
+  assert.equal(result.action?.type === 'update' ? result.action.patch.dateText : undefined, expectedDate?.dateText)
+  assert.equal(result.action?.type === 'update' ? result.action.patch.dateParsed : undefined, expectedDate?.dateParsed)
   assert.equal(result.reason, 'correction_update')
 })
 

@@ -89,6 +89,8 @@ export function hasExplicitBodyRegion(userMessage: string): boolean {
 const UNAVAILABILITY_PHRASES = [
   "nao tenho", "nao tem", "nao tenho isso", "sem isso", "acabou", "acabou isso",
   "nao tenho esse", "nao tenho essa", "ta sem", "to sem", "estou sem", "nao possuo",
+  "tambem nao tenho", "nao tenho tambem", "esse tambem nao da", "essa tambem nao da",
+  "esse tambem nao rola", "essa tambem nao rola",
   "non ce l", "non ce l ho", "non ho", "non ho questo", "finito", "e finito",
   "i don t have", "i don t have it", "dont have", "don t have", "out of", "ran out",
   "we re out", "no tengo",
@@ -98,6 +100,8 @@ const UNAVAILABILITY_PHRASES = [
 const EQUIPMENT_BUSY_PHRASES = [
   "ocupado", "ocupada", "ta ocupado", "ta ocupada", "lotado", "cheio", "fila",
   "nao tem esse aparelho", "nao tem o aparelho", "aparelho ocupado", "maquina ocupada",
+  "tambem ocupado", "tambem esta ocupado", "tambem ocupada", "tambem esta ocupada",
+  "esse tambem nao da", "essa tambem nao da",
   "occupato", "occupata", "preso", "busy", "taken", "in use", "occupied",
 ];
 

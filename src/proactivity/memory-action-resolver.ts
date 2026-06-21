@@ -5,8 +5,9 @@
 // Why: GUTO cannot save "if user says X then Y"; it must understand context,
 // but state transitions still need guardrails and memory-id validation.
 
-import { getProactiveMemoriesByStatus, getProactiveMemories } from './proactive-store'
+import { getProactiveMemoriesByStatus, getProactiveMemories, getDateKey } from './proactive-store'
 import { detectTravelTrainingSignal } from './decision-engine'
+import { resolveProactiveDate } from './date-resolver'
 import type { ProactiveMemory } from './types'
 import { config } from '../config'
 
@@ -16,14 +17,14 @@ export type ResolvedAction =
   | {
       type: 'confirm'
       memoryId: string
-      patch?: Partial<Pick<ProactiveMemory, 'rawText' | 'understood' | 'dateText' | 'dateParsed' | 'location'>>
+      patch?: Partial<Pick<ProactiveMemory, 'rawText' | 'understood' | 'dateText' | 'dateParsed' | 'location' | 'stage' | 'confirmationStage'>>
     }
   | { type: 'discard'; memoryId: string }
   | { type: 'request_discard'; memoryId: string }
   | {
       type: 'update'
       memoryId: string
-      patch: Partial<Pick<ProactiveMemory, 'rawText' | 'understood' | 'dateText' | 'dateParsed' | 'location'>>
+      patch: Partial<Pick<ProactiveMemory, 'rawText' | 'understood' | 'dateText' | 'dateParsed' | 'location' | 'stage' | 'confirmationStage'>>
     }
   | { type: 'validate'; memoryId: string; outcome: 'happened' | 'postponed' | 'discarded' }
   | { type: 'cancel_discard_request'; memoryId: string }
@@ -122,16 +123,6 @@ const CORRECTION_STARTS: string[] = [
   'nao,', 'no,', 'non,', 'nao e', 'nao vai ser', 'no it', 'no its', "no it's", 'non e',
 ]
 
-const WEEKDAY_CORRECTIONS: Array<{ terms: string[]; day: number; pt: string; en: string; it: string }> = [
-  { terms: ['domingo', 'sunday', 'domenica'], day: 0, pt: 'domingo', en: 'Sunday', it: 'domenica' },
-  { terms: ['segunda', 'segunda feira', 'monday', 'lunedi'], day: 1, pt: 'segunda-feira', en: 'Monday', it: 'lunedi' },
-  { terms: ['terca', 'terca feira', 'tuesday', 'martedi'], day: 2, pt: 'terça-feira', en: 'Tuesday', it: 'martedi' },
-  { terms: ['quarta', 'quarta feira', 'wednesday', 'mercoledi'], day: 3, pt: 'quarta-feira', en: 'Wednesday', it: 'mercoledi' },
-  { terms: ['quinta', 'quinta feira', 'thursday', 'giovedi'], day: 4, pt: 'quinta-feira', en: 'Thursday', it: 'giovedi' },
-  { terms: ['sexta', 'sexta feira', 'friday', 'venerdi'], day: 5, pt: 'sexta-feira', en: 'Friday', it: 'venerdi' },
-  { terms: ['sabado', 'saturday', 'sabato'], day: 6, pt: 'sábado', en: 'Saturday', it: 'sabato' },
-]
-
 // ── Validation: happened ──
 const HAPPENED_TERMS: string[] = [
   // pt-BR
@@ -182,38 +173,6 @@ function isCorrection(normalized: string): boolean {
   return withoutPrefix.length > 1
 }
 
-function dateFromISO(date: string | undefined): Date | null {
-  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null
-  const parsed = new Date(`${date}T12:00:00.000Z`)
-  return Number.isNaN(parsed.getTime()) ? null : parsed
-}
-
-function isoDate(date: Date): string {
-  return date.toISOString().slice(0, 10)
-}
-
-function addUtcDays(date: Date, days: number): Date {
-  const next = new Date(date)
-  next.setUTCDate(next.getUTCDate() + days)
-  return next
-}
-
-function resolveWeekdayDate(targetDay: number, memory: ProactiveMemory): string {
-  const base = dateFromISO(memory.dateParsed) || new Date()
-  const currentDay = base.getUTCDay()
-  const delta = (targetDay - currentDay + 7) % 7
-  return isoDate(addUtcDays(base, delta))
-}
-
-function labelForWeekday(
-  weekday: { pt: string; en: string; it: string },
-  language: string
-): string {
-  if (language === 'en-US') return weekday.en
-  if (language === 'it-IT') return weekday.it
-  return weekday.pt
-}
-
 function titleCasePlace(value: string): string {
   return value
     .replace(/\s+/g, ' ')
@@ -252,14 +211,13 @@ function buildCorrectionUnderstood(
 function correctionPatch(
   memory: ProactiveMemory,
   userInput: string,
-  normalized: string,
   language: string
 ): Partial<Pick<ProactiveMemory, 'understood' | 'dateText' | 'dateParsed' | 'location'>> | null {
   const patch: Partial<Pick<ProactiveMemory, 'understood' | 'dateText' | 'dateParsed' | 'location'>> = {}
-  const weekday = WEEKDAY_CORRECTIONS.find((candidate) => hasAny(normalized, candidate.terms))
-  if (weekday) {
-    patch.dateText = labelForWeekday(weekday, language)
-    patch.dateParsed = resolveWeekdayDate(weekday.day, memory)
+  const resolvedDate = resolveProactiveDate(userInput, getDateKey())
+  if (resolvedDate) {
+    patch.dateText = resolvedDate.dateText
+    patch.dateParsed = resolvedDate.dateParsed
   }
 
   const locationMatch = userInput.match(/\b(?:para|pra|to|a)\s+([\p{L}\p{M}\s.'-]{2,80})$/iu)
@@ -286,6 +244,13 @@ function ambiguousConfirmFallback(memory: ProactiveMemory, language: string): st
   if (language === 'it-IT') return `"${item}" — ci vai o no? Dimmi chiaramente.`
   if (language === 'en-US') return `"${item}" — yes or no? Tell me straight.`
   return `"${item}" — confirma ou cancela? Me fala direto.`
+}
+
+function tripEventCardFirstFallback(memory: ProactiveMemory, language: string): string {
+  const item = memory.dateParsed || memory.dateText || memory.understood
+  if (language === 'it-IT') return `Prima conferma il viaggio nel card (${item}). Dopo ti chiedo dell'allenamento adattato.`
+  if (language === 'en-US') return `First confirm the trip on the card (${item}). After that I ask about the adapted workout.`
+  return `Primeiro confirma a viagem no card (${item}). Depois eu pergunto sobre o treino adaptado.`
 }
 
 function correctionFallback(memory: ProactiveMemory, language: string): string {
@@ -543,13 +508,62 @@ export async function resolveProactiveMemoryActionFromUserReply(
 
     if (pendingConfirmation.length === 1 && isCorrection(normalized)) {
       const target = pendingConfirmation[0]!
-      const patch = correctionPatch(target, userInput, normalized, language)
+      const patch = correctionPatch(target, userInput, language)
       if (patch) {
         return {
           engaged: true,
           action: { type: 'update', memoryId: target.id, patch },
           fallbackMessage: correctionFallback({ ...target, ...patch }, language),
           reason: 'correction_update',
+        }
+      }
+    }
+
+    if (pendingConfirmation.length === 1 && pendingConfirmation[0]?.type === 'trip') {
+      const target = pendingConfirmation[0]!
+      const travelTrainingSignal = detectTravelTrainingSignal(userInput)
+      if (travelTrainingSignal !== 'unknown') {
+        const isContinuityQuestion = target.stage === 'continuity_question'
+        const isEventConfirmation = target.stage === 'event_confirmation' || (
+          !target.stage && target.confirmationStage !== 'impact'
+        )
+        if (isEventConfirmation) {
+          return {
+            engaged: true,
+            action: null,
+            fallbackMessage: tripEventCardFirstFallback(target, language),
+            reason: 'pending_trip_event_card_first',
+          }
+        }
+        if (travelTrainingSignal === 'cannot_train') {
+          return {
+            engaged: true,
+            action: {
+              type: 'update',
+              memoryId: target.id,
+              patch: {
+                ...appendUserReplyToMemoryPatch(target, userInput),
+                ...(isContinuityQuestion
+                  ? { stage: 'impact_confirmation' as const, confirmationStage: 'impact' as const }
+                  : {}),
+              },
+            },
+            reason: 'pending_trip_protected_confirmation',
+          }
+        }
+        return {
+          engaged: true,
+          action: {
+            type: 'confirm',
+            memoryId: target.id,
+            patch: {
+              ...appendUserReplyToMemoryPatch(target, userInput),
+              ...(isContinuityQuestion
+                ? { stage: 'confirmed_adapted' as const, confirmationStage: 'event' as const }
+                : {}),
+            },
+          },
+          reason: `confirmed_trip_training_${travelTrainingSignal}`,
         }
       }
     }
@@ -675,7 +689,7 @@ export async function resolveProactiveMemoryActionFromUserReply(
 
       // Correction must be checked BEFORE discard and confirm
       if (isCorrection(normalized)) {
-        const patch = correctionPatch(target, userInput, normalized, language)
+        const patch = correctionPatch(target, userInput, language)
         if (patch) {
           return {
             engaged: true,
@@ -699,6 +713,14 @@ export async function resolveProactiveMemoryActionFromUserReply(
       if (target.type === 'trip') {
         const travelTrainingSignal = detectTravelTrainingSignal(userInput)
         if (travelTrainingSignal !== 'unknown') {
+          if (target.confirmationStage !== 'impact') {
+            return {
+              engaged: true,
+              action: null,
+              fallbackMessage: tripEventCardFirstFallback(target, language),
+              reason: 'pending_trip_event_card_first',
+            }
+          }
           if (travelTrainingSignal === 'cannot_train') {
             return {
               engaged: true,

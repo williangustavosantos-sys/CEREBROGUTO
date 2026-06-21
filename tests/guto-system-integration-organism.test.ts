@@ -175,6 +175,25 @@ async function requestJson<T = any>(
   return { res, body: parsed };
 }
 
+async function confirmTripEventThenCanTrain(student: AccessRecord, memoryId: string): Promise<Record<string, any>> {
+  const token = tokenFor(student);
+  const eventConfirm = await requestJson("POST", "/guto/proactivity/confirm", token, { memoryId });
+  assert.equal(eventConfirm.res.status, 200);
+  assert.equal(eventConfirm.body.memory.status, "confirmed");
+  assert.equal(eventConfirm.body.impact, null);
+  assert.equal(eventConfirm.body.expectedResponse?.context, "travel_training");
+
+  const impactReply = await requestJson("POST", "/guto", token, {
+    input: "consigo treinar no hotel",
+    language: "pt-BR",
+    history: [],
+  });
+  assert.equal(impactReply.res.status, 200);
+  const impact = impactReply.body.memoryPatch?.proactiveImpacts?.find((item: Record<string, unknown>) => item.memoryId === memoryId);
+  assert.ok(impact, `impacto proativo não retornou no memoryPatch: ${JSON.stringify(impactReply.body)}`);
+  return { ...impactReply.body, impact };
+}
+
 function readStore(): Record<string, any> {
   return existsSync(testMemoryFile) ? JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, any> : {};
 }
@@ -392,9 +411,7 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
       weekKey: "2026-W23",
     });
 
-    const { res, body } = await requestJson("POST", "/guto/proactivity/confirm", tokenFor(student), { memoryId: memory.id });
-    assert.equal(res.status, 200);
-    assert.equal(body.memory.status, "confirmed");
+    const body = await confirmTripEventThenCanTrain(student, String(memory.id));
     assert.equal(body.impact.decision.reason, "travel");
     assert.equal(body.impact.workoutEffect, "short_light");
     assert.equal(body.impact.missionEffect, "reduced");
@@ -746,8 +763,8 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
       dateParsed: dateKey(),
       weekKey: "2026-W23",
     });
-    const confirm = await requestJson("POST", "/guto/proactivity/confirm", tokenFor(student), { memoryId: memory.id });
-    assert.equal(confirm.res.status, 200);
+    const confirm = await confirmTripEventThenCanTrain(student, String(memory.id));
+    assert.equal(confirm.impact.workoutEffect, "short_light");
 
     const generated = await requestJson("POST", "/guto", tokenFor(student), {
       input: "monta meu treino agora",
@@ -773,10 +790,9 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
       dateParsed: dateKey(),
       weekKey: "2026-W23",
     });
-    const confirm = await requestJson("POST", "/guto/proactivity/confirm", tokenFor(student), { memoryId: memory.id });
-    assert.equal(confirm.res.status, 200);
-    assert.equal(confirm.body.impact.missionEffect, "reduced");
-    assert.equal(confirm.body.impact.xpEffect, "no_free_xp_context_only");
+    const confirm = await confirmTripEventThenCanTrain(student, String(memory.id));
+    assert.equal(confirm.impact.missionEffect, "reduced");
+    assert.equal(confirm.impact.xpEffect, "no_free_xp_context_only");
 
     const stored = readMemory(student.userId);
     assert.equal(stored.totalXp, 100);

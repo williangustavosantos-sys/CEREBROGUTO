@@ -243,6 +243,50 @@ describe("diet generation contract", () => {
     assert.ok(memory.memoryAudit.some((entry: any) => entry.source === "diet_generated"));
   });
 
+  it("gera dieta base mesmo com confirmação de viagem pendente", async () => {
+    const userId = "diet-pending-trip-user";
+    writeMemory(userId, {
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      trainingLevel: "consistent",
+      trainingGoal: "muscle_gain",
+      country: "Italia",
+      countryCode: "IT",
+      foodRestrictions: "none",
+      resolvedFields: {
+        foodRestriction: { rawValue: "none", status: "clear", normalizedValue: "none" },
+      },
+      proactiveMemories: [
+        {
+          id: "pm-diet-trip",
+          userId,
+          type: "trip",
+          status: "pending_confirmation",
+          stage: "impact_confirmation",
+          rawText: "viajo terça; impossível treinar",
+          understood: "Viagem terça; dia sem treino aguardando confirmação",
+          dateParsed: "2026-06-23",
+          weekKey: "2026-W26",
+          createdAt: "2026-06-21T10:00:00.000Z",
+          updatedAt: "2026-06-21T10:00:00.000Z",
+        },
+      ],
+    });
+
+    const res = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "it-IT" }),
+    });
+
+    assert.equal(res.status, 200);
+    const memory = readMemory(userId);
+    assert.equal(memory.dietGenerationStatus, "generated");
+    assert.equal(memory.proactiveMemories?.[0]?.stage, "impact_confirmation");
+  });
+
   it("repara plano levemente fora da meta calórica em vez de bloquear", async () => {
     const userId = "diet-calorie-repair";
     dietModelResponse = dietModelResponseOffByCalories;

@@ -128,6 +128,8 @@ import {
   getProactiveMemories,
   getProactiveMemoriesByStatus,
   hasMatchingProactiveMemory,
+  buildProactiveEventKey,
+  upsertProactiveMemory,
   addProactiveMemory,
   updateProactiveMemory,
   discardProactiveMemory,
@@ -136,6 +138,7 @@ import {
   markWeeklyConversationDone,
   markPastActiveMemoriesPendingValidation,
   getWeekKey,
+  resolveProactiveDate,
   resolveProactiveMemoryActionFromUserReply,
 } from "./src/proactivity/index.js";
 import {
@@ -146,8 +149,15 @@ import {
 } from "./src/proactivity/decision-engine.js";
 import type {
   ProactiveAdaptationForDate,
+  TravelTrainingSignal,
 } from "./src/proactivity/decision-engine.js";
-import type { ProactiveImpact, ProactiveMemory, ProactivePrompt, WeeklyConversation } from "./src/proactivity/types.js";
+import type {
+  ProactiveImpact,
+  ProactiveMemory,
+  ProactiveMemoryStage,
+  ProactivePrompt,
+  WeeklyConversation,
+} from "./src/proactivity/types.js";
 import type { ResolverResult } from "./src/proactivity/memory-action-resolver.js";
 
 type Acao = "none" | "updateWorkout" | "lock" | "changeLanguage" | "requestDeleteAccount" | "showProfile";
@@ -361,8 +371,45 @@ interface GutoModelResponse {
     type: "confirm" | "discard" | "validate" | "request_discard" | "cancel_discard_request" | "update";
     memoryId: string;
     outcome?: "happened" | "postponed" | "discarded";
-    patch?: Partial<Pick<ProactiveMemory, "rawText" | "understood" | "dateText" | "dateParsed" | "location">>;
+    patch?: Partial<Pick<ProactiveMemory, "rawText" | "understood" | "dateText" | "dateParsed" | "location" | "stage" | "confirmationStage">>;
   } | null;
+  turnDecision?: AtomicTurnDecision;
+}
+
+interface AtomicTurnStateSnapshot {
+  activeContext: ActiveConversationContext | null;
+  relatedMemoryId?: string;
+  stage: ProactiveMemoryStage | "none";
+}
+
+interface AtomicTurnCard {
+  memoryId: string;
+  stage: "impact_confirmation";
+  dateParsed?: string;
+}
+
+interface AtomicTurnDecision {
+  turnId: string;
+  userMessage: string;
+  previousState: AtomicTurnStateSnapshot;
+  activeContext: ActiveConversationContext | null;
+  intent: string;
+  relatedMemoryId?: string;
+  stage: ProactiveMemoryStage | "none";
+  nextState: AtomicTurnStateSnapshot;
+  effects: string[];
+  response: Pick<GutoModelResponse, "fala" | "acao" | "expectedResponse" | "avatarEmotion">;
+  cards: AtomicTurnCard[];
+  memoryPatch: GutoMemoryPatch;
+  workoutEffect: string;
+  dietEffect: string;
+  pathEffect: string;
+}
+
+interface AtomicTurnRecord {
+  decision: AtomicTurnDecision;
+  responsePayload: GutoModelResponse & { message?: string };
+  createdAt: string;
 }
 interface GutoVoiceProfile {
   languageCode: GutoLanguage;
@@ -443,6 +490,9 @@ interface GutoMemory {
    * Expira por TTL na leitura (ver ACTIVE_EXERCISE_TTL_MS).
    */
   activeExercise?: ActiveExerciseContext | null;
+  substitutionContext?: SubstitutionContext | null;
+  activeConversationContext?: ActiveConversationContext | null;
+  turnJournal?: AtomicTurnRecord[];
 }
 
 interface ActiveExerciseContext {
@@ -455,6 +505,35 @@ interface ActiveExerciseContext {
   currentSet?: number;
   totalSets?: number;
   note?: string;
+  updatedAt: string;
+}
+
+interface SubstitutionContext {
+  kind: "exercise" | "food";
+  originalId: string;
+  originalName: string;
+  lastSuggestedId?: string;
+  rejectedIds: string[];
+  mealName?: string;
+  planExercise?: Pick<WorkoutExercise, "sets" | "reps" | "rest">;
+  updatedAt: string;
+}
+
+type ActiveConversationContextKind =
+  | "travel_confirmation"
+  | "travel_impact_confirmation"
+  | "workout_substitution"
+  | "diet_substitution"
+  | "pain_safety"
+  | "weekly_checkin"
+  | "none";
+
+interface ActiveConversationContext {
+  kind: ActiveConversationContextKind;
+  source: "proactive_memory" | "proactive_prompt" | "substitution_context" | "safety" | "weekly_conversation" | "none";
+  relatedMemoryId?: string;
+  originalId?: string;
+  dateParsed?: string;
   updatedAt: string;
 }
 
@@ -1175,9 +1254,14 @@ export function getMemory(userId: string): GutoMemory {
           : undefined,
       lastSuggestedFocus: isWorkoutFocus(existing.lastSuggestedFocus) ? existing.lastSuggestedFocus : undefined,
       proactiveSent: existing.proactiveSent || {},
-      proactiveMemories: Array.isArray(existing.proactiveMemories) ? existing.proactiveMemories : [],
+      proactiveMemories: Array.isArray(existing.proactiveMemories)
+        ? existing.proactiveMemories.map(normalizeProactiveMemoryForConversationState)
+        : [],
       proactiveImpacts: Array.isArray(existing.proactiveImpacts) ? existing.proactiveImpacts : [],
       activeExercise: normalizeActiveExerciseContext(existing.activeExercise),
+      substitutionContext: normalizeSubstitutionContext(existing.substitutionContext),
+      activeConversationContext: normalizeActiveConversationContext(existing.activeConversationContext),
+      turnJournal: Array.isArray(existing.turnJournal) ? existing.turnJournal.slice(-20) : [],
       weeklyConversation:
         existing.weeklyConversation &&
         typeof existing.weeklyConversation === "object" &&
@@ -1226,6 +1310,9 @@ export function getMemory(userId: string): GutoMemory {
     proactiveImpacts: [],
     proactivePrompt: null,
     activeExercise: null,
+    substitutionContext: null,
+    activeConversationContext: null,
+    turnJournal: [],
   };
 }
 
@@ -1266,16 +1353,20 @@ type BackendProactiveActionResult = {
   status?: string;
   memory?: ProactiveMemory | null;
   impact?: ProactiveImpact | null;
+  fala?: string;
+  expectedResponse?: ExpectedResponse | null;
   memoryPatch?: GutoMemoryPatch;
   discardRequestedAt?: string;
   ignored?: boolean;
 };
 
 function buildProactiveMemoryPatch(memory: GutoMemory): GutoMemoryPatch {
+  syncCanonicalConversationContext(memory);
   return {
     proactiveMemories: memory.proactiveMemories || [],
     proactiveImpacts: memory.proactiveImpacts || [],
     proactivePrompt: memory.proactivePrompt || null,
+    activeConversationContext: memory.activeConversationContext || null,
   };
 }
 
@@ -1394,6 +1485,41 @@ function setProactiveImpactsStatusForMemory(
 
 type BackendProactiveAction = ResolverResult["action"] | GutoModelResponse["proactiveMemoryAction"];
 
+async function confirmTripEventAndOpenImpactPrompt(
+  userId: string,
+  proactiveMemory: ProactiveMemory,
+  language: GutoLanguage
+): Promise<BackendProactiveActionResult & { fala?: string; expectedResponse?: ExpectedResponse | null }> {
+  const confirmedAt = new Date().toISOString();
+  const updated = await updateProactiveMemory(userId, proactiveMemory.id, {
+    status: "confirmed",
+    confirmedAt,
+    stage: "continuity_question",
+    confirmationStage: "event",
+  } as Partial<ProactiveMemory>);
+  const memory = getMemory(userId);
+  const currentMemory = updated || (memory.proactiveMemories || []).find((item) => item.id === proactiveMemory.id) || proactiveMemory;
+  replaceProactiveMemoryInMemoryObject(memory, currentMemory);
+  const prompt = buildTravelTrainingPrompt(memory, currentMemory, language);
+  syncCanonicalConversationContext(memory);
+  appendMemoryAudit(
+    memory,
+    "proactivity_action",
+    ["proactiveMemories", "proactivePrompt", "activeConversationContext"],
+    `Viagem ${proactiveMemory.id} confirmada; aguardando impacto de treino antes de criar Percurso.`
+  );
+  saveMemory(memory);
+  return {
+    id: proactiveMemory.id,
+    status: "confirmed",
+    memory: currentMemory,
+    impact: null,
+    fala: prompt.fala,
+    expectedResponse: prompt.expectedResponse as ExpectedResponse | null,
+    memoryPatch: buildProactiveMemoryPatch(memory),
+  };
+}
+
 async function applyBackendProactiveAction(userId: string, action: BackendProactiveAction) {
   if (!action?.memoryId) return null;
 
@@ -1404,6 +1530,10 @@ async function applyBackendProactiveAction(userId: string, action: BackendProact
   };
 
   if (action.type === "confirm") {
+    const current = (await getProactiveMemories(userId)).find((item) => item.id === action.memoryId);
+    if (current && isTripEventConfirmation(current)) {
+      return confirmTripEventAndOpenImpactPrompt(userId, current, normalizeLanguage(getMemory(userId).language || "pt-BR"));
+    }
     const result = await updateProactiveMemory(userId, action.memoryId, {
       ...(action.patch || {}),
       status: "confirmed",
@@ -1423,9 +1553,25 @@ async function applyBackendProactiveAction(userId: string, action: BackendProact
 
   if (action.type === "discard") {
     await discardProactiveMemory(userId, action.memoryId);
-    const impactResult = setProactiveImpactsStatusForMemory(userId, action.memoryId, "discarded");
+    setProactiveImpactsStatusForMemory(userId, action.memoryId, "discarded");
+    const memory = getMemory(userId);
+    memory.proactiveMemories = (memory.proactiveMemories || []).map((item) =>
+      item.id === action.memoryId
+        ? {
+            ...item,
+            status: "discarded",
+            discardedAt: new Date().toISOString(),
+            discardRequestedAt: undefined,
+          }
+        : item
+    );
+    if (memory.proactivePrompt?.relatedMemoryId === action.memoryId) {
+      clearActiveProactivePrompt(memory);
+    }
+    syncCanonicalConversationContext(memory);
+    saveMemory(memory);
     auditProactivity("discard");
-    return { id: action.memoryId, status: "discarded", memoryPatch: impactResult.memoryPatch };
+    return { id: action.memoryId, status: "discarded", memoryPatch: buildProactiveMemoryPatch(getMemory(userId)) };
   }
 
   if (action.type === "request_discard") {
@@ -3359,6 +3505,7 @@ function formatHistoryForPrompt(history: GutoHistoryItem[] = []) {
 // Exercício ativo vira contexto morto após algumas horas (sessão antiga / dúvida
 // abandonada). TTL de segurança: não injeta exercício velho como se fosse o atual.
 const ACTIVE_EXERCISE_TTL_MS = 3 * 60 * 60 * 1000;
+const SUBSTITUTION_CONTEXT_TTL_MS = 3 * 60 * 60 * 1000;
 
 function normalizeActiveExerciseContext(value: unknown): ActiveExerciseContext | null | undefined {
   if (value === null) return null;
@@ -3384,6 +3531,565 @@ function normalizeActiveExerciseContext(value: unknown): ActiveExerciseContext |
     note: str(raw.note),
     updatedAt: updatedAt || new Date().toISOString(),
   };
+}
+
+function normalizeSubstitutionContext(value: unknown): SubstitutionContext | null | undefined {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Partial<SubstitutionContext>;
+  if (raw.kind !== "exercise" && raw.kind !== "food") return null;
+  if (typeof raw.originalId !== "string" || !raw.originalId.trim()) return null;
+  if (typeof raw.originalName !== "string" || !raw.originalName.trim()) return null;
+  const updatedAt = typeof raw.updatedAt === "string" ? raw.updatedAt : "";
+  const updated = Date.parse(updatedAt);
+  if (Number.isFinite(updated) && Date.now() - updated > SUBSTITUTION_CONTEXT_TTL_MS) return null;
+  const rejectedIds = Array.isArray(raw.rejectedIds)
+    ? raw.rejectedIds.filter((id): id is string => typeof id === "string" && Boolean(id.trim())).map((id) => id.trim())
+    : [];
+  const planExercise =
+    raw.planExercise &&
+    typeof raw.planExercise === "object" &&
+    typeof raw.planExercise.sets === "number" &&
+    typeof raw.planExercise.reps === "string" &&
+    typeof raw.planExercise.rest === "string"
+      ? {
+          sets: raw.planExercise.sets,
+          reps: raw.planExercise.reps,
+          rest: raw.planExercise.rest,
+        }
+      : undefined;
+  return {
+    kind: raw.kind,
+    originalId: raw.originalId.trim(),
+    originalName: raw.originalName.trim(),
+    lastSuggestedId: typeof raw.lastSuggestedId === "string" && raw.lastSuggestedId.trim() ? raw.lastSuggestedId.trim() : undefined,
+    rejectedIds: Array.from(new Set(rejectedIds)),
+    mealName: typeof raw.mealName === "string" && raw.mealName.trim() ? raw.mealName.trim() : undefined,
+    planExercise,
+    updatedAt: updatedAt || new Date().toISOString(),
+  };
+}
+
+function normalizeActiveConversationContext(value: unknown): ActiveConversationContext | null | undefined {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Partial<ActiveConversationContext>;
+  const validKinds: ActiveConversationContextKind[] = [
+    "travel_confirmation",
+    "travel_impact_confirmation",
+    "workout_substitution",
+    "diet_substitution",
+    "pain_safety",
+    "weekly_checkin",
+    "none",
+  ];
+  const kind = validKinds.includes(raw.kind as ActiveConversationContextKind)
+    ? (raw.kind as ActiveConversationContextKind)
+    : "none";
+  if (kind === "none") return null;
+  const source =
+    raw.source === "proactive_memory" ||
+    raw.source === "proactive_prompt" ||
+    raw.source === "substitution_context" ||
+    raw.source === "safety" ||
+    raw.source === "weekly_conversation"
+      ? raw.source
+      : "none";
+  return {
+    kind,
+    source,
+    relatedMemoryId: typeof raw.relatedMemoryId === "string" && raw.relatedMemoryId.trim() ? raw.relatedMemoryId.trim() : undefined,
+    originalId: typeof raw.originalId === "string" && raw.originalId.trim() ? raw.originalId.trim() : undefined,
+    dateParsed: typeof raw.dateParsed === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw.dateParsed) ? raw.dateParsed : undefined,
+    updatedAt: typeof raw.updatedAt === "string" && raw.updatedAt.trim() ? raw.updatedAt.trim() : new Date().toISOString(),
+  };
+}
+
+function normalizeProactiveMemoryForConversationState(memory: ProactiveMemory): ProactiveMemory {
+  if (memory.type !== "trip" || memory.status !== "pending_confirmation") return memory;
+  if (memory.stage) return memory;
+  const confirmationStage = memory.confirmationStage === "impact" ? "impact" : "event";
+  return {
+    ...memory,
+    confirmationStage,
+    stage: confirmationStage === "impact" ? "impact_confirmation" : "event_confirmation",
+  };
+}
+
+function getFreshSubstitutionContext(memory: GutoMemory, kind: SubstitutionContext["kind"]): SubstitutionContext | null {
+  const normalized = normalizeSubstitutionContext(memory.substitutionContext);
+  if (!normalized || normalized.kind !== kind) return null;
+  return normalized;
+}
+
+function isTripImpactConfirmation(memory: ProactiveMemory): boolean {
+  return memory.type === "trip" && memory.status === "pending_confirmation" && (
+    memory.stage === "impact_confirmation" || memory.confirmationStage === "impact"
+  );
+}
+
+function isTripEventConfirmation(memory: ProactiveMemory): boolean {
+  return memory.type === "trip" && memory.status === "pending_confirmation" && (
+    memory.stage === "event_confirmation" || (!memory.stage && memory.confirmationStage !== "impact")
+  );
+}
+
+function deriveCanonicalConversationContext(memory: GutoMemory): ActiveConversationContext {
+  const now = new Date().toISOString();
+  const memories = memory.proactiveMemories || [];
+  const awaitingDiscard = memories.find(
+    (item) => item.discardRequestedAt && ["confirmed", "enriched", "surfaced"].includes(item.status)
+  );
+  if (awaitingDiscard) {
+    return {
+      kind: "travel_confirmation",
+      source: "proactive_memory",
+      relatedMemoryId: awaitingDiscard.id,
+      dateParsed: awaitingDiscard.dateParsed,
+      updatedAt: now,
+    };
+  }
+
+  const pendingImpact = memories.find(isTripImpactConfirmation);
+  if (pendingImpact) {
+    return {
+      kind: "travel_impact_confirmation",
+      source: "proactive_memory",
+      relatedMemoryId: pendingImpact.id,
+      dateParsed: pendingImpact.dateParsed,
+      updatedAt: now,
+    };
+  }
+
+  const pendingTrip = memories.find(isTripEventConfirmation);
+  if (pendingTrip) {
+    return {
+      kind: "travel_confirmation",
+      source: "proactive_memory",
+      relatedMemoryId: pendingTrip.id,
+      dateParsed: pendingTrip.dateParsed,
+      updatedAt: now,
+    };
+  }
+
+  const prompt = activeProactivePrompt(memory);
+  if (prompt?.kind === "travel_training") {
+    return {
+      kind: "travel_impact_confirmation",
+      source: "proactive_prompt",
+      relatedMemoryId: prompt.relatedMemoryId,
+      dateParsed: prompt.dayKey,
+      updatedAt: now,
+    };
+  }
+
+  const pendingValidation = memories.find((item) => item.status === "pending_validation");
+  if (pendingValidation) {
+    return {
+      kind: "weekly_checkin",
+      source: "proactive_memory",
+      relatedMemoryId: pendingValidation.id,
+      dateParsed: pendingValidation.dateParsed,
+      updatedAt: now,
+    };
+  }
+
+  const activePrompt = activeProactivePrompt(memory);
+  if (activePrompt?.kind === "weekly_opening" || activePrompt?.kind === "memory_validation") {
+    return {
+      kind: "weekly_checkin",
+      source: "proactive_prompt",
+      relatedMemoryId: activePrompt.relatedMemoryId,
+      dateParsed: activePrompt.dayKey,
+      updatedAt: now,
+    };
+  }
+
+  const exerciseContext = getFreshSubstitutionContext(memory, "exercise");
+  if (exerciseContext) {
+    return {
+      kind: "workout_substitution",
+      source: "substitution_context",
+      originalId: exerciseContext.originalId,
+      updatedAt: now,
+    };
+  }
+
+  const foodContext = getFreshSubstitutionContext(memory, "food");
+  if (foodContext) {
+    return {
+      kind: "diet_substitution",
+      source: "substitution_context",
+      originalId: foodContext.originalId,
+      updatedAt: now,
+    };
+  }
+
+  return { kind: "none", source: "none", updatedAt: now };
+}
+
+function syncCanonicalConversationContext(memory: GutoMemory): ActiveConversationContext {
+  const context = deriveCanonicalConversationContext(memory);
+  memory.activeConversationContext = context.kind === "none" ? null : context;
+  return context;
+}
+
+function replaceProactiveMemoryInMemoryObject(memory: GutoMemory, updated: ProactiveMemory | null | undefined): void {
+  if (!updated) return;
+  const current = memory.proactiveMemories || [];
+  const replaced = current.map((item) => (item.id === updated.id ? updated : item));
+  memory.proactiveMemories = replaced.some((item) => item.id === updated.id) ? replaced : [...replaced, updated];
+}
+
+function getBlockingCardContext(memory: GutoMemory): ActiveConversationContext | null {
+  const context = syncCanonicalConversationContext(memory);
+  return ["travel_confirmation", "travel_impact_confirmation", "weekly_checkin"].includes(context.kind)
+    ? context
+    : null;
+}
+
+function isExactYesNo(rawInput: string): "yes" | "no" | null {
+  const text = normalize(extractUserMessageFromContext(rawInput));
+  if (/^(sim|s|yes|y|si|sì|ok|confirmo|confirmar|confirma)$/.test(text)) return "yes";
+  if (/^(nao|não|n|no|fechar|cancela|cancelar|descarta|descartar)$/.test(text)) return "no";
+  return null;
+}
+
+function resolveTravelPromptSignal(rawInput: string): TravelTrainingSignal {
+  const yesNo = isExactYesNo(rawInput);
+  if (yesNo === "yes") return "can_train";
+  if (yesNo === "no") return "cannot_train";
+  return detectTravelTrainingSignal(rawInput);
+}
+
+function appendTravelImpactText(memory: ProactiveMemory, rawInput: string, signal: TravelTrainingSignal): Pick<ProactiveMemory, "rawText" | "understood"> {
+  const reply = normalizeMemoryValue(extractUserMessageFromContext(rawInput));
+  const rawBase = memory.rawText || memory.understood || "";
+  const understoodBase = memory.understood || memory.rawText || "";
+  const suffix = signal === "can_train"
+    ? "treino adaptado de 20 minutos possível"
+    : "dia sem treino precisa de confirmação final";
+  return {
+    rawText: `${rawBase} | Resposta impacto: ${reply}`.slice(0, 360),
+    understood: `${understoodBase}; ${suffix}`.slice(0, 300),
+  };
+}
+
+function buildBlockingConversationResponse(context: ActiveConversationContext, memory: GutoMemory, language: GutoLanguage): GutoModelResponse {
+  const target = context.relatedMemoryId
+    ? (memory.proactiveMemories || []).find((item) => item.id === context.relatedMemoryId)
+    : null;
+  const dateLabel = formatShortDateLabel(context.dateParsed || target?.dateParsed);
+
+  if (context.kind === "travel_impact_confirmation") {
+    const line = dateLabel
+      ? `Tem uma decisão pendente sobre ${dateLabel}: confirma no card se esse dia fica sem treino. Eu não vou trocar de assunto antes disso.`
+      : "Tem uma decisão pendente sobre a viagem: confirma no card se esse dia fica sem treino. Eu não vou trocar de assunto antes disso.";
+    return { fala: line, acao: "none", expectedResponse: null, avatarEmotion: "alert", memoryPatch: buildProactiveMemoryPatch(memory) };
+  }
+
+  if (context.kind === "travel_confirmation") {
+    const line = dateLabel
+      ? `Antes de adaptar treino ou dieta, confirma no card se a viagem de ${dateLabel} está certa. Depois disso eu defino o impacto.`
+      : "Antes de adaptar treino ou dieta, confirma no card se essa viagem está certa. Depois disso eu defino o impacto.";
+    return { fala: line, acao: "none", expectedResponse: null, avatarEmotion: "alert", memoryPatch: buildProactiveMemoryPatch(memory) };
+  }
+
+  const line = language === "en-US"
+    ? "There is a pending validation card. Answer that first so I do not mix contexts."
+    : language === "it-IT"
+      ? "C'è una validazione pendente nel card. Rispondi prima lì, così non mescolo i contesti."
+      : "Tem uma validação pendente no card. Resolve ela primeiro pra eu não misturar contextos.";
+  return { fala: line, acao: "none", expectedResponse: null, avatarEmotion: "alert", memoryPatch: buildProactiveMemoryPatch(memory) };
+}
+
+async function resolveActiveTravelTrainingPromptReply(
+  userId: string,
+  input: string,
+  memory: GutoMemory,
+  language: GutoLanguage
+): Promise<GutoModelResponse | null> {
+  const prompt = activeProactivePrompt(memory);
+  if (prompt?.kind !== "travel_training" || !prompt.relatedMemoryId) return null;
+
+  const target = (memory.proactiveMemories || []).find((item) => item.id === prompt.relatedMemoryId);
+  if (!target || target.type !== "trip") {
+    clearActiveProactivePrompt(memory);
+    syncCanonicalConversationContext(memory);
+    saveMemory(memory);
+    return null;
+  }
+
+  const signal = resolveTravelPromptSignal(input);
+  if (signal === "unknown") {
+    console.info("[GUTO][conversation-state] source=state_resolver kind=travel_impact_confirmation outcome=clarify");
+    syncCanonicalConversationContext(memory);
+    return {
+      fala: prompt.fala,
+      acao: "none",
+      expectedResponse: prompt.expectedResponse as ExpectedResponse | null,
+      avatarEmotion: "default",
+      memoryPatch: buildProactiveMemoryPatch(memory),
+    };
+  }
+
+  const patch = appendTravelImpactText(target, input, signal);
+  if (signal === "can_train") {
+    const updated = await updateProactiveMemory(userId, target.id, {
+      ...patch,
+      status: "confirmed",
+      stage: "confirmed_adapted",
+      confirmationStage: "event",
+    } as Partial<ProactiveMemory>);
+    const impactResult = persistDecisionImpactForMemory(userId, updated);
+    const fresh = getMemory(userId);
+    replaceProactiveMemoryInMemoryObject(fresh, impactResult.memory || updated);
+    clearActiveProactivePrompt(fresh);
+    syncCanonicalConversationContext(fresh);
+    saveMemory(fresh);
+    console.info("[GUTO][conversation-state] source=state_resolver kind=travel_impact_confirmation outcome=adapted_training");
+    return {
+      fala: impactResult.impact?.decision.message || buildProactiveContinuityFala("travel_can_train", language, getGutoCallName(fresh)),
+      acao: "none",
+      expectedResponse: null,
+      workoutPlan: null,
+      avatarEmotion: "default",
+      memoryPatch: buildProactiveMemoryPatch(fresh),
+    };
+  }
+
+  const updated = await updateProactiveMemory(userId, target.id, {
+    ...patch,
+    status: "pending_confirmation",
+    stage: "impact_confirmation",
+    confirmationStage: "impact",
+    discardRequestedAt: undefined,
+  } as Partial<ProactiveMemory>);
+  const fresh = getMemory(userId);
+  replaceProactiveMemoryInMemoryObject(fresh, updated);
+  clearActiveProactivePrompt(fresh);
+  syncCanonicalConversationContext(fresh);
+  saveMemory(fresh);
+  console.info("[GUTO][conversation-state] source=state_resolver kind=travel_impact_confirmation outcome=protected_card");
+  return {
+    fala: buildProtectedDayFinalConfirmationFala(updated || target, language),
+    acao: "none",
+    expectedResponse: null,
+    workoutPlan: null,
+    avatarEmotion: "alert",
+    memoryPatch: buildProactiveMemoryPatch(fresh),
+  };
+}
+
+async function buildResolverHandledResponse(
+  userId: string,
+  resolverResult: ResolverResult,
+  memory: GutoMemory,
+  language: GutoLanguage
+): Promise<GutoModelResponse | null> {
+  if (!resolverResult.engaged) return null;
+  console.info(`[GUTO][conversation-state] source=state_resolver reason=${resolverResult.reason}`);
+
+  if (!resolverResult.action) {
+    syncCanonicalConversationContext(memory);
+    saveMemory(memory);
+    return {
+      fala: resolverResult.fallbackMessage || buildBlockingConversationResponse(syncCanonicalConversationContext(memory), memory, language).fala,
+      acao: "none",
+      expectedResponse: null,
+      avatarEmotion: "alert",
+      memoryPatch: buildProactiveMemoryPatch(memory),
+    };
+  }
+
+  const proactiveActionResult = await applyBackendProactiveAction(userId, resolverResult.action);
+  const fresh = getMemory(userId);
+  let fala = proactiveActionResult?.fala;
+  if (!fala && proactiveActionResult?.impact?.decision.message) {
+    fala = proactiveActionResult.impact.decision.message;
+  }
+  if (!fala && proactiveActionResult?.status === "discarded") {
+    fala = language === "en-US"
+      ? "Closed. I discarded that card and we keep the plan clean."
+      : language === "it-IT"
+        ? "Chiuso. Ho scartato quel card e teniamo il piano pulito."
+        : "Fechado. Descartei esse card e mantenho o plano limpo.";
+  }
+  if (!fala) {
+    fala = language === "en-US"
+      ? "Done. I updated that context."
+      : language === "it-IT"
+        ? "Fatto. Ho aggiornato quel contesto."
+        : "Fechado. Atualizei esse contexto.";
+  }
+
+  return {
+    fala,
+    acao: "none",
+    expectedResponse: proactiveActionResult?.expectedResponse || null,
+    workoutPlan: null,
+    avatarEmotion: proactiveActionResult?.impact?.workoutEffect === "protected" ? "alert" : "default",
+    memoryPatch: proactiveActionResult?.memoryPatch || buildProactiveMemoryPatch(fresh),
+  };
+}
+
+function atomicTurnState(memory: GutoMemory): AtomicTurnStateSnapshot {
+  const activeContext = deriveCanonicalConversationContext(memory);
+  const normalizedContext = activeContext.kind === "none" ? null : activeContext;
+  const relatedMemoryId = normalizedContext?.relatedMemoryId;
+  const relatedMemory = relatedMemoryId
+    ? (memory.proactiveMemories || []).find((item) => item.id === relatedMemoryId)
+    : undefined;
+  const legacyStage = relatedMemory?.confirmationStage === "impact"
+    ? "impact_confirmation"
+    : relatedMemory?.confirmationStage === "event"
+      ? "event_confirmation"
+      : "none";
+  return {
+    activeContext: normalizedContext,
+    relatedMemoryId,
+    stage: relatedMemory?.stage || legacyStage,
+  };
+}
+
+function buildAtomicTurnDecision({
+  turnId,
+  userMessage,
+  previousState,
+  memory,
+  response,
+}: {
+  turnId: string;
+  userMessage: string;
+  previousState: AtomicTurnStateSnapshot;
+  memory: GutoMemory;
+  response: GutoModelResponse;
+}): AtomicTurnDecision {
+  const nextState = atomicTurnState(memory);
+  const relatedMemoryId = nextState.relatedMemoryId || previousState.relatedMemoryId;
+  const relatedMemory = relatedMemoryId
+    ? (memory.proactiveMemories || []).find((item) => item.id === relatedMemoryId)
+    : [...(memory.proactiveMemories || [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+  const stage = relatedMemory?.stage || nextState.stage;
+  const impact = relatedMemory
+    ? (memory.proactiveImpacts || []).find((item) => item.memoryId === relatedMemory.id && item.status === "active")
+    : undefined;
+  const impactCards = (memory.proactiveMemories || []).filter((item) =>
+    item.status === "pending_confirmation" && item.stage === "impact_confirmation"
+  );
+  const activeCard = impactCards.find((item) => item.id === relatedMemoryId) || impactCards[0];
+  const effects = new Set<string>();
+  if (response.memoryPatch && Object.keys(response.memoryPatch).length > 0) effects.add("memory");
+  if (response.workoutPlan || response.acao === "updateWorkout") effects.add("workout");
+  if (memory.dietGenerationStatus && memory.dietGenerationStatus !== "idle") effects.add("diet");
+  if (impact || relatedMemory?.stage === "impact_confirmation") effects.add("path");
+
+  const intent = previousState.activeContext?.kind && previousState.activeContext.kind !== "none"
+    ? previousState.activeContext.kind
+    : relatedMemory?.type
+      ? `proactive_${relatedMemory.type}`
+      : response.acao && response.acao !== "none"
+        ? response.acao
+        : "conversation";
+
+  return {
+    turnId,
+    userMessage,
+    previousState,
+    activeContext: nextState.activeContext,
+    intent,
+    relatedMemoryId: relatedMemory?.id || relatedMemoryId,
+    stage,
+    nextState,
+    effects: [...effects],
+    response: {
+      fala: response.fala,
+      acao: response.acao,
+      expectedResponse: response.expectedResponse,
+      avatarEmotion: response.avatarEmotion,
+    },
+    cards: activeCard
+      ? [{ memoryId: activeCard.id, stage: "impact_confirmation", dateParsed: activeCard.dateParsed }]
+      : [],
+    memoryPatch: response.memoryPatch || {},
+    workoutEffect: response.workoutPlan
+      ? "base_generated"
+      : impact?.workoutEffect || "none",
+    dietEffect: memory.dietGenerationStatus || "idle",
+    pathEffect: impact || relatedMemory?.stage === "impact_confirmation" ? "aggregate_by_memory" : "none",
+  };
+}
+
+const gutoTurnQueues = new Map<string, Promise<void>>();
+
+const serializeGutoTurn: express.RequestHandler = async (req, res, next) => {
+  const userId = req.gutoUser?.userId;
+  if (!userId) return next();
+  const previous = gutoTurnQueues.get(userId) || Promise.resolve();
+  let releaseCurrent: (() => void) | undefined;
+  const current = new Promise<void>((resolve) => {
+    releaseCurrent = resolve;
+  });
+  const tail = previous.catch(() => {}).then(() => current);
+  gutoTurnQueues.set(userId, tail);
+  await previous.catch(() => {});
+
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    releaseCurrent?.();
+    if (gutoTurnQueues.get(userId) === tail) gutoTurnQueues.delete(userId);
+  };
+  res.once("finish", release);
+  res.once("close", release);
+  next();
+};
+
+const attachAtomicTurnDecision: express.RequestHandler = (req, res, next) => {
+  const userId = req.gutoUser?.userId;
+  if (!userId) return next();
+  const requestedTurnId = typeof req.body?.turnId === "string" ? req.body.turnId.trim().slice(0, 128) : "";
+  const turnId = requestedTurnId || crypto.randomUUID();
+  const userMessage = typeof req.body?.input === "string" ? req.body.input : "";
+  const memoryAtStart = getMemory(userId);
+  const previousState = atomicTurnState(memoryAtStart);
+  const originalJson = res.json.bind(res);
+  const replay = (memoryAtStart.turnJournal || []).find((item) => item.decision.turnId === turnId);
+  if (replay) {
+    return originalJson({
+      ...replay.responsePayload,
+      turnId,
+      turnDecision: replay.decision,
+    });
+  }
+
+  res.json = ((body: unknown) => {
+    if (!body || typeof body !== "object" || Array.isArray(body) || res.statusCode >= 400) {
+      return originalJson(body);
+    }
+    const rawPayload = body as GutoModelResponse & { message?: string };
+    const { turnDecision: _discardedDecision, ...responsePayload } = rawPayload;
+    const freshMemory = getMemory(userId);
+    const decision = buildAtomicTurnDecision({
+      turnId,
+      userMessage,
+      previousState,
+      memory: freshMemory,
+      response: responsePayload,
+    });
+    freshMemory.turnJournal = [
+      ...(freshMemory.turnJournal || []).filter((item) => item.decision.turnId !== turnId),
+      { decision, responsePayload, createdAt: new Date().toISOString() },
+    ].slice(-20);
+    saveMemory(freshMemory);
+    return originalJson({ ...responsePayload, turnId, turnDecision: decision });
+  }) as typeof res.json;
+  next();
+};
+
+function mergeRejectedIds(...groups: Array<Array<string | undefined> | undefined>): string[] {
+  return Array.from(new Set(groups.flatMap((group) => group || []).filter((id): id is string => Boolean(id && id.trim()))));
 }
 
 function buildActiveExerciseContextBlock(memory: GutoMemory): string | null {
@@ -4838,6 +5544,56 @@ function isEquipmentBusyMessage(input?: string) {
   return hasEquipmentContext && hasBusyContext;
 }
 
+function isSubstitutionRejectionFollowUp(input?: string) {
+  const normalized = normalize(stripInjectedContext(input || ""));
+  if (!normalized) return false;
+  return hasAnyTerm(normalized, [
+    "tambem ocupado",
+    "também ocupado",
+    "tambem esta ocupado",
+    "também está ocupado",
+    "tambem ocupada",
+    "também ocupada",
+    "tambem esta ocupada",
+    "também está ocupada",
+    "esse tambem",
+    "esse também",
+    "essa tambem",
+    "essa também",
+    "tambem nao da",
+    "também não dá",
+    "tambem nao tenho",
+    "também não tenho",
+    "nao tenho tambem",
+    "não tenho também",
+    "nao tenho esse",
+    "não tenho esse",
+    "nao tenho essa",
+    "não tenho essa",
+    "nao tem esse aparelho",
+    "não tem esse aparelho",
+    "esse tambem nao da",
+    "esse também não dá",
+    "essa tambem nao da",
+    "essa também não dá",
+    "esse nao rola",
+    "esse não rola",
+    "essa nao rola",
+    "essa não rola",
+    "also busy",
+    "that is busy too",
+    "that one is busy too",
+    "i dont have that either",
+    "i don't have that either",
+    "also dont have it",
+    "also don't have it",
+    "anche quello",
+    "anche questa",
+    "non ho anche quello",
+    "non ce l ho neanche",
+  ]);
+}
+
 // Mapeia país do usuário (countryCode ou nome livre) para o FoodCountry do
 // catálogo. Sem match → undefined (suggestFoodSubstitutes cai nos substitutes
 // explícitos do alimento, modo conservador).
@@ -4893,29 +5649,67 @@ function buildFoodSubstituteResponse(
   language: GutoLanguage
 ): GutoModelResponse | null {
   const dietCtx = parseDietContext(input || "");
-  const foodName = dietCtx?.foodName || resolveUnavailableFoodName(input || "");
+  const previous = getFreshSubstitutionContext(memory, "food");
+  const isRejectedFollowUp = Boolean(previous?.lastSuggestedId && isSubstitutionRejectionFollowUp(input));
+  const foodName = isRejectedFollowUp
+    ? previous?.originalName
+    : dietCtx?.foodName || resolveUnavailableFoodName(input || "");
   if (!foodName) return null;
-  const foodId = resolveFoodIdByName(foodName);
+  const foodId = isRejectedFollowUp ? previous?.originalId : resolveFoodIdByName(foodName);
   if (!foodId) return null;
+  const rejectedIds = isRejectedFollowUp
+    ? mergeRejectedIds(previous?.rejectedIds, [previous?.lastSuggestedId])
+    : mergeRejectedIds(previous?.originalId === foodId ? previous?.rejectedIds : undefined);
 
   const subs = suggestFoodSubstitutes({
     originalFoodId: foodId,
     country: resolveFoodCountry(memory),
     constraints: memoryFoodConstraints(memory),
     useContext: "meal_substitution",
-  });
-  if (subs.length === 0) return null;
+  }).filter((food) => !rejectedIds.includes(food.id));
+
+  if (subs.length === 0) {
+    memory.substitutionContext = {
+      kind: "food",
+      originalId: foodId,
+      originalName: getFoodById(foodId)?.names["pt-BR"] || foodName,
+      rejectedIds,
+      mealName: dietCtx?.mealName || previous?.mealName,
+      updatedAt: new Date().toISOString(),
+    };
+    appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Alimento sugerido foi rejeitado; aguardando alimentos disponíveis.");
+    saveMemory(memory);
+    const foodLabel = getFoodById(foodId)?.names[language as FoodLanguage] || foodName;
+    const fallback: Record<GutoLanguage, string> = {
+      "pt-BR": `Fechado. Não vou repetir ${foodLabel}. Me diz o que você tem disponível agora e eu encaixo mantendo a função da refeição.`,
+      "en-US": `Got it. I won't repeat ${foodLabel}. Tell me what you have available now and I will keep the same meal role.`,
+      "it-IT": `Chiaro. Non ripeto ${foodLabel}. Dimmi cosa hai disponibile ora e mantengo la stessa funzione del pasto.`,
+    };
+    return { fala: fallback[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
+  }
 
   const lang = language as FoodLanguage;
-  const names = subs.slice(0, 2).map((f) => f.names[lang] || f.names["pt-BR"]);
+  const selected = subs[0]!;
+  const selectedName = selected.names[lang] || selected.names["pt-BR"];
   const foodLabel = getFoodById(foodId)?.names[lang] || foodName;
-  const options = names.length >= 2 ? { "pt-BR": `${names[0]} ou ${names[1]}`, en: `${names[0]} or ${names[1]}`, it: `${names[0]} o ${names[1]}` } : { "pt-BR": names[0], en: names[0], it: names[0] };
-  const meal = dietCtx?.mealName;
+  const meal = dietCtx?.mealName || previous?.mealName;
+
+  memory.substitutionContext = {
+    kind: "food",
+    originalId: foodId,
+    originalName: getFoodById(foodId)?.names["pt-BR"] || foodName,
+    lastSuggestedId: selected.id,
+    rejectedIds,
+    mealName: meal,
+    updatedAt: new Date().toISOString(),
+  };
+  appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Substituto alimentar sugerido e mantido como contexto operacional.");
+  saveMemory(memory);
 
   const fala: Record<GutoLanguage, string> = {
-    "pt-BR": `Troca ${foodLabel} por ${options["pt-BR"]}${meal ? `, mantendo a energia do ${meal}` : ""}. Mesma função no prato, sem furar a dieta.`,
-    "en-US": `Swap ${foodLabel} for ${options.en}${meal ? `, keeping the energy of ${meal}` : ""}. Same role on the plate, diet intact.`,
-    "it-IT": `Cambia ${foodLabel} con ${options.it}${meal ? `, mantenendo l'energia di ${meal}` : ""}. Stessa funzione nel piatto, dieta intatta.`,
+    "pt-BR": `Troca ${foodLabel} por ${selectedName}${meal ? `, mantendo a energia do ${meal}` : ""}. Mesma função no prato, sem furar a dieta.`,
+    "en-US": `Swap ${foodLabel} for ${selectedName}${meal ? `, keeping the energy of ${meal}` : ""}. Same role on the plate, diet intact.`,
+    "it-IT": `Cambia ${foodLabel} con ${selectedName}${meal ? `, mantenendo l'energia di ${meal}` : ""}. Stessa funzione nel piatto, dieta intatta.`,
   };
   return { fala: fala[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
 }
@@ -5138,9 +5932,11 @@ function resolveWorkoutExerciseForSubstitution({
 function pickValidatedExerciseSubstitute({
   originalId,
   memory,
+  rejectedIds = [],
 }: {
   originalId: string;
   memory: GutoMemory;
+  rejectedIds?: string[];
 }): CatalogExercise | null {
   const plan = memory.lastWorkoutPlan;
   const location = getLocationMode(plan?.location || memory.preferredTrainingLocation || memory.trainingLocation) as CatalogLocation;
@@ -5153,6 +5949,7 @@ function pickValidatedExerciseSubstitute({
   });
 
   return substitutes
+    .filter((id) => !rejectedIds.includes(id))
     .map((id) => getCatalogById(id))
     .find((entry): entry is CatalogExercise =>
       Boolean(entry && entry.id !== originalId && (!original || validateExerciseSubstitute(original, entry).valid))
@@ -5163,18 +5960,32 @@ function buildValidatedEquipmentBusyResponse({
   original,
   memory,
   language,
+  rejectedIds = [],
 }: {
-  original: { id: string; name: string; planExercise?: WorkoutExercise | null };
+  original: { id: string; name: string; planExercise?: Pick<WorkoutExercise, "sets" | "reps" | "rest"> | null };
   memory: GutoMemory;
   language: GutoLanguage;
+  rejectedIds?: string[];
 }): GutoModelResponse {
-  const substitute = pickValidatedExerciseSubstitute({ originalId: original.id, memory });
+  const substitute = pickValidatedExerciseSubstitute({ originalId: original.id, memory, rejectedIds });
 
   if (!substitute) {
+    memory.substitutionContext = {
+      kind: "exercise",
+      originalId: original.id,
+      originalName: original.name,
+      rejectedIds,
+      planExercise: original.planExercise
+        ? { sets: original.planExercise.sets, reps: original.planExercise.reps, rest: original.planExercise.rest }
+        : undefined,
+      updatedAt: new Date().toISOString(),
+    };
+    appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Substitutos de exercício rejeitados; aguardando equipamentos livres.");
+    saveMemory(memory);
     const copy: Record<GutoLanguage, string> = {
-      "pt-BR": `${original.name} travou? Sem drama: pula ele por enquanto, faz o próximo exercício e volta nele no final. Se ainda estiver cheio, me chama de novo.`,
-      "en-US": `${original.name} is taken? No drama: skip it for now, do the next exercise, and come back at the end. If it is still busy, call me again.`,
-      "it-IT": `${original.name} è occupato? Nessun dramma: saltalo per ora, fai il prossimo esercizio e torna alla fine. Se è ancora pieno, chiamami di nuovo.`,
+      "pt-BR": `${original.name} segue indisponível. Não vou chutar troca fora do alvo. Me diz quais equipamentos estão livres agora que eu valido mantendo o mesmo músculo.`,
+      "en-US": `${original.name} is still unavailable. I won't guess outside the target. Tell me which equipment is free now and I will validate the same muscle target.`,
+      "it-IT": `${original.name} è ancora indisponibile. Non improvviso fuori target. Dimmi quali attrezzi sono liberi e valido lo stesso muscolo.`,
     };
     return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
@@ -5196,6 +6007,19 @@ function buildValidatedEquipmentBusyResponse({
     "en-US": `${original.name} is taken? Swap to ${substituteName}: ${scheme["en-US"]}. Same mission, no standing around.`,
     "it-IT": `${original.name} occupato? Cambia con ${substituteName}: ${scheme["it-IT"]}. Stessa missione, senza fermarti.`,
   };
+  memory.substitutionContext = {
+    kind: "exercise",
+    originalId: original.id,
+    originalName: original.name,
+    lastSuggestedId: substitute.id,
+    rejectedIds,
+    planExercise: original.planExercise
+      ? { sets: original.planExercise.sets, reps: original.planExercise.reps, rest: original.planExercise.rest }
+      : undefined,
+    updatedAt: new Date().toISOString(),
+  };
+  appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Substituto de exercício sugerido e mantido como contexto operacional.");
+  saveMemory(memory);
   return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
 }
 
@@ -5210,8 +6034,16 @@ function buildEquipmentBusyFallbackResponse({
   memory: GutoMemory;
   language: GutoLanguage;
 }): GutoModelResponse | null {
-  if (!isEquipmentBusyMessage(input)) return null;
-  const original = resolveWorkoutExerciseForSubstitution({ input, history, memory });
+  const previous = getFreshSubstitutionContext(memory, "exercise");
+  const isRejectedFollowUp = Boolean(previous?.lastSuggestedId && isSubstitutionRejectionFollowUp(input));
+  if (!isEquipmentBusyMessage(input) && !isRejectedFollowUp) return null;
+  const original = isRejectedFollowUp && previous
+    ? {
+        id: previous.originalId,
+        name: previous.originalName,
+        planExercise: previous.planExercise || null,
+      }
+    : resolveWorkoutExerciseForSubstitution({ input, history, memory });
 
   if (!original) {
     // Só aqui — sem QUALQUER contexto de exercício — faz sentido perguntar qual.
@@ -5223,7 +6055,10 @@ function buildEquipmentBusyFallbackResponse({
     return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
 
-  return buildValidatedEquipmentBusyResponse({ original, memory, language });
+  const rejectedIds = isRejectedFollowUp
+    ? mergeRejectedIds(previous?.rejectedIds, [previous?.lastSuggestedId])
+    : mergeRejectedIds(previous?.originalId === original.id ? previous?.rejectedIds : undefined);
+  return buildValidatedEquipmentBusyResponse({ original, memory, language, rejectedIds });
 }
 
 function detectArmTargetMismatchObjection(input?: string): "triceps" | "biceps" | null {
@@ -7154,6 +7989,68 @@ export function buildProactiveExpectedResponse(signal: ProactiveContinuitySignal
   };
 }
 
+function formatShortDateLabel(dateKeyValue?: string): string {
+  if (!dateKeyValue || !/^\d{4}-\d{2}-\d{2}$/.test(dateKeyValue)) return "";
+  const [, month, day] = dateKeyValue.split("-") as [string, string, string];
+  return `${day}/${month}`;
+}
+
+function buildTravelImpactQuestionFala(memory: GutoMemory, proactiveMemory: ProactiveMemory, language: GutoLanguage): string {
+  const dateLabel = formatShortDateLabel(proactiveMemory.dateParsed);
+  const relative =
+    proactiveMemory.dateParsed === addDaysToKey(todayKey(), 1)
+      ? language === "en-US"
+        ? "tomorrow"
+        : language === "it-IT"
+          ? "domani"
+          : "amanhã"
+      : "";
+  const when = dateLabel ? `${relative ? `${relative}, ` : ""}dia ${dateLabel}` : proactiveMemory.dateText || "esse dia";
+  const name = getGutoCallName(memory);
+  if (language === "en-US") {
+    return `${name}, trip confirmed. Will you be able to do an adapted 20-minute workout on ${when}?`;
+  }
+  if (language === "it-IT") {
+    return `${name}, viaggio confermato. Riesci a fare un allenamento adattato di 20 minuti ${when}?`;
+  }
+  return `${name}, viagem confirmada. Você vai conseguir fazer um treino adaptado de 20 minutos ${when}?`;
+}
+
+function buildTravelEventConfirmationFala(proactiveMemory: ProactiveMemory | null | undefined, language: GutoLanguage): string {
+  const dateLabel = formatShortDateLabel(proactiveMemory?.dateParsed);
+  if (language === "en-US") {
+    return dateLabel
+      ? `I registered the trip for ${dateLabel}. Confirm it on the card first; after that I decide the workout impact.`
+      : "I registered the trip. Confirm it on the card first; after that I decide the workout impact.";
+  }
+  if (language === "it-IT") {
+    return dateLabel
+      ? `Ho registrato il viaggio per il ${dateLabel}. Confermalo prima nel card; poi decido l'impatto sull'allenamento.`
+      : "Ho registrato il viaggio. Confermalo prima nel card; poi decido l'impatto sull'allenamento.";
+  }
+  return dateLabel
+    ? `Registrei a viagem para ${dateLabel}. Confirma primeiro no card; depois eu defino o impacto no treino.`
+    : "Registrei a viagem. Confirma primeiro no card; depois eu defino o impacto no treino.";
+}
+
+function buildProtectedDayFinalConfirmationFala(memory: ProactiveMemory | null | undefined, language: GutoLanguage): string {
+  const dateLabel = formatShortDateLabel(memory?.dateParsed);
+  const dateText = dateLabel || memory?.dateText || "";
+  if (language === "en-US") {
+    return dateText
+      ? `Confirm ${dateText} as a no-workout protected day?`
+      : "Confirm this as a no-workout protected day?";
+  }
+  if (language === "it-IT") {
+    return dateText
+      ? `Confermo il ${dateText} come giorno senza allenamento?`
+      : "Confermo questo come giorno senza allenamento?";
+  }
+  if (!dateText) return "Confirmo esse dia como dia sem treino?";
+  const prefix = memory?.dateParsed === addDaysToKey(todayKey(), 1) ? "amanhã, dia " : "dia ";
+  return `Confirma no card: Confirmo ${prefix}${dateText} como dia sem treino?`;
+}
+
 function activeProactivePrompt(memory: GutoMemory): ProactivePrompt | null {
   return memory.proactivePrompt?.status === "active" ? memory.proactivePrompt : null;
 }
@@ -7251,47 +8148,17 @@ function shouldOpenPresenceWeek(memory: GutoMemory, now = new Date()) {
   return true;
 }
 
-const PROACTIVE_DATE_TOKENS: Array<{ day: number; tokens: string[] }> = [
-  { day: 0, tokens: ["domingo", "sunday", "domenica"] },
-  { day: 1, tokens: ["segunda", "monday", "lunedi", "lunedi feira"] },
-  { day: 2, tokens: ["terca", "terça", "tuesday", "martedi"] },
-  { day: 3, tokens: ["quarta", "wednesday", "mercoledi"] },
-  { day: 4, tokens: ["quinta", "thursday", "giovedi"] },
-  { day: 5, tokens: ["sexta", "friday", "venerdi"] },
-  { day: 6, tokens: ["sabado", "sábado", "saturday", "sabato"] },
-];
-
 function dateFromLocalKey(key: string) {
   const [year, month, day] = key.split("-").map(Number) as [number, number, number];
   return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
 }
 
 function resolveDateText(rawInput: string): string | undefined {
-  const text = normalize(rawInput);
-  if (/\b(amanha|tomorrow|domani)\b/.test(text)) return rawInput.match(/amanh[ãa]|tomorrow|domani/i)?.[0] || "amanhã";
-  if (/\b(hoje|today|oggi)\b/.test(text)) return rawInput.match(/hoje|today|oggi/i)?.[0] || "hoje";
-  for (const item of PROACTIVE_DATE_TOKENS) {
-    const token = item.tokens.find((candidate) => text.includes(candidate));
-    if (token) return token;
-  }
-  const explicit = rawInput.match(/\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/);
-  return explicit?.[0];
+  return resolveProactiveDate(rawInput, todayKey())?.dateText;
 }
 
 function resolveFutureDateKey(rawInput: string, now = new Date()): string | undefined {
-  const text = normalize(rawInput);
-  const today = todayKey(now);
-  if (/\b(hoje|today|oggi)\b/.test(text)) return today;
-  if (/\b(amanha|tomorrow|domani)\b/.test(text)) return addDaysToKey(today, 1);
-
-  const base = dateFromLocalKey(today);
-  const currentDay = base.getUTCDay();
-  for (const item of PROACTIVE_DATE_TOKENS) {
-    if (!item.tokens.some((candidate) => text.includes(candidate))) continue;
-    const diff = (item.day - currentDay + 7) % 7;
-    return addDaysToKey(today, diff === 0 ? 7 : diff);
-  }
-  return undefined;
+  return resolveProactiveDate(rawInput, todayKey(now))?.dateParsed;
 }
 
 function inferImmediateProactiveMemoryType(rawInput: string): ProactiveMemory["type"] | null {
@@ -7303,7 +8170,12 @@ function inferImmediateProactiveMemoryType(rawInput: string): ProactiveMemory["t
   return null;
 }
 
-function buildImmediateProactiveMemory(memory: GutoMemory, rawInput: string, signal: ProactiveContinuitySignal): ProactiveMemory | null {
+function buildImmediateProactiveMemory(
+  memory: GutoMemory,
+  rawInput: string,
+  signal: ProactiveContinuitySignal,
+  turnId?: string,
+): ProactiveMemory | null {
   const type = inferImmediateProactiveMemoryType(rawInput);
   if (!type) return null;
   const dateText = resolveDateText(rawInput);
@@ -7314,11 +8186,11 @@ function buildImmediateProactiveMemory(memory: GutoMemory, rawInput: string, sig
     : type === "commitment"
       ? `Compromisso informado: ${normalizedInput}`
       : `Contexto informado: ${normalizedInput}`;
-  const candidate: ProactiveMemory = {
+  const candidateBase: ProactiveMemory = {
     id: `pm_${memory.userId.slice(0, 6)}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
     userId: memory.userId,
     type,
-    status: signal === "travel_can_train" ? "confirmed" : "pending_confirmation",
+    status: "pending_confirmation",
     rawText: normalizedInput,
     understood,
     dateText,
@@ -7326,7 +8198,14 @@ function buildImmediateProactiveMemory(memory: GutoMemory, rawInput: string, sig
     weekKey: getWeekKey(),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    ...(signal === "travel_can_train" ? { confirmedAt: new Date().toISOString() } : {}),
+    sourceTurnId: turnId,
+    ...(type === "trip"
+      ? { stage: "continuity_question" as const, confirmationStage: "event" as const }
+      : { stage: "event_confirmation" as const }),
+  };
+  const candidate = {
+    ...candidateBase,
+    eventKey: buildProactiveEventKey(memory.userId, candidateBase),
   };
 
   const current = memory.proactiveMemories || [];
@@ -7343,7 +8222,7 @@ function buildTravelTrainingPrompt(memory: GutoMemory, proactiveMemory: Proactiv
     relatedMemoryId: proactiveMemory.id,
     weekKey: proactiveMemory.weekKey,
     dayKey: proactiveMemory.dateParsed || todayKey(),
-    fala: buildProactiveContinuityFala("travel_unknown", language, getGutoCallName(memory)),
+    fala: buildTravelImpactQuestionFala(memory, proactiveMemory, language),
     expectedResponse: buildProactiveExpectedResponse("travel_unknown", language),
   });
 }
@@ -7805,7 +8684,8 @@ function enforceTrainingFlowCertainty(
   language: GutoLanguage,
   rawInput: string,
   contractIntent: ContractIntent = emptyContractIntent("not_run"),
-  riskActive = false
+  riskActive = false,
+  turnId?: string,
 ) {
   // SEGURANÇA tem precedência absoluta: quando o risk-classifier ativou um
   // override (febre/intoxicação/dor cardíaca/trauma/etc.), o modelo já moldou a
@@ -7832,27 +8712,28 @@ function enforceTrainingFlowCertainty(
   // continuidade e sai — nunca cai na escada nem no "descanso por padrão".
   if (contractIntent.kind === "proactive_context") {
     const signal = classifyProactiveContinuitySignal(rawInput);
-    const proactiveMemory = buildImmediateProactiveMemory(memory, rawInput, signal);
-    if (proactiveMemory && signal === "travel_can_train") {
-      persistDecisionImpactInMemoryObject(memory, proactiveMemory, language);
-    }
-    const travelPrompt = proactiveMemory && signal === "travel_unknown"
-      ? buildTravelTrainingPrompt(memory, proactiveMemory, language)
-      : null;
+    const proactiveMemory = buildImmediateProactiveMemory(memory, rawInput, signal, turnId);
+    const travelContinuityPending = proactiveMemory?.type === "trip" &&
+      proactiveMemory.status === "pending_confirmation" &&
+      proactiveMemory.stage === "continuity_question";
+    const travelPrompt = travelContinuityPending ? buildTravelTrainingPrompt(memory, proactiveMemory, language) : null;
     const noMissionShortWindow = signal === "short_window" && !getTodayMissionPlan(memory);
     setContractResponse(response, {
       fala: noMissionShortWindow
         ? buildNoMissionShortWindowFala(language, getGutoCallName(memory))
-        : travelPrompt?.fala || buildProactiveContinuityFala(signal, language, getGutoCallName(memory)),
+        : travelPrompt
+          ? travelPrompt.fala
+          : buildProactiveContinuityFala(signal, language, getGutoCallName(memory)),
       acao: "none",
-      expectedResponse: (travelPrompt?.expectedResponse as ExpectedResponse | null) || buildProactiveExpectedResponse(signal, language),
+      expectedResponse: travelPrompt?.expectedResponse as ExpectedResponse | null || buildProactiveExpectedResponse(signal, language),
       workoutPlan: null,
     });
+    syncCanonicalConversationContext(memory);
     response.memoryPatch = {
       ...(response.memoryPatch || {}),
       ...buildProactiveMemoryPatch(memory),
     };
-    if (shouldRedirectAfterProactiveContextSignal(signal)) {
+    if (!travelContinuityPending && shouldRedirectAfterProactiveContextSignal(signal)) {
       appendPostConfirmationRedirect(response, memory, language);
     }
     return;
@@ -9038,6 +9919,8 @@ async function askGutoModel({
   proactivityContext,
   activeExerciseContext,
   resolverResult,
+  turnId,
+  operationalMode = "turn",
 }: {
   input: string;
   language: string;
@@ -9047,6 +9930,8 @@ async function askGutoModel({
   proactivityContext?: string | null;
   activeExerciseContext?: string | null;
   resolverResult?: ResolverResult;
+  turnId?: string;
+  operationalMode?: "turn" | "base_plan";
 }) {
   const memory = mergeMemory(profile, language || profile?.language);
   const selectedLanguage = normalizeLanguage(language || profile?.language || memory.language);
@@ -9075,13 +9960,15 @@ async function askGutoModel({
     const fallbackProactiveMemoryAction = resolverResult?.engaged
       ? (resolverResult.action ?? null)
       : null;
-    const contractIntent = await classifyContractIntent({
-      rawInput: input || "",
-      language: selectedLanguage,
-      memory,
-      previousExpectedResponse: expectedResponse,
-      modelResponse: fallback,
-    });
+    const contractIntent = operationalMode === "base_plan"
+      ? emptyContractIntent("operational_base_plan")
+      : await classifyContractIntent({
+          rawInput: input || "",
+          language: selectedLanguage,
+          memory,
+          previousExpectedResponse: expectedResponse,
+          modelResponse: fallback,
+        });
     // Preparação curta antes do treino: NÃO é recusa. Mantém o treino planejado,
     // puxa a refeição da dieta se existir, pede retorno curto. Não toca XP/Arena.
     if (contractIntent.kind === "training_prep") {
@@ -9100,7 +9987,7 @@ async function askGutoModel({
       }
     }
     await applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
-    enforceTrainingFlowCertainty(fallback, memory, expectedResponse, selectedLanguage, input || "", contractIntent);
+    enforceTrainingFlowCertainty(fallback, memory, expectedResponse, selectedLanguage, input || "", contractIntent, false, turnId);
     commitMemoryDecision(memory);
     if (fallback.acao === "updateWorkout") {
       const executionGate = buildTrainingExecutionGate(memory, selectedLanguage);
@@ -9189,9 +10076,11 @@ async function askGutoModel({
   // P0 safety: classifica risco do input ANTES de montar o brain prompt.
   // Falha aberta — qualquer erro/timeout vira flag=null (comportamento normal).
   // Threshold de ativação: confidence >= 0.6 (definido em buildGutoBrainPrompt).
-  const risk = await classifyRisk(input || "", selectedLanguage as ClassifierLanguage, {
-    timeoutMs: 1800,
-  });
+  const risk = operationalMode === "base_plan"
+    ? { flag: null, confidence: 0, reasoning: "operational_base_plan" } as RiskClassification
+    : await classifyRisk(input || "", selectedLanguage as ClassifierLanguage, {
+        timeoutMs: 1800,
+      });
   const riskOverride: RiskClassification | null =
     risk.flag && risk.confidence >= 0.6 ? risk : null;
   if (riskOverride) {
@@ -9253,13 +10142,15 @@ async function askGutoModel({
       parsedResponse.fala = resolverResult.fallbackMessage;
     }
 
-    const contractIntent = await classifyContractIntent({
-      rawInput: input || "",
-      language: selectedLanguage,
-      memory,
-      previousExpectedResponse: expectedResponse,
-      modelResponse: parsedResponse,
-    });
+    const contractIntent = operationalMode === "base_plan"
+      ? emptyContractIntent("operational_base_plan")
+      : await classifyContractIntent({
+          rawInput: input || "",
+          language: selectedLanguage,
+          memory,
+          previousExpectedResponse: expectedResponse,
+          modelResponse: parsedResponse,
+        });
 
     await applyMemoryPatch(memory, parsedResponse.memoryPatch, parsedResponse.trainedReference, input);
 
@@ -9345,11 +10236,11 @@ async function askGutoModel({
     } else if (isProactiveContext) {
       resetChatRefusalStage(memory);
       const signal = classifyProactiveContinuitySignal(input || "");
-      const proactiveMemory = buildImmediateProactiveMemory(memory, input || "", signal);
-      if (proactiveMemory && signal === "travel_can_train") {
-        persistDecisionImpactInMemoryObject(memory, proactiveMemory, selectedLanguage);
-      }
-      const travelPrompt = proactiveMemory && signal === "travel_unknown"
+      const proactiveMemory = buildImmediateProactiveMemory(memory, input || "", signal, turnId);
+      const travelContinuityPending = proactiveMemory?.type === "trip" &&
+        proactiveMemory.status === "pending_confirmation" &&
+        proactiveMemory.stage === "continuity_question";
+      const travelPrompt = travelContinuityPending
         ? buildTravelTrainingPrompt(memory, proactiveMemory, selectedLanguage)
         : null;
       const composed = await composeContextualResponse(
@@ -9358,7 +10249,9 @@ async function askGutoModel({
       const noMissionShortWindow = signal === "short_window" && !getTodayMissionPlan(memory);
       const fala = noMissionShortWindow
         ? buildNoMissionShortWindowFala(selectedLanguage, getGutoCallName(memory))
-        : (travelPrompt?.fala || composed || buildProactiveContinuityFala(signal, selectedLanguage, getGutoCallName(memory)));
+        : travelPrompt
+          ? travelPrompt.fala
+          : (composed || buildProactiveContinuityFala(signal, selectedLanguage, getGutoCallName(memory)));
       setContractResponse(parsedResponse, {
         fala,
         acao: "none",
@@ -9366,18 +10259,19 @@ async function askGutoModel({
         workoutPlan: null,
         avatarEmotion: "default",
       });
+      syncCanonicalConversationContext(memory);
       parsedResponse.memoryPatch = {
         ...(parsedResponse.memoryPatch || {}),
         ...buildProactiveMemoryPatch(memory),
       };
-      if (shouldRedirectAfterProactiveContextSignal(signal)) {
+      if (!travelContinuityPending && shouldRedirectAfterProactiveContextSignal(signal)) {
         appendPostConfirmationRedirect(parsedResponse, memory, selectedLanguage);
       }
       commitMemoryDecision(memory);
       return finalize(parsedResponse);
     }
 
-    enforceTrainingFlowCertainty(parsedResponse, memory, expectedResponse, selectedLanguage, input || "", contractIntent, Boolean(riskOverride));
+    enforceTrainingFlowCertainty(parsedResponse, memory, expectedResponse, selectedLanguage, input || "", contractIntent, Boolean(riskOverride), turnId);
     commitMemoryDecision(memory);
 
     let workoutPlan: WorkoutPlan | null = null;
@@ -9637,7 +10531,7 @@ async function askGutoModel({
       }
     }
     await applyMemoryPatch(memory, fallback.memoryPatch, fallback.trainedReference, input);
-    enforceTrainingFlowCertainty(fallback, memory, expectedResponse, selectedLanguage, input || "", contractIntent);
+    enforceTrainingFlowCertainty(fallback, memory, expectedResponse, selectedLanguage, input || "", contractIntent, false, turnId);
     commitMemoryDecision(memory);
     // When resolver engaged with no action (clarification needed), replace the generic
     // "lost connection" message with a context-aware proactivity clarification.
@@ -10269,7 +11163,43 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
     : shouldSendLimitationCheck(memory, day)
       ? "limitation_check"
       : getProactiveSlot();
-  const missionPlanAtOpen = getTodayMissionPlan(memory);
+  let missionPlanAtOpen = getTodayMissionPlan(memory);
+  let basePlanResult: GutoModelResponse | null = null;
+
+  if (
+    (force || slot === "arrival") &&
+    !memory.trainedToday &&
+    !missionPlanAtOpen &&
+    hasCalibrationProfileLocked(memory)
+  ) {
+    try {
+      basePlanResult = await askGutoModel({
+        input: buildProactiveInput(memory, "arrival", operationalContext),
+        language,
+        profile: { ...memory },
+        history: [],
+        proactivityContext: null,
+        operationalMode: "base_plan",
+      });
+      memory = getMemory(userId);
+      missionPlanAtOpen = getTodayMissionPlan(memory) || basePlanResult.workoutPlan || null;
+    } catch {
+      basePlanResult = null;
+    }
+  }
+
+  const includeBasePlanEffect = (response: GutoModelResponse): GutoModelResponse => {
+    if (!basePlanResult?.workoutPlan) return response;
+    return {
+      ...response,
+      acao: "updateWorkout",
+      workoutPlan: basePlanResult.workoutPlan,
+      memoryPatch: {
+        ...(response.memoryPatch || {}),
+        ...(basePlanResult.memoryPatch || {}),
+      },
+    };
+  };
 
   const activePrompt = activeProactivePrompt(memory);
   if (activePrompt) {
@@ -10277,7 +11207,7 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
       due: true,
       slot: activePrompt.kind === "weekly_opening" ? "arrival" : activePrompt.kind,
       ...attachAvatarEmotion({
-        response: responseFromProactivePrompt(activePrompt),
+        response: includeBasePlanEffect(responseFromProactivePrompt(activePrompt)),
         memory,
         context: operationalContext,
         slot: activePrompt.kind,
@@ -10296,7 +11226,7 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
       due: true,
       slot: memoryPrompt.kind,
       ...attachAvatarEmotion({
-        response: responseFromProactivePrompt(memoryPrompt),
+        response: includeBasePlanEffect(responseFromProactivePrompt(memoryPrompt)),
         memory,
         context: operationalContext,
         slot: memoryPrompt.kind,
@@ -10328,7 +11258,7 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
       due: true,
       slot: "arrival",
       ...attachAvatarEmotion({
-        response: responseFromProactivePrompt(weeklyPrompt),
+        response: includeBasePlanEffect(responseFromProactivePrompt(weeklyPrompt)),
         memory,
         context: operationalContext,
         slot: "arrival",
@@ -10373,12 +11303,12 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
           due: true,
           slot,
           ...attachAvatarEmotion({
-            response: {
+            response: includeBasePlanEffect({
               fala,
               acao: "none",
               expectedResponse: null,
               avatarEmotion: "default",
-            },
+            }),
             memory: freshMemory,
             context: operationalContext,
             slot,
@@ -10409,12 +11339,12 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
         due: true,
         slot,
         ...attachAvatarEmotion({
-          response: {
+          response: includeBasePlanEffect({
             fala,
             acao: "none",
             expectedResponse: null,
             avatarEmotion: "reward",
-          },
+          }),
           memory: freshMemory,
           context: operationalContext,
           slot,
@@ -10703,12 +11633,13 @@ async function enforceSafetyAndLimitationBeforeGates(
   return { acuteResponse: null };
 }
 
-app.post("/guto", requireActiveUser, async (req, res) => {
-  const { input, language, history, expectedResponse } = req.body as {
+app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision, async (req, res) => {
+  const { input, language, history, expectedResponse, turnId } = req.body as {
     input?: string;
     language?: string;
     history?: GutoHistoryItem[];
     expectedResponse?: ExpectedResponse | null;
+    turnId?: string;
   };
 
   const userId = req.gutoUser!.userId;
@@ -10773,6 +11704,50 @@ app.post("/guto", requireActiveUser, async (req, res) => {
     engaged: false, action: null, reason: 'not_run',
   };
   try {
+    const activePromptResponse = await resolveActiveTravelTrainingPromptReply(
+      userId,
+      input || "",
+      memory,
+      selectedLanguage,
+    );
+    if (activePromptResponse) {
+      const context = getOperationalContext(new Date(), selectedLanguage);
+      return res.json(attachAvatarEmotion({
+        response: activePromptResponse,
+        memory: getMemory(userId),
+        context,
+        input: input || "",
+      }));
+    }
+
+    await enrichPendingMemories(userId, memory.country || "", memory.countryCode, selectedLanguage).catch(() => {});
+    const resolverResult = await resolveProactiveMemoryActionFromUserReply(userId, input || "", selectedLanguage);
+    resolverResultForRoute = resolverResult;
+    const resolverHandledResponse = await buildResolverHandledResponse(userId, resolverResult, memory, selectedLanguage);
+    if (resolverHandledResponse) {
+      const context = getOperationalContext(new Date(), selectedLanguage);
+      return res.json(attachAvatarEmotion({
+        response: resolverHandledResponse,
+        memory: getMemory(userId),
+        context,
+        input: input || "",
+      }));
+    }
+
+    const blockingContext = getBlockingCardContext(memory);
+    if (blockingContext) {
+      console.info(`[GUTO][conversation-state] source=state_guard kind=${blockingContext.kind}`);
+      syncCanonicalConversationContext(memory);
+      saveMemory(memory);
+      const context = getOperationalContext(new Date(), selectedLanguage);
+      return res.json(attachAvatarEmotion({
+        response: buildBlockingConversationResponse(blockingContext, memory, selectedLanguage),
+        memory,
+        context,
+        input: input || "",
+      }));
+    }
+
     const substitutionObjectionResponse = buildExerciseSubstitutionObjectionResponse({
       input,
       memory,
@@ -10830,13 +11805,7 @@ app.post("/guto", requireActiveUser, async (req, res) => {
 
     // Build proactivity context and run deterministic resolver concurrently.
     const opCtx = getOperationalContext(new Date(), selectedLanguage);
-    await enrichPendingMemories(userId, memory.country || "", memory.countryCode, selectedLanguage).catch(() => {});
-    const [proactivityCtx, resolverResult] = await Promise.all([
-      buildProactivityContextBlock(userId, opCtx.weekday, selectedLanguage).catch(() => null),
-      resolveProactiveMemoryActionFromUserReply(userId, input || "", selectedLanguage),
-    ]);
-
-    resolverResultForRoute = resolverResult;
+    const proactivityCtx = await buildProactivityContextBlock(userId, opCtx.weekday, selectedLanguage).catch(() => null);
     const effectiveProactivityCtx = shouldDeferWeeklyOpeningForTurn(proactivityCtx, input || "")
       ? null
       : proactivityCtx;
@@ -10850,6 +11819,7 @@ app.post("/guto", requireActiveUser, async (req, res) => {
       proactivityContext: effectiveProactivityCtx,
       activeExerciseContext: buildActiveExerciseContextBlock(memory),
       resolverResult,
+      turnId,
     });
     if (result.proactiveMemoryAction) {
       const proactiveActionResult = await applyBackendProactiveAction(userId, result.proactiveMemoryAction).catch((error) => {
@@ -10872,6 +11842,16 @@ app.post("/guto", requireActiveUser, async (req, res) => {
             ...buildProactiveMemoryPatch(promptedMemory),
           };
         }
+      }
+      if (
+        resolverResultForRoute.reason === "pending_trip_protected_confirmation" &&
+        proactiveActionResult?.status === "pending_confirmation"
+      ) {
+        result.fala = buildProtectedDayFinalConfirmationFala(proactiveActionResult.memory, selectedLanguage);
+        result.acao = "none";
+        result.expectedResponse = null;
+        result.workoutPlan = null;
+        result.avatarEmotion = "alert";
       }
       if (proactiveActionResult?.impact?.decision.message) {
         result.fala = proactiveActionResult.impact.decision.message;
@@ -11383,14 +12363,10 @@ app.post("/guto/proactivity/extract", requireActiveUser, async (req, res) => {
     );
 
     const saved: import("./src/proactivity/types.js").ProactiveMemory[] = [];
-    const existingMemories = await getProactiveMemories(userId);
     for (const event of events) {
       const data = buildPendingMemoryData(userId, event);
-      if (hasMatchingProactiveMemory([...existingMemories, ...saved], data)) {
-        continue;
-      }
-      const memory = await addProactiveMemory(userId, data);
-      saved.push(memory);
+      const result = await upsertProactiveMemory(userId, data);
+      if (result.created) saved.push(result.memory);
     }
 
     // Mark weekly extraction attempt for this week (even if zero events — avoids re-extract every message)
@@ -11427,17 +12403,25 @@ app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
       return res.json({ ok: true, memory: current, ignored: true, memoryPatch: buildProactiveMemoryPatch(getMemory(userId)) });
     }
 
+    const selectedLanguage = normalizeLanguage(getMemory(userId).language || "pt-BR");
+    if (isTripEventConfirmation(current)) {
+      const result = await confirmTripEventAndOpenImpactPrompt(userId, current, selectedLanguage);
+      return res.json({ ok: true, ...result });
+    }
+
     const confirmedAt = new Date().toISOString();
     const updated = await updateProactiveMemory(userId, memoryId, {
       status: "confirmed",
       confirmedAt,
+      ...(current.type === "trip"
+        ? { stage: "confirmed_protected" as const, confirmationStage: "impact" as const }
+        : {}),
     });
     const impactResult = persistDecisionImpactForMemory(userId, updated);
 
     // Trigger background enrichment (fire and forget)
     const freshMemory = getMemory(userId);
     const userCountry = freshMemory.country || "";
-    const selectedLanguage = normalizeLanguage(freshMemory.language || "pt-BR");
     enrichPendingMemories(userId, userCountry, freshMemory.countryCode, selectedLanguage).catch(() => {});
     const fala = impactResult.impact?.decision.message && shouldApplyPostConfirmationRedirect(impactResult.impact)
       ? appendPostConfirmationRedirect(
@@ -11493,8 +12477,25 @@ app.post("/guto/proactivity/discard", requireActiveUser, async (req, res) => {
     }
 
     await discardProactiveMemory(userId, memoryId);
-    const impactResult = setProactiveImpactsStatusForMemory(userId, memoryId, "discarded");
-    res.json({ ok: true, memoryPatch: impactResult.memoryPatch });
+    setProactiveImpactsStatusForMemory(userId, memoryId, "discarded");
+    const memory = getMemory(userId);
+    memory.proactiveMemories = (memory.proactiveMemories || []).map((item) =>
+      item.id === memoryId
+        ? {
+            ...item,
+            status: "discarded",
+            stage: "discarded",
+            discardedAt: new Date().toISOString(),
+            discardRequestedAt: undefined,
+          }
+        : item
+    );
+    if (memory.proactivePrompt?.relatedMemoryId === memoryId) {
+      clearActiveProactivePrompt(memory);
+    }
+    syncCanonicalConversationContext(memory);
+    saveMemory(memory);
+    res.json({ ok: true, memoryPatch: buildProactiveMemoryPatch(getMemory(userId)) });
   } catch (e) {
     console.error("[GUTO][proactivity] discard error:", e);
     res.status(500).json({ error: "internal error" });
