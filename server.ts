@@ -371,7 +371,7 @@ interface GutoModelResponse {
     type: "confirm" | "discard" | "validate" | "request_discard" | "cancel_discard_request" | "update";
     memoryId: string;
     outcome?: "happened" | "postponed" | "discarded";
-    patch?: Partial<Pick<ProactiveMemory, "rawText" | "understood" | "dateText" | "dateParsed" | "location" | "stage" | "confirmationStage">>;
+    patch?: Partial<Pick<ProactiveMemory, "rawText" | "understood" | "dateText" | "dateParsed" | "location" | "stage" | "confirmationStage" | "proposedTrainingAdapted" | "trainingAdapted">>;
   } | null;
   turnDecision?: AtomicTurnDecision;
 }
@@ -522,6 +522,7 @@ interface SubstitutionContext {
 type ActiveConversationContextKind =
   | "travel_confirmation"
   | "travel_impact_confirmation"
+  | "travel_date_correction"
   | "workout_substitution"
   | "diet_substitution"
   | "pain_safety"
@@ -1531,6 +1532,20 @@ async function applyBackendProactiveAction(userId: string, action: BackendProact
 
   if (action.type === "confirm") {
     const current = (await getProactiveMemories(userId)).find((item) => item.id === action.memoryId);
+    if (current?.type === "trip" && current.status === "pending_confirmation") {
+      return {
+        id: action.memoryId,
+        status: "pending_confirmation",
+        memory: current,
+        impact: null,
+        fala: normalizeLanguage(getMemory(userId).language || "pt-BR") === "en-US"
+          ? "Confirm the trip decision on the card."
+          : normalizeLanguage(getMemory(userId).language || "pt-BR") === "it-IT"
+            ? "Conferma la decisione del viaggio nel card."
+            : "Confirma a decisão da viagem no card.",
+        memoryPatch: buildProactiveMemoryPatch(getMemory(userId)),
+      };
+    }
     if (current && isTripEventConfirmation(current)) {
       return confirmTripEventAndOpenImpactPrompt(userId, current, normalizeLanguage(getMemory(userId).language || "pt-BR"));
     }
@@ -1593,13 +1608,38 @@ async function applyBackendProactiveAction(userId: string, action: BackendProact
       status: "pending_confirmation",
       discardRequestedAt: undefined,
     });
-    const impactResult = setProactiveImpactsStatusForMemory(userId, action.memoryId, "discarded");
+    const memory = getMemory(userId);
+    replaceProactiveMemoryInMemoryObject(memory, result);
+    const now = new Date().toISOString();
+    memory.proactiveImpacts = (memory.proactiveImpacts || []).map((impact) =>
+      impact.memoryId === action.memoryId ? { ...impact, status: "discarded", updatedAt: now } : impact
+    );
+    let fala: string | undefined;
+    let expectedResponse: ExpectedResponse | null = null;
+    if (result?.type === "trip" && result.stage === "continuity_question") {
+      const language = normalizeLanguage(memory.language || "pt-BR");
+      const prompt = buildTravelTrainingPrompt(memory, result, language);
+      fala = prompt.fala;
+      expectedResponse = prompt.expectedResponse as ExpectedResponse | null;
+    } else if (result?.type === "trip" && result.stage === "impact_confirmation") {
+      clearActiveProactivePrompt(memory);
+      const language = normalizeLanguage(memory.language || "pt-BR");
+      fala = language === "en-US"
+        ? "Confirm it on the card and I will keep organizing your week."
+        : language === "it-IT"
+          ? "Conferma nel card e continuo a organizzare la tua settimana."
+          : "Confirma no card e eu já sigo organizando tua semana.";
+    }
+    syncCanonicalConversationContext(memory);
+    saveMemory(memory);
     auditProactivity("update");
     return {
       id: action.memoryId,
       status: "pending_confirmation",
       memory: result,
-      memoryPatch: impactResult.memoryPatch,
+      fala,
+      expectedResponse,
+      memoryPatch: buildProactiveMemoryPatch(memory),
     };
   }
 
@@ -1620,18 +1660,35 @@ async function applyBackendProactiveAction(userId: string, action: BackendProact
       };
     }
     if (action.outcome === "postponed") {
+      const current = (await getProactiveMemories(userId)).find((item) => item.id === action.memoryId);
+      const fallbackDate = current?.dateParsed ? addDaysToKey(current.dateParsed, 7) : addDaysToKey(todayKey(), 7);
       const result = await updateProactiveMemory(userId, action.memoryId, {
-        status: "validated_postponed",
+        ...(action.patch || {}),
+        dateParsed: action.patch?.dateParsed || fallbackDate,
+        status: "pending_confirmation",
+        stage: "continuity_question",
+        confirmationStage: "event",
+        proposedTrainingAdapted: undefined,
+        trainingAdapted: undefined,
+        confirmedAt: undefined,
         validatedAt: new Date().toISOString(),
       });
-      const impactResult = persistDecisionImpactForMemory(userId, result);
+      setProactiveImpactsStatusForMemory(userId, action.memoryId, "discarded");
+      const memory = getMemory(userId);
+      replaceProactiveMemoryInMemoryObject(memory, result);
+      const language = normalizeLanguage(memory.language || "pt-BR");
+      const prompt = result ? buildTravelTrainingPrompt(memory, result, language) : null;
+      syncCanonicalConversationContext(memory);
+      saveMemory(memory);
       auditProactivity("validate_postponed");
       return {
         id: action.memoryId,
-        status: "validated_postponed",
-        memory: impactResult.memory || result,
-        impact: impactResult.impact,
-        memoryPatch: impactResult.memoryPatch,
+        status: "pending_confirmation",
+        memory: result,
+        impact: null,
+        fala: prompt?.fala,
+        expectedResponse: prompt?.expectedResponse as ExpectedResponse | null,
+        memoryPatch: buildProactiveMemoryPatch(memory),
       };
     }
     const result = await updateProactiveMemory(userId, action.memoryId, {
@@ -1978,6 +2035,7 @@ function applyDailyMissPenalty(memory: GutoMemory, day = todayKey()) {
   const completedDays = new Set(memory.completedWorkoutDates || []);
   const adaptedDays = new Set(memory.adaptedMissionDates || []);
   if (completedDays.has(day) || adaptedDays.has(day)) return memory;
+  if (getAdaptationForDate(memory, day).isProtectedDay) return memory;
 
   const missedDays = new Set(memory.missedMissionDates || []);
   missedDays.add(day);
@@ -2084,6 +2142,7 @@ function hasWorkoutPlanExercises(plan?: WorkoutPlan | null): plan is WorkoutPlan
 }
 
 function getTodayMissionPlan(memory: GutoMemory, now = new Date()): WorkoutPlan | null {
+  if (getAdaptationForDate(memory, todayKey(now)).isProtectedDay) return null;
   const weeklyPlan = memory.weeklyWorkoutPlan?.days?.[getWeekDayKey(now)] || null;
   if (hasWorkoutPlanExercises(weeklyPlan)) return weeklyPlan;
   if (hasWorkoutPlanExercises(memory.lastWorkoutPlan)) return memory.lastWorkoutPlan;
@@ -3577,6 +3636,7 @@ function normalizeActiveConversationContext(value: unknown): ActiveConversationC
   const validKinds: ActiveConversationContextKind[] = [
     "travel_confirmation",
     "travel_impact_confirmation",
+    "travel_date_correction",
     "workout_substitution",
     "diet_substitution",
     "pain_safety",
@@ -3657,6 +3717,19 @@ function deriveCanonicalConversationContext(memory: GutoMemory): ActiveConversat
       source: "proactive_memory",
       relatedMemoryId: pendingImpact.id,
       dateParsed: pendingImpact.dateParsed,
+      updatedAt: now,
+    };
+  }
+
+  const pendingDateCorrection = memories.find(
+    (item) => item.type === "trip" && item.status === "pending_confirmation" && item.stage === "date_correction"
+  );
+  if (pendingDateCorrection) {
+    return {
+      kind: "travel_date_correction",
+      source: "proactive_memory",
+      relatedMemoryId: pendingDateCorrection.id,
+      dateParsed: pendingDateCorrection.dateParsed,
       updatedAt: now,
     };
   }
@@ -3834,35 +3907,13 @@ async function resolveActiveTravelTrainingPromptReply(
   }
 
   const patch = appendTravelImpactText(target, input, signal);
-  if (signal === "can_train") {
-    const updated = await updateProactiveMemory(userId, target.id, {
-      ...patch,
-      status: "confirmed",
-      stage: "confirmed_adapted",
-      confirmationStage: "event",
-    } as Partial<ProactiveMemory>);
-    const impactResult = persistDecisionImpactForMemory(userId, updated);
-    const fresh = getMemory(userId);
-    replaceProactiveMemoryInMemoryObject(fresh, impactResult.memory || updated);
-    clearActiveProactivePrompt(fresh);
-    syncCanonicalConversationContext(fresh);
-    saveMemory(fresh);
-    console.info("[GUTO][conversation-state] source=state_resolver kind=travel_impact_confirmation outcome=adapted_training");
-    return {
-      fala: impactResult.impact?.decision.message || buildProactiveContinuityFala("travel_can_train", language, getGutoCallName(fresh)),
-      acao: "none",
-      expectedResponse: null,
-      workoutPlan: null,
-      avatarEmotion: "default",
-      memoryPatch: buildProactiveMemoryPatch(fresh),
-    };
-  }
-
   const updated = await updateProactiveMemory(userId, target.id, {
     ...patch,
     status: "pending_confirmation",
     stage: "impact_confirmation",
     confirmationStage: "impact",
+    proposedTrainingAdapted: signal === "can_train",
+    trainingAdapted: undefined,
     discardRequestedAt: undefined,
   } as Partial<ProactiveMemory>);
   const fresh = getMemory(userId);
@@ -3870,9 +3921,13 @@ async function resolveActiveTravelTrainingPromptReply(
   clearActiveProactivePrompt(fresh);
   syncCanonicalConversationContext(fresh);
   saveMemory(fresh);
-  console.info("[GUTO][conversation-state] source=state_resolver kind=travel_impact_confirmation outcome=protected_card");
+  console.info(`[GUTO][conversation-state] source=state_resolver kind=travel_impact_confirmation outcome=card_${signal}`);
   return {
-    fala: buildProtectedDayFinalConfirmationFala(updated || target, language),
+    fala: language === "en-US"
+      ? "Confirm it on the card and I will keep organizing your week."
+      : language === "it-IT"
+        ? "Conferma nel card e continuo a organizzare la tua settimana."
+        : "Confirma no card e eu já sigo organizando tua semana.",
     acao: "none",
     expectedResponse: null,
     workoutPlan: null,
@@ -8247,21 +8302,21 @@ function buildMemoryReminderFala(memory: GutoMemory, item: ProactiveMemory, lang
   if (language === "en-US") {
     if (isTomorrow) return `Tomorrow is your ${item.type === "trip" ? "trip" : "commitment"}. Today we use the window better before it hits.`;
     if (isToday) return protectedDay
-      ? `Today is your ${item.type === "trip" ? "trip" : "commitment"}. I keep the day protected as confirmed.`
-      : `Today is your ${item.type === "trip" ? "trip" : "commitment"}. I adapt the mission around it.`;
+      ? `Today is your ${item.type === "trip" ? "trip" : "commitment"}. That day is protected. No blind charge. Tomorrow we resume.`
+      : `Today is your ${item.type === "trip" ? "trip" : "commitment"}. You said you can train, so we keep the focus. Tell me: gym, room, or outdoors?`;
     return `${when ? `${when} ` : ""}${item.type === "trip" ? "the trip" : "that commitment"} is on my radar. I won't charge blind.`;
   }
   if (language === "it-IT") {
     if (isTomorrow) return `Domani c'è ${item.type === "trip" ? "il tuo viaggio" : "il tuo impegno"}. Oggi usiamo meglio la finestra prima che arrivi.`;
     if (isToday) return protectedDay
-      ? `Oggi c'è ${item.type === "trip" ? "il tuo viaggio" : "il tuo impegno"}. Tengo il giorno protetto come confermato.`
-      : `Oggi c'è ${item.type === "trip" ? "il tuo viaggio" : "il tuo impegno"}. Adatto la missione attorno a questo.`;
+      ? `Oggi c'è ${item.type === "trip" ? "il tuo viaggio" : "il tuo impegno"}. Il giorno è protetto. Niente pressione cieca. Domani riprendiamo.`
+      : `Oggi c'è ${item.type === "trip" ? "il tuo viaggio" : "il tuo impegno"}. Hai detto che puoi allenarti, quindi restiamo concentrati. Dimmi: palestra, camera o all'aperto?`;
     return `${when ? `${when} ` : ""}${item.type === "trip" ? "il viaggio" : "quell'impegno"} è nel mio radar. Non ti carico alla cieca.`;
   }
   if (isTomorrow) return `Amanhã é tua ${item.type === "trip" ? "viagem" : "agenda"}. Hoje vamos aproveitar melhor antes dela.`;
   if (isToday) return protectedDay
-    ? `Hoje é tua ${item.type === "trip" ? "viagem" : "agenda"}. Eu mantenho o dia protegido como confirmado.`
-    : `Hoje é tua ${item.type === "trip" ? "viagem" : "agenda"}. Eu adapto a missão em cima disso.`;
+    ? `Hoje é tua ${item.type === "trip" ? "viagem" : "agenda"}. Esse dia já está protegido. Sem cobrança burra. Amanhã a gente retoma.`
+    : `Hoje é tua ${item.type === "trip" ? "viagem" : "agenda"}. Você falou que consegue um tempo para treinar, então a gente mantém o foco. Me diz: academia, quarto ou ar livre?`;
   return `${when ? `${when} ` : ""}${item.type === "trip" ? "a viagem" : "esse compromisso"} está no meu radar. Eu não vou te cobrar no escuro.`;
 }
 
@@ -11158,6 +11213,7 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
   const language = String(req.query.language || memory.language || "pt-BR");
   const operationalContext = getOperationalContext(new Date(), language || memory.language);
   const day = todayKey();
+  const todayProactiveAdaptation = getAdaptationForDate(memory, day);
   const slot = force
     ? "arrival"
     : shouldSendLimitationCheck(memory, day)
@@ -11170,6 +11226,7 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
     (force || slot === "arrival") &&
     !memory.trainedToday &&
     !missionPlanAtOpen &&
+    !todayProactiveAdaptation.isProtectedDay &&
     hasCalibrationProfileLocked(memory)
   ) {
     try {
@@ -11189,7 +11246,7 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
   }
 
   const includeBasePlanEffect = (response: GutoModelResponse): GutoModelResponse => {
-    if (!basePlanResult?.workoutPlan) return response;
+    if (!basePlanResult?.workoutPlan || todayProactiveAdaptation.isProtectedDay) return response;
     return {
       ...response,
       acao: "updateWorkout",
@@ -11729,20 +11786,6 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
       return res.json(attachAvatarEmotion({
         response: resolverHandledResponse,
         memory: getMemory(userId),
-        context,
-        input: input || "",
-      }));
-    }
-
-    const blockingContext = getBlockingCardContext(memory);
-    if (blockingContext) {
-      console.info(`[GUTO][conversation-state] source=state_guard kind=${blockingContext.kind}`);
-      syncCanonicalConversationContext(memory);
-      saveMemory(memory);
-      const context = getOperationalContext(new Date(), selectedLanguage);
-      return res.json(attachAvatarEmotion({
-        response: buildBlockingConversationResponse(blockingContext, memory, selectedLanguage),
-        memory,
         context,
         input: input || "",
       }));
@@ -12382,12 +12425,12 @@ app.post("/guto/proactivity/extract", requireActiveUser, async (req, res) => {
 /**
  * POST /guto/proactivity/confirm
  * Confirms a pending memory (user confirmed GUTO understood correctly).
- * Body: { memoryId: string }
+ * Body: { memoryId: string, trainingAdapted?: boolean }
  * Triggers background enrichment.
  */
 app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
-  const { memoryId } = req.body as { memoryId?: string };
+  const { memoryId, trainingAdapted } = req.body as { memoryId?: string; trainingAdapted?: boolean };
 
   if (!memoryId) {
     return res.status(400).json({ error: "memoryId required" });
@@ -12399,23 +12442,80 @@ app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
       return res.status(404).json({ error: "memory not found" });
     }
 
-    if (current.status !== "pending_confirmation") {
+    const isActiveTripUpdate = current.type === "trip" &&
+      ["confirmed", "enriched", "surfaced"].includes(current.status) &&
+      typeof trainingAdapted === "boolean";
+    if (current.status !== "pending_confirmation" && !isActiveTripUpdate) {
       return res.json({ ok: true, memory: current, ignored: true, memoryPatch: buildProactiveMemoryPatch(getMemory(userId)) });
     }
 
     const selectedLanguage = normalizeLanguage(getMemory(userId).language || "pt-BR");
-    if (isTripEventConfirmation(current)) {
-      const result = await confirmTripEventAndOpenImpactPrompt(userId, current, selectedLanguage);
-      return res.json({ ok: true, ...result });
+    if (current.type === "trip") {
+      if (typeof trainingAdapted !== "boolean") {
+        return res.status(400).json({ error: "trainingAdapted required for trip confirmation" });
+      }
+      if (current.status === "pending_confirmation" && current.stage !== "impact_confirmation") {
+        return res.status(409).json({ error: "trip is not ready for card confirmation" });
+      }
+
+      const confirmedAt = new Date().toISOString();
+      const updated = await updateProactiveMemory(userId, memoryId, {
+        status: "confirmed",
+        confirmedAt,
+        trainingAdapted,
+        proposedTrainingAdapted: trainingAdapted,
+        stage: trainingAdapted ? "confirmed_adapted" : "confirmed_protected",
+        confirmationStage: "impact",
+        discardRequestedAt: undefined,
+      });
+      const freshMemory = getMemory(userId);
+      replaceProactiveMemoryInMemoryObject(freshMemory, updated);
+      clearActiveProactivePrompt(freshMemory);
+      const impact = persistDecisionImpactInMemoryObject(freshMemory, updated, selectedLanguage);
+      syncCanonicalConversationContext(freshMemory);
+      appendMemoryAudit(
+        freshMemory,
+        "proactivity_action",
+        ["proactiveMemories", "proactiveImpacts"],
+        `Viagem ${memoryId} validada no card com treinoAdaptado=${trainingAdapted}.`
+      );
+      saveMemory(freshMemory);
+
+      enrichPendingMemories(
+        userId,
+        freshMemory.country || "",
+        freshMemory.countryCode,
+        selectedLanguage
+      ).catch(() => {});
+
+      const day = current.dateParsed
+        ? formatRelativeProactiveDay(current.dateParsed, selectedLanguage)
+        : selectedLanguage === "en-US" ? "that day" : selectedLanguage === "it-IT" ? "quel giorno" : "esse dia";
+      const fala = trainingAdapted
+        ? selectedLanguage === "en-US"
+          ? `Done. I saved your trip for ${day}. I will adapt that day's mission instead of cancelling it. Now let's take care of today.`
+          : selectedLanguage === "it-IT"
+            ? `Fatto. Ho salvato il viaggio per ${day}. Adatto la missione di quel giorno invece di cancellarla. Ora pensiamo a oggi.`
+            : `Fechado. Salvei tua viagem para ${day}. Vou adaptar a missão desse dia em vez de cancelar. Agora vamos cuidar de hoje.`
+        : selectedLanguage === "en-US"
+          ? `Done. I saved ${day} as a protected day. No wild compensation. We keep the focus today.`
+          : selectedLanguage === "it-IT"
+            ? `Fatto. Ho salvato ${day} come giorno protetto. Niente compensazioni folli. Oggi manteniamo il focus.`
+            : `Fechado. Salvei ${day} como dia protegido. Sem inventar compensação maluca. A gente mantém o foco hoje.`;
+
+      return res.json({
+        ok: true,
+        memory: updated,
+        impact,
+        fala,
+        memoryPatch: buildProactiveMemoryPatch(freshMemory),
+      });
     }
 
     const confirmedAt = new Date().toISOString();
     const updated = await updateProactiveMemory(userId, memoryId, {
       status: "confirmed",
       confirmedAt,
-      ...(current.type === "trip"
-        ? { stage: "confirmed_protected" as const, confirmationStage: "impact" as const }
-        : {}),
     });
     const impactResult = persistDecisionImpactForMemory(userId, updated);
 
@@ -12449,13 +12549,78 @@ app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
 });
 
 /**
+ * POST /guto/proactivity/change-date
+ * Suspends the definitive effect and opens a persisted date-correction context.
+ * Body: { memoryId: string }
+ */
+app.post("/guto/proactivity/change-date", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
+  const { memoryId } = req.body as { memoryId?: string };
+  if (!memoryId) return res.status(400).json({ error: "memoryId required" });
+
+  try {
+    const current = (await getProactiveMemories(userId)).find((item) => item.id === memoryId);
+    if (!current) return res.status(404).json({ error: "memory not found" });
+    if (current.type !== "trip" || ["discarded", "validated_happened"].includes(current.status)) {
+      return res.status(409).json({ error: "memory cannot change date" });
+    }
+
+    const updated = await updateProactiveMemory(userId, memoryId, {
+      status: "pending_confirmation",
+      stage: "date_correction",
+      confirmationStage: "event",
+      proposedTrainingAdapted: current.trainingAdapted ?? current.proposedTrainingAdapted,
+      trainingAdapted: undefined,
+      confirmedAt: undefined,
+      discardRequestedAt: undefined,
+    });
+    const memory = getMemory(userId);
+    replaceProactiveMemoryInMemoryObject(memory, updated);
+    const now = new Date().toISOString();
+    memory.proactiveImpacts = (memory.proactiveImpacts || []).map((impact) =>
+      impact.memoryId === memoryId ? { ...impact, status: "discarded", updatedAt: now } : impact
+    );
+    clearActiveProactivePrompt(memory);
+    syncCanonicalConversationContext(memory);
+    saveMemory(memory);
+    const language = normalizeLanguage(memory.language || "pt-BR");
+    const fala = language === "en-US"
+      ? "What is the correct travel date?"
+      : language === "it-IT"
+        ? "Qual è la data corretta del viaggio?"
+        : "Qual é a data certa da viagem?";
+    activateProactivePrompt(memory, {
+      kind: "memory_reminder",
+      relatedMemoryId: memoryId,
+      weekKey: updated?.weekKey,
+      dayKey: updated?.dateParsed || todayKey(),
+      fala,
+      expectedResponse: {
+        type: "text",
+        instruction: language === "en-US"
+          ? "Reply with the correct travel date."
+          : language === "it-IT"
+            ? "Rispondi con la data corretta del viaggio."
+            : "Responder com a data certa da viagem.",
+      },
+    });
+    syncCanonicalConversationContext(memory);
+    saveMemory(memory);
+    return res.json({ ok: true, memory: updated, fala, memoryPatch: buildProactiveMemoryPatch(memory) });
+  } catch (error) {
+    console.error("[GUTO][proactivity] change-date error:", error);
+    return res.status(500).json({ error: "internal error" });
+  }
+});
+
+/**
  * POST /guto/proactivity/discard
  * Discards a memory (user said GUTO understood wrong or event was cancelled).
  * Body: { memoryId: string }
  */
 app.post("/guto/proactivity/discard", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
-  const { memoryId } = req.body as { memoryId?: string };
+  const { memoryId, confirmedByUser } = req.body as { memoryId?: string; confirmedByUser?: boolean };
 
   if (!memoryId) {
     return res.status(400).json({ error: "memoryId required" });
@@ -12470,7 +12635,7 @@ app.post("/guto/proactivity/discard", requireActiveUser, async (req, res) => {
     const activeStatuses = ["confirmed", "enriched", "surfaced"] as const;
     const canDiscard =
       current.status === "pending_confirmation" ||
-      ((activeStatuses as readonly string[]).includes(current.status) && !!current.discardRequestedAt);
+      ((activeStatuses as readonly string[]).includes(current.status) && (!!current.discardRequestedAt || confirmedByUser === true));
 
     if (!canDiscard) {
       return res.json({ ok: true, memory: current, ignored: true, memoryPatch: buildProactiveMemoryPatch(getMemory(userId)) });
@@ -12641,11 +12806,39 @@ app.post("/guto/proactivity/validate", requireActiveUser, async (req, res) => {
       return res.json({ ok: true, memory: current, ignored: true, memoryPatch: buildProactiveMemoryPatch(getMemory(userId)) });
     }
 
+    if (outcome === "postponed") {
+      const nextDate = current.dateParsed ? addDaysToKey(current.dateParsed, 7) : addDaysToKey(todayKey(), 7);
+      const updated = await updateProactiveMemory(userId, memoryId, {
+        status: "pending_confirmation",
+        dateParsed: nextDate,
+        stage: "continuity_question",
+        confirmationStage: "event",
+        proposedTrainingAdapted: undefined,
+        trainingAdapted: undefined,
+        confirmedAt: undefined,
+        validatedAt: new Date().toISOString(),
+      });
+      setProactiveImpactsStatusForMemory(userId, memoryId, "discarded");
+      const memory = getMemory(userId);
+      replaceProactiveMemoryInMemoryObject(memory, updated);
+      const language = normalizeLanguage(memory.language || "pt-BR");
+      const prompt = updated ? buildTravelTrainingPrompt(memory, updated, language) : null;
+      syncCanonicalConversationContext(memory);
+      saveMemory(memory);
+      await markWeeklyConversationDone(userId, "validationDone");
+      return res.json({
+        ok: true,
+        memory: updated,
+        impact: null,
+        fala: prompt?.fala,
+        expectedResponse: prompt?.expectedResponse,
+        memoryPatch: buildProactiveMemoryPatch(memory),
+      });
+    }
+
     let newStatus: import("./src/proactivity/types.js").ProactiveMemoryStatus;
     if (outcome === "happened") {
       newStatus = "validated_happened";
-    } else if (outcome === "postponed") {
-      newStatus = "validated_postponed";
     } else {
       newStatus = "discarded";
     }
@@ -12659,9 +12852,7 @@ app.post("/guto/proactivity/validate", requireActiveUser, async (req, res) => {
     const impactResult =
       newStatus === "validated_happened"
         ? setProactiveImpactsStatusForMemory(userId, memoryId, "validated")
-        : newStatus === "validated_postponed"
-          ? persistDecisionImpactForMemory(userId, updated)
-          : setProactiveImpactsStatusForMemory(userId, memoryId, "discarded");
+        : setProactiveImpactsStatusForMemory(userId, memoryId, "discarded");
 
     // Mark validation as done for this week
     await markWeeklyConversationDone(userId, "validationDone");
@@ -12776,6 +12967,29 @@ app.get("/guto/arena/me", requireActiveUser, (req, res) => {
 
 // ── Diet endpoints ────────────────────────────────────────────────────────────
 
+function applyTravelContextToDiet(
+  plan: DietPlan,
+  memory: GutoMemory,
+  language: GutoLanguage,
+  day = todayKey()
+): DietPlan {
+  if (plan.lockedByCoach || plan.manualOverride) return plan;
+  const adaptation = getAdaptationForDate(memory, day);
+  if (adaptation.reason !== "travel" || !adaptation.primaryImpact) return plan;
+  const note = language === "en-US"
+    ? "Travel day: keep a practical option with you and preserve the planned portions."
+    : language === "it-IT"
+      ? "Giorno di viaggio: porta con te un'opzione pratica e mantieni le porzioni previste."
+      : "Dia de viagem: leva uma opção prática contigo e mantém as porções planejadas.";
+  return {
+    ...plan,
+    meals: plan.meals.map((meal) => ({
+      ...meal,
+      gutoNote: meal.gutoNote.includes(note) ? meal.gutoNote : `${meal.gutoNote} ${note}`.trim(),
+    })),
+  };
+}
+
 // GET /guto/diet
 app.get("/guto/diet", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
@@ -12798,7 +13012,8 @@ app.get("/guto/diet", requireActiveUser, async (req, res) => {
         });
       }
     }
-    return res.json(plan);
+    const memory = getMemory(userId);
+    return res.json(applyTravelContextToDiet(plan, memory, normalizeLanguage(memory.language)));
   } catch (error) {
     console.error("[GUTO] diet GET error:", error);
     return res.status(500).json({ error: "Erro ao buscar dieta." });
@@ -13129,7 +13344,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
     });
   }
 
-  const plan: DietPlan = {
+  const plan: DietPlan = applyTravelContextToDiet({
     userId,
     source: "guto_generated",
     lockedByCoach: false,
@@ -13140,7 +13355,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
     macros,
     meals,
     foodRestrictions: nutritionProfile.foodRestrictions,
-  };
+  }, memory, language);
 
   await saveDietPlan(plan);
   memory.dietGenerationStatus = "generated";

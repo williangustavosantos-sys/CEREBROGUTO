@@ -171,15 +171,22 @@ export async function upsertProactiveMemory(
 
     created = false
     const existing = current[index]!
+    const expiredPending = existing.status === 'pending_confirmation' && Boolean(existing.expiresAt && existing.expiresAt < now)
     result = {
-      ...existing,
+      ...(expiredPending ? candidate : existing),
+      id: existing.id,
+      userId: existing.userId,
+      createdAt: existing.createdAt,
       eventKey,
-      rawText: existing.rawText || candidate.rawText,
-      understood: existing.understood || candidate.understood,
-      dateText: existing.dateText || candidate.dateText,
-      dateParsed: existing.dateParsed || candidate.dateParsed,
-      location: existing.location || candidate.location,
-      sourceTurnId: existing.sourceTurnId || candidate.sourceTurnId,
+      rawText: expiredPending ? candidate.rawText : existing.rawText || candidate.rawText,
+      understood: expiredPending ? candidate.understood : existing.understood || candidate.understood,
+      dateText: expiredPending ? candidate.dateText : existing.dateText || candidate.dateText,
+      dateParsed: expiredPending ? candidate.dateParsed : existing.dateParsed || candidate.dateParsed,
+      location: expiredPending ? candidate.location : existing.location || candidate.location,
+      sourceTurnId: expiredPending ? candidate.sourceTurnId : existing.sourceTurnId || candidate.sourceTurnId,
+      stage: expiredPending ? candidate.stage : existing.stage || candidate.stage,
+      confirmationStage: expiredPending ? candidate.confirmationStage : existing.confirmationStage || candidate.confirmationStage,
+      expiresAt: expiredPending ? expiresAt : existing.expiresAt,
       updatedAt: now,
     }
     return current.map((item, itemIndex) => itemIndex === index ? result : item)

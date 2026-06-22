@@ -34,6 +34,15 @@ function authHeaders(userId: string) {
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 }
 
+function todayKey() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: process.env.GUTO_TIME_ZONE || "Europe/Rome",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
 function defaultDietModelResponse() {
   return {
     candidates: [
@@ -285,6 +294,83 @@ describe("diet generation contract", () => {
     const memory = readMemory(userId);
     assert.equal(memory.dietGenerationStatus, "generated");
     assert.equal(memory.proactiveMemories?.[0]?.stage, "impact_confirmation");
+  });
+
+  it("dieta confirmada usa o contexto da viagem no dia sem alterar alimentos ou macros", async () => {
+    const userId = "diet-confirmed-trip-today";
+    const day = todayKey();
+    writeMemory(userId, {
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      trainingLevel: "consistent",
+      trainingGoal: "muscle_gain",
+      country: "Italia",
+      countryCode: "IT",
+      foodRestrictions: "none",
+      resolvedFields: {
+        foodRestriction: { rawValue: "none", status: "clear", normalizedValue: "none" },
+      },
+      proactiveMemories: [{
+        id: "pm-diet-trip-today",
+        userId,
+        type: "trip",
+        status: "confirmed",
+        stage: "confirmed_adapted",
+        trainingAdapted: true,
+        rawText: "viaggio oggi",
+        understood: "Viaggio oggi",
+        dateParsed: day,
+        weekKey: "current",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        confirmedAt: new Date().toISOString(),
+      }],
+      proactiveImpacts: [{
+        id: "pi-diet-trip-today",
+        memoryId: "pm-diet-trip-today",
+        status: "active",
+        surfaces: ["diet"],
+        priority: 90,
+        affectedDates: [day],
+        workoutEffect: "short_light",
+        missionEffect: "reduced",
+        pushEffect: "avoid_blind_charge",
+        xpEffect: "no_free_xp_context_only",
+        arenaEffect: "validation_required",
+        pathEffect: "adapted_context",
+        evolutionEffect: "adapted_context",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        decision: {
+          id: "decision-diet-trip-today",
+          memoryId: "pm-diet-trip-today",
+          kind: "adapt_day",
+          reason: "travel",
+          priority: 90,
+          affectedDates: [day],
+          workoutEffect: "short_light",
+          missionEffect: "reduced",
+          message: "Viaggio confermato.",
+          createdAt: new Date().toISOString(),
+        },
+      }],
+    });
+
+    const res = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "it-IT" }),
+    });
+    assert.equal(res.status, 200);
+    const plan = await res.json() as {
+      meals: Array<{ gutoNote: string; foods: Array<{ name: string; quantity: string; kcal: number }> }>;
+      macros: { targetKcal: number };
+    };
+    assert.ok(plan.meals.every((meal) => /giorno di viaggio/i.test(meal.gutoNote)));
+    assert.ok(plan.meals.every((meal) => meal.foods.length > 0));
+    assert.ok(plan.macros.targetKcal > 0);
   });
 
   it("repara plano levemente fora da meta calórica em vez de bloquear", async () => {

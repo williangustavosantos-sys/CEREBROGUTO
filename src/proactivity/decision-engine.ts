@@ -257,7 +257,9 @@ export function decideFromProactiveMemory(
     /\b(viajo|viajar|viagem|vou viajar|travel|trip|flight|volo|viaggio|parto)\b/.test(text)
   if (travelDetected) {
     const affectedDates = resolveAffectedDates(memory, text, now)
-    const signal = detectTravelTrainingSignal(text)
+    const signal = typeof memory.trainingAdapted === 'boolean'
+      ? memory.trainingAdapted ? 'can_train' : 'cannot_train'
+      : detectTravelTrainingSignal(text)
 
     // Continuidade ativa: usuário consegue treinar viajando → mantém o treino,
     // adaptado para hotel/quarto (curto e leve). NÃO marca descanso, NÃO bloqueia
@@ -270,10 +272,10 @@ export function decideFromProactiveMemory(
         workoutEffect: 'short_light',
         missionEffect: 'reduced',
         message: language.includes('en')
-          ? 'You can train on the trip, so I will NOT block that day. I keep the workout alive, adapted for hotel/room — short and clean. No rest by default, no max-intensity to compensate. XP only with real validation.'
+          ? 'Trip confirmed. I will adapt that day instead of cancelling it.'
           : language.includes('it')
-            ? 'Puoi allenarti in viaggio, quindi NON blocco quel giorno. Tengo l allenamento vivo, adattato per hotel/camera — corto e pulito. Niente riposo di default, niente intensità massima per compensare. XP solo con validazione reale.'
-            : 'Você consegue treinar na viagem, então NÃO vou bloquear o dia. Mantenho o treino vivo, adaptado pra hotel/quarto — curto e limpo. Sem descanso por padrão, sem intensidade máxima pra compensar. XP só com validação real.',
+            ? 'Viaggio confermato. Adatto quel giorno invece di cancellarlo.'
+            : 'Viagem confirmada. Vou adaptar esse dia em vez de cancelar.',
       })
     }
 
@@ -289,10 +291,10 @@ export function decideFromProactiveMemory(
         workoutEffect: 'protected',
         missionEffect: 'protected',
         message: language.includes('en')
-          ? 'Got it — that day is protected/unavailable. I reorganize the week around it. No automatic max-intensity, no free XP, no free Arena.'
+          ? 'Trip confirmed. That day is protected.'
           : language.includes('it')
-            ? 'Capito — quel giorno è protetto/non disponibile. Riorganizzo la settimana. Niente intensità massima automatica, niente XP gratis, niente Arena gratis.'
-            : 'Fechado — esse dia fica protegido/indisponível. Eu reorganizo a semana sem inventar intensidade máxima, sem XP grátis e sem Arena grátis.',
+            ? 'Viaggio confermato. Quel giorno è protetto.'
+            : 'Viagem confirmada. Esse dia fica protegido.',
       })
     }
 
