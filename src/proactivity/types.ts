@@ -23,6 +23,7 @@ export type ProactiveMemoryStage =
   | 'event_confirmation'
   | 'continuity_question'
   | 'impact_confirmation'
+  | 'date_correction'
   | 'confirmed_adapted'
   | 'confirmed_protected'
   | 'discarded'
@@ -164,6 +165,10 @@ export interface ProactiveMemory {
   eventKey?: string
   stage?: ProactiveMemoryStage
   sourceTurnId?: string
+  /** Preferência entendida no chat. Continua transitória até o clique no card. */
+  proposedTrainingAdapted?: boolean
+  /** Decisão operacional definitiva, gravada somente após validação no card. */
+  trainingAdapted?: boolean
   /** Compatibilidade temporária com memórias gravadas antes do estágio operacional canônico. */
   confirmationStage?: 'event' | 'impact'
 }

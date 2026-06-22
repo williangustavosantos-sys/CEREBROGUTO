@@ -88,6 +88,18 @@ export function resolveProactiveDate(
     }
   }
 
+  const mentionedWeekday = WEEKDAYS.find((item) => item.tokens.some((token) => text.includes(token)))
+  const nextWeekMatch = text.match(/\b(semana que vem|proxima semana|next week|settimana prossima|prossima settimana)\b/)
+  if (mentionedWeekday && nextWeekMatch) {
+    const currentDay = today.getUTCDay()
+    const daysUntilNextMonday = (8 - currentDay) % 7 || 7
+    const weekdayOffsetFromMonday = (mentionedWeekday.day + 6) % 7
+    return {
+      dateParsed: addDaysToDateKey(todayKey, daysUntilNextMonday + weekdayOffsetFromMonday),
+      dateText: mentionedWeekday.label,
+    }
+  }
+
   const relative: Array<{ pattern: RegExp; days: number; fallback: string }> = [
     { pattern: /\b(hoje|today|oggi)\b/, days: 0, fallback: 'hoje' },
     { pattern: /\b(amanha|tomorrow|domani)\b/, days: 1, fallback: 'amanhã' },
@@ -123,7 +135,7 @@ export function resolveProactiveDate(
     }
   }
 
-  const weekday = WEEKDAYS.find((item) => item.tokens.some((token) => text.includes(token)))
+  const weekday = mentionedWeekday
   if (!weekday) return null
   const currentDay = today.getUTCDay()
   const delta = (weekday.day - currentDay + 7) % 7

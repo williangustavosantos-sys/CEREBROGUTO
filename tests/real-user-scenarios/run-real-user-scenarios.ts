@@ -1110,7 +1110,7 @@ async function runProfile(ctx: ScenarioContext, profile: ScenarioProfile): Promi
     const before = await ctx.getMemory(profile);
     const response = await ctx.chat(profile, profile.prompts.travelCannotTrain);
     const after = await ctx.getMemory(profile);
-    expect(hasAny(response.fala || "", profile.language === "it-IT" ? ["confermo", "giorno", "allenamento"] : ["confirma", "card", "dia", "sem treino"]), `indisponibilidade não pediu confirmação final: ${response.fala}`);
+    expect(hasAny(response.fala || "", profile.language === "it-IT" ? ["conferma", "card", "giorno", "allenamento"] : ["confirma", "card", "dia", "sem treino"]), `indisponibilidade não pediu confirmação final: ${response.fala}`);
     expect(!hasCalibrationReask(response.fala || "", profile.language), `indisponibilidade reperguntou calibragem: ${response.fala}`);
     expect(after.totalXp === before.totalXp, `viagem alterou XP: antes=${before.totalXp}, depois=${after.totalXp}`);
     expect(!after.proactiveImpacts?.some((impact) => impact.status === "active" && impact.workoutEffect === "protected"), "viagem criou dia protegido antes da confirmação final");

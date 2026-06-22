@@ -177,21 +177,24 @@ async function requestJson<T = any>(
 
 async function confirmTripEventThenCanTrain(student: AccessRecord, memoryId: string): Promise<Record<string, any>> {
   const token = tokenFor(student);
-  const eventConfirm = await requestJson("POST", "/guto/proactivity/confirm", token, { memoryId });
-  assert.equal(eventConfirm.res.status, 200);
-  assert.equal(eventConfirm.body.memory.status, "confirmed");
-  assert.equal(eventConfirm.body.impact, null);
-  assert.equal(eventConfirm.body.expectedResponse?.context, "travel_training");
-
   const impactReply = await requestJson("POST", "/guto", token, {
     input: "consigo treinar no hotel",
     language: "pt-BR",
     history: [],
   });
   assert.equal(impactReply.res.status, 200);
-  const impact = impactReply.body.memoryPatch?.proactiveImpacts?.find((item: Record<string, unknown>) => item.memoryId === memoryId);
-  assert.ok(impact, `impacto proativo não retornou no memoryPatch: ${JSON.stringify(impactReply.body)}`);
-  return { ...impactReply.body, impact };
+  assert.equal(impactReply.body.memoryPatch?.proactiveMemories?.find((item: Record<string, unknown>) => item.id === memoryId)?.status, "pending_confirmation");
+  assert.equal(impactReply.body.memoryPatch?.proactiveImpacts?.length || 0, 0);
+
+  const cardConfirm = await requestJson("POST", "/guto/proactivity/confirm", token, {
+    memoryId,
+    trainingAdapted: true,
+  });
+  assert.equal(cardConfirm.res.status, 200);
+  assert.equal(cardConfirm.body.memory.status, "confirmed");
+  assert.equal(cardConfirm.body.memory.trainingAdapted, true);
+  assert.ok(cardConfirm.body.impact, `impacto proativo não retornou no clique do card: ${JSON.stringify(cardConfirm.body)}`);
+  return cardConfirm.body;
 }
 
 function readStore(): Record<string, any> {
@@ -408,6 +411,8 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
       rawText: "viajo quarta, consigo treinar no hotel",
       understood: "Viagem na quarta, treina no hotel",
       dateText: "quarta",
+      stage: "continuity_question",
+      confirmationStage: "event",
       weekKey: "2026-W23",
     });
 
@@ -761,6 +766,8 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
       rawText: "viajo hoje, consigo treinar no hotel",
       understood: "Viagem hoje, treina no hotel",
       dateParsed: dateKey(),
+      stage: "continuity_question",
+      confirmationStage: "event",
       weekKey: "2026-W23",
     });
     const confirm = await confirmTripEventThenCanTrain(student, String(memory.id));
@@ -788,6 +795,8 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
       rawText: "viajo hoje, consigo treinar no hotel",
       understood: "Viagem hoje, treina no hotel",
       dateParsed: dateKey(),
+      stage: "continuity_question",
+      confirmationStage: "event",
       weekKey: "2026-W23",
     });
     const confirm = await confirmTripEventThenCanTrain(student, String(memory.id));

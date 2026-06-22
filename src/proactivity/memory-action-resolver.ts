@@ -17,16 +17,21 @@ export type ResolvedAction =
   | {
       type: 'confirm'
       memoryId: string
-      patch?: Partial<Pick<ProactiveMemory, 'rawText' | 'understood' | 'dateText' | 'dateParsed' | 'location' | 'stage' | 'confirmationStage'>>
+      patch?: Partial<Pick<ProactiveMemory, 'rawText' | 'understood' | 'dateText' | 'dateParsed' | 'location' | 'stage' | 'confirmationStage' | 'proposedTrainingAdapted' | 'trainingAdapted'>>
     }
   | { type: 'discard'; memoryId: string }
   | { type: 'request_discard'; memoryId: string }
   | {
       type: 'update'
       memoryId: string
-      patch: Partial<Pick<ProactiveMemory, 'rawText' | 'understood' | 'dateText' | 'dateParsed' | 'location' | 'stage' | 'confirmationStage'>>
+      patch: Partial<Pick<ProactiveMemory, 'rawText' | 'understood' | 'dateText' | 'dateParsed' | 'location' | 'stage' | 'confirmationStage' | 'proposedTrainingAdapted' | 'trainingAdapted'>>
     }
-  | { type: 'validate'; memoryId: string; outcome: 'happened' | 'postponed' | 'discarded' }
+  | {
+      type: 'validate'
+      memoryId: string
+      outcome: 'happened' | 'postponed' | 'discarded'
+      patch?: Partial<Pick<ProactiveMemory, 'dateText' | 'dateParsed' | 'location'>>
+    }
   | { type: 'cancel_discard_request'; memoryId: string }
 
 export interface ResolverResult {
@@ -66,6 +71,11 @@ function hasAny(normalized: string, terms: string[]): boolean {
 
 function isExactlyOneOf(normalized: string, terms: string[]): boolean {
   return terms.some((t) => normalized === t)
+}
+
+function isLikelyProactiveReply(normalized: string): boolean {
+  if (normalized.split(' ').length <= 4) return true
+  return /\b(viagem|viajar|viajo|trip|travel|viaggio|parto|cancelei|cancelado|cancelled|annullato|adiei|adiada|remarquei|troquei|mudei|postponed|rescheduled|rimandato|spostato|aconteceu|fui|rolou|happened|went|successo|andato|segunda|terca|quarta|quinta|sexta|sabado|domingo|monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunedi|martedi|mercoledi|giovedi|venerdi|sabato|domenica)\b/.test(normalized)
 }
 
 // ─── Term banks (normalised — no accents) ─────────────────────────────────────
@@ -138,7 +148,7 @@ const HAPPENED_TERMS: string[] = [
 // ── Validation: postponed ──
 const POSTPONED_TERMS: string[] = [
   // pt-BR
-  'adiei', 'ficou para depois', 'remarquei', 'adiado', 'vou depois',
+  'adiei', 'ficou para depois', 'remarquei', 'adiado', 'adiada', 'vou depois',
   'fica pra depois', 'mudei', 'mudamos', 'ficou pra outra',
   // en-US
   'postponed', 'rescheduled', 'delayed', 'pushed back', 'moved it', 'moved',
@@ -150,7 +160,7 @@ const POSTPONED_TERMS: string[] = [
 const VALIDATED_DISCARD_TERMS: string[] = [
   // pt-BR
   'nao fui', 'nao rolou', 'nao foi', 'cancelei', 'nao aconteceu', 'desisti',
-  'nao vai mais', 'foi cancelado', 'nao fomos',
+  'nao vai mais', 'foi cancelado', 'foi cancelada', 'nao fomos',
   // en-US
   'cancelled', 'canceled', 'did not go', "didn't go", 'did not happen', "didn't happen",
   'nope', 'no', "we didn't go",
@@ -506,6 +516,42 @@ export async function resolveProactiveMemoryActionFromUserReply(
       getProactiveMemoriesByStatus(userId, ['pending_validation']),
     ])
 
+    const pendingDateCorrection = pendingConfirmation.find(
+      (memory) => memory.type === 'trip' && memory.stage === 'date_correction'
+    )
+    if (pendingDateCorrection) {
+      const resolvedDate = resolveProactiveDate(userInput, getDateKey())
+      if (!resolvedDate) {
+        return {
+          engaged: true,
+          action: null,
+          fallbackMessage: language === 'en-US'
+            ? 'What is the correct travel date?'
+            : language === 'it-IT'
+              ? 'Qual è la data corretta del viaggio?'
+              : 'Qual é a data certa da viagem?',
+          reason: 'trip_date_correction_missing_date',
+        }
+      }
+      const patch = {
+        dateText: resolvedDate.dateText,
+        dateParsed: resolvedDate.dateParsed,
+        understood: buildCorrectionUnderstood(pendingDateCorrection, language, resolvedDate),
+        stage: 'impact_confirmation' as const,
+        confirmationStage: 'impact' as const,
+      }
+      return {
+        engaged: true,
+        action: { type: 'update', memoryId: pendingDateCorrection.id, patch },
+        fallbackMessage: language === 'en-US'
+          ? 'Date updated. Confirm the decision on the card.'
+          : language === 'it-IT'
+            ? 'Data aggiornata. Conferma la decisione nel card.'
+            : 'Data atualizada. Confirma a decisão no card.',
+        reason: 'trip_date_corrected',
+      }
+    }
+
     if (pendingConfirmation.length === 1 && isCorrection(normalized)) {
       const target = pendingConfirmation[0]!
       const patch = correctionPatch(target, userInput, language)
@@ -535,37 +581,83 @@ export async function resolveProactiveMemoryActionFromUserReply(
             reason: 'pending_trip_event_card_first',
           }
         }
-        if (travelTrainingSignal === 'cannot_train') {
-          return {
-            engaged: true,
-            action: {
-              type: 'update',
-              memoryId: target.id,
-              patch: {
-                ...appendUserReplyToMemoryPatch(target, userInput),
-                ...(isContinuityQuestion
-                  ? { stage: 'impact_confirmation' as const, confirmationStage: 'impact' as const }
-                  : {}),
-              },
-            },
-            reason: 'pending_trip_protected_confirmation',
-          }
-        }
         return {
           engaged: true,
           action: {
-            type: 'confirm',
+            type: 'update',
             memoryId: target.id,
             patch: {
               ...appendUserReplyToMemoryPatch(target, userInput),
+              proposedTrainingAdapted: travelTrainingSignal === 'can_train',
               ...(isContinuityQuestion
-                ? { stage: 'confirmed_adapted' as const, confirmationStage: 'event' as const }
+                ? { stage: 'impact_confirmation' as const, confirmationStage: 'impact' as const }
                 : {}),
             },
           },
-          reason: `confirmed_trip_training_${travelTrainingSignal}`,
+          reason: `pending_trip_card_${travelTrainingSignal}`,
         }
       }
+    }
+
+    const activeTrips = allMemories.filter(
+      (memory) => memory.type === 'trip' && ['confirmed', 'enriched', 'surfaced'].includes(memory.status)
+    )
+    if (activeTrips.length === 1) {
+      const target = activeTrips[0]!
+      const travelTrainingSignal = detectTravelTrainingSignal(userInput)
+      if (travelTrainingSignal !== 'unknown') {
+        return {
+          engaged: true,
+          action: {
+            type: 'update',
+            memoryId: target.id,
+            patch: {
+              ...appendUserReplyToMemoryPatch(target, userInput),
+              proposedTrainingAdapted: travelTrainingSignal === 'can_train',
+              trainingAdapted: undefined,
+              stage: 'impact_confirmation',
+              confirmationStage: 'impact',
+            },
+          },
+          reason: `active_trip_card_${travelTrainingSignal}`,
+        }
+      }
+
+      const movedDate = resolveProactiveDate(userInput, getDateKey())
+      if (movedDate && /\b(adiei|adiada|remarquei|troquei|mudei|mudou|postponed|rescheduled|moved|rimandato|spostato)\b/.test(normalized)) {
+        return {
+          engaged: true,
+          action: {
+            type: 'update',
+            memoryId: target.id,
+            patch: {
+              dateText: movedDate.dateText,
+              dateParsed: movedDate.dateParsed,
+              understood: buildCorrectionUnderstood(target, language, movedDate),
+              proposedTrainingAdapted: undefined,
+              trainingAdapted: undefined,
+              stage: 'continuity_question',
+              confirmationStage: 'event',
+            },
+          },
+          reason: 'active_trip_rescheduled',
+        }
+      }
+
+      if (hasAny(normalized, DISCARD_TERMS)) {
+        return {
+          engaged: true,
+          action: { type: 'discard', memoryId: target.id },
+          reason: 'active_trip_cancelled',
+        }
+      }
+    }
+
+    if (
+      (pendingConfirmation.length > 0 || pendingValidation.length > 0) &&
+      !isLikelyProactiveReply(normalized)
+    ) {
+      return PASS_THROUGH
     }
 
     const semantic = await resolveSemantically(
@@ -649,9 +741,15 @@ export async function resolveProactiveMemoryActionFromUserReply(
       }
 
       if (hasAny(normalized, POSTPONED_TERMS)) {
+        const correction = correctionPatch(target, userInput, language) || undefined
         return {
           engaged: true,
-          action: { type: 'validate', memoryId: target.id, outcome: 'postponed' },
+          action: {
+            type: 'validate',
+            memoryId: target.id,
+            outcome: 'postponed',
+            ...(correction ? { patch: correction } : {}),
+          },
           reason: 'validate_postponed',
         }
       }
@@ -721,25 +819,19 @@ export async function resolveProactiveMemoryActionFromUserReply(
               reason: 'pending_trip_event_card_first',
             }
           }
-          if (travelTrainingSignal === 'cannot_train') {
-            return {
-              engaged: true,
-              action: {
-                type: 'update',
-                memoryId: target.id,
-                patch: appendUserReplyToMemoryPatch(target, userInput),
-              },
-              reason: 'pending_trip_protected_confirmation',
-            }
-          }
           return {
             engaged: true,
             action: {
-              type: 'confirm',
+              type: 'update',
               memoryId: target.id,
-              patch: appendUserReplyToMemoryPatch(target, userInput),
+              patch: {
+                ...appendUserReplyToMemoryPatch(target, userInput),
+                proposedTrainingAdapted: travelTrainingSignal === 'can_train',
+                stage: 'impact_confirmation',
+                confirmationStage: 'impact',
+              },
             },
-            reason: `confirmed_trip_training_${travelTrainingSignal}`,
+            reason: `pending_trip_card_${travelTrainingSignal}`,
           }
         }
       }

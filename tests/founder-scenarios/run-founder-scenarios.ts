@@ -174,11 +174,11 @@ async function chat(userId: string, input: string): Promise<GutoResponse> {
   return (await response.json()) as GutoResponse;
 }
 
-async function confirmProactiveMemory(userId: string, memoryId: string): Promise<GutoResponse & { ok?: boolean; memoryPatch?: MemoryRecord }> {
+async function confirmProactiveMemory(userId: string, memoryId: string, trainingAdapted = false): Promise<GutoResponse & { ok?: boolean; memoryPatch?: MemoryRecord }> {
   const response = await fetch(`${baseUrl}/guto/proactivity/confirm`, {
     method: "POST",
     headers: authHeaders(userId),
-    body: JSON.stringify({ memoryId }),
+    body: JSON.stringify({ memoryId, trainingAdapted }),
   });
   assert.equal(response.status, 200, `POST /guto/proactivity/confirm deveria responder 200, veio ${response.status}`);
   return (await response.json()) as GutoResponse & { ok?: boolean; memoryPatch?: MemoryRecord };
