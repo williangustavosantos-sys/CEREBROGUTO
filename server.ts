@@ -5583,10 +5583,18 @@ function isEquipmentBusyMessage(input?: string) {
     "barra",
     "esteira",
     "polia",
+    "cadeira",
+    "abdutora",
+    "abdutor",
   ]);
   const hasBusyContext = hasAnyTerm(normalized, [
     "cheio",
     "ocupado",
+    "ocupada",
+    "esta ocupado",
+    "está ocupado",
+    "esta ocupada",
+    "está ocupada",
     "lotado",
     "fila",
     "indisponivel",
@@ -5603,6 +5611,19 @@ function isSubstitutionRejectionFollowUp(input?: string) {
   const normalized = normalize(stripInjectedContext(input || ""));
   if (!normalized) return false;
   return hasAnyTerm(normalized, [
+    "ocupado",
+    "ocupada",
+    "esta ocupado",
+    "esta ocupada",
+    "está ocupado",
+    "está ocupada",
+    "tbm",
+    "tbm ocupado",
+    "tbm ocupada",
+    "tbm esta ocupado",
+    "tbm esta ocupada",
+    "tbm está ocupado",
+    "tbm está ocupada",
     "tambem ocupado",
     "também ocupado",
     "tambem esta ocupado",
@@ -5613,8 +5634,20 @@ function isSubstitutionRejectionFollowUp(input?: string) {
     "também está ocupada",
     "esse tambem",
     "esse também",
+    "esse tbm",
     "essa tambem",
     "essa também",
+    "essa tbm",
+    "esse nao",
+    "esse não",
+    "essa nao",
+    "essa não",
+    "nao tem",
+    "não tem",
+    "nao da",
+    "não dá",
+    "ocupado tbm",
+    "ocupada tbm",
     "tambem nao da",
     "também não dá",
     "tambem nao tenho",
@@ -5948,6 +5981,29 @@ function findExerciseFromFreeText(input: string | undefined, plan?: WorkoutPlan 
     .sort((a, b) => b.normalizedName.length - a.normalizedName.length)[0]?.exercise || null;
 }
 
+function findExerciseFromActiveExercise(memory: GutoMemory, plan?: WorkoutPlan | null): WorkoutExercise | null {
+  const active = normalizeActiveExerciseContext(memory.activeExercise);
+  if (!active?.name || !plan?.exercises?.length) return null;
+  const activeName = normalize(active.name);
+  if (!activeName) return null;
+
+  return (
+    plan.exercises.find((exercise) => normalize(exercise.name || "") === activeName) ||
+    plan.exercises.find((exercise) => normalize(exercise.canonicalNamePt || "") === activeName) ||
+    plan.exercises.find((exercise) => {
+      const names = [exercise.name, exercise.canonicalNamePt].map((value) => normalize(value || "")).filter(Boolean);
+      return names.some((name) => name.includes(activeName) || activeName.includes(name));
+    }) ||
+    null
+  );
+}
+
+function resolveCatalogExerciseFromActiveExercise(memory: GutoMemory): { id: string; name: string } | null {
+  const active = normalizeActiveExerciseContext(memory.activeExercise);
+  if (!active?.name) return null;
+  return resolveCatalogExerciseFromFreeText(active.name);
+}
+
 function resolveWorkoutExerciseForSubstitution({
   input,
   history,
@@ -5961,10 +6017,13 @@ function resolveWorkoutExerciseForSubstitution({
   const planExercise =
     findLastExerciseDoubt(history || [], plan) ||
     findExerciseFromContextMarker(input, plan) ||
-    findExerciseFromFreeText(input, plan);
+    findExerciseFromFreeText(input, plan) ||
+    findExerciseFromActiveExercise(memory, plan);
   const catalogRef = planExercise
     ? null
-    : resolveCatalogExerciseFromContextMarker(input) || resolveCatalogExerciseFromFreeText(input);
+    : resolveCatalogExerciseFromContextMarker(input) ||
+      resolveCatalogExerciseFromFreeText(input) ||
+      resolveCatalogExerciseFromActiveExercise(memory);
   const exerciseId = planExercise?.id ?? catalogRef?.id;
   const exerciseName = planExercise?.name ?? catalogRef?.name;
 
@@ -6011,6 +6070,38 @@ function pickValidatedExerciseSubstitute({
     ) || null;
 }
 
+function buildEquipmentAvailabilityQuestion({
+  original,
+  memory,
+  language,
+  rejectedIds,
+}: {
+  original: { id: string; name: string; planExercise?: Pick<WorkoutExercise, "sets" | "reps" | "rest"> | null };
+  memory: GutoMemory;
+  language: GutoLanguage;
+  rejectedIds: string[];
+}): GutoModelResponse {
+  memory.substitutionContext = {
+    kind: "exercise",
+    originalId: original.id,
+    originalName: original.name,
+    rejectedIds,
+    planExercise: original.planExercise
+      ? { sets: original.planExercise.sets, reps: original.planExercise.reps, rest: original.planExercise.rest }
+      : undefined,
+    updatedAt: new Date().toISOString(),
+  };
+  appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Substitutos de exercício rejeitados; coletando equipamentos disponíveis.");
+  saveMemory(memory);
+
+  const copy: Record<GutoLanguage, string> = {
+    "pt-BR": `Já descartei algumas opções para ${original.name}. Me diz o que está livre agora: polia, halteres, banco, elástico, colchonete ou nenhum desses.`,
+    "en-US": `I already ruled out a few options for ${original.name}. Tell me what is free now: cable, dumbbells, bench, band, mat, or none of these.`,
+    "it-IT": `Ho già scartato alcune opzioni per ${original.name}. Dimmi cosa è libero ora: cavo, manubri, panca, elastico, tappetino o nessuno di questi.`,
+  };
+  return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
+}
+
 function buildValidatedEquipmentBusyResponse({
   original,
   memory,
@@ -6022,27 +6113,15 @@ function buildValidatedEquipmentBusyResponse({
   language: GutoLanguage;
   rejectedIds?: string[];
 }): GutoModelResponse {
-  const substitute = pickValidatedExerciseSubstitute({ originalId: original.id, memory, rejectedIds });
+  const normalizedRejectedIds = mergeRejectedIds(rejectedIds);
+  if (normalizedRejectedIds.length >= 3) {
+    return buildEquipmentAvailabilityQuestion({ original, memory, language, rejectedIds: normalizedRejectedIds });
+  }
+
+  const substitute = pickValidatedExerciseSubstitute({ originalId: original.id, memory, rejectedIds: normalizedRejectedIds });
 
   if (!substitute) {
-    memory.substitutionContext = {
-      kind: "exercise",
-      originalId: original.id,
-      originalName: original.name,
-      rejectedIds,
-      planExercise: original.planExercise
-        ? { sets: original.planExercise.sets, reps: original.planExercise.reps, rest: original.planExercise.rest }
-        : undefined,
-      updatedAt: new Date().toISOString(),
-    };
-    appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Substitutos de exercício rejeitados; aguardando equipamentos livres.");
-    saveMemory(memory);
-    const copy: Record<GutoLanguage, string> = {
-      "pt-BR": `${original.name} segue indisponível. Não vou chutar troca fora do alvo. Me diz quais equipamentos estão livres agora que eu valido mantendo o mesmo músculo.`,
-      "en-US": `${original.name} is still unavailable. I won't guess outside the target. Tell me which equipment is free now and I will validate the same muscle target.`,
-      "it-IT": `${original.name} è ancora indisponibile. Non improvviso fuori target. Dimmi quali attrezzi sono liberi e valido lo stesso muscolo.`,
-    };
-    return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
+    return buildEquipmentAvailabilityQuestion({ original, memory, language, rejectedIds: normalizedRejectedIds });
   }
 
   const substituteName = substitute.namesByLanguage[language as CatalogLanguage] || substitute.canonicalNamePt;
@@ -6067,7 +6146,7 @@ function buildValidatedEquipmentBusyResponse({
     originalId: original.id,
     originalName: original.name,
     lastSuggestedId: substitute.id,
-    rejectedIds,
+    rejectedIds: normalizedRejectedIds,
     planExercise: original.planExercise
       ? { sets: original.planExercise.sets, reps: original.planExercise.reps, rest: original.planExercise.rest }
       : undefined,
@@ -6091,7 +6170,11 @@ function buildEquipmentBusyFallbackResponse({
 }): GutoModelResponse | null {
   const previous = getFreshSubstitutionContext(memory, "exercise");
   const isRejectedFollowUp = Boolean(previous?.lastSuggestedId && isSubstitutionRejectionFollowUp(input));
-  if (!isEquipmentBusyMessage(input) && !isRejectedFollowUp) return null;
+  const hasActiveExerciseContext = Boolean(normalizeActiveExerciseContext(memory.activeExercise)?.name);
+  const canUseExerciseContext = isEquipmentBusyMessage(input) ||
+    isRejectedFollowUp ||
+    (hasActiveExerciseContext && isSubstitutionRejectionFollowUp(input));
+  if (!canUseExerciseContext) return null;
   const original = isRejectedFollowUp && previous
     ? {
         id: previous.originalId,
