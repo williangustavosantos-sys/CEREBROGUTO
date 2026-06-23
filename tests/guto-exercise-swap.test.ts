@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Server } from "node:http";
 import jwt from "jsonwebtoken";
-import { getCatalogById, suggestExerciseSubstitutes } from "../exercise-catalog";
+import { getCatalogById, suggestExerciseSubstitutes, validateExerciseSubstitute } from "../exercise-catalog";
 
 // Fase 3 — BUG 3: "Troca" em contexto de exercício nunca pode virar dica de
 // execução. Tem que ser pedido de substituição OU pergunta objetiva de validação.
@@ -33,6 +33,13 @@ function writeUserMemory(userId: string, data: Record<string, any>) {
   writeFileSync(testMemoryFile, JSON.stringify(store, null, 2));
 }
 
+function readUserMemory(userId: string): Record<string, any> {
+  const store = existsSync(testMemoryFile)
+    ? (JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, any>)
+    : {};
+  return store[userId] || {};
+}
+
 async function postGuto(userId: string, input: string) {
   const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
   const res = await originalFetch(`${baseUrl}/guto`, {
@@ -46,6 +53,68 @@ async function postGuto(userId: string, input: string) {
 
 // Frases típicas de DICA DE EXECUÇÃO que jamais podem aparecer numa resposta de troca.
 const EXECUTION_CUE_RE = /foca no|aperta o|contrai|mantenha a postura|controle a descida|amplitude|glúteo médio|gluteo medio/i;
+
+function writeSingleExerciseWorkout(userId: string, exerciseId = "cadeira_abdutora", extra: Record<string, any> = {}) {
+  const ex = getCatalogById(exerciseId);
+  assert.ok(ex, `exercício ${exerciseId} precisa existir no catálogo`);
+  writeUserMemory(userId, {
+    trainingGoal: "muscle_gain",
+    trainingLevel: "consistent",
+    preferredTrainingLocation: "gym",
+    lastWorkoutPlan: {
+      focus: "Treino",
+      focusKey: "legs_core",
+      dateLabel: "Hoje",
+      scheduledFor: new Date().toISOString(),
+      summary: "",
+      location: "academia",
+      exercises: [{
+        id: ex.id,
+        name: ex.canonicalNamePt,
+        canonicalNamePt: ex.canonicalNamePt,
+        muscleGroup: ex.muscleGroup,
+        sets: 3,
+        reps: "12",
+        rest: "60s",
+        cue: "",
+        note: "",
+        videoUrl: ex.videoUrl,
+        videoProvider: "local",
+        sourceFileName: ex.sourceFileName,
+      }],
+    },
+    ...extra,
+  });
+}
+
+function exerciseContextFor(exerciseId = "cadeira_abdutora") {
+  const ex = getCatalogById(exerciseId);
+  assert.ok(ex, `exercício ${exerciseId} precisa existir no catálogo`);
+  return `[WORKOUT EXERCISE CONTEXT — language: pt-BR] Exercise: "${ex.canonicalNamePt}". Muscle group: ${ex.muscleGroup}.`;
+}
+
+function suggestedExerciseId(userId: string): string {
+  const id = readUserMemory(userId).substitutionContext?.lastSuggestedId;
+  assert.equal(typeof id, "string", "precisa persistir lastSuggestedId");
+  return id;
+}
+
+function rejectedExerciseIds(userId: string): string[] {
+  const ids = readUserMemory(userId).substitutionContext?.rejectedIds;
+  assert.ok(Array.isArray(ids), "precisa persistir rejectedIds");
+  return ids;
+}
+
+function assertSafeAbductorSubstitute(substituteId: string) {
+  const original = getCatalogById("cadeira_abdutora");
+  const substitute = getCatalogById(substituteId);
+  assert.ok(original, "cadeira_abdutora precisa existir");
+  assert.ok(substitute, `substituto ${substituteId} precisa existir`);
+  assert.notEqual(substitute.id, "cadeira_abdutora");
+  assert.notEqual(substitute.id, "cadeira_adutora", "abdutora nunca pode virar adutora");
+  assert.notEqual(substitute.movementPattern, "aducao", "abdutora nunca pode virar padrão de adução puro");
+  assert.equal(validateExerciseSubstitute(original, substitute).valid, true);
+}
 
 describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () => {
   before(async () => {
@@ -232,6 +301,72 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     assert.equal(res.acao, "none");
     assert.match(res.fala || "", /troca por|swap to|cambia con/i);
     assert.doesNotMatch(res.fala || "", EXECUTION_CUE_RE);
+  });
+
+  it("HTTP abdutora ocupada + recusas curtas avança A→B→C, não repete e depois coleta equipamentos", async () => {
+    const userId = "swap-abdutora-recusa-curta";
+    writeSingleExerciseWorkout(userId, "cadeira_abdutora");
+    clearMemoryStoreCache();
+
+    const ctx = exerciseContextFor("cadeira_abdutora");
+    const first = await postGuto(userId, `${ctx} User message: Cadeira abdutora está ocupada`);
+    assert.equal(first.acao, "none");
+    assert.match(first.fala || "", /troca por/i);
+    assert.doesNotMatch(first.fala || "", EXECUTION_CUE_RE);
+    const firstId = suggestedExerciseId(userId);
+    assertSafeAbductorSubstitute(firstId);
+
+    // Simula refresh/reload: o próximo turno vem sem marcador visual, mas a memória
+    // precisa manter a cadeia de substituição viva.
+    clearMemoryStoreCache();
+    const second = await postGuto(userId, "tbm esta ocupado");
+    assert.equal(second.acao, "none");
+    assert.match(second.fala || "", /troca por/i);
+    assert.doesNotMatch(second.fala || "", EXECUTION_CUE_RE);
+    const secondId = suggestedExerciseId(userId);
+    assertSafeAbductorSubstitute(secondId);
+    assert.notEqual(secondId, firstId, "não pode repetir substituto recusado");
+    assert.deepEqual(rejectedExerciseIds(userId), [firstId]);
+
+    clearMemoryStoreCache();
+    const third = await postGuto(userId, "esse também");
+    assert.equal(third.acao, "none");
+    assert.match(third.fala || "", /troca por/i);
+    assert.doesNotMatch(third.fala || "", EXECUTION_CUE_RE);
+    const thirdId = suggestedExerciseId(userId);
+    assertSafeAbductorSubstitute(thirdId);
+    assert.equal(new Set([firstId, secondId, thirdId]).size, 3, "A, B e C precisam ser distintos");
+    assert.deepEqual(rejectedExerciseIds(userId), [firstId, secondId]);
+
+    clearMemoryStoreCache();
+    const fourth = await postGuto(userId, "nao tem");
+    assert.equal(fourth.acao, "none");
+    assert.match(fourth.fala || "", /o que est[aá] livre|polia|halteres|banco|colchonete/i);
+    assert.doesNotMatch(fourth.fala || "", /troca por/i);
+    assert.deepEqual(rejectedExerciseIds(userId), [firstId, secondId, thirdId]);
+  });
+
+  it("HTTP activeExercise mantém fallback sem marcador do frontend", async () => {
+    const userId = "swap-active-exercise-fallback";
+    writeSingleExerciseWorkout(userId, "cadeira_abdutora", {
+      activeExercise: {
+        source: "chat",
+        name: "Cadeira abdutora",
+        muscleGroup: "pernas",
+        reps: "12",
+        rest: "60s",
+        totalSets: 3,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    clearMemoryStoreCache();
+
+    const res = await postGuto(userId, "esta ocupado");
+    assert.equal(res.acao, "none");
+    assert.match(res.fala || "", /troca por/i);
+    assert.doesNotMatch(res.fala || "", /qual aparelho|qual m[áa]quina/i);
+    assert.doesNotMatch(res.fala || "", EXECUTION_CUE_RE);
+    assertSafeAbductorSubstitute(suggestedExerciseId(userId));
   });
 
   it("HTTP contexto de alimento + 'não tenho' → falta/substituição alimentar, nunca patologia", async () => {
