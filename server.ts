@@ -3558,6 +3558,25 @@ function isWorkoutFocus(value: unknown): value is WorkoutFocus {
   );
 }
 
+function getCurrentMissionFocus(memory: GutoMemory): WorkoutFocus | undefined {
+  const todayPlan = getTodayMissionPlan(memory);
+  if (isWorkoutFocus(todayPlan?.focusKey)) return todayPlan.focusKey;
+  if (isWorkoutFocus(memory.lastWorkoutPlan?.focusKey)) return memory.lastWorkoutPlan.focusKey;
+  if (isWorkoutFocus(memory.lastSuggestedFocus)) return memory.lastSuggestedFocus;
+  if (isWorkoutFocus(memory.nextWorkoutFocus)) return memory.nextWorkoutFocus;
+  return undefined;
+}
+
+function getCurrentMissionLabel(memory: GutoMemory, language: GutoLanguage): string {
+  const todayPlan = getTodayMissionPlan(memory);
+  if (todayPlan?.title || todayPlan?.focus) return todayPlan.title || todayPlan.focus;
+  if (memory.lastWorkoutPlan?.title || memory.lastWorkoutPlan?.focus) {
+    return memory.lastWorkoutPlan.title || memory.lastWorkoutPlan.focus;
+  }
+  const focus = getCurrentMissionFocus(memory);
+  return focus ? localizeMuscleGroup(focus, language) : "desconhecido";
+}
+
 function formatHistoryForPrompt(history: GutoHistoryItem[] = []) {
   return history
     .slice(-12)
@@ -4510,7 +4529,9 @@ REGRAS DO JSON:
 
   const contextoAtual = `
 ESTADO ATUAL DO GUTO (REFERÊNCIA PARA "ISSO" / "ESSE"):
-- Último foco sugerido/visível para o usuário: ${memory.lastSuggestedFocus || memory.nextWorkoutFocus || "desconhecido"}
+- Missão/treino atual visível para o usuário (fonte de verdade): ${getCurrentMissionLabel(memory, selectedLanguage)}
+- Foco atual da Missão: ${getCurrentMissionFocus(memory) || "desconhecido"}
+- Último foco sugerido legado (fallback, não vence a Missão): ${memory.lastSuggestedFocus || "desconhecido"}
 - Local planejado: ${memory.trainingLocation || memory.preferredTrainingLocation || "não definido"}
 - Objetivo: ${memory.trainingGoal || "evolução"}
 `.trim();
@@ -4643,6 +4664,8 @@ Usuário pede excluir conta:
       heightCm: memory.heightCm,
       weightKg: memory.weightKg,
       foodRestrictions: memory.foodRestrictions,
+      currentMissionFocus: getCurrentMissionFocus(memory),
+      currentMissionLabel: getCurrentMissionLabel(memory, selectedLanguage),
       lastSuggestedFocus: memory.lastSuggestedFocus,
       lastWorkoutFocus: (memory.lastWorkoutPlan as { focusKey?: string } | null)?.focusKey ?? null,
       recentTrainingHistory: memory.recentTrainingHistory,
@@ -4759,7 +4782,7 @@ function resolveTrainedReference(
 
   let muscleGroup: string | null | undefined = ref.explicitMuscleGroup;
   if (!muscleGroup) {
-    muscleGroup = (memory.lastWorkoutPlan as { focusKey?: string } | null)?.focusKey || memory.lastSuggestedFocus;
+    muscleGroup = getCurrentMissionFocus(memory);
   }
 
   if (!muscleGroup) return null;
@@ -7541,6 +7564,46 @@ function setContractResponse(
   if (patch.avatarEmotion) response.avatarEmotion = patch.avatarEmotion;
 }
 
+function hasUnexecutedWorkoutMutationPromise(response: GutoModelResponse): boolean {
+  if (response.acao === "updateWorkout" && response.workoutPlan) return false;
+  const text = normalize(response.fala || "");
+  if (!text) return false;
+  const mentionsWorkout =
+    /\b(treino|missao|workout|mission|allenamento|missione|foco|focus)\b/.test(text) ||
+    /\b(peito|triceps|costas|biceps|pernas|core|ombros|abdomen|chest|back|legs|shoulders|petto|tricipiti|schiena|gambe|spalle)\b/.test(text);
+  if (!mentionsWorkout) return false;
+  return (
+    /\b(troquei|alterei|mudei|recalculei|reorganizei|ajustei|trocar para|mudar para|vou trocar|vou mudar|vou alterar)\b/.test(text) ||
+    /\b(changed|swapped|updated|recalculated|reorganized|switching|i will switch|i'll switch)\b/.test(text) ||
+    /\b(cambiato|modificato|ricalcolato|riorganizzato|cambio|passo a)\b/.test(text) ||
+    /\b(vou de|vamos de|hoje e|hoje é)\s+(peito|costas|pernas|ombros|core|triceps|biceps)\b/.test(text)
+  );
+}
+
+function guardWorkoutMutationPromise(response: GutoModelResponse, language: GutoLanguage): GutoModelResponse {
+  if (!hasUnexecutedWorkoutMutationPromise(response)) return response;
+  const fala = language === "en-US"
+    ? "I can adjust the route, but I only say it changed when the Mission is updated. Tell me exactly what changed in today's workout."
+    : language === "it-IT"
+      ? "Posso adattare la rotta, ma dico che è cambiata solo quando aggiorno la Missione. Dimmi cosa è cambiato nell'allenamento di oggi."
+      : "Consigo ajustar a rota, mas só digo que mudei quando a Missão for atualizada. Me diz exatamente o que mudou no treino de hoje.";
+  return {
+    ...response,
+    fala,
+    acao: "none",
+    workoutPlan: null,
+    expectedResponse: response.expectedResponse || {
+      type: "text",
+      instruction: language === "en-US"
+        ? "Reply with what changed in today's workout."
+        : language === "it-IT"
+          ? "Rispondi con cosa è cambiato nell'allenamento di oggi."
+          : "Responder o que mudou no treino de hoje.",
+    },
+    avatarEmotion: response.avatarEmotion || "default",
+  };
+}
+
 type ContractIntentKind =
   | "none"
   | "resistance_common"
@@ -7707,7 +7770,7 @@ export function classifyContractIntentFallback(input: {
       ? "back_biceps"
       : /perna|leg|gambe/.test(text)
         ? "legs_core"
-        : input.memory.lastSuggestedFocus || input.memory.lastWorkoutPlan?.focusKey || undefined;
+        : getCurrentMissionFocus(input.memory);
     return { kind: "history_reference", confidence: 0.76, reason: "fallback_history", dateLabel, muscleGroup };
   }
 
@@ -7784,7 +7847,10 @@ async function classifyContractIntent(input: {
       trainingLocation: input.memory.trainingLocation,
       trainingStatus: input.memory.trainingStatus,
       trainingLimitations: input.memory.trainingLimitations,
+      currentMissionFocus: getCurrentMissionFocus(input.memory),
+      currentMissionLabel: getCurrentMissionLabel(input.memory, input.language),
       lastSuggestedFocus: input.memory.lastSuggestedFocus,
+      lastWorkoutFocus: input.memory.lastWorkoutPlan?.focusKey || null,
       nextWorkoutFocus: input.memory.nextWorkoutFocus,
       recentTrainingHistory: input.memory.recentTrainingHistory || [],
     })}`,
@@ -7818,7 +7884,7 @@ async function classifyContractIntent(input: {
     "- therapist_manipulation: user asks GUTO to act as therapist or abandon training for therapy role.",
     "- neutral_chatbot_manipulation: user asks GUTO to become neutral/generic chatbot.",
     "",
-    "For history_reference return dateLabel and muscleGroup if inferable. If user says 'that/isso/lho' use memory.lastSuggestedFocus.",
+    "For history_reference return dateLabel and muscleGroup if inferable. If user says 'that/isso/lho/esse' use memory.currentMissionFocus first — this is the mission/workout currently visible to the user. Use memory.lastSuggestedFocus only if currentMissionFocus is missing.",
     "For clear_no_limitation or clear_limitation return age if present and limitationText/statusText if useful.",
     "For location_answer return locationText. For training_status_answer return statusText.",
     "Short location answers are valid operational context. Examples: 'Gym.' -> location_answer gym; 'Pales.' -> location_answer palestra; 'Piscina.' -> location_answer piscina.",
@@ -9334,7 +9400,7 @@ function enforceTrainingFlowCertainty(
       // Conclusão do treino de hoje: reconhece a execução, fecha continuidade e
       // avança o foco. NUNCA reabre intake de idade/dor (Regra 2 — memória soberana).
       // XP/validação nascem em /guto/validate-workout; aqui só conduzimos.
-      const doneFocus: WorkoutFocus = (memory.lastSuggestedFocus as WorkoutFocus) || (memory.lastWorkoutPlan?.focusKey as WorkoutFocus) || "full_body";
+      const doneFocus: WorkoutFocus = getCurrentMissionFocus(memory) || "full_body";
       memory.recentTrainingHistory = normalizeRecentTrainingHistory([
         {
           dateLabel: "today",
@@ -9360,7 +9426,7 @@ function enforceTrainingFlowCertainty(
     }
 
     if (contractIntent.kind === "history_reference") {
-      const muscleGroup: WorkoutFocus = contractIntent.muscleGroup || (memory.lastSuggestedFocus as WorkoutFocus) || "chest_triceps";
+      const muscleGroup: WorkoutFocus = contractIntent.muscleGroup || getCurrentMissionFocus(memory) || "chest_triceps";
       const dateLabel = contractIntent.dateLabel || "yesterday";
     memory.recentTrainingHistory = normalizeRecentTrainingHistory([
       {
@@ -9374,9 +9440,13 @@ function enforceTrainingFlowCertainty(
       const blocked = new Set((memory.recentTrainingHistory || []).map((item) => item.muscleGroup));
     // Se a calibragem é soberana, idade/dor JÁ estão na memória — não reperguntar
     // (Regra 2). Só pedir quando o intake está genuinamente incompleto.
-    const nextFocusPt = blocked.has("back_biceps") && blocked.has("chest_triceps")
-      ? "Não repito peito nem costas: hoje é pernas e core."
-      : "Não repito peito e tríceps: vou de costas e bíceps.";
+    const nextFocus = isWorkoutFocus(memory.nextWorkoutFocus) ? memory.nextWorkoutFocus : chooseNextWorkoutFocus(memory);
+    const nextFocusLabelPt = localizeMuscleGroup(nextFocus, "pt-BR").toLocaleLowerCase("pt-BR");
+    const nextFocusPt = blocked.has("chest_triceps") && blocked.has("back_biceps")
+      ? `Não repito peito nem costas: próximo foco sugerido: ${nextFocusLabelPt}.`
+      : muscleGroup === "chest_triceps"
+        ? `Não repito peito e tríceps. Próximo foco sugerido: ${nextFocusLabelPt}.`
+        : `Não repito esse foco. Próximo foco sugerido: ${nextFocusLabelPt}.`;
     const fala = language === "en-US"
       ? (hasSovereign
           ? "History registered. I will not repeat that focus blindly — your next block is already lined up."
@@ -10109,7 +10179,10 @@ async function askGutoModel({
   const dailyPresencePrompt = formatDailyPresenceContextForPrompt(dailyPresence);
 
   const finalize = (response: GutoModelResponse) => {
-    const languageSafeResponse = assertAndRepairVisibleLanguage(response, selectedLanguage);
+    const languageSafeResponse = assertAndRepairVisibleLanguage(
+      guardWorkoutMutationPromise(response, selectedLanguage),
+      selectedLanguage
+    );
     // Evidência de respeito à limitação no plano oficial: a re-localização do
     // summary (acima) só guarda o rótulo do foco, então o cuidado é (re)anexado
     // aqui, depois da localização, para todo treino gerado pelo GUTO. "" quando
@@ -13132,7 +13205,7 @@ function applyTravelContextToDiet(
     ...plan,
     meals: plan.meals.map((meal) => ({
       ...meal,
-      gutoNote: meal.gutoNote.includes(note) ? meal.gutoNote : `${meal.gutoNote} ${note}`.trim(),
+      gutoNote: (meal.gutoNote || "").includes(note) ? meal.gutoNote || "" : `${meal.gutoNote || ""} ${note}`.trim(),
     })),
   };
 }
@@ -13163,7 +13236,7 @@ app.get("/guto/diet", requireActiveUser, async (req, res) => {
     const dailyPresenceContext = await buildDailyPresenceContext(memory, {
       dateKey: todayKey(),
       language: normalizeLanguage(memory.language),
-      allowExternalFetch: true,
+      allowExternalFetch: false,
     });
     return res.json(applyTravelContextToDiet(plan, memory, normalizeLanguage(memory.language), todayKey(), dailyPresenceContext));
   } catch (error) {
@@ -13499,7 +13572,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
   const dailyPresenceContext = await buildDailyPresenceContext(memory, {
     dateKey: todayKey(),
     language,
-    allowExternalFetch: true,
+    allowExternalFetch: false,
   });
 
   const plan: DietPlan = applyTravelContextToDiet({

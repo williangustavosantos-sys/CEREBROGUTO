@@ -287,6 +287,33 @@ describe("GUTO contextual muscle history", () => {
     assert.doesNotMatch(response.fala || "", /Perdi conexão/i);
   });
 
+  it("usa a Missão atual como fonte de verdade mesmo se lastSuggestedFocus estiver obsoleto", async () => {
+    const userId = "history-current-mission-wins";
+    writeUserMemory(userId, {
+      lastSuggestedFocus: "chest_triceps",
+      nextWorkoutFocus: "chest_triceps",
+      trainingPathology: "joelho",
+      lastWorkoutPlan: {
+        title: "INFERIORES E CORE",
+        focus: "Inferiores e core",
+        focusKey: "legs_core",
+      },
+    });
+
+    const response = await postGuto({
+      language: "pt-BR",
+      profile: { userId, name: "Will" },
+      history: [{ role: "model", parts: [{ text: "Treino do dia: INFERIORES E CORE. Cuidado: joelho." }] }],
+      input: "treinei isso ontem",
+    });
+
+    const memory = { ...readUserMemory(userId), ...response.memoryPatch };
+    assert.equal(memory.recentTrainingHistory?.[0]?.muscleGroup, "legs_core");
+    assert.equal(memory.recentTrainingHistory?.[0]?.dateLabel, "yesterday");
+    assert.doesNotMatch(response.fala || "", /não repito peito/i);
+    assert.doesNotMatch(response.fala || "", /vou de costas/i);
+  });
+
   it("resolves 'treinei isso anteontem' without saving it as limitation", async () => {
     const userId = "history-context-pt-day-before";
     seedVisibleWorkoutFocus(userId);

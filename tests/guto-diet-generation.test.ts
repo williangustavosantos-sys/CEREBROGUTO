@@ -158,6 +158,18 @@ function dietModelResponseOffByCalories() {
   return response;
 }
 
+function dietModelResponseWithoutGutoNotes() {
+  const response = defaultDietModelResponse();
+  const part = response.candidates[0]?.content.parts[0];
+  assert.ok(part);
+  const parsed = JSON.parse(part.text) as { meals: Array<{ gutoNote?: string }> };
+  parsed.meals.forEach((meal) => {
+    delete meal.gutoNote;
+  });
+  part.text = JSON.stringify(parsed);
+  return response;
+}
+
 describe("diet generation contract", () => {
   before(async () => {
     process.env.GUTO_MEMORY_FILE = testMemoryFile;
@@ -371,6 +383,65 @@ describe("diet generation contract", () => {
     assert.ok(plan.meals.every((meal) => /giorno di viaggio/i.test(meal.gutoNote)));
     assert.ok(plan.meals.every((meal) => meal.foods.length > 0));
     assert.ok(plan.macros.targetKcal > 0);
+  });
+
+  it("dieta em viagem não falha quando o cérebro omite gutoNote", async () => {
+    const userId = "diet-trip-no-guto-note";
+    const day = todayKey();
+    dietModelResponse = dietModelResponseWithoutGutoNotes;
+    writeMemory(userId, {
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      trainingLevel: "consistent",
+      trainingGoal: "muscle_gain",
+      country: "Italia",
+      countryCode: "IT",
+      foodRestrictions: "none",
+      resolvedFields: {
+        foodRestriction: { rawValue: "none", status: "clear", normalizedValue: "none" },
+      },
+      proactiveImpacts: [{
+        id: "pi-diet-trip-no-note",
+        memoryId: "pm-diet-trip-no-note",
+        status: "active",
+        surfaces: ["diet"],
+        priority: 90,
+        affectedDates: [day],
+        workoutEffect: "short_light",
+        missionEffect: "reduced",
+        pushEffect: "avoid_blind_charge",
+        xpEffect: "no_free_xp_context_only",
+        arenaEffect: "validation_required",
+        pathEffect: "adapted_context",
+        evolutionEffect: "adapted_context",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        decision: {
+          id: "decision-diet-trip-no-note",
+          memoryId: "pm-diet-trip-no-note",
+          kind: "adapt_day",
+          reason: "travel",
+          priority: 90,
+          affectedDates: [day],
+          workoutEffect: "short_light",
+          missionEffect: "reduced",
+          message: "Viaggio confermato.",
+          createdAt: new Date().toISOString(),
+        },
+      }],
+    });
+
+    const res = await originalFetch(`${baseUrl}/guto/diet/generate`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "it-IT" }),
+    });
+
+    assert.equal(res.status, 200);
+    const plan = await res.json() as { meals: Array<{ gutoNote: string }> };
+    assert.ok(plan.meals.every((meal) => /giorno di viaggio/i.test(meal.gutoNote)));
   });
 
   it("repara plano levemente fora da meta calórica em vez de bloquear", async () => {
