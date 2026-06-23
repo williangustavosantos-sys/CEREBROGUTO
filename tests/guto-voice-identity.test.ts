@@ -108,4 +108,12 @@ describe("Identidade vocal fixa", () => {
     assert.doesNotMatch(server, /\bOrus\b/, "não pode cair para outra voz prebuilt");
     assert.doesNotMatch(server, /synth_ok_fallback|synth_ok_native/, "não pode registrar troca de voz em fallback");
   });
+
+  it("todos os idiomas usam o mesmo voiceName canônico", () => {
+    const server = readFileSync(join(process.cwd(), "server.ts"), "utf8");
+    assert.match(server, /"pt-BR":\s*{\s*languageCode:\s*"pt-BR",\s*primaryName:\s*"Charon"/s);
+    assert.match(server, /"en-US":\s*{\s*languageCode:\s*"en-US",\s*primaryName:\s*"Charon"/s);
+    assert.match(server, /"it-IT":\s*{\s*languageCode:\s*"it-IT",\s*primaryName:\s*"Charon"/s);
+    assert.match(server, /voiceName:\s*voice\.primaryName/);
+  });
 });
