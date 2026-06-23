@@ -117,6 +117,13 @@ import {
   detectForeignLanguageLeak,
   resolveCanonicalVoiceText,
 } from "./src/voice-identity.js";
+import {
+  buildDailyPresenceContext,
+  formatDailyPresenceContextForPrompt,
+  shouldSuppressTrainingCharge,
+  type DailyPresenceContext,
+  type DailyPresenceMemory,
+} from "./src/daily-presence-context.js";
 
 import {
   buildProactivityContextBlock,
@@ -2288,11 +2295,13 @@ function buildArrivalMissionFala({
   plan,
   language,
   day,
+  dailyPresenceContext,
 }: {
   memory: GutoMemory;
   plan: WorkoutPlan | null;
   language: GutoLanguage;
   day: string;
+  dailyPresenceContext?: DailyPresenceContext | null;
 }): string | null {
   if (!plan || memory.trainedToday) return null;
 
@@ -2300,7 +2309,7 @@ function buildArrivalMissionFala({
   const prefix = name ? `${name}, ` : "";
   const mission = formatMissionLabel(plan);
   const care = describeLimitationCare(memory, language);
-  const impact = getArrivalContextImpact(memory, day);
+  const impact = dailyPresenceContext?.proactivity.activeImpact || getArrivalContextImpact(memory, day);
   const impactDate = impact?.affectedDates.find((date) => date >= day);
   const weekday = formatDateWeekday(impactDate, language);
 
@@ -4188,6 +4197,7 @@ function buildGutoBrainPrompt({
   expectedResponse,
   riskOverride,
   proactivityContext,
+  dailyPresenceContext,
   activeExerciseContext,
 }: {
   input: string;
@@ -4206,6 +4216,8 @@ function buildGutoBrainPrompt({
   riskOverride?: RiskClassification | null;
   /** Optional block injected from the proactivity system. */
   proactivityContext?: string | null;
+  /** Daily operational context shared by chat, mission, diet, push and GUTO Online. */
+  dailyPresenceContext?: string | null;
   /** Exercício ativo (chat doubt / GUTO Online) já formatado. Mantém o turno
    *  ancorado no exercício real e impede resposta genérica. */
   activeExerciseContext?: string | null;
@@ -4604,6 +4616,7 @@ Usuário pede excluir conta:
     "",
     "─── DADOS DO TURNO ATUAL ───",
     `Contexto operacional: ${JSON.stringify(operationalContext)}`,
+    ...(dailyPresenceContext ? [`Contexto diário GUTO: ${dailyPresenceContext}`] : []),
     `Memória do usuário: ${JSON.stringify({
       userId: memory.userId,
       name: memory.name,
@@ -4624,6 +4637,12 @@ Usuário pede excluir conta:
       trainingGoal: memory.trainingGoal,
       preferredTrainingLocation: memory.preferredTrainingLocation,
       trainingPathology: memory.trainingPathology,
+      country: memory.country,
+      countryCode: memory.countryCode,
+      city: memory.city,
+      heightCm: memory.heightCm,
+      weightKg: memory.weightKg,
+      foodRestrictions: memory.foodRestrictions,
       lastSuggestedFocus: memory.lastSuggestedFocus,
       lastWorkoutFocus: (memory.lastWorkoutPlan as { focusKey?: string } | null)?.focusKey ?? null,
       recentTrainingHistory: memory.recentTrainingHistory,
@@ -6444,7 +6463,8 @@ function addDaysToDateKey(dateKey: string, days: number): string {
   ].join("-");
 }
 
-function hasBadTrainingWeather(memory: GutoMemory): boolean {
+function hasBadTrainingWeather(memory: GutoMemory, dailyPresenceContext?: DailyPresenceContext | null): boolean {
+  if (dailyPresenceContext?.weather.isBadForOutdoorTraining) return true;
   const today = todayKey();
   const tomorrow = addDaysToDateKey(today, 1);
   const activeStatuses = new Set(["confirmed", "enriched", "surfaced"]);
@@ -6457,9 +6477,13 @@ function hasBadTrainingWeather(memory: GutoMemory): boolean {
   });
 }
 
-function getWeatherAdjustedTrainingLocation(memory: GutoMemory, locationRaw: string): string {
+function getWeatherAdjustedTrainingLocation(
+  memory: GutoMemory,
+  locationRaw: string,
+  dailyPresenceContext?: DailyPresenceContext | null
+): string {
   const mode = getLocationMode(locationRaw);
-  if ((mode === "park" || locationRaw === "mixed") && hasBadTrainingWeather(memory)) {
+  if ((mode === "park" || locationRaw === "mixed") && hasBadTrainingWeather(memory, dailyPresenceContext)) {
     return "home";
   }
   return locationRaw;
@@ -10055,6 +10079,7 @@ async function askGutoModel({
   history = [],
   expectedResponse,
   proactivityContext,
+  dailyPresenceContext,
   activeExerciseContext,
   resolverResult,
   turnId,
@@ -10066,6 +10091,7 @@ async function askGutoModel({
   history?: GutoHistoryItem[];
   expectedResponse?: ExpectedResponse | null;
   proactivityContext?: string | null;
+  dailyPresenceContext?: DailyPresenceContext | null;
   activeExerciseContext?: string | null;
   resolverResult?: ResolverResult;
   turnId?: string;
@@ -10075,6 +10101,12 @@ async function askGutoModel({
   const selectedLanguage = normalizeLanguage(language || profile?.language || memory.language);
   const operationalContext = getOperationalContext(new Date(), selectedLanguage);
   const normalizedExpectedResponse = normalizeExpectedResponse(expectedResponse);
+  const dailyPresence = dailyPresenceContext ?? await buildDailyPresenceContext(memory, {
+    dateKey: todayKey(),
+    language: selectedLanguage,
+    allowExternalFetch: false,
+  });
+  const dailyPresencePrompt = formatDailyPresenceContextForPrompt(dailyPresence);
 
   const finalize = (response: GutoModelResponse) => {
     const languageSafeResponse = assertAndRepairVisibleLanguage(response, selectedLanguage);
@@ -10145,7 +10177,8 @@ async function askGutoModel({
       const semanticFocus = chooseNextWorkoutFocus(memory, memory.nextWorkoutFocus);
       const locationRaw = getWeatherAdjustedTrainingLocation(
         memory,
-        memory.preferredTrainingLocation || memory.trainingLocation || "casa"
+        memory.preferredTrainingLocation || memory.trainingLocation || "casa",
+        dailyPresence
       );
       const locationMode = getLocationMode(locationRaw) as CuratorLocationMode;
       let fallbackPlan: WorkoutPlan = {
@@ -10236,6 +10269,7 @@ async function askGutoModel({
     expectedResponse: normalizedExpectedResponse,
     riskOverride,
     proactivityContext: proactivityContext ?? null,
+    dailyPresenceContext: dailyPresencePrompt,
     activeExerciseContext: activeExerciseContext ?? null,
   });
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
@@ -10451,7 +10485,7 @@ async function askGutoModel({
         parsedResponse.memoryPatch?.nextWorkoutFocus || memory.nextWorkoutFocus
       );
       const baseLocationRaw = memory.preferredTrainingLocation || memory.trainingLocation || "casa";
-      const locationRaw = getWeatherAdjustedTrainingLocation(memory, baseLocationRaw);
+      const locationRaw = getWeatherAdjustedTrainingLocation(memory, baseLocationRaw, dailyPresence);
       const locationMode = getLocationMode(locationRaw) as CuratorLocationMode;
       const conservativeTraining = shouldEnterConservativeMode(memory.resolvedFields, "training");
 
@@ -10694,7 +10728,8 @@ async function askGutoModel({
       const semanticFocus = chooseNextWorkoutFocus(memory, memory.nextWorkoutFocus);
       const locationRaw = getWeatherAdjustedTrainingLocation(
         memory,
-        memory.preferredTrainingLocation || memory.trainingLocation || "casa"
+        memory.preferredTrainingLocation || memory.trainingLocation || "casa",
+        dailyPresence
       );
       const locationMode = getLocationMode(locationRaw) as CuratorLocationMode;
       let fallbackPlan: WorkoutPlan = {
@@ -10976,7 +11011,7 @@ app.post("/guto/push/dispatch", async (req, res) => {
   }
 
   const subs = getAllSubscriptions();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayKey();
   const memoryStore = await readMemoryStoreAsync();
 
   let sent = 0;
@@ -10997,6 +11032,17 @@ app.post("/guto/push/dispatch", async (req, res) => {
       continue;
     }
 
+    const language = (typeof memory.language === "string" ? memory.language : "pt-BR") as GutoLanguage;
+    const dailyPresenceContext = await buildDailyPresenceContext({ userId: sub.userId, ...memory } as DailyPresenceMemory, {
+      dateKey: today,
+      language,
+      allowExternalFetch: false,
+    });
+    if (shouldSuppressTrainingCharge(dailyPresenceContext)) {
+      skipped++;
+      continue;
+    }
+
     const lastSent = sub.lastSentAt ? sub.lastSentAt.slice(0, 10) : "";
     if (lastSent === today) {
       skipped++;
@@ -11006,7 +11052,6 @@ app.post("/guto/push/dispatch", async (req, res) => {
     const totalXp = Math.max(0, typeof memory.totalXp === "number" ? memory.totalXp : 100);
     const missedDates = Array.isArray(memory.missedMissionDates) ? (memory.missedMissionDates as string[]) : [];
     const missedCount = missedDates.length;
-    const language = (typeof memory.language === "string" ? memory.language : "pt-BR") as GutoLanguage;
     const preferredName = typeof memory.preferredName === "string" ? memory.preferredName : "";
     const fallbackName = typeof memory.name === "string" ? memory.name : "";
     const userName = preferredName || fallbackName;
@@ -11296,7 +11341,12 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
   const language = String(req.query.language || memory.language || "pt-BR");
   const operationalContext = getOperationalContext(new Date(), language || memory.language);
   const day = todayKey();
-  const todayProactiveAdaptation = getAdaptationForDate(memory, day);
+  let dailyPresenceContext = await buildDailyPresenceContext(memory, {
+    dateKey: day,
+    language: normalizeLanguage(language || memory.language),
+    allowExternalFetch: true,
+  });
+  const todayProactiveAdaptation = dailyPresenceContext.proactivity.adaptation;
   const slot = force
     ? "arrival"
     : shouldSendLimitationCheck(memory, day)
@@ -11319,9 +11369,15 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
         profile: { ...memory },
         history: [],
         proactivityContext: null,
+        dailyPresenceContext,
         operationalMode: "base_plan",
       });
       memory = getMemory(userId);
+      dailyPresenceContext = await buildDailyPresenceContext(memory, {
+        dateKey: day,
+        language: normalizeLanguage(language || memory.language),
+        allowExternalFetch: false,
+      });
       missionPlanAtOpen = getTodayMissionPlan(memory) || basePlanResult.workoutPlan || null;
     } catch {
       basePlanResult = null;
@@ -11468,6 +11524,7 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
       plan: missionPlanAtOpen,
       language: selectedLang,
       day,
+      dailyPresenceContext,
     });
 
     if (fala) {
@@ -11508,6 +11565,7 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
       },
       history: [],
       proactivityContext,
+      dailyPresenceContext,
     });
 
     // FORCE COHERENCE FOR THE FIRST MESSAGE
@@ -11555,6 +11613,7 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
           plan: missionPlanForArrival,
           language: selectedLang,
           day,
+          dailyPresenceContext,
         })
       : null;
 
@@ -13054,16 +13113,21 @@ function applyTravelContextToDiet(
   plan: DietPlan,
   memory: GutoMemory,
   language: GutoLanguage,
-  day = todayKey()
+  day = todayKey(),
+  dailyPresenceContext?: DailyPresenceContext | null
 ): DietPlan {
   if (plan.lockedByCoach || plan.manualOverride) return plan;
-  const adaptation = getAdaptationForDate(memory, day);
+  const adaptation = dailyPresenceContext?.proactivity.adaptation || getAdaptationForDate(memory, day);
   if (adaptation.reason !== "travel" || !adaptation.primaryImpact) return plan;
+  const city = dailyPresenceContext?.location.source === "trip_destination" && dailyPresenceContext.location.city
+    ? dailyPresenceContext.location.city
+    : "";
+  const isProtected = dailyPresenceContext?.workout.isProtectedDay || adaptation.isProtectedDay;
   const note = language === "en-US"
-    ? "Travel day: keep a practical option with you and preserve the planned portions."
+    ? `${city ? `Travel day in ${city}:` : "Travel day:"} ${isProtected ? "keep the diet practical; no training compensation." : "keep a practical option with you and preserve the planned portions."}`
     : language === "it-IT"
-      ? "Giorno di viaggio: porta con te un'opzione pratica e mantieni le porzioni previste."
-      : "Dia de viagem: leva uma opção prática contigo e mantém as porções planejadas.";
+      ? `${city ? `Giorno di viaggio a ${city}:` : "Giorno di viaggio:"} ${isProtected ? "dieta pratica; niente compensazioni di allenamento." : "porta con te un'opzione pratica e mantieni le porzioni previste."}`
+      : `${city ? `Dia de viagem em ${city}:` : "Dia de viagem:"} ${isProtected ? "dieta prática; sem compensação maluca de treino." : "leva uma opção prática contigo e mantém as porções planejadas."}`;
   return {
     ...plan,
     meals: plan.meals.map((meal) => ({
@@ -13096,7 +13160,12 @@ app.get("/guto/diet", requireActiveUser, async (req, res) => {
       }
     }
     const memory = getMemory(userId);
-    return res.json(applyTravelContextToDiet(plan, memory, normalizeLanguage(memory.language)));
+    const dailyPresenceContext = await buildDailyPresenceContext(memory, {
+      dateKey: todayKey(),
+      language: normalizeLanguage(memory.language),
+      allowExternalFetch: true,
+    });
+    return res.json(applyTravelContextToDiet(plan, memory, normalizeLanguage(memory.language), todayKey(), dailyPresenceContext));
   } catch (error) {
     console.error("[GUTO] diet GET error:", error);
     return res.status(500).json({ error: "Erro ao buscar dieta." });
@@ -13427,6 +13496,12 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
     });
   }
 
+  const dailyPresenceContext = await buildDailyPresenceContext(memory, {
+    dateKey: todayKey(),
+    language,
+    allowExternalFetch: true,
+  });
+
   const plan: DietPlan = applyTravelContextToDiet({
     userId,
     source: "guto_generated",
@@ -13438,7 +13513,7 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res) => {
     macros,
     meals,
     foodRestrictions: nutritionProfile.foodRestrictions,
-  }, memory, language);
+  }, memory, language, todayKey(), dailyPresenceContext);
 
   await saveDietPlan(plan);
   memory.dietGenerationStatus = "generated";
@@ -13495,7 +13570,8 @@ function buildOnlineExceptionPrompt(
     userMessage?: string;
     alternatives?: string[];
   },
-  language = "pt-BR"
+  language = "pt-BR",
+  dailyPresenceContext?: DailyPresenceContext | null
 ): string {
   const langNote = language !== "pt-BR" ? `Responda em ${language}.` : "";
   const exercise = context.exerciseName ? `Exercício: ${context.exerciseName}` : "";
@@ -13506,6 +13582,9 @@ function buildOnlineExceptionPrompt(
   const userSaid = context.userMessage ? `O usuário disse: "${context.userMessage}"` : "";
   const alts = context.alternatives?.length
     ? `Alternativas definidas: ${context.alternatives.join(", ")}`
+    : "";
+  const daily = dailyPresenceContext
+    ? `Contexto diário: ${formatDailyPresenceContextForPrompt(dailyPresenceContext)}. Se o dia estiver protegido, não cobre treino; responda só a necessidade imediata.`
     : "";
 
   const typeInstructions: Record<OnlineExceptionType, string> = {
@@ -13523,6 +13602,8 @@ function buildOnlineExceptionPrompt(
     langNote,
     "",
     typeInstructions[type],
+    "",
+    daily,
     "",
     [exercise, muscle, setInfo, userSaid, alts].filter(Boolean).join(". "),
   ].filter(Boolean).join("\n");
@@ -13546,14 +13627,21 @@ app.post("/guto/online/exception", requireActiveUser, async (req, res) => {
       ? type
       : "unknown_command";
 
-  const userLanguage = (req as any).user?.language || "pt-BR";
+  const userId = req.gutoUser!.userId;
+  const memory = getMemory(userId);
+  const userLanguage = normalizeLanguage(memory.language || "pt-BR");
   const fallback = getOnlineFallback(exceptionType, userLanguage);
 
   if (!GEMINI_API_KEY) {
     return res.json({ text: fallback });
   }
 
-  const prompt = buildOnlineExceptionPrompt(exceptionType, context, userLanguage);
+  const dailyPresenceContext = await buildDailyPresenceContext(memory, {
+    dateKey: todayKey(),
+    language: userLanguage,
+    allowExternalFetch: false,
+  });
+  const prompt = buildOnlineExceptionPrompt(exceptionType, context, userLanguage, dailyPresenceContext);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
   try {
