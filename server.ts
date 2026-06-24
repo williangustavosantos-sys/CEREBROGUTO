@@ -81,6 +81,7 @@ import { applyLevelStructure, resolveTrainingLevel, type WorkoutLanguage, type T
 import {
   classifyShortContextIntent,
   stripInjectedContext,
+  hasExplicitBodyRegion,
   parseDietContext,
   foodUnavailableReply,
   equipmentUnavailableReply,
@@ -6199,6 +6200,18 @@ function buildValidatedEquipmentBusyResponse({
   return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
 }
 
+// FAIL 3 — recupera do histórico o último substituto que o GUTO já sugeriu
+// (inclusive quando veio do modelo e não foi persistido em substitutionContext).
+// Garante que "também ocupado" rejeite a sugestão anterior em vez de repeti-la.
+function recoverLastSuggestedSubstituteIdFromHistory(history?: GutoHistoryItem[]): string | null {
+  if (!history?.length) return null;
+  const lastGuto = [...history]
+    .reverse()
+    .find((item) => item.role !== "user" && Boolean(item.parts?.[0]?.text));
+  const substitute = extractSubstituteFromResponseText(lastGuto?.parts?.[0]?.text || "");
+  return substitute?.id ?? null;
+}
+
 function buildEquipmentBusyFallbackResponse({
   input,
   history,
@@ -6213,9 +6226,18 @@ function buildEquipmentBusyFallbackResponse({
   const previous = getFreshSubstitutionContext(memory, "exercise");
   const isRejectedFollowUp = Boolean(previous?.lastSuggestedId && isSubstitutionRejectionFollowUp(input));
   const hasActiveExerciseContext = Boolean(normalizeActiveExerciseContext(memory.activeExercise)?.name);
+  // FAIL 2 — chat livre: o usuário nomeia o exercício + cue de ocupação ("supino
+  // reto ocupado") SEM o marcador [WORKOUT EXERCISE CONTEXT] e sem palavra genérica
+  // de equipamento. Se dá pra resolver o exercício a partir do texto, a decisão sai
+  // daqui (determinístico) — nunca cai no modelo para virar "qual prefere?".
+  const hasBusyCue = isEquipmentBusyMessage(input) || isSubstitutionRejectionFollowUp(input);
+  const freeTextOriginal = !isRejectedFollowUp && hasBusyCue
+    ? resolveWorkoutExerciseForSubstitution({ input, history, memory })
+    : null;
   const canUseExerciseContext = isEquipmentBusyMessage(input) ||
     isRejectedFollowUp ||
-    (hasActiveExerciseContext && isSubstitutionRejectionFollowUp(input));
+    (hasActiveExerciseContext && isSubstitutionRejectionFollowUp(input)) ||
+    Boolean(freeTextOriginal);
   if (!canUseExerciseContext) return null;
   const original = isRejectedFollowUp && previous
     ? {
@@ -6223,7 +6245,7 @@ function buildEquipmentBusyFallbackResponse({
         name: previous.originalName,
         planExercise: previous.planExercise || null,
       }
-    : resolveWorkoutExerciseForSubstitution({ input, history, memory });
+    : (freeTextOriginal ?? resolveWorkoutExerciseForSubstitution({ input, history, memory }));
 
   if (!original) {
     // Só aqui — sem QUALQUER contexto de exercício — faz sentido perguntar qual.
@@ -6235,9 +6257,15 @@ function buildEquipmentBusyFallbackResponse({
     return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
   }
 
+  const recoveredSuggestedId = !previous?.lastSuggestedId && isSubstitutionRejectionFollowUp(input)
+    ? recoverLastSuggestedSubstituteIdFromHistory(history)
+    : null;
   const rejectedIds = isRejectedFollowUp
     ? mergeRejectedIds(previous?.rejectedIds, [previous?.lastSuggestedId])
-    : mergeRejectedIds(previous?.originalId === original.id ? previous?.rejectedIds : undefined);
+    : mergeRejectedIds(
+        previous?.originalId === original.id ? previous?.rejectedIds : undefined,
+        recoveredSuggestedId ? [recoveredSuggestedId] : undefined,
+      );
   return buildValidatedEquipmentBusyResponse({ original, memory, language, rejectedIds });
 }
 
@@ -6357,6 +6385,58 @@ function repairInvalidExerciseSubstitutionResponse({
 
   if (validateExerciseSubstitute(originalEntry, substitute).valid) return response;
   return buildValidatedEquipmentBusyResponse({ original, memory, language });
+}
+
+// Detecta oferta de PREFERÊNCIA / menu / duas opções numa resposta ("Stiff ou Mesa
+// Flexora. Qual prefere?"). Função pura — coberta por teste.
+export function offersExercisePreferenceMenu(text?: string): boolean {
+  if (!text) return false;
+  const n = normalize(text);
+  if (/\bqual (voce |vc )?prefere\b|\bo que (voce|vc) prefere\b|\bqual deles\b|\bqual dos dois\b|\bqual das duas\b|\bescolhe entre\b|which one do you prefer|quale preferisci|cosa preferisci/.test(n)) {
+    return true;
+  }
+  // "X ou Y?" — menu de duas opções fechando em pergunta.
+  if (/\?/.test(text) && /\b ou \b| or | oppure /.test(n)) return true;
+  return false;
+}
+
+// Blindagem final (Regra Soberana: o GUTO decide, não terceiriza). Se a resposta do
+// modelo oferece menu/preferência ENTRE EXERCÍCIOS e existe um substituto seguro,
+// reescreve para a forma decisiva. Só deixa a pergunta passar quando há dor/risco
+// (região corporal explícita) ou quando NÃO há substituto seguro (falta de info).
+function enforceDecisiveSwap({
+  input,
+  history,
+  memory,
+  language,
+  response,
+}: {
+  input?: string;
+  history?: GutoHistoryItem[];
+  memory: GutoMemory;
+  language: GutoLanguage;
+  response: GutoModelResponse;
+}): GutoModelResponse {
+  if (!response?.fala || response.expectedResponse) return response;
+  if (!offersExercisePreferenceMenu(response.fala)) return response;
+  // O menu precisa ser ENTRE EXERCÍCIOS (nomeia algo do catálogo), senão não é troca.
+  if (!resolveCatalogExerciseFromFreeText(response.fala)) return response;
+  // Dor/risco na fala do usuário = ambiguidade real → pode perguntar.
+  if (hasExplicitBodyRegion(stripInjectedContext(input || ""))) return response;
+
+  const original = resolveWorkoutExerciseForSubstitution({ input, history, memory });
+  const originalEntry = original ? getCatalogById(original.id) || original.catalogEntry : null;
+  if (!original || !originalEntry) return response;
+
+  const previous = getFreshSubstitutionContext(memory, "exercise");
+  const recoveredSuggestedId = recoverLastSuggestedSubstituteIdFromHistory(history);
+  const rejectedIds = mergeRejectedIds(
+    previous?.originalId === original.id ? previous?.rejectedIds : undefined,
+    recoveredSuggestedId ? [recoveredSuggestedId] : undefined,
+  );
+  // Sem substituto seguro disponível → falta de info real: mantém a pergunta.
+  if (!pickValidatedExerciseSubstitute({ originalId: original.id, memory, rejectedIds })) return response;
+  return buildValidatedEquipmentBusyResponse({ original, memory, language, rejectedIds });
 }
 
 // ─── Fase 3 — Intenção de troca / dúvida de exercício (determinístico) ────────
@@ -12122,12 +12202,18 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
       }
     }
     result.proactiveMemoryAction = null;
-    res.json(repairInvalidExerciseSubstitutionResponse({
+    res.json(enforceDecisiveSwap({
       input,
       history: history || [],
       memory,
       language: selectedLanguage,
-      response: result,
+      response: repairInvalidExerciseSubstitutionResponse({
+        input,
+        history: history || [],
+        memory,
+        language: selectedLanguage,
+        response: result,
+      }),
     }));
   } catch (e) {
     console.error('Erro na rota /guto:', e);
@@ -12706,17 +12792,25 @@ app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
       const day = current.dateParsed
         ? formatRelativeProactiveDay(current.dateParsed, selectedLanguage)
         : selectedLanguage === "en-US" ? "that day" : selectedLanguage === "it-IT" ? "quel giorno" : "esse dia";
-      const fala = trainingAdapted
+      const baseFala = trainingAdapted
         ? selectedLanguage === "en-US"
-          ? `Done. I saved your trip for ${day}. I will adapt that day's mission instead of cancelling it. Now let's take care of today.`
+          ? `Done. I saved your trip for ${day}. I will adapt that day's mission instead of cancelling it.`
           : selectedLanguage === "it-IT"
-            ? `Fatto. Ho salvato il viaggio per ${day}. Adatto la missione di quel giorno invece di cancellarla. Ora pensiamo a oggi.`
-            : `Fechado. Salvei tua viagem para ${day}. Vou adaptar a missão desse dia em vez de cancelar. Agora vamos cuidar de hoje.`
+            ? `Fatto. Ho salvato il viaggio per ${day}. Adatto la missione di quel giorno invece di cancellarla.`
+            : `Fechado. Salvei tua viagem para ${day}. Vou adaptar a missão desse dia em vez de cancelar.`
         : selectedLanguage === "en-US"
-          ? `Done. I saved ${day} as a protected day. No wild compensation. We keep the focus today.`
+          ? `Done. I saved ${day} as a protected day. No wild compensation.`
           : selectedLanguage === "it-IT"
-            ? `Fatto. Ho salvato ${day} come giorno protetto. Niente compensazioni folli. Oggi manteniamo il focus.`
-            : `Fechado. Salvei ${day} como dia protegido. Sem inventar compensação maluca. A gente mantém o foco hoje.`;
+            ? `Fatto. Ho salvato ${day} come giorno protetto. Niente compensazioni folli.`
+            : `Fechado. Salvei ${day} como dia protegido. Sem inventar compensação maluca.`;
+
+      // FAIL 1 — confirmar viagem não pode terminar em frase morta. Recondução
+      // obrigatória para hoje + próxima ação concreta, como os demais confirms.
+      const { fala } = appendPostConfirmationRedirect(
+        { fala: baseFala, acao: "none", expectedResponse: null },
+        freshMemory,
+        selectedLanguage,
+      );
 
       return res.json({
         ok: true,

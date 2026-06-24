@@ -24,6 +24,7 @@ let baseUrl = "";
 let clearMemoryStoreCache: () => void = () => {};
 let originalFetch: typeof globalThis.fetch;
 let classifyExerciseDoubtMessage: (input: string) => string;
+let offersExercisePreferenceMenu: (text?: string) => boolean;
 
 function writeUserMemory(userId: string, data: Record<string, any>) {
   const store = existsSync(testMemoryFile)
@@ -137,9 +138,11 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     const serverModule = (await import(pathToFileURL(join(process.cwd(), "server.ts")).href)) as {
       app: typeof app;
       classifyExerciseDoubtMessage: (input: string) => string;
+      offersExercisePreferenceMenu: (text?: string) => boolean;
     };
     app = serverModule.app;
     classifyExerciseDoubtMessage = serverModule.classifyExerciseDoubtMessage;
+    offersExercisePreferenceMenu = serverModule.offersExercisePreferenceMenu;
 
     const memStore = (await import(pathToFileURL(join(process.cwd(), "src/memory-store.ts")).href)) as {
       clearMemoryStoreCache: () => void;
@@ -406,5 +409,129 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     assert.match(res.fala || "", /alimento|aparelho/i);
     assert.doesNotMatch(res.fala || "", /ombro entendido|joelho entendido/i);
     assert.doesNotMatch(res.fala || "", EXECUTION_CUE_RE);
+  });
+
+  // FAIL 2 — chat livre SEM o marcador [WORKOUT EXERCISE CONTEXT].
+  // "supino reto ocupado" cai hoje no Gemini (o mock devolve cue de execução) em
+  // vez do resolvedor determinístico. Tem que DECIDIR uma troca, nunca oferecer menu.
+  it("FAIL 2 — 'supino reto ocupado' SEM marcador cai no determinístico, não no Gemini", async () => {
+    const userId = "fail2-free-chat";
+    writeSingleExerciseWorkout(userId, "supino_reto");
+    clearMemoryStoreCache();
+
+    const res = await postGuto(userId, "supino reto está ocupado");
+
+    assert.equal(res.acao, "none");
+    assert.match(res.fala || "", /troca por/i, "tem que decidir a troca (determinístico)");
+    assert.doesNotMatch(res.fala || "", EXECUTION_CUE_RE, "não pode ser a resposta do Gemini (cue de execução)");
+    assert.doesNotMatch(
+      res.fala || "",
+      /qual prefere|prefere\?|qual voc[eê]|o que voc[eê] prefere|escolhe entre/i,
+      "não pode oferecer votação de preferência",
+    );
+  });
+
+  // FAIL 3 — a sugestão anterior veio do MODELO (está no history, não em
+  // substitutionContext). Ao dizer "também ocupado", o sistema precisa recuperar
+  // o substituto que o modelo deu, jogá-lo em rejectedIds e NÃO repetir.
+  it("FAIL 3 — sugestão anterior do modelo: 'também ocupado' rejeita a anterior e não repete", async () => {
+    const originalId = ["agachamento_livre", "supino_reto", "puxada_frente", "desenvolvimento_sentado", "posterior_maquina"]
+      .find((id) => {
+        const orig = getCatalogById(id);
+        if (!orig) return false;
+        const valid = suggestExerciseSubstitutes(id, { location: "gym" })
+          .map((sid) => getCatalogById(sid))
+          .filter((e): e is NonNullable<typeof e> => Boolean(e && e.id !== id && validateExerciseSubstitute(orig, e).valid));
+        return valid.length >= 2;
+      });
+    assert.ok(originalId, "precisa de um exercício com ao menos 2 substitutos válidos na academia");
+    const original = getCatalogById(originalId!)!;
+    const firstValid = suggestExerciseSubstitutes(originalId!, { location: "gym" })
+      .map((sid) => getCatalogById(sid))
+      .find((e): e is NonNullable<typeof e> => Boolean(e && e.id !== originalId && validateExerciseSubstitute(original, e).valid))!;
+    const modelSuggestedId = firstValid.id;
+    const modelSuggestedName = firstValid.canonicalNamePt;
+
+    const userId = "fail3-model-seeded";
+    writeSingleExerciseWorkout(userId, originalId!, {
+      activeExercise: { name: original.canonicalNamePt, source: "workout", updatedAt: new Date().toISOString() },
+    });
+    clearMemoryStoreCache();
+
+    // O modelo já sugeriu o substituto no turno anterior (vive só no history).
+    const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
+    const resp = await originalFetch(`${baseUrl}/guto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        language: "pt-BR",
+        profile: { userId, name: "Will" },
+        history: [
+          { role: "user", parts: [{ text: `${original.canonicalNamePt} ocupado` }] },
+          { role: "model", parts: [{ text: `${original.canonicalNamePt} ocupado? Troca por ${modelSuggestedName}: mantém 3 séries.` }] },
+        ],
+        input: "também ocupado",
+      }),
+    });
+    assert.equal(resp.status, 200, `POST /guto deveria responder 200, veio ${resp.status}`);
+    const res = (await resp.json()) as { fala?: string; acao?: string };
+
+    assert.equal(res.acao, "none");
+    assert.match(res.fala || "", /troca por/i, "tem que decidir a próxima troca");
+    const suggested = suggestedExerciseId(userId);
+    assert.notEqual(suggested, modelSuggestedId, "não pode repetir o substituto que o modelo já deu");
+    assert.ok(
+      rejectedExerciseIds(userId).includes(modelSuggestedId),
+      "o substituto do modelo deve entrar em rejectedIds (contexto recuperado)",
+    );
+  });
+
+  // BLINDAGEM — detector puro de menu/preferência.
+  it("BLINDAGEM — detecta menu/preferência ('qual prefere?', 'A ou B?')", () => {
+    assert.equal(offersExercisePreferenceMenu("Stiff com halteres ou Mesa Flexora. Qual prefere?"), true);
+    assert.equal(offersExercisePreferenceMenu("Prefere Supino inclinado ou Crucifixo?"), true);
+    assert.equal(offersExercisePreferenceMenu("Supino reto ocupado? Troca por Crucifixo: mantém 3 séries."), false);
+    assert.equal(offersExercisePreferenceMenu("Fechado. Eu troco por um exercício equivalente."), false);
+  });
+
+  // BLINDAGEM — se o modelo oferecer menu de exercícios e houver substituto seguro,
+  // a resposta final tem que ser DECISIVA (sem "qual prefere?").
+  it("BLINDAGEM — menu do modelo em contexto de troca vira decisão", async () => {
+    const original = getCatalogById("supino_reto")!;
+    const subs = suggestExerciseSubstitutes("supino_reto", { location: "gym" })
+      .map((id) => getCatalogById(id))
+      .filter((e): e is NonNullable<typeof e> => Boolean(e && e.id !== "supino_reto" && validateExerciseSubstitute(original, e).valid));
+    assert.ok(subs.length >= 2, "supino_reto precisa de ao menos 2 substitutos para o menu do modelo");
+    const menuText = `${subs[0].canonicalNamePt} ou ${subs[1].canonicalNamePt}. Qual prefere?`;
+
+    const userId = "blindagem-menu-modelo";
+    writeSingleExerciseWorkout(userId, "supino_reto", {
+      activeExercise: { name: original.canonicalNamePt, source: "workout", updatedAt: new Date().toISOString() },
+    });
+    clearMemoryStoreCache();
+
+    // Override do modelo só neste teste: devolve um MENU de preferência.
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (!url.includes("generativelanguage.googleapis.com")) return originalFetch(input as any, init);
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ fala: menuText, acao: "none", expectedResponse: null }) }] } }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof globalThis.fetch;
+
+    try {
+      // Input neutro: passa pelos gates determinísticos e chega ao modelo.
+      const res = await postGuto(userId, "valeu, gostei da conversa de hoje");
+      assert.doesNotMatch(
+        res.fala || "",
+        /qual prefere|prefere\?|qual deles|qual dos dois|escolhe entre/i,
+        "blindagem precisa eliminar a votação de preferência",
+      );
+      assert.match(res.fala || "", /troca por/i, "blindagem precisa entregar uma decisão");
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
   });
 });
