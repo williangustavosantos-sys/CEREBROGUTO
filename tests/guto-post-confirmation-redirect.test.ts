@@ -300,4 +300,41 @@ describe("POST_CONFIRMATION_REDIRECT", () => {
     assert.equal(afterMemory.lastWorkoutPlan?.title, before.lastWorkoutPlan?.title);
     assert.deepEqual(afterMemory.proactiveImpacts || [], []);
   });
+
+  // FAIL 1 — confirmar viagem NO CARD não pode terminar em frase morta
+  // ("Agora vamos cuidar de hoje" sozinho). Tem que reconduzir para a próxima
+  // ação concreta (missão/treino/dieta/pergunta), igual aos outros confirms.
+  it("FAIL 1 — confirmar viagem no card termina com próxima ação concreta", async () => {
+    writeUserMemory(USER_ID, { lastWorkoutPlan: missionPlan("Corpo Inteiro com cuidado no ombro") });
+    const created = await addProactiveMemory(USER_ID, {
+      type: "trip",
+      status: "pending_confirmation",
+      stage: "impact_confirmation",
+      confirmationStage: "impact",
+      rawText: "Vou viajar sexta.",
+      understood: "Viagem na sexta.",
+      dateText: "sexta",
+      dateParsed: dateKey(2),
+      weekKey: "2026-W24",
+    });
+    clearMemoryStoreCache();
+
+    const response = await originalFetch(`${baseUrl}/guto/proactivity/confirm`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ memoryId: created.id, trainingAdapted: true }),
+    });
+    assert.equal(response.status, 200, `confirm deveria responder 200, veio ${response.status}`);
+    const body = (await response.json()) as Record<string, any>;
+
+    // A condução obrigatória: recondução para hoje + próxima ação concreta.
+    assert.match(body.fala, /Agora volta comigo para hoje/i, "confirmação precisa reconduzir para hoje");
+    assert.match(
+      body.fala,
+      /Pr[oó]xima a[cç][aã]o:|Sua miss[aã]o [ée]|Abre a miss[aã]o/i,
+      "confirmação precisa entregar próxima ação concreta",
+    );
+    // Frase morta isolada não basta.
+    assert.doesNotMatch(body.fala, /vamos cuidar de hoje\.?\s*$/i, "não pode terminar em frase morta");
+  });
 });
