@@ -2509,6 +2509,34 @@ export function appendPostConfirmationRedirect(
   return response;
 }
 
+// ─── Behavior Laws — portão único de saída de turno ───────────────────────────
+// `finalizeTurn` é o ponto central por onde as respostas de turno passam antes de
+// sair (ver GUTO_BEHAVIOR_LAWS.md). Hoje aplica a LEI 1 — toda RESOLUÇÃO
+// operacional conduz para a próxima ação clara, nunca termina no vazio.
+// Está preparado para as Leis 2/3/4/8, ativadas por etapa (sem ligar tudo de uma
+// vez). Egresso novo só precisa chamar `finalizeTurn` para herdar as leis.
+interface FinalizeTurnContext {
+  memory: GutoMemory;
+  language: GutoLanguage;
+  // LEI 1: marca um turno que RESOLVE algo operacional (confirmar viagem/treino,
+  // adaptar, alterar memória, finalizar card, concluir fluxo). Resolução é
+  // conduzida para o próximo passo; conversa livre e perguntas não são forçadas.
+  isResolution?: boolean;
+}
+
+export function finalizeTurn(response: GutoModelResponse, ctx: FinalizeTurnContext): GutoModelResponse {
+  if (!response) return response;
+  let out = response;
+  // LEI 1 — conduzir toda resolução para a próxima ação concreta.
+  // `appendPostConfirmationRedirect` já é conservador: não toca turnos que já
+  // perguntam (`expectedResponse`), que abrem treino (`updateWorkout`) ou que já
+  // conduzem ("Agora volta comigo…").
+  if (ctx.isResolution) {
+    out = appendPostConfirmationRedirect(out, ctx.memory, ctx.language);
+  }
+  return out;
+}
+
 function buildProactiveInput(memory: GutoMemory, slot: string, context: OperationalContext) {
   const slotGoal: Record<string, string> = {
     "12": "assumir que ainda dá tempo hoje e pedir contexto operacional em uma frase",
@@ -12078,6 +12106,11 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
     const resolverHandledResponse = await buildResolverHandledResponse(userId, resolverResult, memory, selectedLanguage);
     if (resolverHandledResponse) {
       const context = getOperationalContext(new Date(), selectedLanguage);
+      // LEI 1: `buildResolverHandledResponse` já conduz por caso (resolução
+      // terminal reconduz; abertura/continuidade de card pergunta e NÃO reconduz
+      // antes da confirmação). Não envolvemos em finalizeTurn aqui para não forçar
+      // condução em turno que ainda aguarda o card — migração para o portão central
+      // virá com teste dedicado de "abertura ≠ resolução".
       return res.json(attachAvatarEmotion({
         response: resolverHandledResponse,
         memory: getMemory(userId),
@@ -12804,12 +12837,11 @@ app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
             ? `Fatto. Ho salvato ${day} come giorno protetto. Niente compensazioni folli.`
             : `Fechado. Salvei ${day} como dia protegido. Sem inventar compensação maluca.`;
 
-      // FAIL 1 — confirmar viagem não pode terminar em frase morta. Recondução
-      // obrigatória para hoje + próxima ação concreta, como os demais confirms.
-      const { fala } = appendPostConfirmationRedirect(
+      // LEI 1 (portão central) — confirmar viagem não pode terminar em frase
+      // morta. `finalizeTurn` reconduz para hoje + próxima ação concreta.
+      const { fala } = finalizeTurn(
         { fala: baseFala, acao: "none", expectedResponse: null },
-        freshMemory,
-        selectedLanguage,
+        { memory: freshMemory, language: selectedLanguage, isResolution: true },
       );
 
       return res.json({
