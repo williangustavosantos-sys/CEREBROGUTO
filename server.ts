@@ -1600,7 +1600,30 @@ async function applyBackendProactiveAction(userId: string, action: BackendProact
   if (action.type === "request_discard") {
     await requestDiscardProactiveMemory(userId, action.memoryId);
     auditProactivity("request_discard");
-    return { id: action.memoryId, discardRequestedAt: new Date().toISOString() };
+    // LEI 1/7 — pedido de cancelamento NUNCA pode virar "atualizei" no vazio.
+    // Aponta para o card de cancelamento (próxima ação), sem vazar texto interno.
+    const m = getMemory(userId);
+    const language = normalizeLanguage(m.language || "pt-BR");
+    const current = (m.proactiveMemories || []).find((it) => it.id === action.memoryId);
+    const dayLabel = current?.dateParsed
+      ? formatRelativeProactiveDay(current.dateParsed, language)
+      : (current?.dateText || "");
+    const tripFala = language === "en-US"
+      ? `Got it. Do you want to cancel the trip${dayLabel ? ` on ${dayLabel}` : ""}? Confirm on the card.`
+      : language === "it-IT"
+        ? `Capito. Vuoi annullare il viaggio${dayLabel ? ` del ${dayLabel}` : ""}? Conferma nel card.`
+        : `Entendi. Quer cancelar a viagem${dayLabel ? ` de ${dayLabel}` : ""}? Confirma no card.`;
+    const genericFala = language === "en-US"
+      ? "Got it. Do you want to drop this? Confirm on the card."
+      : language === "it-IT"
+        ? "Capito. Vuoi toglierlo? Conferma nel card."
+        : "Entendi. Quer tirar isso? Confirma no card.";
+    return {
+      id: action.memoryId,
+      discardRequestedAt: new Date().toISOString(),
+      fala: current?.type === "trip" ? tripFala : genericFala,
+      memoryPatch: buildProactiveMemoryPatch(m),
+    };
   }
 
   if (action.type === "cancel_discard_request") {
@@ -4035,7 +4058,7 @@ async function buildResolverHandledResponse(
         : "Fechado. Atualizei esse contexto.";
   }
 
-  return {
+  const handled: GutoModelResponse = {
     fala,
     acao: "none",
     expectedResponse: proactiveActionResult?.expectedResponse || null,
@@ -4043,6 +4066,13 @@ async function buildResolverHandledResponse(
     avatarEmotion: proactiveActionResult?.impact?.workoutEffect === "protected" ? "alert" : "default",
     memoryPatch: proactiveActionResult?.memoryPatch || buildProactiveMemoryPatch(fresh),
   };
+  // LEI 1 — descarte/validação concluída é resolução terminal: reconduz. Pedido de
+  // cancelamento (request_discard) NÃO entra aqui (não tem status "discarded"):
+  // ele aponta para o card e aguarda confirmação.
+  if (proactiveActionResult?.status === "discarded") {
+    return finalizeTurn(handled, { memory: fresh, language, isResolution: true });
+  }
+  return handled;
 }
 
 function atomicTurnState(memory: GutoMemory): AtomicTurnStateSnapshot {
@@ -13001,7 +13031,24 @@ app.post("/guto/proactivity/discard", requireActiveUser, async (req, res) => {
     }
     syncCanonicalConversationContext(memory);
     saveMemory(memory);
-    res.json({ ok: true, memoryPatch: buildProactiveMemoryPatch(getMemory(userId)) });
+    // LEI 1 — confirmar cancelamento é resolução: reconduz para a próxima ação.
+    const language = normalizeLanguage(memory.language || "pt-BR");
+    const cancelledFala = current.type === "trip"
+      ? (language === "en-US"
+          ? "Done. I cancelled that trip and we go back to the normal plan."
+          : language === "it-IT"
+            ? "Fatto. Ho annullato quel viaggio e torniamo al piano normale."
+            : "Fechado. Cancelei essa viagem e a gente volta ao plano normal.")
+      : (language === "en-US"
+          ? "Done. I cleared that and we keep the plan clean."
+          : language === "it-IT"
+            ? "Fatto. Ho tolto quello e teniamo il piano pulito."
+            : "Fechado. Tirei isso e mantenho o plano limpo.");
+    const { fala } = finalizeTurn(
+      { fala: cancelledFala, acao: "none", expectedResponse: null },
+      { memory, language, isResolution: true },
+    );
+    res.json({ ok: true, fala, memoryPatch: buildProactiveMemoryPatch(getMemory(userId)) });
   } catch (e) {
     console.error("[GUTO][proactivity] discard error:", e);
     res.status(500).json({ error: "internal error" });

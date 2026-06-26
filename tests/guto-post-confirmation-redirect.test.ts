@@ -337,4 +337,64 @@ describe("POST_CONFIRMATION_REDIRECT", () => {
     // Frase morta isolada não basta.
     assert.doesNotMatch(body.fala, /vamos cuidar de hoje\.?\s*$/i, "não pode terminar em frase morta");
   });
+
+  // ── Cancelamento de viagem (falha real em produção) ───────────────────────
+  // "ela foi cancelada" devolvia "Fechado. Atualizei esse contexto." (beco morto,
+  // viola LEI 1/7) e o card ficava preso sem ação. Estes testes travam o fluxo.
+
+  it("CANCEL — pedir cancelamento NÃO responde 'atualizei' e aponta para o card", async () => {
+    writeUserMemory(USER_ID, { lastWorkoutPlan: missionPlan("Corpo Inteiro") });
+    await addProactiveMemory(USER_ID, {
+      type: "trip",
+      status: "surfaced",
+      rawText: "viajo sexta",
+      understood: "Viagem na sexta",
+      dateText: "sexta",
+      dateParsed: dateKey(2),
+      weekKey: "2026-W24",
+    });
+    clearMemoryStoreCache();
+
+    const body = await postGuto("cancelei a viagem");
+
+    assert.doesNotMatch(body.fala, /atualizei esse contexto|updated that context/i, "não pode dizer 'atualizei' no vazio");
+    assert.match(body.fala, /cancelar|card/i, "deve apontar para o card de cancelamento");
+    const trip = readUserMemory().proactiveMemories?.find((m: any) => m.type === "trip");
+    assert.ok(trip?.discardRequestedAt, "deve abrir pedido de cancelamento (card com ação)");
+  });
+
+  it("CANCEL — confirmar cancelamento conduz (não morre) e descarta a viagem", async () => {
+    writeUserMemory(USER_ID, { lastWorkoutPlan: missionPlan("Corpo Inteiro") });
+    const created = await addProactiveMemory(USER_ID, {
+      type: "trip",
+      status: "surfaced",
+      rawText: "viajo sexta",
+      understood: "Viagem na sexta",
+      dateText: "sexta",
+      dateParsed: dateKey(2),
+      weekKey: "2026-W24",
+      discardRequestedAt: new Date().toISOString(),
+    });
+    clearMemoryStoreCache();
+
+    const response = await originalFetch(`${baseUrl}/guto/proactivity/discard`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ memoryId: created.id, confirmedByUser: true }),
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as Record<string, any>;
+
+    assert.match(body.fala || "", /Cancelei essa viagem|cancelled that trip/i, "deve confirmar o cancelamento");
+    assert.match(
+      body.fala || "",
+      /Agora volta comigo para hoje|Pr[oó]xima a[cç][aã]o|Sua miss[aã]o/i,
+      "confirmar cancelamento precisa reconduzir para a missão",
+    );
+    assert.equal(
+      readUserMemory().proactiveMemories?.find((m: any) => m.id === created.id)?.status,
+      "discarded",
+      "a viagem precisa ficar descartada",
+    );
+  });
 });

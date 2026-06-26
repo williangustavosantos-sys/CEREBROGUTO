@@ -99,6 +99,8 @@ const DISCARD_TERMS: string[] = [
   // pt-BR
   'nao vou mais', 'nao vai mais', 'cancelei', 'cancelou', 'nao vai rolar',
   'desisti', 'nao vou', 'nao acontece mais', 'foi cancelado', 'cancela',
+  'foi cancelada', 'cancelada', 'nao vai acontecer', 'desmarca', 'desmarcar',
+  'remove a viagem', 'remover a viagem', 'tira a viagem', 'desmarca a viagem',
   // en-US
   'cancelled', 'canceled', 'not going', 'wont go', 'wont happen', 'no longer', 'gave up',
   'i cancelled', 'not going anymore', 'its cancelled', "it's cancelled",
@@ -645,10 +647,13 @@ export async function resolveProactiveMemoryActionFromUserReply(
       }
 
       if (hasAny(normalized, DISCARD_TERMS)) {
+        // Viagem ATIVA (confirmed/enriched/surfaced) não é descartada na hora:
+        // abre o card de cancelamento (request_discard) e confirma antes de apagar
+        // (spec de proatividade + LEI 1/7 — sem "atualizei" no vazio, sem card preso).
         return {
           engaged: true,
-          action: { type: 'discard', memoryId: target.id },
-          reason: 'active_trip_cancelled',
+          action: { type: 'request_discard', memoryId: target.id },
+          reason: 'active_trip_cancel_requested',
         }
       }
     }
