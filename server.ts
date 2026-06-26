@@ -88,6 +88,7 @@ import {
   clarificationReply,
   type ShortIntentLanguage,
 } from "./src/chat-context-intent.js";
+import { sanitizeResponsePayload, sanitizeUserFacingText } from "./src/output-sanitizer.js";
 import { resolveFoodIdByName, getFoodById, type FoodCountry, type FoodLanguage } from "./src/food-catalog.js";
 import { suggestFoodSubstitutes, type UserFoodConstraints } from "./src/food-availability.js";
 import {
@@ -710,6 +711,16 @@ app.use(createRateLimit({
 }));
 app.use(requestLog);
 app.use(parseAuth);
+
+// LEI 11 — NENHUM marcador interno do cérebro sai do backend. Chokepoint único:
+// envolve res.json e limpa toda resposta (fala, memória, instruções) de qualquer
+// contexto/pipeline interno, qualquer que seja o caminho que a gerou. É a última
+// linha de defesa — independente de finalizeTurn e dos 70+ pontos de res.json.
+app.use((_req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = ((body?: unknown) => originalJson(sanitizeResponsePayload(body))) as typeof res.json;
+  next();
+});
 
 // Selfies de validação são dado pessoal sensível — NÃO podem ser públicas.
 // Servidas só com URL assinada (HMAC, ver storage.signImageUrl): a assinatura vai
@@ -2550,6 +2561,11 @@ interface FinalizeTurnContext {
 export function finalizeTurn(response: GutoModelResponse, ctx: FinalizeTurnContext): GutoModelResponse {
   if (!response) return response;
   let out = response;
+  // LEI 11 — nenhum marcador interno na fala do GUTO (defesa em profundidade; o
+  // middleware de res.json é o chokepoint final, mas o portão de turno também limpa).
+  if (typeof out.fala === "string") {
+    out = { ...out, fala: sanitizeUserFacingText(out.fala) };
+  }
   // LEI 1 — conduzir toda resolução para a próxima ação concreta.
   // `appendPostConfirmationRedirect` já é conservador: não toca turnos que já
   // perguntam (`expectedResponse`), que abrem treino (`updateWorkout`) ou que já

@@ -397,4 +397,40 @@ describe("POST_CONFIRMATION_REDIRECT", () => {
       "a viagem precisa ficar descartada",
     );
   });
+
+  // LEI 11 — fim a fim: contexto interno injetado no input NUNCA volta ao usuário.
+  // Reproduz o vazamento real de produção ([DIET CONTEXT …] na resposta final).
+  it("LEI 11 — contexto interno injetado NUNCA volta na resposta (fim a fim)", async () => {
+    writeUserMemory(USER_ID, { lastWorkoutPlan: missionPlan("Corpo Inteiro") });
+    await addProactiveMemory(USER_ID, {
+      type: "trip",
+      status: "surfaced",
+      rawText: "viajo sexta",
+      understood: "Viagem na sexta",
+      dateText: "sexta",
+      dateParsed: dateKey(2),
+      weekKey: "2026-W24",
+    });
+    clearMemoryStoreCache();
+
+    const injected = [
+      "[DIET CONTEXT — language: pt-BR — nutrition only]",
+      'User opened chat from the food "?" button on their weekly diet plan.',
+      "User question: cancelei a viagem",
+    ].join("\n");
+    const body = await postGuto(injected);
+    const serialized = JSON.stringify(body);
+
+    assert.doesNotMatch(
+      serialized,
+      /\[DIET CONTEXT|\[WORKOUT EXERCISE CONTEXT|User opened chat from|nutrition only|\[PROACTIVITY|\[PROATIVIDADE|\[GUTO_/i,
+      `resposta vazou marcador interno: ${serialized.slice(0, 400)}`,
+    );
+    // também não pode poluir a memória que volta no patch
+    assert.doesNotMatch(
+      JSON.stringify(readUserMemory().proactiveMemories || []),
+      /\[DIET CONTEXT|User opened chat from|nutrition only/i,
+      "memória proativa foi poluída com contexto injetado",
+    );
+  });
 });

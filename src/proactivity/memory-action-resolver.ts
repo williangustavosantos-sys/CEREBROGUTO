@@ -10,6 +10,7 @@ import { detectTravelTrainingSignal } from './decision-engine'
 import { resolveProactiveDate } from './date-resolver'
 import type { ProactiveMemory } from './types'
 import { config } from '../config'
+import { sanitizeUserFacingText } from '../output-sanitizer'
 
 // ─── Output types ──────────────────────────────────────────────────────────────
 
@@ -299,7 +300,10 @@ function appendUserReplyToMemoryPatch(
   memory: ProactiveMemory,
   userInput: string
 ): Partial<Pick<ProactiveMemory, 'rawText' | 'understood'>> {
-  const reply = userInput.replace(/\s+/g, ' ').trim().slice(0, 180)
+  // LEI 11 — nunca gravar contexto interno injetado ([DIET CONTEXT], "User
+  // opened chat from…", etc.) na memória, senão vaza depois em qualquer fala que
+  // ecoe understood/rawText. Limpa o reply na ORIGEM.
+  const reply = sanitizeUserFacingText(userInput).replace(/\s+/g, ' ').trim().slice(0, 180)
   if (!reply) return {}
   const append = (base: string | undefined): string => {
     const cleanBase = (base || '').replace(/\s+/g, ' ').trim()
