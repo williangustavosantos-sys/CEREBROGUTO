@@ -222,17 +222,23 @@ describe("Fatia 1 — interceptação da flag no handler /guto", () => {
     });
   }
 
-  it("risco ativo → defere (retorna null) e decideTurn NÃO é chamado", async () => {
+  it("2A: risco ativo → cérebro POSSUI (decideTurn é chamado; risk vai ao worldState)", async () => {
     let decideCalled = false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let capturedWorldState: any = null;
     const result = await callHelper({
       classifyRiskFn: async () => ({ flag: "cardio_neuro_acute", confidence: 0.9, reasoning: "x", classifiedAt: "" }),
-      decide: async () => {
+      decide: async (inp: { worldState: Record<string, unknown> }) => {
         decideCalled = true;
+        capturedWorldState = inp.worldState;
         return okContract;
       },
     });
-    assert.equal(result, null);
-    assert.equal(decideCalled, false, "com risco ativo o cérebro nem decide — defere ao legado");
+    // 2A: não defere mais por risco — o cérebro decide (compõe segurança via riskOverride).
+    assert.equal(decideCalled, true, "com risco ativo o cérebro AGORA decide (não defere)");
+    assert.deepEqual(result, okContract.response, "entrega a resposta pública do cérebro");
+    // O risco vira OBSERVAÇÃO no worldState (trilho).
+    assert.deepEqual(capturedWorldState.risk, { flag: "cardio_neuro_acute", confidence: 0.9 });
   });
 
   it("decideTurn devolve defer → helper retorna null (cai no legado)", async () => {

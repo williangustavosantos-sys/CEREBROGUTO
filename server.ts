@@ -80,6 +80,7 @@ import {
 // Cérebro soberano — Fatia 1 (atrás de GUTO_BRAIN_SLICE1). Ver runSovereignBrainSlice1.
 import { assembleWorldState } from "./src/brain/assemble-world-state.js";
 import { decideTurn, type DecideTurnDeps } from "./src/brain/decide-turn.js";
+import type { ReducedWorldState } from "./src/brain/types.js";
 import { applyLevelStructure, resolveTrainingLevel, type WorkoutLanguage, type TrainingLevel } from "./src/workout-level.js";
 import {
   classifyShortContextIntent,
@@ -12062,14 +12063,44 @@ async function enforceSafetyAndLimitationBeforeGates(
   return { acuteResponse: null };
 }
 
-// ─── Cérebro soberano — Fatia 1 (atrás de GUTO_BRAIN_SLICE1) ───────────────────
-// Intercepta SÓ turno simples (acao:"none"). Fluxos complexos → decideTurn devolve
-// validation:"defer" e o handler cai no askGutoModel legado (isso custa uma SEGUNDA
-// chamada ao modelo enquanto a flag está ON — aceitável temporariamente na Fatia 1).
-// Turno com risco ativo TAMBÉM defere: o legado aplica o SAFETY_OVERRIDE completo,
-// então o cérebro só decide quando buildGutoBrainPrompt usaria riskOverride=null
-// (paridade total de segurança — zero regressão). Retorna a resposta PÚBLICA
-// (contract.response) ou null para deferir. meta/validation NUNCA saem daqui.
+// ─── Diretriz exclusiva do cérebro soberano (Fatia 2A) ────────────────────────
+// Anexada SÓ no caminho do cérebro (closure abaixo) — buildGutoBrainPrompt
+// compartilhado com o legado NÃO é tocado, então flag OFF fica idêntica.
+// Ataca diretamente os padrões que a Calibração 2.0 provou destruir a identidade.
+function buildBrain2ADirective(ws: ReducedWorldState): string {
+  const known: string[] = [];
+  if (!ws.missingFields.includes("trainingStatus") && ws.trainingStatus) known.push(`estado=${ws.trainingStatus}`);
+  if (!ws.missingFields.includes("trainingLimitations") && typeof ws.trainingLimitations === "string" && ws.trainingLimitations) known.push(`limitação=${ws.trainingLimitations}`);
+  if (!ws.missingFields.includes("userAge")) known.push("idade já conhecida");
+  if (ws.trainingLocation) known.push(`local=${ws.trainingLocation}`);
+  if (ws.trainingGoal) known.push(`objetivo=${ws.trainingGoal}`);
+  const knownLine = known.length
+    ? `DADOS JÁ NA MEMÓRIA (NUNCA repergunte): ${known.join("; ")}.`
+    : "";
+  return `
+DIRETRIZ SOBERANA — IDENTIDADE NO RACIOCÍNIO (vale para QUALQUER turno):
+QUANDO o turno for emoção, conversa, identidade, fragilidade, retorno, resistência leve, luto, tristeza, raiva ou felicidade:
+- PRESENÇA PRIMEIRO. Reconheça o que a pessoa sente ANTES de qualquer próximo passo. Em fragilidade real, a emoção vem antes do treino.
+- acao:"none" é um próximo passo LEGÍTIMO quando a sua própria fala já conduz. NÃO pivote para updateWorkout só porque é possível.
+- Reconheça a FELICIDADE antes de puxar ação ("que isso, bora surfar essa energia") — nunca ignore o estado positivo.
+- No RETORNO de quem sumiu: reconheça o retorno como GUTO (parceria, peso real), sem template, sem cobrança fria.
+PROIBIÇÕES ABSOLUTAS (quebram a identidade do GUTO):
+- NUNCA use streak/pacto/sequência como CULPA ("não deixa a streak cair", "honra o pacto") sobre dor emocional. Gamificação não é alavanca sobre sentimento.
+- NUNCA diminua o sentimento com "é só...", "é só o cérebro tentando...", "desânimo passageiro".
+- NUNCA puxe agenda/compromisso/viagem quando isso NÃO muda a ação deste turno.
+- NUNCA fale "app", "aba", "no sistema", "registrei aqui", "na aba treino" — você É o GUTO, não narra a interface.
+- NUNCA registre treino por alegação verbal ("já treinei"). NÃO diga "registrado/feito/anotei". Conduza para a validação real do treino.
+- ${knownLine}
+QUANDO o usuário PEDIR explicitamente treino, dieta, troca de exercício ou ação operacional: responda normalmente com a acao certa — o sistema cuida da execução.
+`.trim();
+}
+
+// ─── Cérebro soberano — Fatia 2A (atrás de GUTO_BRAIN_SLICE1) ──────────────────
+// Possui conversa/emoção/identidade/fragilidade/retorno como acao:"none". NÃO
+// defere mais por risco: compõe a segurança no PRÓPRIO call via riskOverride (mesmo
+// SAFETY_OVERRIDE do legado). Só defere quando o turno EXIGE treino/dieta/swap/
+// proatividade (acao != "none"). Retorna a resposta PÚBLICA (contract.response) ou
+// null para deferir. meta/validation NUNCA saem daqui.
 // `decide`/`classifyRiskFn` são injetáveis só para teste; produção usa os reais.
 async function runSovereignBrainSlice1(params: {
   memory: GutoMemory;
@@ -12086,9 +12117,11 @@ async function runSovereignBrainSlice1(params: {
   const decide = params.decide ?? decideTurn;
   const classifyRiskFn = params.classifyRiskFn ?? classifyRisk;
 
-  // Segurança: risco ativo → defere ao legado (que monta o SAFETY_OVERRIDE).
+  // Segurança como OBSERVAÇÃO (trilho), não como defer. O cérebro compõe a
+  // segurança no próprio call via riskOverride (mesmo SAFETY_OVERRIDE do legado).
   const risk = await classifyRiskFn(input, language as ClassifierLanguage, { timeoutMs: 1800 }).catch(() => null);
-  if (risk && risk.flag && risk.confidence >= 0.6) return null;
+  const riskActive = Boolean(risk && risk.flag && risk.confidence >= 0.6);
+  const riskOverride = riskActive ? risk : null;
 
   const worldState = assembleWorldState({
     userId: memory.userId,
@@ -12100,6 +12133,7 @@ async function runSovereignBrainSlice1(params: {
     trainingLimitations: memory.trainingLimitations,
     trainingStatus: memory.trainingStatus,
     trainingLocation: memory.trainingLocation,
+    userAge: memory.userAge,
     lastWorkoutPlan: memory.lastWorkoutPlan
       ? {
           focus: memory.lastWorkoutPlan.focus,
@@ -12109,6 +12143,7 @@ async function runSovereignBrainSlice1(params: {
       : memory.lastWorkoutPlan,
     weeklyDietPlan: memory.weeklyDietPlan,
     workoutFeedbackHistory: memory.workoutFeedbackHistory,
+    risk: risk ? { flag: risk.flag, confidence: risk.confidence } : null,
   });
 
   const normalizedExpectedResponse = normalizeExpectedResponse(expectedResponse);
@@ -12122,7 +12157,9 @@ async function runSovereignBrainSlice1(params: {
   // Deps reais: as MESMAS primitivas de baixo nível do legado, injetadas (o módulo
   // do cérebro nunca importa server.ts; a URL com a chave fica encapsulada aqui).
   const deps: DecideTurnDeps = {
-    // Reusa o prompt PROVADO do legado (riskOverride=null garantido pelo gate acima).
+    // Reusa o prompt PROVADO do legado + riskOverride real (mesmo SAFETY_OVERRIDE) +
+    // a diretriz soberana 2A anexada SÓ aqui (buildGutoBrainPrompt compartilhado
+    // permanece intocado → flag OFF idêntica).
     buildPrompt: () =>
       buildGutoBrainPrompt({
         input,
@@ -12131,11 +12168,11 @@ async function runSovereignBrainSlice1(params: {
         language,
         operationalContext,
         expectedResponse: normalizedExpectedResponse,
-        riskOverride: null,
+        riskOverride,
         proactivityContext,
         dailyPresenceContext: dailyPresencePrompt,
         activeExerciseContext: buildActiveExerciseContextBlock(memory),
-      }),
+      }) + "\n\n" + buildBrain2ADirective(worldState),
     callModel: async (prompt) => {
       if (!GEMINI_API_KEY) return { ok: false };
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
