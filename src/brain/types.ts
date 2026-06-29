@@ -16,8 +16,25 @@ export type FeedbackDifficulty = "easy" | "ok" | "hard" | "pain";
 export type ProgressionSignal = "progress" | "hold" | "deload";
 
 /**
+ * Observação de segurança — saída do classifyRisk (TRILHO, não decisão).
+ * O cérebro LÊ isto e decide; o gate de risco não decide o turno fora do cérebro.
+ * `flag` null = sem sinal de risco. "Ativo" (consumidor decide) = flag != null && confidence >= 0.6.
+ */
+export interface RiskObservation {
+  flag: string | null;
+  confidence: number;
+}
+
+/**
+ * Campos soberanos cuja ausência impede execução SEGURA de treino.
+ * É OBSERVAÇÃO (o cérebro lê e decide perguntar na própria voz) — uso pleno na Fatia 2B.
+ */
+export type SovereignField = "trainingStatus" | "userAge" | "trainingLimitations";
+
+/**
  * Subconjunto REDUZIDO do estado lido por assembleWorldState (commit 4).
- * Sem DuoHealth / risco / morte / Arena / Avatar / XP / Proatividade — fora da Fatia 1.
+ * Sem DuoHealth / risco de abandono / morte / Arena / Avatar / XP / Proatividade.
+ * `risk`/`missingFields` (Fatia 2A) são OBSERVAÇÕES (trilho), nunca decisões.
  */
 export interface ReducedWorldState {
   userId: string;
@@ -40,6 +57,10 @@ export interface ReducedWorldState {
   recentDifficulty: FeedbackDifficulty[];
   /** Sinal agregado (progress|hold|deload) ou null se não há feedback suficiente. */
   feedbackSignal: ProgressionSignal | null;
+  /** Observação de segurança (Fatia 2A). null = sem risco classificado. TRILHO, não decisão. */
+  risk: RiskObservation | null;
+  /** Campos soberanos ausentes p/ execução de treino (Fatia 2A). Observação; uso pleno na 2B. */
+  missingFields: SovereignField[];
 }
 
 /**

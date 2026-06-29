@@ -217,3 +217,82 @@ test("userId e language sempre presentes no resultado", () => {
   assert.ok("feedbackSignal" in r);
   assert.equal(r.userId, "u-xyz");
 });
+
+// ─── Commit 2A.1: observações risk e missingFields ───────────────────────────
+
+test("perfil COMPLETO (status+idade+limitação) → missingFields=[]", () => {
+  const r = assembleWorldState({
+    userId: "u1",
+    trainingStatus: "consistent",
+    userAge: 33,
+    trainingLimitations: "sem dor",
+  });
+  assert.deepEqual(r.missingFields, []);
+});
+
+test("perfil INCOMPLETO → missingFields lista exatamente os ausentes", () => {
+  const r = assembleWorldState({ userId: "u1", trainingStatus: "consistent" });
+  // falta idade e limitação; status presente
+  assert.deepEqual(r.missingFields.sort(), ["trainingLimitations", "userAge"]);
+});
+
+test("perfil VAZIO → missingFields = todos os 3 campos soberanos", () => {
+  const r = assembleWorldState({ userId: "u1" });
+  assert.deepEqual(r.missingFields.sort(), ["trainingLimitations", "trainingStatus", "userAge"]);
+});
+
+test("'sem dor' conta como limitação PRESENTE (declarada e fechada)", () => {
+  const r = assembleWorldState({ userId: "u1", trainingLimitations: "sem dor", trainingStatus: "consistent", userAge: 30 });
+  assert.ok(!r.missingFields.includes("trainingLimitations"));
+});
+
+test("idade fora do range (12) → userAge ausente", () => {
+  const r = assembleWorldState({ userId: "u1", userAge: 12, trainingStatus: "consistent", trainingLimitations: "sem dor" });
+  assert.ok(r.missingFields.includes("userAge"));
+});
+
+test("string vazia/espaços não conta como presente", () => {
+  const r = assembleWorldState({ userId: "u1", trainingStatus: "   ", trainingLimitations: "" , userAge: 30 });
+  assert.ok(r.missingFields.includes("trainingStatus"));
+  assert.ok(r.missingFields.includes("trainingLimitations"));
+});
+
+test("risk: passthrough quando fornecido", () => {
+  const r = assembleWorldState({ userId: "u1", risk: { flag: "suicide_self_harm", confidence: 0.92 } });
+  assert.deepEqual(r.risk, { flag: "suicide_self_harm", confidence: 0.92 });
+});
+
+test("risk: ausente => null (sem sinal)", () => {
+  const r = assembleWorldState({ userId: "u1" });
+  assert.equal(r.risk, null);
+});
+
+test("risk: explicitamente null => null", () => {
+  const r = assembleWorldState({ userId: "u1", risk: null });
+  assert.equal(r.risk, null);
+});
+
+test("observações 2A sempre presentes no resultado", () => {
+  const r = assembleWorldState({ userId: "u1" });
+  assert.ok("risk" in r);
+  assert.ok("missingFields" in r);
+  assert.ok(Array.isArray(r.missingFields));
+});
+
+test("campos FORA de escopo (DuoHealth/risco-abandono/Arena/XP/Avatar) continuam AUSENTES", () => {
+  const r = assembleWorldState({
+    userId: "u1",
+    trainingStatus: "consistent",
+    userAge: 33,
+    trainingLimitations: "sem dor",
+    risk: { flag: null, confidence: 0 },
+  }) as unknown as Record<string, unknown>;
+  for (const forbidden of ["duoHealth", "abandonmentRisk", "riskBand", "avatarState", "xp", "arena", "deathSignal", "userAge"]) {
+    assert.ok(!(forbidden in r), `campo fora de escopo não pode aparecer: ${forbidden}`);
+  }
+});
+
+test("função permanece pura: mesmo input (com risk+perfil) → mesmo output", () => {
+  const input = { userId: "u1", trainingStatus: "consistent", userAge: 33, trainingLimitations: "joelho", risk: { flag: "acute", confidence: 0.7 } };
+  assert.deepEqual(assembleWorldState(input), assembleWorldState(input));
+});

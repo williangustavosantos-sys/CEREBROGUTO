@@ -1,6 +1,12 @@
 import { getProgressionSignal } from "../workout-progression.js";
 import type { WorkoutFeedbackRecord } from "../workout-progression.js";
-import type { ReducedWorldState, Language, FeedbackDifficulty } from "./types.js";
+import type {
+  ReducedWorldState,
+  Language,
+  FeedbackDifficulty,
+  RiskObservation,
+  SovereignField,
+} from "./types.js";
 
 const VALID_LANGUAGES = new Set<Language>(["pt-BR", "en-US", "it-IT"]);
 const VALID_DIFFICULTIES = new Set<FeedbackDifficulty>(["easy", "ok", "hard", "pain"]);
@@ -20,16 +26,44 @@ export interface WorldStateInput {
   trainingLimitations?: string;
   trainingStatus?: string;
   trainingLocation?: string;
+  /** Idade — usada só para computar missingFields (não é exposta como campo do WorldState). */
+  userAge?: number;
   /** Subconjunto de GutoMemory.lastWorkoutPlan (apenas o que o cérebro usa). */
   lastWorkoutPlan?: { focus?: string; title?: string; scheduledFor?: string } | null;
   /** Presença de plano de dieta: não copiamos a estrutura inteira. */
   weeklyDietPlan?: unknown;
   workoutFeedbackHistory?: WorkoutFeedbackRecord[];
+  /**
+   * Observação de risco JÁ classificada (classifyRisk roda fora — é async).
+   * assembleWorldState permanece PURA: só repassa. Ausente/undefined => null.
+   */
+  risk?: RiskObservation | null;
 }
 
 function normalizeLanguage(raw: string | undefined): Language {
   if (VALID_LANGUAGES.has(raw as Language)) return raw as Language;
   return "pt-BR";
+}
+
+function isNonEmptyString(v: unknown): boolean {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+/** Idade válida para treino (espelha o range editável do chat: 14–99). */
+function isValidAge(v: unknown): boolean {
+  return typeof v === "number" && Number.isFinite(v) && v >= 14 && v <= 99;
+}
+
+/**
+ * Campos soberanos AUSENTES para execução segura de treino. Observação pura.
+ * "sem dor"/"no pain" conta como PRESENTE (limitação declarada e fechada).
+ */
+function computeMissingFields(input: WorldStateInput): SovereignField[] {
+  const missing: SovereignField[] = [];
+  if (!isNonEmptyString(input.trainingStatus)) missing.push("trainingStatus");
+  if (!isValidAge(input.userAge)) missing.push("userAge");
+  if (!isNonEmptyString(input.trainingLimitations)) missing.push("trainingLimitations");
+  return missing;
 }
 
 function extractDifficulties(history: WorkoutFeedbackRecord[]): FeedbackDifficulty[] {
@@ -59,6 +93,9 @@ export function assembleWorldState(input: WorldStateInput): ReducedWorldState {
     recentDifficulty: extractDifficulties(history),
     // null honesto quando não há feedback: "hold" pressupõe dados neutros, null é ausência de sinal.
     feedbackSignal: history.length > 0 ? getProgressionSignal(history) : null,
+    // Observações (Fatia 2A) — TRILHO, não decisão. risk repassado; missingFields computado.
+    risk: input.risk ?? null,
+    missingFields: computeMissingFields(input),
   };
 
   if (input.name !== undefined) ws.name = input.name;

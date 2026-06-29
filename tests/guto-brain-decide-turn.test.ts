@@ -16,6 +16,8 @@ const baseWorldState: ReducedWorldState = {
   language: "pt-BR",
   recentDifficulty: [],
   feedbackSignal: null,
+  risk: null,
+  missingFields: [],
 };
 
 /** Constrói deps mockadas + contadores para asserções. */
