@@ -12082,7 +12082,7 @@ DIRETRIZ SOBERANA — IDENTIDADE NO RACIOCÍNIO (vale para QUALQUER turno):
 QUANDO o turno for emoção, conversa, identidade, fragilidade, retorno, resistência leve, luto, tristeza, raiva ou felicidade:
 - PRESENÇA PRIMEIRO. Reconheça o que a pessoa sente ANTES de qualquer próximo passo. Em fragilidade real, a emoção vem antes do treino.
 - acao:"none" é um próximo passo LEGÍTIMO quando a sua própria fala já conduz. NÃO pivote para updateWorkout só porque é possível.
-- Reconheça a FELICIDADE antes de puxar ação ("que isso, bora surfar essa energia") — nunca ignore o estado positivo.
+- FELICIDADE/energia positiva ("tô voando", "tô feliz") NÃO é pedido de treino: RECONHEÇA a alegria e mantenha acao:"none" (converse, celebre, canalize em palavra) — só gere updateWorkout se o usuário PEDIR treino explicitamente.
 - No RETORNO de quem sumiu: reconheça o retorno como GUTO (parceria, peso real), sem template, sem cobrança fria.
 PROIBIÇÕES ABSOLUTAS (quebram a identidade do GUTO):
 - NUNCA use streak/pacto/sequência como CULPA ("não deixa a streak cair", "honra o pacto") sobre dor emocional. Gamificação não é alavanca sobre sentimento.
@@ -12147,12 +12147,6 @@ async function runSovereignBrainSlice1(params: {
   });
 
   const normalizedExpectedResponse = normalizeExpectedResponse(expectedResponse);
-  const dailyPresence = await buildDailyPresenceContext(memory, {
-    dateKey: todayKey(),
-    language,
-    allowExternalFetch: false,
-  }).catch(() => null);
-  const dailyPresencePrompt = dailyPresence ? formatDailyPresenceContextForPrompt(dailyPresence) : null;
 
   // Deps reais: as MESMAS primitivas de baixo nível do legado, injetadas (o módulo
   // do cérebro nunca importa server.ts; a URL com a chave fica encapsulada aqui).
@@ -12160,6 +12154,10 @@ async function runSovereignBrainSlice1(params: {
     // Reusa o prompt PROVADO do legado + riskOverride real (mesmo SAFETY_OVERRIDE) +
     // a diretriz soberana 2A anexada SÓ aqui (buildGutoBrainPrompt compartilhado
     // permanece intocado → flag OFF idêntica).
+    // Fatia 2A: NÃO injetamos dailyPresence/proatividade no caminho do cérebro — a
+    // validação viva provou que eles produzem o "tique de agenda" (abertura semanal)
+    // que sequestra turnos emocionais/identitários. Proatividade/evento temporário
+    // são da Fatia 2F. (brain-only; o legado segue com seus contextos via askGutoModel.)
     buildPrompt: () =>
       buildGutoBrainPrompt({
         input,
@@ -12169,8 +12167,8 @@ async function runSovereignBrainSlice1(params: {
         operationalContext,
         expectedResponse: normalizedExpectedResponse,
         riskOverride,
-        proactivityContext,
-        dailyPresenceContext: dailyPresencePrompt,
+        proactivityContext: null,
+        dailyPresenceContext: null,
         activeExerciseContext: buildActiveExerciseContextBlock(memory),
       }) + "\n\n" + buildBrain2ADirective(worldState),
     callModel: async (prompt) => {
