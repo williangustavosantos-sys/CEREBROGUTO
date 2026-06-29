@@ -162,6 +162,35 @@ describe("Fatia 1 — interceptação da flag no handler /guto", () => {
     assert.ok(modelCallCount > 2, "ação complexa deve cair no legado (mais chamadas que o cérebro puro)");
   });
 
+  // ─── Fatia 2A.2: L3 neutro para acao:"none" ─────────────────────────────────
+  it("2A.2: fala do cérebro (acao:none) sai IDÊNTICA mesmo contendo padrão de swap-menu", async () => {
+    // Fala que enforceDecisiveSwap/repairInvalid MIRARIAM se rodassem (menu de
+    // preferência entre exercícios). Com o guard, a fala do cérebro sai intacta.
+    const falaComMenu = "Tamo junto. Se um dia trocar, Supino ou Crucifixo, qual prefere? Hoje seguimos firmes.";
+    stubModelPayload = { flag: null, confidence: 0, fala: falaComMenu, acao: "none", expectedResponse: null };
+    seed("brain-l3-neutral");
+    const { status, body } = await chat("brain-l3-neutral", "valeu guto, parceria firme");
+
+    assert.equal(status, 200);
+    assert.equal(body.fala, falaComMenu, "a L3 não pode alterar a fala do cérebro em acao:none");
+    assert.equal(body.acao, "none");
+    assert.equal(modelCallCount, 2, "turno do cérebro: risk + brain (não cai no legado)");
+    for (const k of META_KEYS) {
+      assert.ok(!(k in body), `body não pode conter chave interna '${k}'`);
+    }
+  });
+
+  it("2A.2: turno do cérebro acao:none não dispara applyBackendProactiveAction (sem proactiveMemoryAction)", async () => {
+    stubModelPayload = { flag: null, confidence: 0, fala: "Presença total, Will.", acao: "none", expectedResponse: null };
+    seed("brain-l3-proactive");
+    const { status, body } = await chat("brain-l3-proactive", "só queria te dar um oi");
+    assert.equal(status, 200);
+    assert.equal(body.fala, "Presença total, Will.");
+    assert.equal(body.acao, "none");
+    // o atalho 2A.2 entrega direto; nenhum efeito proativo do legado roda
+    assert.equal(modelCallCount, 2);
+  });
+
   // ─── Unit: runSovereignBrainSlice1 com deps injetadas (sem modelo real) ──────
   const minimalMemory = () => ({
     userId: "u-unit",

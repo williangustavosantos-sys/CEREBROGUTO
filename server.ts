@@ -12374,6 +12374,18 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
       resolverResult,
       turnId,
     });
+    // ─── Fatia 2A.2: trava de neutralidade da L3 para turno conversacional ────
+    // Quando o cérebro soberano entrega acao:"none" (conversa/emoção/identidade), a
+    // fala dele NÃO pode ser mutada pelos pós-processadores de swap/proatividade —
+    // eles existem para o legado. applyBackendProactiveAction já não roda (sem
+    // proactiveMemoryAction); aqui travamos também enforceDecisiveSwap e
+    // repairInvalidExerciseSubstitutionResponse. A fala sai IDÊNTICA (só o sanitizer
+    // global de res.json roda — LEI 11). Gated por brainResult => flag OFF / legado
+    // nunca entram neste atalho. Forward-safe: turnos do cérebro com acao != "none"
+    // (Fatia 2B) caem no pipeline normal abaixo.
+    if (brainResult && result.acao === "none") {
+      return res.json(result);
+    }
     if (result.proactiveMemoryAction) {
       const proactiveActionResult = await applyBackendProactiveAction(userId, result.proactiveMemoryAction).catch((error) => {
         console.warn("[GUTO] Backend proactive action failed:", error);
