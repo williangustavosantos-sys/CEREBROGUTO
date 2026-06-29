@@ -29,6 +29,13 @@ export interface ReducedWorldState {
   trainingLimitations?: string[] | string;
   trainingStatus?: string;
   trainingLocation?: string;
+  /**
+   * Treino atual do usuário — subconjunto mínimo de GutoMemory.lastWorkoutPlan.
+   * null = plano existe mas sem dados de foco/data; undefined = nenhum plano ainda.
+   */
+  todayWorkout?: { focus?: string; title?: string; scheduledFor?: string } | null;
+  /** true se há plano de dieta semanal ativo (não copiamos a estrutura inteira). */
+  hasDietPlan?: boolean;
   /** Feedback Fácil/Normal/Difícil já capturado (LIDO, não recapturado na Fatia 1). */
   recentDifficulty: FeedbackDifficulty[];
   /** Sinal agregado (progress|hold|deload) ou null se não há feedback suficiente. */
