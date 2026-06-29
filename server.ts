@@ -77,6 +77,9 @@ import {
   summarizeWorkoutFeedback,
   type WorkoutFeedbackRecord,
 } from "./src/workout-progression.js";
+// Cérebro soberano — Fatia 1 (atrás de GUTO_BRAIN_SLICE1). Ver runSovereignBrainSlice1.
+import { assembleWorldState } from "./src/brain/assemble-world-state.js";
+import { decideTurn, type DecideTurnDeps } from "./src/brain/decide-turn.js";
 import { applyLevelStructure, resolveTrainingLevel, type WorkoutLanguage, type TrainingLevel } from "./src/workout-level.js";
 import {
   classifyShortContextIntent,
@@ -12059,6 +12062,122 @@ async function enforceSafetyAndLimitationBeforeGates(
   return { acuteResponse: null };
 }
 
+// ─── Cérebro soberano — Fatia 1 (atrás de GUTO_BRAIN_SLICE1) ───────────────────
+// Intercepta SÓ turno simples (acao:"none"). Fluxos complexos → decideTurn devolve
+// validation:"defer" e o handler cai no askGutoModel legado (isso custa uma SEGUNDA
+// chamada ao modelo enquanto a flag está ON — aceitável temporariamente na Fatia 1).
+// Turno com risco ativo TAMBÉM defere: o legado aplica o SAFETY_OVERRIDE completo,
+// então o cérebro só decide quando buildGutoBrainPrompt usaria riskOverride=null
+// (paridade total de segurança — zero regressão). Retorna a resposta PÚBLICA
+// (contract.response) ou null para deferir. meta/validation NUNCA saem daqui.
+// `decide`/`classifyRiskFn` são injetáveis só para teste; produção usa os reais.
+async function runSovereignBrainSlice1(params: {
+  memory: GutoMemory;
+  input: string;
+  history: GutoHistoryItem[];
+  language: GutoLanguage;
+  expectedResponse: ExpectedResponse | null;
+  proactivityContext: string | null;
+  operationalContext: OperationalContext;
+  decide?: typeof decideTurn;
+  classifyRiskFn?: typeof classifyRisk;
+}): Promise<GutoModelResponse | null> {
+  const { memory, input, history, language, expectedResponse, proactivityContext, operationalContext } = params;
+  const decide = params.decide ?? decideTurn;
+  const classifyRiskFn = params.classifyRiskFn ?? classifyRisk;
+
+  // Segurança: risco ativo → defere ao legado (que monta o SAFETY_OVERRIDE).
+  const risk = await classifyRiskFn(input, language as ClassifierLanguage, { timeoutMs: 1800 }).catch(() => null);
+  if (risk && risk.flag && risk.confidence >= 0.6) return null;
+
+  const worldState = assembleWorldState({
+    userId: memory.userId,
+    name: memory.name,
+    language,
+    country: memory.country,
+    city: memory.city,
+    trainingGoal: memory.trainingGoal,
+    trainingLimitations: memory.trainingLimitations,
+    trainingStatus: memory.trainingStatus,
+    trainingLocation: memory.trainingLocation,
+    lastWorkoutPlan: memory.lastWorkoutPlan
+      ? {
+          focus: memory.lastWorkoutPlan.focus,
+          title: memory.lastWorkoutPlan.title,
+          scheduledFor: memory.lastWorkoutPlan.scheduledFor,
+        }
+      : memory.lastWorkoutPlan,
+    weeklyDietPlan: memory.weeklyDietPlan,
+    workoutFeedbackHistory: memory.workoutFeedbackHistory,
+  });
+
+  const normalizedExpectedResponse = normalizeExpectedResponse(expectedResponse);
+  const dailyPresence = await buildDailyPresenceContext(memory, {
+    dateKey: todayKey(),
+    language,
+    allowExternalFetch: false,
+  }).catch(() => null);
+  const dailyPresencePrompt = dailyPresence ? formatDailyPresenceContextForPrompt(dailyPresence) : null;
+
+  // Deps reais: as MESMAS primitivas de baixo nível do legado, injetadas (o módulo
+  // do cérebro nunca importa server.ts; a URL com a chave fica encapsulada aqui).
+  const deps: DecideTurnDeps = {
+    // Reusa o prompt PROVADO do legado (riskOverride=null garantido pelo gate acima).
+    buildPrompt: () =>
+      buildGutoBrainPrompt({
+        input,
+        memory,
+        history,
+        language,
+        operationalContext,
+        expectedResponse: normalizedExpectedResponse,
+        riskOverride: null,
+        proactivityContext,
+        dailyPresenceContext: dailyPresencePrompt,
+        activeExerciseContext: buildActiveExerciseContextBlock(memory),
+      }),
+    callModel: async (prompt) => {
+      if (!GEMINI_API_KEY) return { ok: false };
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+      const { response, data } = await fetchJsonWithTimeout<any>(
+        url,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: {
+              response_mime_type: "application/json",
+              temperature: Math.min(GUTO_MODEL_TEMPERATURE, 0.3),
+              topP: 0.8,
+            },
+          }),
+        },
+        GUTO_MODEL_TIMEOUT_MS
+      );
+      if (!response.ok || data?.error) return { ok: false };
+      return { ok: true, rawText: data?.candidates?.[0]?.content?.parts?.[0]?.text };
+    },
+    parseResponse: (rawText, lang) => parseGutoResponse(rawText, lang),
+    // Persistência honesta e ÚNICA: aplica o patch e salva (mesma primitiva do legado).
+    persist: async (_userId, patch) => {
+      await applyMemoryPatch(memory, patch as GutoModelResponse["memoryPatch"], undefined, input);
+    },
+  };
+
+  // history nativo (GutoHistoryItem) já é usado pelo buildPrompt; aqui passamos a
+  // forma {role,content} só para satisfazer o tipo de decideTurn (que a repassa).
+  const brainHistory = (history || []).map((h) => ({
+    role: h.role,
+    content: (h.parts || []).map((p) => p.text).join(" "),
+  }));
+
+  const contract = await decide({ worldState, input, history: brainHistory }, deps);
+  if (contract.validation !== "ok") return null;
+  // SOMENTE contract.response segue adiante — meta/validation ficam retidos aqui (LEI 11).
+  return contract.response as unknown as GutoModelResponse;
+}
+
 app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision, async (req, res) => {
   const { input, language, history, expectedResponse, turnId } = req.body as {
     input?: string;
@@ -12227,7 +12346,24 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
       ? null
       : proactivityCtx;
 
-    const result = await askGutoModel({
+    // ─── Interceptação única do cérebro soberano (Fatia 1) ───────────────────
+    // Flag OFF → brainResult=null e o fluxo legado roda IDÊNTICO. Flag ON → tenta
+    // o cérebro; se ele deferir (turno complexo/risco/resposta inválida), cai no
+    // askGutoModel abaixo. Em ambos os casos a resposta passa pelo MESMO
+    // pós-processamento obrigatório (applyBackendProactiveAction, reparos de idioma,
+    // repairInvalidExerciseSubstitutionResponse, enforceDecisiveSwap).
+    const brainResult = config.brainSlice1
+      ? await runSovereignBrainSlice1({
+          memory,
+          input: input || "",
+          history: history || [],
+          language: selectedLanguage,
+          expectedResponse: normalizeExpectedResponse(expectedResponse),
+          proactivityContext: effectiveProactivityCtx,
+          operationalContext: opCtx,
+        })
+      : null;
+    const result = brainResult ?? await askGutoModel({
       input: input || "",
       language: selectedLanguage,
       profile,
@@ -13954,7 +14090,7 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   res.status(500).json({ error: fallbackLine(language, "internal_error"), acao: "none", fala: fallbackLine(language, "internal_error") });
 });
 
-export { app, askGutoModel, applyMemoryPatch, invalidateDietIfNeeded };
+export { app, askGutoModel, applyMemoryPatch, invalidateDietIfNeeded, runSovereignBrainSlice1 };
 
 if (process.env.GUTO_DISABLE_LISTEN !== "1") {
   app.listen(PORT, () => console.log(`🦾 GUTO ONLINE NA PORTA ${PORT}`));
