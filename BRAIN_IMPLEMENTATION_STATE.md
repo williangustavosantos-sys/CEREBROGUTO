@@ -4,10 +4,9 @@
 > migração do cérebro soberano do GUTO. Ele registra o estado exato para sobreviver à
 > compactação de contexto. **Não reconstrua a conversa — continue daqui.**
 >
-> ⚠️ **ATENÇÃO — leia primeiro:** este template foi pedido com a Fatia 2B como "próxima",
-> mas **a Fatia 2B JÁ FOI CONCLUÍDA e validada viva nesta sessão**. As seções 6–11 abaixo
-> ficam como **registro do que foi feito na 2B** (não refaça). A **próxima tarefa real é a
-> Fatia 2C** (ver seção 12).
+> ⚠️ **ATENÇÃO — leia primeiro:** as Fatias **1, 2A, 2B e 2C JÁ FORAM CONCLUÍDAS** e
+> validadas vivas. As seções 6–11 ficam como registro da 2B (não refaça). A **próxima
+> tarefa real é a Fatia 2D** (ver seção 12). A seção 13 registra o que foi feito na 2C.
 
 ---
 
@@ -20,12 +19,14 @@
 - **Flag OFF mantém o legado intacto** (byte-idêntico — provado pela suíte completa).
 - **Nenhum merge feito.** PR continua draft.
 - **Frontend intocado. Produção intocada.** Flag NÃO ativada no `.env` (default OFF).
-- **Último commit:** `f865e01` (Fatia 2B).
+- **Último commit:** o commit da **Fatia 2C** (este — adaptação/dor/continuidade). `b447318` era o handoff; antes, `f865e01` (2B).
 - **Node:** `/opt/homebrew/bin/node` (export `PATH="/opt/homebrew/bin:$PATH"` antes de rodar).
 - **Rodar testes:** `cd guto-backend && npm run typecheck` e `node --import tsx --test --test-concurrency=1 <arquivo>`. Suíte completa: `node scripts/run-guto-tests.mjs`.
 
 ### Commits da migração (mais recentes no topo)
 ```
+<2C>    feat(guto): cérebro possui adaptação/dor/continuidade — L3 vira trilho/validador (2C)
+b447318 docs: add sovereign brain implementation handoff
 f865e01 feat(guto): cérebro possui updateWorkout — execução de treino soberana (2B)
 12a7efb feat(guto): suprime dailyPresence/proatividade no cérebro + reforça regra de felicidade (2A)
 8f4cc6b feat(guto): cérebro possui conversa/emoção/identidade com riskOverride + diretriz 2A
@@ -81,18 +82,26 @@ e3b45e9 feat(brain): validateContract — validação só de forma + suporte Fat
 - perfil completo (`missingFields` vazio) → executa, preserva fala, sem `askGutoModel`; perfil incompleto → defer honesto; executor falha → defer;
 - **template legado ELIMINADO** nos turnos de treino; **re-ask de memória ELIMINADO**; limitação respeitada na execução.
 
+### Fatia 2C — CONCLUÍDA (nesta sessão) — adaptação, dor, continuidade
+- cérebro assumiu **dor/limitação/adaptação/continuidade/troca simples**; ver seção 13 (registro completo);
+- **L3 deixou de decidir fala:** `enforceDecisiveSwap`/`repairInvalidExerciseSubstitutionResponse` só rodam no legado (atalho `res.json` para `none`/`updateWorkout` já os ignora) — provado por teste;
+- decisor L1 `buildExerciseSwapClarityResponse` virou **trilho/fallback** (gated por flag): com a flag ON não pré-empta o cérebro; se o cérebro deferir, é usado como fallback honesto (paridade flag-OFF);
+- **validação de catálogo como trilho** dentro do cérebro: substituição inválida (outro grupo muscular) → **defer honesto**, nunca template reescrevendo a voz do cérebro;
+- diretriz soberana 2C (`buildBrain2CDirective`, brain-only): adaptação decisiva, limitação conhecida sem re-ask, dificuldade sem cobrança de streak.
+
 ---
 
 ## 3. Estado de testes conhecido (mais recente)
 
-- **Fatia 1+2A+2B: 109/109** ✅ (`node --import tsx --test tests/guto-brain-*.test.ts`)
-- **Backend completo flag OFF: 847/847** ✅ (`node scripts/run-guto-tests.mjs`)
+- **Fatia 1+2A+2B+2C: 120/120** ✅ (`node --import tsx --test tests/guto-brain-*.test.ts`)
+- **Backend completo flag OFF: 858/858** ✅ (`node scripts/run-guto-tests.mjs`)
 - **Typecheck: verde** ✅ (`npm run typecheck`)
 - **Validação viva 2A:** 14 cenários com Gemini real — chantagem 0, agenda 0, presença OK.
 - **Validação viva 2B:** 10 cenários com Gemini real — 5/5 treinos executados pelo cérebro, template legado 0, re-ask 0, chantagem 0.
+- **Validação viva 2C:** 10 cenários com Gemini real (flag ON) — **cérebro possui 10/10**, defer 0, **template legado 0, re-ask 0, chantagem de streak 0**, menção a interface 0, vazamento de meta 0, resposta dupla 0; treino executado 8/10 (os 2 `acao:none` perguntaram DECISIVAMENTE qual exercício — sem contexto, conduta correta).
 - Sem vazamento de meta/validation. Sem resposta dupla. PR #87 continua draft.
 
-*(Números históricos por etapa: Fatia 1 = 80/80 + 818 backend; 2A = 99/99 + 837 backend; 2B = 109/109 + 847 backend.)*
+*(Números históricos por etapa: Fatia 1 = 80/80 + 818 backend; 2A = 99/99 + 837 backend; 2B = 109/109 + 847 backend; 2C = 120/120 + 858 backend.)*
 
 ---
 
@@ -232,22 +241,63 @@ respeitada. Volume do executor verificado = 5 ex no fallback determinístico (pa
 
 ---
 
-## 12. PRÓXIMA AÇÃO REAL — Fatia 2C (aguardando autorização do fundador)
+## 12. PRÓXIMA AÇÃO REAL — Fatia 2D (aguardando autorização do fundador)
 
-A 2B está pronta, testada e validada viva. **A próxima fatia (não autorizada ainda) é a 2C.**
+A 2C está pronta, testada e validada viva (seção 13). **A próxima fatia (não autorizada ainda) é a 2D.**
 
-Pela auditoria de migração (Fase 2), a sequência de menor risco × maior retorno de identidade é:
-- **2C — Adaptação/dor/continuidade**: garantir que `repairInvalidExerciseSubstitutionResponse`/
-  `enforceDecisiveSwap` (L3) NÃO mutem a fala do cérebro; reclassificar como trilho/validador.
+Pela auditoria de migração (Fase 2), a sequência restante de menor risco × maior retorno é:
 - **2D — Dieta & swaps (resolvers L1)**: migrar os resolvers pré-modelo de "decidir antes do
-  cérebro" para "observação/ferramenta" (catálogo de alimentos/exercícios como trilho).
+  cérebro" para "observação/ferramenta" (catálogo de alimentos/exercícios como trilho). Os
+  decisores L1 de swap COMPLEXO ainda vivos (`buildExerciseSubstitutionObjectionResponse`,
+  `buildEquipmentBusyFallbackResponse`) e o gate de dieta entram aqui.
 - **2E — Áudio (`/guto-audio`)**: rotear transcrição → `decideTurn` (trivial após texto pronto).
 - **2F — Proatividade & base-plan (`/guto/proactive`)**: migrar a máquina de estado proativa.
 - **2G — Remoção**: quando as 3 superfícies roteiam 100% por `decideTurn` sem defer, deletar
   `askGutoModel` + `classifyContractIntent` + `enforceTrainingFlowCertainty` +
-  `enforceExecutionGateBeforeWorkout` + a escada. `askGutoModel` deixa de existir no fim da 2F.
+  `enforceExecutionGateBeforeWorkout` + a escada + a DUPLICAÇÃO do executor (2B). `askGutoModel`
+  deixa de existir no fim da 2F.
 
-**Como continuar:** aguardar o fundador autorizar a 2C; então implementar a fatia inteira
+**Como continuar:** aguardar o fundador autorizar a 2D; então implementar a fatia inteira
 (sem microparadas), testar (typecheck + suíte da fatia + backend completo flag OFF), validar
 viva com Gemini real, e só então entregar o relatório final. Manter tudo atrás da flag, PR draft,
 sem merge, sem frontend, flag OFF intacta.
+
+---
+
+## 13. Fatia 2C — registro do que foi feito (CONCLUÍDA; não refazer)
+
+**Objetivo:** migrar adaptação, dor e continuidade para o cérebro; garantir que o L3 não muta
+nem corrompe a fala do cérebro (L3 não decide fala — vira trilho/validador).
+
+**Arquivos alterados:**
+- `server.ts`:
+  - `buildBrain2CDirective(ws)` (NOVO): diretriz soberana brain-only (marker `ADAPTAÇÃO, DOR E
+    CONTINUIDADE`) — adaptação decisiva, limitação conhecida sem re-ask, dificuldade sem streak.
+    Anexada SÓ no closure do cérebro (`buildGutoBrainPrompt` compartilhado intocado → flag OFF idêntica).
+  - `buildExerciseSwapClarityResponse` (gate L1 ~12510): early-return agora gated `&& !config.brainSlice1`.
+    Com a flag ON vira FALLBACK: se o cérebro deferir, é usado (paridade flag-OFF) antes do `askGutoModel`.
+  - `runSovereignBrainSlice1`: validação de catálogo como TRILHO antes do `return` — se o cérebro
+    propôs substituir um exercício do contexto por outro grupo muscular/movimento incompatível,
+    DEFERE (return null); nunca reescreve a fala. Mesma condição estrita do reparo legado.
+- `tests/guto-brain-2c.test.ts` (NOVO): 11 testes determinísticos (todos os obrigatórios da 2C).
+
+**Princípio central cumprido:** L3 não decide fala. `enforceDecisiveSwap`/`repairInvalid…` só
+agem no legado (o atalho `res.json` para `none`/`updateWorkout` já os ignora). A validação de
+catálogo protege catálogo via DEFER honesto, nunca via template substituindo a voz do cérebro.
+
+**Testes:** 2C 11/11; brain 120/120; backend flag OFF 858/858; typecheck verde.
+
+**Validação viva (Gemini real, flag ON, 10 cenários):** cérebro possui 10/10; defer 0; template
+legado 0; re-ask 0; chantagem de streak 0; menção a interface 0; vazamento de meta 0; resposta
+dupla 0. Adaptação de dor (joelho) respeitou a limitação; trocas decisivas (agachamento→leg press);
+dificuldade conduzida com continuidade ("não precisa ser perfeito, só precisa ser feito"); 2 turnos
+`acao:none` perguntaram DECISIVAMENTE qual exercício (sem contexto de exercício no input — conduta correta).
+
+**O que ainda ficou no legado (dívida intencional, fora do escopo 2C):**
+- `buildExerciseSubstitutionObjectionResponse` e `buildEquipmentBusyFallbackResponse` (swap
+  complexo/equipamento ocupado) — continuam decisores L1 (escopo 2D).
+- Gate de dieta e resolvers L1 de dieta — 2D.
+- Duplicação do executor de treino (cérebro vs legado) — quitar na 2G.
+
+**Riscos restantes:** baixos. A validação de catálogo só dispara em contexto real de substituição
+(mesma condição do reparo legado), então não causa defer falso em conversa/adaptação normal.

@@ -12095,6 +12095,35 @@ QUANDO o usuário PEDIR explicitamente treino, dieta, troca de exercício ou aç
 `.trim();
 }
 
+// ─── Diretriz exclusiva do cérebro soberano (Fatia 2C) ────────────────────────
+// Adaptação, dor e continuidade. Anexada SÓ no caminho do cérebro (closure abaixo);
+// buildGutoBrainPrompt compartilhado NÃO é tocado → flag OFF idêntica. Ataca os
+// padrões que a Calibração 2.0 mostrou que o pós-processamento legado corrompia:
+// re-ask de limitação conhecida, menu indeciso de troca, cobrança de streak na
+// dificuldade. O cérebro DECIDE a adaptação; o executor/validador só protege catálogo.
+function buildBrain2CDirective(ws: ReducedWorldState): string {
+  const knownLimitation =
+    !ws.missingFields.includes("trainingLimitations") &&
+    typeof ws.trainingLimitations === "string" &&
+    ws.trainingLimitations
+      ? `Limitação JÁ conhecida: "${ws.trainingLimitations}". NÃO repergunte — ADAPTE com base nela.`
+      : "";
+  return `
+DIRETRIZ SOBERANA — ADAPTAÇÃO, DOR E CONTINUIDADE (vale para QUALQUER turno):
+QUANDO o usuário relata DOR, LIMITAÇÃO ou um exercício que incomoda/não consegue fazer:
+- ${knownLimitation}
+- Você usa o que JÁ SABE da memória. Nunca repergunte idade/local/dor já conhecidos.
+- ADAPTE de forma DECISIVA: ofereça UM caminho claro (a troca ou o ajuste), não um cardápio "X ou Y, qual prefere?". Só pergunte quando a região/causa for ambígua DE VERDADE.
+- A troca preserva o MESMO grupo muscular de forma mais segura — nunca empurra para outro músculo nem inventa exercício fora do catálogo.
+QUANDO o usuário diz que o treino está DIFÍCIL, pesado, ou "hoje tá difícil":
+- ACOLHA e CONDUZA com continuidade. Dificuldade é informação para adaptar intensidade/volume, não fracasso.
+- NUNCA cobre sequência/streak/pacto diante da dificuldade ("não deixa a streak cair"). Reduza o atrito, não a presença.
+QUANDO o usuário diz que o treino está FÁCIL demais:
+- Reconheça o progresso e conduza para subir o estímulo (carga/volume/variação) — sem burocracia.
+QUANDO a adaptação for COMPLEXA (equipamento ocupado em cadeia, várias trocas encadeadas, contexto de catálogo que você não tem): conduza com honestidade — não invente exercício nem prometa o que não pode validar.
+`.trim();
+}
+
 // ─── Executor de treino do cérebro soberano (Fatia 2B) ────────────────────────
 // EXECUTOR puro: o cérebro JÁ decidiu (fala + acao:"updateWorkout"); aqui só geramos
 // o plano e persistimos. Reusa as MESMAS primitivas do legado (curador → fallback
@@ -12299,7 +12328,7 @@ async function runSovereignBrainSlice1(params: {
         proactivityContext: null,
         dailyPresenceContext: null,
         activeExerciseContext: buildActiveExerciseContextBlock(memory),
-      }) + "\n\n" + buildBrain2ADirective(worldState),
+      }) + "\n\n" + buildBrain2ADirective(worldState) + "\n\n" + buildBrain2CDirective(worldState),
     callModel: async (prompt) => {
       if (!GEMINI_API_KEY) return { ok: false };
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
@@ -12353,6 +12382,24 @@ async function runSovereignBrainSlice1(params: {
     if (!plan) return null; // executor falhou → defer ao legado (rede de segurança)
     response.workoutPlan = plan;
     response.expectedResponse = null; // treino nunca pergunta (paridade com o legado)
+  }
+
+  // ─── Fatia 2C: validação de catálogo como TRILHO (não decisor de fala) ────────
+  // O cérebro possui a adaptação/troca: a fala dele NUNCA é reescrita por template.
+  // Mas o catálogo é uma rede de segurança: se o cérebro propôs substituir um
+  // exercício do contexto por algo de OUTRO grupo muscular / movimento incompatível,
+  // DEFERIMOS honestamente (o validador/legado trata) em vez de deixar passar uma
+  // troca insegura. Mesma condição estrita do reparo legado (só dispara quando há um
+  // exercício-alvo resolvível no contexto) → nunca defere conversa/adaptação normal.
+  if (response.acao === "none" && response.fala) {
+    const substitute = extractSubstituteFromResponseText(response.fala);
+    if (substitute) {
+      const original = resolveWorkoutExerciseForSubstitution({ input, history, memory });
+      const originalEntry = original ? getCatalogById(original.id) || original.catalogEntry : null;
+      if (original && originalEntry && !validateExerciseSubstitute(originalEntry, substitute).valid) {
+        return null; // catálogo inválido → defer honesto (não reescreve a voz do cérebro)
+      }
+    }
   }
   return response;
 }
@@ -12507,8 +12554,13 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
 
     // Fase 3 — intenção de troca/dor em contexto de exercício: valida o motivo
     // de forma determinística ANTES do modelo. "Troca" nunca vira dica de execução.
+    // ─── Fatia 2C ─────────────────────────────────────────────────────────────
+    // Com a flag ON, este DECISOR legado NÃO pré-empta o cérebro: ele possui dor/
+    // limitação/adaptação/troca simples. Guardamos a resposta como FALLBACK honesto —
+    // se o cérebro DEFERIR (troca complexa, catálogo inválido), usamos o legado
+    // (paridade flag-OFF). Flag OFF mantém o early-return idêntico.
     const swapClarityResponse = buildExerciseSwapClarityResponse({ input, language: selectedLanguage });
-    if (swapClarityResponse) {
+    if (swapClarityResponse && !config.brainSlice1) {
       const context = getOperationalContext(new Date(), selectedLanguage);
       return res.json(attachAvatarEmotion({
         response: swapClarityResponse,
@@ -12542,6 +12594,19 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
           operationalContext: opCtx,
         })
       : null;
+    // ─── Fatia 2C — fallback honesto do decisor de troca/dor ──────────────────
+    // O cérebro deferiu (troca complexa/catálogo inválido) E havia um decisor legado
+    // de troca/dor para este turno → honra o legado (mesma fala que a flag OFF daria),
+    // sem cair no askGutoModel à toa. Gated por brainSlice1 → flag OFF nunca entra.
+    if (config.brainSlice1 && !brainResult && swapClarityResponse) {
+      const context = getOperationalContext(new Date(), selectedLanguage);
+      return res.json(attachAvatarEmotion({
+        response: swapClarityResponse,
+        memory,
+        context,
+        input: input || "",
+      }));
+    }
     const result = brainResult ?? await askGutoModel({
       input: input || "",
       language: selectedLanguage,
