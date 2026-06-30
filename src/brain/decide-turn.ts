@@ -37,6 +37,11 @@ export interface ModelCallResult {
   rawText?: string;
 }
 
+export type DecideWorldState = ReducedWorldState | {
+  userId?: unknown;
+  language?: unknown;
+};
+
 /**
  * Dependências injetadas. O server.ts (commit 6) liga cada uma às primitivas
  * REAIS já existentes — este módulo nunca as importa do monolito.
@@ -44,7 +49,7 @@ export interface ModelCallResult {
 export interface DecideTurnDeps {
   /** Wrap de buildGutoBrainPrompt: monta o prompt a partir do estado reduzido. */
   buildPrompt: (ctx: {
-    worldState: ReducedWorldState;
+    worldState: DecideWorldState;
     input: string;
     history: BrainHistoryItem[];
   }) => string;
@@ -60,10 +65,19 @@ export interface DecideTurnDeps {
 }
 
 export interface DecideTurnInput {
-  worldState: ReducedWorldState;
+  worldState: DecideWorldState;
   input: string;
   history?: BrainHistoryItem[];
 }
+
+const SUPPORTED_TURN_ACOES = new Set<TurnAcao>([
+  "none",
+  "updateWorkout",
+  "generateDiet",
+  "openProactiveCard",
+  "swapExercise",
+  "callCoach",
+]);
 
 /** Fala neutra e honesta para o caminho de defer (o server.ts substitui na escada antiga). */
 function deferFala(language: Language): string {
@@ -125,7 +139,7 @@ export async function decideTurn(
   deps: DecideTurnDeps
 ): Promise<TurnContract> {
   const { worldState } = input;
-  const language = worldState.language;
+  const language = (worldState.language as Language) || "pt-BR";
   const history = input.history ?? [];
 
   const prompt = deps.buildPrompt({ worldState, input: input.input, history });
@@ -146,7 +160,7 @@ export async function decideTurn(
   const candidate = deps.parseResponse(result.rawText, language) as Record<string, unknown>;
   const verdict = validateContract(candidate);
 
-  // Inválido (forma ruim) OU complexo (acao !== "none") → defer, sem persistir.
+  // Inválido (forma ruim) → defer seguro, sem persistir.
   if (!verdict.ok) {
     return deferContract(
       language,
@@ -160,15 +174,16 @@ export async function decideTurn(
       language,
       `deferred:${String(candidate.acao ?? "unknown")}`,
       true,
-      "ação fora da Fatia 1 (acao !== 'none')"
+      "ação fora do contrato soberano"
     );
   }
 
-  // ─── Turno suportado válido (acao="none" ou, na 2B, "updateWorkout") ──────
+  // ─── Turno soberano válido ────────────────────────────────────────────────
   // Monta o response PÚBLICO campo-a-campo: nunca espalha o candidato inteiro,
   // para que nenhuma chave estranha/meta vaze (LEI 11). PRESERVA a acao decidida
   // pelo cérebro (a execução do treino é feita pelo executor no server, depois).
-  const decidedAcao: TurnAcao = candidate.acao === "updateWorkout" ? "updateWorkout" : "none";
+  const candidateAcao = String(candidate.acao || "none") as TurnAcao;
+  const decidedAcao: TurnAcao = SUPPORTED_TURN_ACOES.has(candidateAcao) ? candidateAcao : "none";
   const response: PublicTurnResponse = {
     fala: String(candidate.fala),
     acao: decidedAcao,
@@ -180,13 +195,15 @@ export async function decideTurn(
 
   const memoryPatch = readMemoryPatch(candidate.memoryPatch);
   if (memoryPatch) response.memoryPatch = memoryPatch;
+  const proactiveMemoryAction = readMemoryPatch(candidate.proactiveMemoryAction);
+  if (proactiveMemoryAction) response.proactiveMemoryAction = proactiveMemoryAction;
 
   // ─── Persistência HONESTA: depois da validação, no máximo 1 vez ───────────
   let persisted = false;
   let persistNote = "";
   if (memoryPatch && deps.persist) {
     try {
-      await deps.persist(worldState.userId, memoryPatch);
+      await deps.persist(String(worldState.userId || ""), memoryPatch);
       persisted = true;
     } catch {
       // Falha de persistência NÃO transforma a fala em mentira: ela é
@@ -200,9 +217,9 @@ export async function decideTurn(
     response,
     validation: "ok",
     meta: {
-      kind: decidedAcao === "updateWorkout" ? "workout_execution" : "conversational_simple",
+      kind: decidedAcao === "none" ? "conversational_simple" : `action:${decidedAcao}`,
       reasoning: `turno (${decidedAcao}) decidido pelo cérebro soberano${persistNote}`,
-      via: "sovereign_brain_slice1",
+      via: "sovereign_brain_v2",
       modelCalled: true,
       persisted,
     },

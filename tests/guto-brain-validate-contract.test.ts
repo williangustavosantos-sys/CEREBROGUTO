@@ -82,14 +82,28 @@ test("acao='updateWorkout' → ok (Fatia 2B suporta execução de treino)", () =
   assert.equal(r.validation, "ok");
 });
 
-test("acao='generateDiet' → defer (dieta ainda é legado)", () => {
+test("acao='generateDiet' → ok (dieta é ação soberana)", () => {
   const r = validateContract({ ...valid, acao: "generateDiet" });
-  assert.equal(r.validation, "defer");
+  assert.equal(r.ok, true);
+  assert.equal(r.validation, "ok");
 });
 
-test("acao='swapExercise' → defer (swap ainda é legado)", () => {
+test("acao='swapExercise' → ok (swap é ação soberana)", () => {
   const r = validateContract({ ...valid, acao: "swapExercise" });
-  assert.equal(r.validation, "defer");
+  assert.equal(r.ok, true);
+  assert.equal(r.validation, "ok");
+});
+
+test("acao='openProactiveCard' → ok (proatividade é ação soberana)", () => {
+  const r = validateContract({ ...valid, acao: "openProactiveCard" });
+  assert.equal(r.ok, true);
+  assert.equal(r.validation, "ok");
+});
+
+test("acao='callCoach' → ok (encaminhamento humano é ação soberana)", () => {
+  const r = validateContract({ ...valid, acao: "callCoach" });
+  assert.equal(r.ok, true);
+  assert.equal(r.validation, "ok");
 });
 
 test("acao fora do enum → ok:false + defer", () => {

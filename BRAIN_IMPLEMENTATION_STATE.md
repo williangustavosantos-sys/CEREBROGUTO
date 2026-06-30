@@ -5,8 +5,9 @@
 > compactação de contexto. **Não reconstrua a conversa — continue daqui.**
 >
 > ⚠️ **ATENÇÃO — leia primeiro:** as Fatias **1, 2A, 2B e 2C JÁ FORAM CONCLUÍDAS** e
-> validadas vivas. As seções 6–11 ficam como registro da 2B (não refaça). A **próxima
-> tarefa real é a Fatia 2D** (ver seção 12). A seção 13 registra o que foi feito na 2C.
+> validadas vivas. A sequência antiga **2D/2E/2F/2G foi superada** por decisão do
+> fundador. A arquitetura principal agora é a **Convergência do Cérebro Soberano**
+> registrada na seção 14. **Não retome a migração por fatias antigas.**
 
 ---
 
@@ -15,16 +16,17 @@
 - **Repo:** CEREBROGUTO (submódulo local em `guto-backend/`; este arquivo está na raiz dele).
 - **Branch atual:** `feat/brain-slice1`
 - **PR:** **#87 — DRAFT** (https://github.com/williangustavosantos-sys/CEREBROGUTO/pull/87)
-- **Flag principal:** `GUTO_BRAIN_SLICE1` (estrita `=== "true"`, default OFF).
-- **Flag OFF mantém o legado intacto** (byte-idêntico — provado pela suíte completa).
+- **Flag principal histórica:** `GUTO_BRAIN_SLICE1` (estrita `=== "true"`, default OFF), mantida por compatibilidade de testes/config.
+- **Convergência:** `/guto` usa o Cérebro Soberano como fluxo principal mesmo com flag OFF; a flag não reativa o parlamento legado.
 - **Nenhum merge feito.** PR continua draft.
 - **Frontend intocado. Produção intocada.** Flag NÃO ativada no `.env` (default OFF).
-- **Último commit:** o commit da **Fatia 2C** (este — adaptação/dor/continuidade). `b447318` era o handoff; antes, `f865e01` (2B).
+- **Último commit:** o commit da **Convergência Arquitetural** (seção 14). `b447318` era o handoff; antes, `f865e01` (2B).
 - **Node:** `/opt/homebrew/bin/node` (export `PATH="/opt/homebrew/bin:$PATH"` antes de rodar).
 - **Rodar testes:** `cd guto-backend && npm run typecheck` e `node --import tsx --test --test-concurrency=1 <arquivo>`. Suíte completa: `node scripts/run-guto-tests.mjs`.
 
 ### Commits da migração (mais recentes no topo)
 ```
+<CONV>  feat(guto): converge fluxo principal para cérebro soberano
 <2C>    feat(guto): cérebro possui adaptação/dor/continuidade — L3 vira trilho/validador (2C)
 b447318 docs: add sovereign brain implementation handoff
 f865e01 feat(guto): cérebro possui updateWorkout — execução de treino soberana (2B)
@@ -42,16 +44,21 @@ e3b45e9 feat(brain): validateContract — validação só de forma + suporte Fat
 ```
 
 ### Arquivos-chave do cérebro
-- `src/brain/types.ts` — `ReducedWorldState`, `TurnContract`, `RiskObservation`, `SovereignField`, `TurnAcao`.
-- `src/brain/validate-contract.ts` — valida FORMA + decide acao suportada (`none`, `updateWorkout`).
+- `src/brain/types.ts` — `ReducedWorldState`, `TurnContract`, `RiskObservation`, `SovereignField`, `TurnAcao` expandido (`none`, `updateWorkout`, `generateDiet`, `swapExercise`, `openProactiveCard`, `callCoach`).
+- `src/brain/world-state-v2.ts` — `WorldStateV2` e `assembleWorldStateV2`.
+- `src/brain/sovereign-prompt.ts` — `buildSovereignBrainPrompt` independente do prompt legado.
+- `src/brain/validate-contract.ts` — valida FORMA + ações soberanas suportadas.
 - `src/brain/assemble-world-state.ts` — função PURA; observações `risk`/`missingFields`.
 - `src/brain/decide-turn.ts` — chamada governada própria; preserva acao; persist honesto.
 - `server.ts`:
-  - `runSovereignBrainSlice1(...)` (~12100): orquestra o caminho do cérebro (flag ON).
+  - `runSovereignBrainTurn(...)`: fluxo principal soberano V2.
+  - `dispatchSovereignBrainAction(...)`: dispatcher de ações (`none`, `updateWorkout`, `generateDiet`, `swapExercise`, `openProactiveCard`, `callCoach`).
+  - `runSovereignBrainSlice1(...)`: helper histórico/testes da Fatia 1/2, não é o fluxo principal.
   - `buildBrain2ADirective(ws)`: diretriz soberana anexada SÓ no cérebro.
   - `generateAndCommitBrainWorkout(...)`: EXECUTOR de treino do cérebro (2B).
-  - Interceptação no handler `app.post("/guto", ...)`: `brainResult = config.brainSlice1 ? await runSovereignBrainSlice1(...) : null; const result = brainResult ?? await askGutoModel(...)`.
-  - Atalho L3: `if (brainResult && (result.acao === "none" || result.acao === "updateWorkout")) return res.json(result);`
+  - Handler `app.post("/guto", ...)`: retorna via `runSovereignBrainTurn(...)`; `askGutoModel` não é fallback de cérebro alternativo no fluxo principal.
+  - `/guto-audio`: transcrição entra no mesmo `runSovereignBrainTurn(...)`.
+  - `/guto/proactive`: usa fluxo soberano para decisões de base/proatividade onde há fala/persona; stores/executores permanecem.
 - Testes do cérebro: `tests/guto-brain-*.test.ts` (flag, types, validate-contract, assemble-world-state, decide-turn, slice1-handler, slice1 (GT), 2a, 2b).
 
 ---
@@ -93,12 +100,12 @@ e3b45e9 feat(brain): validateContract — validação só de forma + suporte Fat
 
 ## 3. Estado de testes conhecido (mais recente)
 
-- **Fatia 1+2A+2B+2C: 120/120** ✅ (`node --import tsx --test tests/guto-brain-*.test.ts`)
-- **Backend completo flag OFF: 858/858** ✅ (`node scripts/run-guto-tests.mjs`)
+- **Cérebro/convergência: 131/131** ✅ (`node --import tsx --test --test-concurrency=1 tests/guto-brain-*.test.ts`)
+- **Backend completo: 869/869** ✅ (`node scripts/run-guto-tests.mjs`)
 - **Typecheck: verde** ✅ (`npm run typecheck`)
 - **Validação viva 2A:** 14 cenários com Gemini real — chantagem 0, agenda 0, presença OK.
 - **Validação viva 2B:** 10 cenários com Gemini real — 5/5 treinos executados pelo cérebro, template legado 0, re-ask 0, chantagem 0.
-- **Validação viva 2C:** 10 cenários com Gemini real (flag ON) — **cérebro possui 10/10**, defer 0, **template legado 0, re-ask 0, chantagem de streak 0**, menção a interface 0, vazamento de meta 0, resposta dupla 0; treino executado 8/10 (os 2 `acao:none` perguntaram DECISIVAMENTE qual exercício — sem contexto, conduta correta).
+- **Validação viva Convergência:** 12 cenários com Gemini real — status 200 em todos, sem vazamento de meta, sem resposta dupla, sem `askGutoModel` como fallback de cérebro; treino executado em pedidos explícitos, dieta via `generateDiet`, restrição alimentar capturada, viagem via trilho proativo, dor/troca sem fallback genérico.
 - Sem vazamento de meta/validation. Sem resposta dupla. PR #87 continua draft.
 
 *(Números históricos por etapa: Fatia 1 = 80/80 + 818 backend; 2A = 99/99 + 837 backend; 2B = 109/109 + 847 backend; 2C = 120/120 + 858 backend.)*
@@ -241,9 +248,12 @@ respeitada. Volume do executor verificado = 5 ex no fallback determinístico (pa
 
 ---
 
-## 12. PRÓXIMA AÇÃO REAL — Fatia 2D (aguardando autorização do fundador)
+## 12. Sequência antiga 2D/2E/2F/2G — SUPERADA
 
-A 2C está pronta, testada e validada viva (seção 13). **A próxima fatia (não autorizada ainda) é a 2D.**
+A 2C ficou pronta, testada e validada viva (seção 13), mas a estratégia mudou depois:
+o fundador decidiu parar a migração conservadora por fatias e transformar o Cérebro
+Soberano no fluxo principal do produto. **Não implementar 2D/2E/2F/2G como projetos
+separados.** A convergência arquitetural foi executada na seção 14.
 
 Pela auditoria de migração (Fase 2), a sequência restante de menor risco × maior retorno é:
 - **2D — Dieta & swaps (resolvers L1)**: migrar os resolvers pré-modelo de "decidir antes do
@@ -257,10 +267,8 @@ Pela auditoria de migração (Fase 2), a sequência restante de menor risco × m
   `enforceExecutionGateBeforeWorkout` + a escada + a DUPLICAÇÃO do executor (2B). `askGutoModel`
   deixa de existir no fim da 2F.
 
-**Como continuar:** aguardar o fundador autorizar a 2D; então implementar a fatia inteira
-(sem microparadas), testar (typecheck + suíte da fatia + backend completo flag OFF), validar
-viva com Gemini real, e só então entregar o relatório final. Manter tudo atrás da flag, PR draft,
-sem merge, sem frontend, flag OFF intacta.
+**Como continuar:** não retomar esta sequência. Trabalhar a partir da arquitetura convergida:
+um cérebro, um dispatcher, executores/sanitizers/trilhos preservados.
 
 ---
 
@@ -301,3 +309,80 @@ dificuldade conduzida com continuidade ("não precisa ser perfeito, só precisa 
 
 **Riscos restantes:** baixos. A validação de catálogo só dispara em contexto real de substituição
 (mesma condição do reparo legado), então não causa defer falso em conversa/adaptação normal.
+
+---
+
+## 14. Convergência arquitetural — IMPLEMENTADA
+
+**Objetivo executado:** tornar o Cérebro Soberano o fluxo principal do backend, sem manter
+`askGutoModel` como cérebro alternativo para `/guto`.
+
+**Arquitetura final do fluxo principal:**
+```
+Entrada
+↓
+Sanitizers/aguda/auth/rate limit
+↓
+assembleWorldStateV2
+↓
+buildSovereignBrainPrompt + decideTurn
+↓
+dispatchSovereignBrainAction
+↓
+Executores (treino, dieta, swap, proatividade, memória)
+↓
+Sanitizers finais
+↓
+Resposta
+```
+
+**Arquivos principais novos/alterados:**
+- `src/brain/world-state-v2.ts` — WorldStateV2 com memória, risco, treino, dieta,
+  exercício ativo, proatividade, pending cards, contexto diário, catálogo,
+  missingFields e histórico recente.
+- `src/brain/sovereign-prompt.ts` — prompt próprio soberano, sem `buildGutoBrainPrompt`.
+- `src/brain/types.ts`, `src/brain/validate-contract.ts`, `src/brain/decide-turn.ts` —
+  contrato expandido para ações soberanas.
+- `server.ts` — `runSovereignBrainTurn`, dispatcher, executores de dieta/swap/proatividade,
+  roteamento principal de `/guto`, `/guto-audio` e partes de `/guto/proactive`.
+  - O executor soberano de dieta usa o gerador/validador existente; se o modelo não
+    devolve refeições válidas, cai em fallback determinístico validado (macros,
+    restrição alimentar e localidade) antes de declarar falha.
+- `tests/guto-brain-convergence.test.ts` — cobertura da convergência.
+
+**O que perdeu autoridade:**
+- `/guto` não usa `askGutoModel` como fallback de cérebro.
+- `classifyContractIntent`, `isResistance`, `isGrief`, `enforceTrainingFlowCertainty`
+  e templates hardcoded não participam do fluxo soberano principal.
+- Resolvers L1 de dieta/swap viraram resolução operacional/trilho/fallback estruturado,
+  não personalidade concorrente.
+
+**O que permanece:**
+- Segurança aguda, autenticação, rate limit e sanitizers.
+- Persistência/stores.
+- Curador de treino, gerador de dieta, validação de catálogo, proatividade/card store,
+  XP/Arena, TTS/transcrição como executores/estado.
+- `askGutoModel` e parlamento legado ainda existem fisicamente para rotas/testes históricos
+  e dívida de limpeza, mas não são autoridade principal de `/guto`.
+
+**Testes finais da convergência:**
+- `npm run typecheck` ✅
+- `node --import tsx --test --test-concurrency=1 tests/guto-brain-*.test.ts` → **131/131** ✅
+- `node scripts/run-guto-tests.mjs` → **869/869** ✅
+
+**Validação viva com Gemini real (memória temporária, sem produção):**
+- Cenários: `oi`, `estou triste`, `estou feliz`, `hoje tá difícil`, `bora treinar`,
+  `quero treinar braço`, `meu joelho está ruim`, `quero trocar esse exercício`,
+  `quero dieta`, `não como lactose`, `viajo amanhã`, `voltei depois de duas semanas`.
+- Resultado: status 200 em todos; sem meta/validation/prompt leak; sem resposta dupla;
+  treino por `updateWorkout`; dieta por `generateDiet` persistida em store temporário;
+  restrição alimentar persistida; viagem/proatividade roteada por trilho; dor/troca
+  sem fallback genérico; chamadas Gemini do parlamento antigo = 0.
+
+**Riscos/dívida restante:**
+- `server.ts` continua grande; limpeza estrutural física deve ser feita depois, sem mudar
+  comportamento.
+- `askGutoModel` e funções do parlamento ainda podem ser removidos fisicamente em etapa de
+  limpeza, mas já não têm autoridade no fluxo principal.
+- Alguns testes históricos ainda mencionam "flag OFF"; hoje isso significa "não quebra",
+  não "volta ao cérebro antigo".

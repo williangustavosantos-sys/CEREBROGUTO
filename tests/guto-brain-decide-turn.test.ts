@@ -125,10 +125,10 @@ test("2B: updateWorkout → ok, preserva acao e persiste o memoryPatch", async (
   assert.equal(counters.model, 1);
 });
 
-// ─── Ação ainda complexa → defer ───────────────────────────────────────────────
+// ─── Ações ampliadas soberanas ────────────────────────────────────────────────
 
-test("ação complexa (generateDiet) → defer, sem persistir", async () => {
-  let persistCalled = false;
+test("ação generateDiet → ok, preserva acao e persiste memoryPatch", async () => {
+  let persistedPatch: Record<string, unknown> | null = null;
   const { deps, counters } = makeDeps({
     modelResult: { ok: true, rawText: "{}" },
     parsed: {
@@ -137,18 +137,34 @@ test("ação complexa (generateDiet) → defer, sem persistir", async () => {
       expectedResponse: null,
       memoryPatch: { x: 1 },
     },
-    persist: async () => {
-      persistCalled = true;
+    persist: async (_userId, patch) => {
+      persistedPatch = patch;
     },
   });
   const contract = await decideTurn({ worldState: baseWorldState, input: "monta minha dieta" }, deps);
 
-  assert.equal(contract.validation, "defer");
-  assert.equal(persistCalled, false, "ação fora de escopo NÃO pode persistir");
-  assert.equal(counters.persist, 0);
-  assert.equal(contract.meta.persisted, false);
-  assert.equal(counters.model, 1, "uma chamada para descobrir que é complexa; depois defere");
+  assert.equal(contract.validation, "ok");
+  assert.equal(contract.response.acao, "generateDiet");
+  assert.equal(counters.persist, 1);
+  assert.deepEqual(persistedPatch, { x: 1 });
 });
+
+for (const acao of ["swapExercise", "openProactiveCard", "callCoach"] as const) {
+  test(`ação ${acao} → ok e preserva acao`, async () => {
+    const { deps } = makeDeps({
+      modelResult: { ok: true, rawText: "{}" },
+      parsed: {
+        fala: "Fechado.",
+        acao,
+        expectedResponse: null,
+      },
+    });
+    const contract = await decideTurn({ worldState: baseWorldState, input: "executa" }, deps);
+
+    assert.equal(contract.validation, "ok");
+    assert.equal(contract.response.acao, acao);
+  });
+}
 
 // ─── Resposta inválida → fallback/defer sem persistência ──────────────────────
 

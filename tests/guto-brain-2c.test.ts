@@ -146,14 +146,14 @@ describe("Fatia 2C — cérebro possui adaptação/dor/continuidade (L3 não dec
     rmSync(file, { force: true });
   });
 
-  // 1. Flag OFF continua legado.
-  it("flag OFF: adaptação/dor continua no legado (askGutoModel/contractIntent)", async () => {
+  // 1. Flag OFF não reativa legado.
+  it("flag OFF: adaptação/dor continua no fluxo soberano principal", async () => {
     setBrainSlice1(false);
     seed("2c-off");
     const { status, body } = await chat("2c-off", "quero trocar esse exercício");
     assert.equal(status, 200);
-    assert.ok((callsByKind.contractIntent || 0) >= 1, "flag OFF mantém o legado");
-    assert.ok(!lastBrainBody.includes(C_MARKER), "legado não recebe a diretriz 2C");
+    assert.equal(callsByKind.contractIntent || 0, 0, "flag OFF não reativa askGutoModel");
+    assert.ok(lastBrainBody.includes(C_MARKER), "prompt soberano recebe diretriz 2C");
   });
 
   // 2. Dor simples → cérebro possui o turno.
@@ -186,7 +186,7 @@ describe("Fatia 2C — cérebro possui adaptação/dor/continuidade (L3 não dec
     stubPayload = { flag: null, confidence: 0, fala, acao: "none", expectedResponse: null };
     seed("2c-valid", { lastWorkoutPlan: abdutoraPlan() });
     const { body, headerErr } = await chat("2c-valid", `${CTX_ABDUTORA} User message: quero trocar esse`);
-    assert.equal(body.acao, "none");
+    assert.equal(body.acao, "swapExercise");
     assert.equal(body.fala, fala, "substituição válida: a fala do cérebro NÃO é reescrita por template");
     assert.equal(callsByKind.contractIntent || 0, 0, "cérebro possui: sem legado");
     assert.equal(headerErr, false, "sem resposta dupla");
@@ -204,7 +204,7 @@ describe("Fatia 2C — cérebro possui adaptação/dor/continuidade (L3 não dec
   });
 
   // 6. Substituição inválida → validação protege catálogo sem template legado.
-  it("substituição INVÁLIDA → cérebro defere (validação protege catálogo, sem trocar a voz por template)", async () => {
+  it("substituição INVÁLIDA → dispatcher bloqueia com fallback seguro, sem resolver L1", async () => {
     setBrainSlice1(true);
     const invalidFala = `Troca por ${invalidSubstituteName()}, vai ser melhor. Bora.`; // chest p/ glúteo
     stubPayload = { flag: null, confidence: 0, fala: invalidFala, acao: "none", expectedResponse: null };
@@ -212,9 +212,8 @@ describe("Fatia 2C — cérebro possui adaptação/dor/continuidade (L3 não dec
     const { status, body, headerErr } = await chat("2c-invalid", `${CTX_ABDUTORA} User message: quero trocar`);
     assert.equal(status, 200);
     assert.notEqual(body.fala, invalidFala, "a substituição inválida do cérebro NÃO pode vazar ao usuário");
-    // defer honesto: cai no decisor legado de troca/dor (pergunta o motivo) — não um
-    // template silencioso reescrevendo a voz do cérebro.
-    assert.ok(/trocar por qu|pra trocar|qual o motivo/i.test(String(body.fala)), "defer honesto → clareza do legado");
+    assert.equal(callsByKind.contractIntent || 0, 0, "troca inválida não cai no resolver L1/askGutoModel");
+    assert.ok(/catálogo|catalogo|seguro|direta/i.test(String(body.fala)), "fallback seguro estruturado");
     assert.equal(headerErr, false, "sem resposta dupla");
   });
 
@@ -251,28 +250,25 @@ describe("Fatia 2C — cérebro possui adaptação/dor/continuidade (L3 não dec
     for (const k of META_KEYS) assert.ok(!(k in body), `meta não pode vazar: ${k}`);
   });
 
-  // 10. Sem resposta dupla no caminho de DEFER (fallback do decisor legado).
-  it("defer com fallback legado → uma única resposta (sem ERR_HTTP_HEADERS_SENT)", async () => {
+  // 10. Sem resposta dupla no fallback seguro.
+  it("fallback seguro → uma única resposta (sem ERR_HTTP_HEADERS_SENT)", async () => {
     setBrainSlice1(true);
     stubPayload = { flag: null, confidence: 0, fala: "vou montar tua dieta", acao: "generateDiet", expectedResponse: null };
     seed("2c-once");
     const { status, headerErr } = await chat("2c-once", `${CTX_ABDUTORA} User message: troca`);
     assert.equal(status, 200);
-    assert.equal(headerErr, false, "defer + fallback não pode emitir resposta dupla");
+    assert.equal(headerErr, false, "fallback não pode emitir resposta dupla");
   });
 
-  // 11. Caso complexo fora de escopo → defer para legado.
-  it("ação complexa fora de escopo (acao não suportada) → defer ao legado", async () => {
+  // 11. Ação fora do contrato → fallback seguro, sem legado.
+  it("ação fora do contrato → fallback seguro, sem legado", async () => {
     setBrainSlice1(true);
-    // acao "lock" passa pelo parse mas NÃO é suportada pelo cérebro (SUPPORTED={none,updateWorkout})
-    // → validateContract DEFERE → o legado (askGutoModel) assume e roda SUA chamada de modelo.
     stubPayload = { flag: null, confidence: 0, fala: "trocando tudo", acao: "lock", expectedResponse: null };
     seed("2c-complex");
     const { status, body } = await chat("2c-complex", "tô precisando reorganizar várias coisas no meu plano de uma vez");
     assert.equal(status, 200);
-    // acao não suportada → validateContract DEFERE → o legado (askGutoModel) assume e roda
-    // o contractIntent classifier. Defer honesto: o cérebro não executa fora de escopo.
-    assert.ok((callsByKind.contractIntent || 0) >= 1, "acao fora do escopo do cérebro → defer ao legado");
-    assert.ok(!(body.acao === "updateWorkout" && body.workoutPlan), "o cérebro não executa fora de escopo");
+    assert.equal(callsByKind.contractIntent || 0, 0, "acao fora do contrato não chama askGutoModel");
+    assert.equal(body.acao, "none");
+    assert.ok(!body.workoutPlan, "o cérebro não executa fora de escopo");
   });
 });

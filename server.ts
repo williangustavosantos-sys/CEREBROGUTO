@@ -80,7 +80,9 @@ import {
 // Cérebro soberano — Fatia 1 (atrás de GUTO_BRAIN_SLICE1). Ver runSovereignBrainSlice1.
 import { assembleWorldState } from "./src/brain/assemble-world-state.js";
 import { decideTurn, type DecideTurnDeps } from "./src/brain/decide-turn.js";
-import type { ReducedWorldState } from "./src/brain/types.js";
+import type { PublicTurnResponse, ReducedWorldState, TurnAcao } from "./src/brain/types.js";
+import { assembleWorldStateV2, type WorldStateV2 } from "./src/brain/world-state-v2.js";
+import { buildSovereignBrainPrompt } from "./src/brain/sovereign-prompt.js";
 import { applyLevelStructure, resolveTrainingLevel, type WorkoutLanguage, type TrainingLevel } from "./src/workout-level.js";
 import {
   classifyShortContextIntent,
@@ -173,7 +175,17 @@ import type {
 } from "./src/proactivity/types.js";
 import type { ResolverResult } from "./src/proactivity/memory-action-resolver.js";
 
-type Acao = "none" | "updateWorkout" | "lock" | "changeLanguage" | "requestDeleteAccount" | "showProfile";
+type Acao =
+  | "none"
+  | "updateWorkout"
+  | "generateDiet"
+  | "openProactiveCard"
+  | "swapExercise"
+  | "callCoach"
+  | "lock"
+  | "changeLanguage"
+  | "requestDeleteAccount"
+  | "showProfile";
 type GutoLanguage = "pt-BR" | "en-US" | "it-IT";
 type BiologicalSex = NutritionProfile["biologicalSex"];
 type GutoAvatarEmotion = "default" | "alert" | "critical" | "reward";
@@ -3395,6 +3407,60 @@ function parseGutoResponse(raw: string | undefined, language = "pt-BR"): GutoMod
   }
 }
 
+const SOVEREIGN_ACTIONS = new Set<TurnAcao>([
+  "none",
+  "updateWorkout",
+  "generateDiet",
+  "openProactiveCard",
+  "swapExercise",
+  "callCoach",
+]);
+
+function parseSovereignBrainResponse(raw: string | undefined, language = "pt-BR"): PublicTurnResponse {
+  if (!raw) {
+    return { fala: fallbackLine(language, "parse"), acao: "none", expectedResponse: null };
+  }
+
+  try {
+    const parsed = JSON.parse(tryCleanJson(raw)) as Record<string, unknown>;
+    const rawAcao = typeof parsed.acao === "string" ? parsed.acao : "none";
+    const acao = SOVEREIGN_ACTIONS.has(rawAcao as TurnAcao) ? (rawAcao as TurnAcao) : "none";
+    const fala = typeof parsed.fala === "string" && parsed.fala.trim()
+      ? parsed.fala.trim()
+      : fallbackLine(language, "parse");
+    const expectedResponse = normalizeExpectedResponse(parsed.expectedResponse);
+
+    const response: PublicTurnResponse = {
+      fala,
+      acao,
+      expectedResponse: expectedResponse as PublicTurnResponse["expectedResponse"],
+    };
+    if (
+      parsed.avatarEmotion === "default" ||
+      parsed.avatarEmotion === "alert" ||
+      parsed.avatarEmotion === "critical" ||
+      parsed.avatarEmotion === "reward"
+    ) {
+      response.avatarEmotion = parsed.avatarEmotion;
+    }
+    if (parsed.memoryPatch && typeof parsed.memoryPatch === "object" && !Array.isArray(parsed.memoryPatch)) {
+      response.memoryPatch = parsed.memoryPatch as Record<string, unknown>;
+    }
+    const proactiveAction = validateProactiveMemoryAction(parsed.proactiveMemoryAction);
+    if (proactiveAction) {
+      response.proactiveMemoryAction = proactiveAction as unknown as Record<string, unknown>;
+    }
+    return response;
+  } catch {
+    const cleaned = raw.replace(/^```json|```$/g, "").trim();
+    return {
+      fala: cleaned || fallbackLine(language, "parse"),
+      acao: "none",
+      expectedResponse: null,
+    };
+  }
+}
+
 async function fetchJsonWithTimeout<T>(url: string, init: RequestInit, timeoutMs: number) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -5011,6 +5077,7 @@ async function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["m
     changedFields.add("recentTrainingHistory");
     memory.nextWorkoutFocus = chooseNextWorkoutFocus(memory);
     changedFields.add("nextWorkoutFocus");
+    appendMemoryAudit(memory, "trained_reference", ["recentTrainingHistory", "nextWorkoutFocus"], "Usuário informou histórico muscular por conversa.");
   }
   if (patch.lastWorkoutPlan) {
     changedFields.add("lastWorkoutPlan");
@@ -6318,10 +6385,11 @@ function buildEquipmentBusyFallbackResponse({
     Boolean(freeTextOriginal);
   if (!canUseExerciseContext) return null;
   const original = isRejectedFollowUp && previous
-    ? {
+      ? {
         id: previous.originalId,
         name: previous.originalName,
         planExercise: previous.planExercise || null,
+        catalogEntry: getCatalogById(previous.originalId),
       }
     : (freeTextOriginal ?? resolveWorkoutExerciseForSubstitution({ input, history, memory }));
 
@@ -8135,6 +8203,17 @@ function hasSovereignCalibrationForTraining(memory: GutoMemory): boolean {
   return hasLocation && hasRhythm && hasAge && hasPathology;
 }
 
+function getSovereignWorkoutMissingFields(memory: GutoMemory): string[] {
+  const missing: string[] = [];
+  if (!(memory.preferredTrainingLocation || memory.trainingLocation)) missing.push("trainingLocation");
+  if (!(memory.trainingLevel || memory.trainingStatus)) missing.push("trainingStatus");
+  if (!(memory.userAge || memory.trainingAge)) missing.push("userAge");
+  if (!((memory.trainingPathology && memory.trainingPathology.trim()) || (memory.trainingLimitations && memory.trainingLimitations.trim()))) {
+    missing.push("trainingLimitations");
+  }
+  return missing;
+}
+
 // ─── Escada de persistência do chat (recusa / cansaço / adiamento) ──────────
 // Estágio consecutivo na MESMA conversa-dia: 1 = insiste com o vínculo da dupla;
 // 2 = adapta a rota (caminhada/mínimo); 3+ = aceita, aplica a consequência de XP
@@ -9052,6 +9131,34 @@ async function resolveTrainingPrepResponse(
     if (composed) return composed;
   }
   return fallbackPrepReply(memory, language, prep.kind, meal);
+}
+
+async function buildTrainingPrepFallbackResponse(
+  memory: GutoMemory,
+  language: GutoLanguage,
+  rawInput: string,
+): Promise<GutoModelResponse | null> {
+  const prep = detectTrainingPrep(rawInput);
+  if (!prep) return null;
+
+  let meal: DietMeal | null = null;
+  if (prep.kind === "meal") {
+    try {
+      meal = findBreakfastMeal(await getDietPlan(memory.userId));
+    } catch {
+      meal = null;
+    }
+  }
+
+  return {
+    fala: fallbackPrepReply(memory, language, prep.kind, meal),
+    acao: "none",
+    expectedResponse: {
+      type: "text",
+      instruction: prepReturnInstruction(language),
+    },
+    avatarEmotion: "default",
+  };
 }
 
 function fallbackGriefReply(memory: GutoMemory, language: GutoLanguage): string {
@@ -11586,6 +11693,197 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
   let missionPlanAtOpen = getTodayMissionPlan(memory);
   let basePlanResult: GutoModelResponse | null = null;
 
+  try {
+    const activePrompt = activeProactivePrompt(memory);
+    const memoryPrompt = activePrompt
+      ? null
+      : buildDueMemoryPrompt(memory, normalizeLanguage(language || memory.language), day);
+    const sovereignSlot = activePrompt
+      ? (activePrompt.kind === "weekly_opening" ? "arrival" : activePrompt.kind)
+      : memoryPrompt
+        ? memoryPrompt.kind
+        : slot;
+
+    if (!sovereignSlot || (memory.trainedToday && sovereignSlot !== "limitation_check" && sovereignSlot !== "arrival")) {
+      return res.json({ due: false });
+    }
+
+    const sentToday = memory.proactiveSent[day] || [];
+    if (!force && !activePrompt && !memoryPrompt && sentToday.includes(String(sovereignSlot))) {
+      return res.json({ due: false });
+    }
+
+    if (!force && !activePrompt && !memoryPrompt && memory.lastActiveAt) {
+      const minutesSinceLastActive = (new Date().getTime() - new Date(memory.lastActiveAt).getTime()) / 60000;
+      if (minutesSinceLastActive < 120) {
+        return res.json({ due: false });
+      }
+    }
+
+    if (memoryPrompt) saveMemory(memory);
+    const selectedLang = normalizeLanguage(language || memory.language);
+    const hasBaseWorkoutProfile = Boolean(
+      memory.trainingGoal &&
+      (memory.trainingLevel || memory.trainingStatus) &&
+      memory.userAge &&
+      (memory.trainingLocation || memory.preferredTrainingLocation) &&
+      (memory.trainingLimitations || memory.trainingPathology)
+    );
+    const needsBasePlan =
+      (force || slot === "arrival") &&
+      !missionPlanAtOpen &&
+      !todayProactiveAdaptation.isProtectedDay &&
+      hasBaseWorkoutProfile;
+    const returnProactiveResponse = (response: GutoModelResponse, responseSlot: string, emotionSlot = responseSlot) => {
+      const freshMemory = getMemory(userId);
+      freshMemory.proactiveSent[day] = [...(freshMemory.proactiveSent[day] || []), String(responseSlot)];
+      if (responseSlot === "arrival") freshMemory.hasSeenChatOpening = true;
+      if (responseSlot === "limitation_check") freshMemory.lastLimitationCheckAt = new Date().toISOString();
+      freshMemory.lastActiveAt = new Date().toISOString();
+      saveMemory(freshMemory);
+      return res.json({
+        due: true,
+        slot: responseSlot,
+        ...attachAvatarEmotion({
+          response,
+          memory: freshMemory,
+          context: operationalContext,
+          slot: emotionSlot,
+        }),
+      });
+    };
+
+    const directPrompt = activePrompt || memoryPrompt;
+    if (directPrompt && !needsBasePlan) {
+      return returnProactiveResponse(
+        responseFromProactivePrompt(directPrompt),
+        activePrompt
+          ? (activePrompt.kind === "weekly_opening" ? "arrival" : activePrompt.kind)
+          : memoryPrompt!.kind,
+        directPrompt.kind
+      );
+    }
+
+    if (!needsBasePlan && slot === "arrival" && shouldOpenPresenceWeek(memory)) {
+      try {
+        const weekly = await getWeeklyCheckResult(userId, operationalContext.weekday);
+        const hasArrivalImpact = Boolean(getArrivalContextImpact(memory, day));
+        const hasPendingProactivity = (memory.proactiveMemories || []).some((item) =>
+          item.status === "pending_confirmation" || item.status === "pending_validation" || Boolean(item.discardRequestedAt)
+        );
+        if (weekly.shouldOpenWeekly && !hasArrivalImpact && !hasPendingProactivity) {
+          const weeklyPrompt = activateProactivePrompt(memory, {
+            kind: "weekly_opening",
+            weekKey: getWeekKey(),
+            dayKey: day,
+            fala: buildWeeklyPresenceQuestion(memory, selectedLang),
+            expectedResponse: {
+              type: "text",
+              instruction: "Responder em uma frase se há viagem, compromisso, dor, horário apertado ou nada relevante.",
+            },
+          });
+          memory.weeklyConversation = memory.weeklyConversation?.weekKey === weeklyPrompt.weekKey
+            ? memory.weeklyConversation
+            : {
+                weekKey: weeklyPrompt.weekKey || getWeekKey(),
+                happenedAt: weeklyPrompt.createdAt,
+                extractionDone: false,
+                validationDone: false,
+              };
+          saveMemory(memory);
+          return returnProactiveResponse(responseFromProactivePrompt(weeklyPrompt), "arrival", "weekly_opening");
+        }
+      } catch {
+        // segue para chegada normal
+      }
+    }
+
+    if (!needsBasePlan && slot === "arrival" && missionPlanAtOpen && !memory.trainedToday) {
+      const fala = buildArrivalMissionFala({
+        memory,
+        plan: missionPlanAtOpen,
+        language: selectedLang,
+        day,
+        dailyPresenceContext,
+      });
+      if (fala) {
+        return returnProactiveResponse({
+          fala,
+          acao: "none",
+          expectedResponse: null,
+          avatarEmotion: "reward",
+        }, "arrival");
+      }
+    }
+
+    await enrichPendingMemories(userId, memory.country || "", memory.countryCode, normalizeLanguage(language || memory.language)).catch(() => {});
+    const proactivityContext = await buildProactivityContextBlock(
+      userId,
+      operationalContext.weekday,
+      normalizeLanguage(language || memory.language)
+    ).catch(() => null);
+    const proactiveInput = [
+      `Evento proativo devido: ${String(sovereignSlot)}.`,
+      activePrompt ? `Prompt ativo: ${JSON.stringify(activePrompt)}` : "",
+      memoryPrompt ? `Card pendente: ${JSON.stringify(memoryPrompt)}` : "",
+      missionPlanAtOpen ? `Treino já planejado para hoje: ${missionPlanAtOpen.focus || missionPlanAtOpen.title || "sim"}.` : "",
+      "Decida a fala e a próxima ação. Não use culpa por streak nem template de agenda.",
+    ].filter(Boolean).join("\n");
+    const result = await runSovereignBrainTurn({
+      memory,
+      input: proactiveInput,
+      history: [],
+      language: normalizeLanguage(language || memory.language),
+      expectedResponse: null,
+      proactivityContext,
+      dailyPresenceContext,
+      operationalContext,
+      resolverResult: null,
+    });
+
+    const freshMemory = getMemory(userId);
+    freshMemory.proactiveSent[day] = [...(freshMemory.proactiveSent[day] || []), String(sovereignSlot)];
+    if (sovereignSlot === "arrival") freshMemory.hasSeenChatOpening = true;
+    if (sovereignSlot === "limitation_check") freshMemory.lastLimitationCheckAt = new Date().toISOString();
+    freshMemory.lastActiveAt = new Date().toISOString();
+    saveMemory(freshMemory);
+
+    return res.json({
+      due: true,
+      slot: sovereignSlot,
+      ...attachAvatarEmotion({
+        response: result,
+        memory: freshMemory,
+        context: operationalContext,
+        slot: String(sovereignSlot),
+      }),
+    });
+  } catch (error) {
+    console.error("[GUTO] proactive sovereign route failed:", error);
+    const freshMemoryOnError = getMemory(userId);
+    const fallbackResponse = buildSovereignSafeFallback(
+      normalizeLanguage(language || freshMemoryOnError.language),
+      "Falha técnica do fluxo proativo soberano."
+    );
+    freshMemoryOnError.proactiveSent[day] = [...(freshMemoryOnError.proactiveSent[day] || []), String(slot || "arrival")];
+    saveMemory(freshMemoryOnError);
+    return res.json({
+      due: true,
+      slot: slot || "arrival",
+      ...attachAvatarEmotion({
+        response: assertAndRepairVisibleLanguage(fallbackResponse, language),
+        memory: freshMemoryOnError,
+        context: operationalContext,
+        slot,
+      }),
+    });
+  }
+
+  /*
+   * LEGADO PROATIVO BYPASSADO:
+   * O bloco abaixo continha askGutoModel, buildProactiveInput e templates de fala.
+   * A rota retorna acima pelo fluxo soberano; fica aqui só como referência temporária.
+   *
   if (
     (force || slot === "arrival") &&
     !memory.trainedToday &&
@@ -11909,6 +12207,7 @@ app.get("/guto/proactive", requireActiveUser, async (req, res) => {
       }),
     });
   }
+  */
 });
 
 // ── P0 — SEGURANÇA E LIMITAÇÃO ANTES DOS GATES ────────────────────────────────
@@ -12253,6 +12552,1729 @@ async function generateAndCommitBrainWorkout(
   return officialPlan;
 }
 
+function publicTurnToGutoResponse(response: PublicTurnResponse): GutoModelResponse {
+  const result: GutoModelResponse = {
+    fala: response.fala,
+    acao: response.acao as Acao,
+    expectedResponse: normalizeExpectedResponse(response.expectedResponse),
+    avatarEmotion:
+      response.avatarEmotion === "default" ||
+      response.avatarEmotion === "alert" ||
+      response.avatarEmotion === "critical" ||
+      response.avatarEmotion === "reward"
+        ? response.avatarEmotion
+        : undefined,
+  };
+  if (response.workoutPlan !== undefined) result.workoutPlan = response.workoutPlan as WorkoutPlan | null;
+  if (response.memoryPatch) result.memoryPatch = response.memoryPatch as GutoMemoryPatch;
+  if (response.proactiveMemoryAction) {
+    result.proactiveMemoryAction = validateProactiveMemoryAction(response.proactiveMemoryAction);
+  }
+  return result;
+}
+
+function buildSovereignSafeFallback(language: GutoLanguage, reason: string): GutoModelResponse {
+  const fala: Record<GutoLanguage, string> = {
+    "pt-BR": "Não vou inventar aqui. Me manda isso em uma frase direta e eu sigo pelo caminho seguro.",
+    "en-US": "I will not guess here. Send that in one direct sentence and I will take the safe path.",
+    "it-IT": "Qui non tiro a indovinare. Mandamelo in una frase diretta e seguo la strada sicura.",
+  };
+  return {
+    fala: fala[language],
+    acao: "none",
+    expectedResponse: {
+      type: "text",
+      instruction: reason.slice(0, 160),
+    },
+    avatarEmotion: "default",
+  };
+}
+
+function buildMissingTrainingFieldsResponse(language: GutoLanguage, missingFields: string[]): GutoModelResponse {
+  const needsLocation = missingFields.includes("trainingLocation");
+  const needsAge = missingFields.includes("userAge");
+  const needsBody = missingFields.includes("trainingLimitations");
+  const needsStatus = missingFields.includes("trainingStatus");
+  const fala: Record<GutoLanguage, string> = {
+    "pt-BR": needsLocation
+      ? "Antes de montar teu treino: me diz onde você vai treinar, academia, casa ou parque."
+      : needsAge || needsBody
+      ? "Antes de montar teu treino com segurança: me manda tua idade e se tem dor ou limitação no corpo. Se estiver livre, fala sem dor."
+      : needsStatus
+        ? "Antes de montar teu treino: me diz teu ritmo atual, parado, voltando ou já treinando."
+        : "Antes de montar teu treino, me falta um dado rápido de segurança.",
+    "en-US": needsLocation
+      ? "Before I build your workout: tell me where you will train, gym, home, or park."
+      : needsAge || needsBody
+      ? "Before I build your workout safely: give me your age and any pain or limitation. If you are clear, say no pain."
+      : needsStatus
+        ? "Before I build your workout: tell me your current rhythm, stopped, returning, or already training."
+        : "Before I build your workout, I need one quick safety detail.",
+    "it-IT": needsLocation
+      ? "Prima di preparare l'allenamento: dimmi dove ti alleni, palestra, casa o parco."
+      : needsAge || needsBody
+      ? "Prima di preparare l'allenamento: mandami età e qualsiasi dolore o limite. Se sei libero, dimmi nessun dolore."
+      : needsStatus
+        ? "Prima di preparare l'allenamento: dimmi il ritmo attuale, fermo, in ripresa o già allenando."
+        : "Prima di preparare l'allenamento, mi manca un dato rapido di sicurezza.",
+  };
+  const context = needsLocation
+    ? "training_location"
+    : needsAge || needsBody
+      ? "training_limitations"
+      : needsStatus
+        ? "training_status"
+        : "training_status";
+  return {
+    fala: fala[language],
+    acao: "none",
+    expectedResponse: {
+      type: "text",
+      context,
+      instruction: `Responder dados pendentes: ${missingFields.join(", ")}`.slice(0, 160),
+    },
+    avatarEmotion: "default",
+  };
+}
+
+function buildNoModelSovereignFallback(memory: GutoMemory, input: string, language: GutoLanguage): GutoModelResponse | null {
+  const text = normalize(input || "");
+  if (!text) return null;
+
+  if (/\b(faleceu|morreu|perdi minha|perdi meu|luto|falecimento)\b/.test(text)) {
+    const fala: Record<GutoLanguage, string> = {
+      "pt-BR": "Sinto muito. Hoje você não precisa provar nada pra mim nem ir a lugar nenhum. Cuida do teu tempo; eu fico aqui contigo.",
+      "en-US": "I'm sorry. Today you do not need to prove anything to me or go anywhere. Take your time; I stay here with you.",
+      "it-IT": "Mi dispiace. Oggi non devi dimostrare niente né andare da nessuna parte. Prenditi il tuo tempo; resto qui con te.",
+    };
+    return { fala: fala[language], acao: "none", expectedResponse: null, avatarEmotion: "alert" };
+  }
+
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length <= 2 && /\b(piada|joke|barzelletta)\b/.test(text)) {
+    const fala: Record<GutoLanguage, string> = {
+      "pt-BR": "Distração depois. Agora me dá uma ação pequena de hoje.",
+      "en-US": "Distraction later. Action now: give me one small move for today.",
+      "it-IT": "Distrazione dopo. Ora una piccola azione di oggi.",
+    };
+    return { fala: fala[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
+  }
+
+  if (/\b(enrolando|pregui[cç]a|sem vontade|procrastin|adiando|postergando)\b/.test(text)) {
+    const lastDone = memory.lastWorkoutCompletedAt ? Date.parse(memory.lastWorkoutCompletedAt) : NaN;
+    const daysSince = Number.isFinite(lastDone) ? Math.floor((Date.now() - lastDone) / (24 * 60 * 60 * 1000)) : 0;
+    const today = todayKey();
+    if (memory.chatRefusalDate !== today) {
+      memory.chatRefusalDate = today;
+      memory.chatRefusalStage = 0;
+    }
+    const stage = Math.max(1, (memory.chatRefusalStage || 0) + 1);
+    memory.chatRefusalStage = stage;
+    appendMemoryAudit(memory, "chat_patch", ["chatRefusalStage", "chatRefusalDate"], "Fallback soberano sem modelo: recusa curta registrada.");
+    commitMemoryDecision(memory);
+
+    if (daysSince >= 4) {
+      return {
+        fala: "Você voltou. Hoje é só retomar com 10 minutos, sem negociar perfeição.",
+        acao: "none",
+        expectedResponse: null,
+        avatarEmotion: "alert",
+      };
+    }
+    if (stage === 1) {
+      return {
+        fala: "Will, menor passo agora: 10 minutos. Eu adapto o tamanho, não cobro perfeição.",
+        acao: "none",
+        expectedResponse: null,
+        avatarEmotion: "default",
+      };
+    }
+    if (stage === 2) {
+      return {
+        fala: "Então adapto a rota: caminhada de 15 minutos ou mobilidade leve. Sem drama, só movimento.",
+        acao: "none",
+        expectedResponse: null,
+        avatarEmotion: "default",
+      };
+    }
+    return {
+      fala: "Fechado. Hoje eu deixo no mínimo seguro e amanhã retomo contigo sem martelar.",
+      acao: "none",
+      expectedResponse: null,
+      avatarEmotion: "alert",
+    };
+  }
+
+  if (/\b(vou deixar pra amanha|vou deixar pra amanhã|amanha eu faco|amanhã eu faço|depois eu treino|hoje nao|hoje não)\b/.test(text)) {
+    return {
+      fala: "Amanhã fica pra amanhã. Hoje eu só preciso do mínimo seguro: 10 minutos, e acabou.",
+      acao: "none",
+      expectedResponse: null,
+      avatarEmotion: "default",
+    };
+  }
+
+  if (/\b(voltei|retornei|to de volta|tô de volta|estou de volta|voltando)\b.*\b(duas semanas|2 semanas|semana|semanas|dias|tempo)\b/.test(text)) {
+    return {
+      fala: "Você voltou. Hoje a regra é retomada controlada: pouco volume, técnica limpa e sem compensar o tempo parado.",
+      acao: "none",
+      expectedResponse: null,
+      avatarEmotion: "default",
+    };
+  }
+
+  return null;
+}
+
+function isExplicitDietIntent(input: string): boolean {
+  const text = normalize(input || "");
+  return /\b(dieta|refeicao|refeição|alimentacao|alimentação|cardapio|cardápio|macros?|caloria|meal|diet)\b/.test(text);
+}
+
+function shouldPromoteNoneToDietAction(input: string, response: GutoModelResponse): boolean {
+  if (response.acao !== "none" || !isExplicitDietIntent(input)) return false;
+  const fala = normalize(response.fala || "");
+  if (response.expectedResponse && !isSovereignSafeFallbackText(response.fala)) return false;
+  return (
+    /\b(vou|posso|consigo|fechado|bora|vamos)\b[\s\S]{0,80}\b(montar|gerar|criar|fazer|ajustar)\b[\s\S]{0,80}\b(dieta|cardapio|cardápio|plano alimentar|alimentacao|alimentação|meal|diet)\b/.test(fala) ||
+    /\b(dieta|cardapio|cardápio|plano alimentar|alimentacao|alimentação)\b[\s\S]{0,80}\b(montar|gerar|criar|ajustar)\b/.test(fala) ||
+    /\b(nao vou inventar|não vou inventar|nao consegui|não consegui|falha tecnica|falha técnica)\b/.test(fala)
+  );
+}
+
+function isSovereignSafeFallbackText(text?: string): boolean {
+  const normalized = normalize(text || "");
+  return (
+    normalized.includes("nao vou inventar aqui") ||
+    normalized.includes("não vou inventar aqui") ||
+    normalized.includes("i will not guess here") ||
+    normalized.includes("qui non tiro a indovinare")
+  );
+}
+
+function detectFoodRestrictionFact(input: string): string | null {
+  const text = normalize(stripInjectedContext(input || ""));
+  if (!text) return null;
+  if (/\b(nao como|não como|nao consumo|não consumo|sem|intolerante|intolerancia|intolerância|alergia)\b/.test(text) && /\b(lactose|leite|derivados|milk|dairy|lattosio|latte)\b/.test(text)) {
+    return "sem lactose";
+  }
+  if (/\b(nao como|não como|sem|alergia)\b/.test(text) && /\b(peixe|frutos do mar|camarao|camarão|fish|seafood)\b/.test(text)) {
+    return "sem peixe/frutos do mar";
+  }
+  if (/\b(nao como|não como|sem|alergia)\b/.test(text) && /\b(ovo|egg|uovo)\b/.test(text)) {
+    return "sem ovo";
+  }
+  if (/\b(vegano|vegana|vegetariano|vegetariana|vegan|vegetarian)\b/.test(text)) {
+    return text.includes("vegan") || text.includes("vegano") || text.includes("vegana") ? "vegano" : "vegetariano";
+  }
+  return null;
+}
+
+async function buildFoodRestrictionFactResponse(memory: GutoMemory, input: string, language: GutoLanguage): Promise<GutoModelResponse | null> {
+  const restriction = detectFoodRestrictionFact(input);
+  if (!restriction) return null;
+  await applyMemoryPatch(memory, { foodRestrictions: restriction }, undefined, input);
+  const fala: Record<GutoLanguage, string> = {
+    "pt-BR": `Fechado. Vou considerar ${restriction} na dieta e nas trocas de alimento.`,
+    "en-US": `Got it. I will account for ${restriction} in diet and food swaps.`,
+    "it-IT": `Chiaro. Terrò conto di ${restriction} nella dieta e nei cambi alimentari.`,
+  };
+  return {
+    fala: fala[language],
+    acao: "none",
+    expectedResponse: null,
+    avatarEmotion: "default",
+    memoryPatch: { foodRestrictions: restriction },
+  };
+}
+
+function buildPhysicalLimitationOperationalResponse(memory: GutoMemory, input: string, language: GutoLanguage): GutoModelResponse | null {
+  const text = normalize(stripInjectedContext(input || ""));
+  const hasBodySignal = /\b(joelho|ombro|lombar|coluna|quadril|tornozelo|punho|cotovelo|costas|perna|braco|braço|knee|shoulder|back|hip|ankle|wrist|elbow)\b/.test(text);
+  const hasLimitationSignal = /\b(ruim|dor|doi|doendo|machuca|incomoda|lesao|lesão|travado|travada|pain|hurt|bad|sore)\b/.test(text);
+  if (!mentionsPainInjuryOrIllness(input, language) && !(hasBodySignal && hasLimitationSignal)) return null;
+  captureReportedLimitation(memory, input);
+  const resolved = resolveKnownPathologyLocally(input, new Date().toISOString());
+  if (resolved) {
+    memory.resolvedFields = { ...memory.resolvedFields, pathology: resolved };
+    commitMemoryDecision(memory);
+  }
+  const fala: Record<GutoLanguage, string> = {
+    "pt-BR": "Dor registrada. Hoje eu trato isso como limitação real: reduz impacto, evita irritar a região e nada de forçar carga. Agora volta comigo para hoje. Próxima ação: seguir leve e seguro.",
+    "en-US": "Understood. I will treat that as a real limitation today: lower impact, avoid irritating the area, and no forced load.",
+    "it-IT": "Capito. Oggi lo tratto come un limite reale: meno impatto, niente irritazione della zona e nessun carico forzato.",
+  };
+  return {
+    fala: fala[language],
+    acao: "none",
+    expectedResponse: null,
+    avatarEmotion: "alert",
+    memoryPatch: {
+      trainingLimitations: memory.trainingLimitations,
+      trainingPathology: memory.trainingPathology,
+    },
+  };
+}
+
+function buildGenericPhysicalLimitationResponse(input: string, language: GutoLanguage): GutoModelResponse | null {
+  const text = normalize(stripInjectedContext(input || ""));
+  const hasBodySignal = /\b(joelho|ombro|lombar|coluna|quadril|tornozelo|punho|cotovelo|costas|perna|braco|braço|knee|shoulder|back|hip|ankle|wrist|elbow)\b/.test(text);
+  const hasLimitationSignal = /\b(ruim|dor|doi|doendo|machuca|incomoda|lesao|lesão|travado|travada|pain|hurt|bad|sore)\b/.test(text);
+  if (!(hasBodySignal && hasLimitationSignal)) return null;
+  const fala: Record<GutoLanguage, string> = {
+    "pt-BR": "Dor registrada. Vou tratar isso como limitação real agora: reduz impacto, protege a região e nada de forçar carga. Agora volta comigo para hoje. Próxima ação: seguir leve e seguro.",
+    "en-US": "Understood. I will treat that as a real limitation now: lower impact, protect the area, and no forced load.",
+    "it-IT": "Capito. Lo tratto come un limite reale ora: meno impatto, protezione della zona e nessun carico forzato.",
+  };
+  return { fala: fala[language], acao: "none", expectedResponse: null, avatarEmotion: "alert" };
+}
+
+function buildActiveExerciseSwapClarityResponse(memory: GutoMemory, input: string, language: GutoLanguage): GutoModelResponse | null {
+  const active = normalizeActiveExerciseContext(memory.activeExercise);
+  const singlePlanExercise = memory.lastWorkoutPlan?.exercises?.length === 1 ? memory.lastWorkoutPlan.exercises[0] : null;
+  const exerciseName = active?.name || singlePlanExercise?.name || singlePlanExercise?.canonicalNamePt || "";
+  if (!exerciseName || !isExplicitExerciseSwapIntent(input)) return null;
+  if (isEquipmentBusyMessage(input) || mentionsPainInjuryOrIllness(input, language)) return null;
+  const fala: Record<GutoLanguage, string> = {
+    "pt-BR": `${exerciseName}: dá pra trocar. Me diz o motivo: dor, equipamento ocupado ou dificuldade de execução?`,
+    "en-US": `${exerciseName}: we can swap it. Tell me why: pain, busy equipment, or trouble doing it?`,
+    "it-IT": `${exerciseName}: si può cambiare. Dimmi il motivo: dolore, attrezzo occupato o difficoltà di esecuzione?`,
+  };
+  return {
+    fala: fala[language],
+    acao: "none",
+    expectedResponse: {
+      type: "text",
+      context: "exercise_swap",
+      instruction: "Responder o motivo da troca: dor, equipamento ocupado ou dificuldade de execução.",
+    },
+    avatarEmotion: "default",
+  };
+}
+
+function buildGenericExerciseSwapClarificationResponse(input: string, language: GutoLanguage): GutoModelResponse | null {
+  if (!isExplicitExerciseSwapIntent(input)) return null;
+  const fala: Record<GutoLanguage, string> = {
+    "pt-BR": "Dá pra trocar. Me diz qual exercício e o motivo: dor, equipamento ocupado ou dificuldade de execução?",
+    "en-US": "We can swap it. Tell me which exercise and why: pain, busy equipment, or trouble doing it?",
+    "it-IT": "Si può cambiare. Dimmi quale esercizio e il motivo: dolore, attrezzo occupato o difficoltà di esecuzione?",
+  };
+  return {
+    fala: fala[language],
+    acao: "none",
+    expectedResponse: {
+      type: "text",
+      context: "exercise_swap",
+      instruction: "Responder qual exercício e o motivo da troca.",
+    },
+    avatarEmotion: "default",
+  };
+}
+
+function isExplicitExerciseSwapIntent(input: string): boolean {
+  const text = normalize(input || "");
+  return /\b(trocar|troca|substituir|substitui|mudar|muda|swap|replace)\b/.test(text) &&
+    /\b(exercicio|exercício|esse|este|supino|agachamento|puxada|remada|exercise)\b/.test(text);
+}
+
+function isPlainSovereignConversation(input: string): boolean {
+  const text = normalize(stripInjectedContext(input || ""));
+  if (!text) return false;
+  if (isWorkoutExecutionRequest(input) || isExplicitDietIntent(input) || isExplicitExerciseSwapIntent(input)) return false;
+  if (/\b(viagem|viajo|viajar|compromisso|agenda|evento|amanha|amanhã|horario|horário)\b/.test(text)) return false;
+
+  return (
+    /^(oi|ola|olá|e ai|e aí|bom dia|boa tarde|boa noite|hello|hi|ciao|salve)\b/.test(text) ||
+    /\b(estou|to|tô|me sinto|estou me sentindo)\s+(feliz|triste|mal|ansioso|ansiosa|cansado|cansada|esgotado|esgotada)\b/.test(text) ||
+    /\b(voltei|retornei|to de volta|tô de volta|estou de volta|voltando)\b/.test(text) ||
+    /\b(hoje esta dificil|hoje tá dificil|hoje ta dificil|hoje está dificil|hoje tá difícil|hoje está difícil)\b/.test(text)
+  );
+}
+
+function sanitizeSovereignIdentityResponse(response: GutoModelResponse, input: string): GutoModelResponse {
+  if (response.acao !== "none" || !response.fala || !isPlainSovereignConversation(input)) return response;
+
+  const sentences = response.fala.match(/[^.!?]+[.!?]?/g);
+  if (!sentences || sentences.length <= 1) return response;
+
+  const kept = sentences.filter((sentence) => {
+    const normalized = normalize(sentence);
+    const agendaTick =
+      /\b(como esta a sua semana|como ta a sua semana|como esta tua semana|como ta tua semana)\b/.test(normalized) ||
+      /\b(tem algo vindo por ai|algo vindo por ai|atrapalhar seus planos|atrapalhar teus planos|mudar o ritmo|mudar seus planos|mudar teus planos)\b/.test(normalized) ||
+      (/\?/.test(sentence) && /\b(agenda|viagem|compromisso|semana)\b/.test(normalized));
+    return !agendaTick;
+  });
+
+  const fala = kept.join(" ").replace(/\s+/g, " ").trim();
+  return fala && fala !== response.fala ? { ...response, fala } : response;
+}
+
+function finalizeSovereignBrainResponse(response: GutoModelResponse, input: string, language: GutoLanguage): GutoModelResponse {
+  if (isSovereignSafeFallbackText(response.fala)) {
+    const instruction = normalize(String(response.expectedResponse?.instruction || ""));
+    const catalogValidationBlock = /\b(catalogo|validacao|troca proposta|substituto seguro)\b/.test(instruction);
+    if (!catalogValidationBlock) {
+      const swapRecovery = buildGenericExerciseSwapClarificationResponse(input, language);
+      if (swapRecovery) return assertAndRepairVisibleLanguage(swapRecovery, language);
+    }
+    const physicalRecovery = buildGenericPhysicalLimitationResponse(input, language);
+    if (physicalRecovery) return assertAndRepairVisibleLanguage(physicalRecovery, language);
+  }
+  return assertAndRepairVisibleLanguage(sanitizeSovereignIdentityResponse(response, input), language);
+}
+
+async function buildDietIntentFallbackResponse(params: {
+  userId: string;
+  memory: GutoMemory;
+  input: string;
+  history: GutoHistoryItem[];
+  language: GutoLanguage;
+  worldState: WorldStateV2;
+  resolverResult?: ResolverResult | null;
+  turnId?: string;
+}): Promise<GutoModelResponse | null> {
+  if (!isExplicitDietIntent(params.input)) return null;
+  return dispatchSovereignBrainAction({
+    userId: params.userId,
+    memory: params.memory,
+    input: params.input,
+    history: params.history,
+    language: params.language,
+    response: {
+      fala: pickByLanguage(params.language, {
+        "pt-BR": "Fechado. Vou montar a dieta com os dados que já tenho e sem inventar restrição.",
+        "en-US": "Done. I will build the diet with what I already know and without inventing restrictions.",
+        "it-IT": "Fatto. Creo la dieta con quello che so già, senza inventare restrizioni.",
+      }),
+      acao: "generateDiet",
+      expectedResponse: null,
+      avatarEmotion: "default",
+    },
+    worldState: params.worldState,
+    resolverResult: params.resolverResult ?? null,
+    turnId: params.turnId,
+  });
+}
+
+function buildDeterministicSovereignDietMeals(params: {
+  nutritionProfile: NutritionProfile;
+  macros: ReturnType<typeof calculateMacros>;
+  language: GutoLanguage;
+  country: string;
+  countryCode?: string;
+}): DietMeal[] | null {
+  const { nutritionProfile, macros, language, country, countryCode } = params;
+  const label = (values: Record<GutoLanguage, string>) => values[language];
+  const note = label({
+    "pt-BR": "Plano seguro gerado pelo executor determinístico do GUTO quando o modelo não entregou uma dieta válida.",
+    "en-US": "Safe plan generated by GUTO's deterministic executor when the model did not return a valid diet.",
+    "it-IT": "Piano sicuro generato dall'esecutore deterministico di GUTO quando il modello non ha restituito una dieta valida.",
+  });
+  const meals: DietMeal[] = [
+    {
+      id: "breakfast",
+      name: label({ "pt-BR": "Café da manhã", "en-US": "Breakfast", "it-IT": "Colazione" }),
+      time: "08:00",
+      foods: [
+        { name: label({ "pt-BR": "Aveia", "en-US": "Oats", "it-IT": "Avena" }), quantity: "80g", kcal: 300 },
+        { name: "Banana", quantity: "1 unidade", kcal: 105 },
+        { name: label({ "pt-BR": "Pasta de amendoim", "en-US": "Peanut butter", "it-IT": "Burro di arachidi" }), quantity: "20g", kcal: 120 },
+      ],
+      totalKcal: 525,
+      gutoNote: note,
+    },
+    {
+      id: "lunch",
+      name: label({ "pt-BR": "Almoço", "en-US": "Lunch", "it-IT": "Pranzo" }),
+      time: "12:30",
+      foods: [
+        { name: label({ "pt-BR": "Frango grelhado", "en-US": "Grilled chicken", "it-IT": "Pollo grigliato" }), quantity: "180g", kcal: 300 },
+        { name: label({ "pt-BR": "Arroz cozido", "en-US": "Cooked rice", "it-IT": "Riso cotto" }), quantity: "160g", kcal: 205 },
+        { name: label({ "pt-BR": "Feijão", "en-US": "Beans", "it-IT": "Fagioli" }), quantity: "120g", kcal: 150 },
+        { name: label({ "pt-BR": "Legumes", "en-US": "Vegetables", "it-IT": "Verdure" }), quantity: "100g", kcal: 40 },
+        { name: label({ "pt-BR": "Azeite", "en-US": "Olive oil", "it-IT": "Olio d'oliva" }), quantity: "10g", kcal: 90 },
+      ],
+      totalKcal: 785,
+      gutoNote: note,
+    },
+    {
+      id: "snack",
+      name: label({ "pt-BR": "Lanche", "en-US": "Snack", "it-IT": "Spuntino" }),
+      time: "16:30",
+      foods: [
+        { name: label({ "pt-BR": "Frango desfiado", "en-US": "Shredded chicken", "it-IT": "Pollo sfilacciato" }), quantity: "120g", kcal: 200 },
+        { name: label({ "pt-BR": "Batata cozida", "en-US": "Boiled potato", "it-IT": "Patate lesse" }), quantity: "250g", kcal: 215 },
+        { name: label({ "pt-BR": "Fruta", "en-US": "Fruit", "it-IT": "Frutta" }), quantity: "1 unidade", kcal: 80 },
+      ],
+      totalKcal: 495,
+      gutoNote: note,
+    },
+    {
+      id: "dinner",
+      name: label({ "pt-BR": "Jantar", "en-US": "Dinner", "it-IT": "Cena" }),
+      time: "20:00",
+      foods: [
+        { name: label({ "pt-BR": "Carne magra", "en-US": "Lean beef", "it-IT": "Manzo magro" }), quantity: "180g", kcal: 360 },
+        { name: label({ "pt-BR": "Arroz cozido", "en-US": "Cooked rice", "it-IT": "Riso cotto" }), quantity: "120g", kcal: 155 },
+        { name: label({ "pt-BR": "Feijão", "en-US": "Beans", "it-IT": "Fagioli" }), quantity: "100g", kcal: 125 },
+        { name: label({ "pt-BR": "Legumes", "en-US": "Vegetables", "it-IT": "Verdure" }), quantity: "120g", kcal: 50 },
+        { name: label({ "pt-BR": "Azeite", "en-US": "Olive oil", "it-IT": "Olio d'oliva" }), quantity: "10g", kcal: 90 },
+      ],
+      totalKcal: 780,
+      gutoNote: note,
+    },
+  ];
+  const { correctedMeals } = validateAndCorrectPortions(meals);
+  const scaled = scaleDietToTarget(normalizeMealCalories(correctedMeals), macros.targetKcal);
+  if (!scaled) return null;
+  const normalizedMeals = normalizeMealCalories(scaled);
+  if (!validateDietCalories(normalizedMeals, macros.targetKcal).valid) return null;
+  const restrictionIssues = validateDietAgainstRestrictions(normalizedMeals, nutritionProfile.foodRestrictions);
+  if (restrictionIssues.length > 0) return null;
+  const locationIssues = validateDietAgainstLocation(normalizedMeals, country, countryCode);
+  if (locationIssues.length === 0) return normalizedMeals;
+  const repaired = repairDietLocation(normalizedMeals, country, countryCode, nutritionProfile.foodRestrictions, language);
+  const remainingLocation = validateDietAgainstLocation(repaired.meals, country, countryCode);
+  const restrictionAfterRepair = validateDietAgainstRestrictions(repaired.meals, nutritionProfile.foodRestrictions);
+  return remainingLocation.length === 0 && restrictionAfterRepair.length === 0 ? normalizeMealCalories(repaired.meals) : null;
+}
+
+function isWorkoutCompletionReport(input: string): boolean {
+  const text = normalize(input || "");
+  return /\b(fiz o treino|fiz meu treino|ja fiz o treino|terminei o treino|terminei tudo|acabei o treino|completei o treino|treino feito|treino concluido|done the workout|workout done|finished (my |the )?workout|allenamento fatto|ho fatto (il )?allenamento|finito l ?allenamento)\b/.test(text);
+}
+
+function buildWorkoutCompletionFallbackResponse(
+  memory: GutoMemory,
+  input: string,
+  language: GutoLanguage,
+): GutoModelResponse | null {
+  if (!isWorkoutCompletionReport(input)) return null;
+  const doneFocus: WorkoutFocus = getCurrentMissionFocus(memory) || "full_body";
+  memory.recentTrainingHistory = normalizeRecentTrainingHistory([
+    {
+      dateLabel: "today",
+      muscleGroup: doneFocus,
+      raw: normalizeMemoryValue(input),
+      createdAt: new Date().toISOString(),
+    },
+  ], memory.recentTrainingHistory || []);
+  memory.nextWorkoutFocus = chooseNextWorkoutFocus(memory);
+  appendMemoryAudit(memory, "chat_patch", ["recentTrainingHistory", "nextWorkoutFocus"], "Conclusão de treino reconhecida pelo fallback soberano.");
+  commitMemoryDecision(memory);
+  return {
+    fala: pickByLanguage(language, {
+      "pt-BR": "Feito conta. Me conta como foi e se sentiu algum ponto de atenção. Valida na aba treino para registrar a execução; amanhã eu sigo a próxima.",
+      "en-US": "Done counts. Tell me how it went and if anything felt off. Validate it on the workout tab to register it; tomorrow I keep the next one ready.",
+      "it-IT": "Fatto conta. Dimmi com'è andata e se hai sentito qualcosa. Valida nella scheda allenamento per registrarlo; domani continuo con la prossima.",
+    }),
+    acao: "none",
+    expectedResponse: null,
+    avatarEmotion: "default",
+    memoryPatch: {
+      recentTrainingHistory: memory.recentTrainingHistory,
+      nextWorkoutFocus: memory.nextWorkoutFocus,
+    },
+  };
+}
+
+function mapHistoryForBrain(history: GutoHistoryItem[] = []) {
+  return history.map((item) => ({
+    role: item.role,
+    content: (item.parts || []).map((part) => part.text).join(" "),
+  }));
+}
+
+async function buildWorldStateV2ForTurn(params: {
+  memory: GutoMemory;
+  input: string;
+  history: GutoHistoryItem[];
+  language: GutoLanguage;
+  risk: RiskClassification | null;
+  proactivityContext?: string | null;
+  dailyPresenceContext?: DailyPresenceContext | null;
+  operationalContext: OperationalContext;
+  resolverResult?: ResolverResult | null;
+}): Promise<WorldStateV2> {
+  const { memory, input, history, language, risk, operationalContext } = params;
+  const activeExercise = normalizeActiveExerciseContext(memory.activeExercise) || null;
+  const dietPlan = await getDietPlan(memory.userId).catch(() => null);
+  const originalForSwap = resolveWorkoutExerciseForSubstitution({ input, history, memory });
+  const workoutSubstitutes = originalForSwap
+    ? suggestExerciseSubstitutes(originalForSwap.id, {
+        location: getLocationMode(memory.lastWorkoutPlan?.location || memory.preferredTrainingLocation || memory.trainingLocation) as CatalogLocation,
+        userRiskTags: memory.resolvedFields?.pathology?.status === "clear" ? memory.resolvedFields.pathology.riskTags : [],
+        userBodyRegion: memory.resolvedFields?.pathology?.status === "clear" ? memory.resolvedFields.pathology.bodyRegion : undefined,
+      })
+        .map((id) => getCatalogById(id))
+        .filter((entry): entry is CatalogExercise => Boolean(entry))
+        .slice(0, 6)
+        .map((entry) => ({
+          id: entry.id,
+          name: entry.namesByLanguage[language as CatalogLanguage] || entry.canonicalNamePt,
+          muscleGroup: entry.muscleGroup,
+        }))
+    : [];
+  const pendingCards = [
+    ...(memory.proactiveMemories || []).filter((item) =>
+      item.status === "pending_confirmation" || item.status === "pending_validation" || Boolean(item.discardRequestedAt)
+    ),
+    ...(memory.proactiveImpacts || []).filter((item) => item.status === "active"),
+  ].slice(0, 8);
+
+  return assembleWorldStateV2({
+    userId: memory.userId,
+    language,
+    memory: {
+      name: memory.name,
+      country: memory.country,
+      countryCode: memory.countryCode,
+      city: memory.city,
+      trainingGoal: memory.trainingGoal,
+      trainingStatus: memory.trainingStatus,
+      trainingLevel: memory.trainingLevel,
+      trainingLocation: memory.trainingLocation,
+      preferredTrainingLocation: memory.preferredTrainingLocation,
+      trainingLimitations: memory.trainingLimitations,
+      trainingPathology: memory.trainingPathology,
+      biologicalSex: memory.biologicalSex,
+      userAge: memory.userAge,
+      heightCm: memory.heightCm,
+      weightKg: memory.weightKg,
+      foodRestrictions: memory.foodRestrictions,
+      trainedToday: memory.trainedToday,
+      lastActiveAt: memory.lastActiveAt,
+    },
+    risk: risk ? { flag: risk.flag, confidence: risk.confidence } : null,
+    workout: {
+      currentPlan: memory.lastWorkoutPlan
+        ? {
+            title: memory.lastWorkoutPlan.title,
+            focus: memory.lastWorkoutPlan.focus,
+            focusKey: memory.lastWorkoutPlan.focusKey,
+            scheduledFor: memory.lastWorkoutPlan.scheduledFor,
+            location: memory.lastWorkoutPlan.location,
+            locationMode: memory.lastWorkoutPlan.locationMode,
+            lockedByCoach: Boolean(memory.lastWorkoutPlan.lockedByCoach),
+            exercises: (memory.lastWorkoutPlan.exercises || []).slice(0, 12).map((exercise) => ({
+              id: exercise.id,
+              name: exercise.name,
+              muscleGroup: exercise.muscleGroup,
+              sets: exercise.sets,
+              reps: exercise.reps,
+              rest: exercise.rest,
+              alternatives: exercise.alternatives,
+            })),
+          }
+        : null,
+      recentFeedback: (memory.workoutFeedbackHistory || []).slice(-5).map((item) => {
+        const record = item as WorkoutFeedbackRecord & { note?: string };
+        return record.difficulty || record.note || "";
+      }),
+      nextFocus: memory.nextWorkoutFocus || memory.lastSuggestedFocus || null,
+    },
+    diet: {
+      hasPlan: Boolean(dietPlan || memory.weeklyDietPlan || memory.dietGenerationStatus === "generated"),
+      status: memory.dietGenerationStatus || null,
+      restrictions: memory.foodRestrictions || null,
+      country: memory.country || null,
+      city: memory.city || null,
+      lockedByCoach: Boolean(dietPlan?.lockedByCoach),
+    },
+    activeExercise,
+    proactivity: {
+      context: params.proactivityContext ?? null,
+      activePrompt: activeProactivePrompt(memory),
+      pendingMemories: (memory.proactiveMemories || []).slice(-8),
+      resolver: params.resolverResult || null,
+    },
+    pendingCards,
+    dailyContext: {
+      dateKey: todayKey(),
+      weekday: operationalContext.weekday,
+      hour: operationalContext.hour,
+      raw: params.dailyPresenceContext || null,
+    },
+    catalog: {
+      activeExercise: originalForSwap
+        ? {
+            id: originalForSwap.id,
+            name: originalForSwap.name,
+            muscleGroup: originalForSwap.catalogEntry?.muscleGroup,
+          }
+        : activeExercise,
+      workoutSubstitutes,
+      foodConstraints: {
+        restrictions: memory.foodRestrictions || null,
+        unresolvedRestriction: getUnresolvedFoodRestriction(memory),
+      },
+    },
+    recentHistory: mapHistoryForBrain(history),
+    contextSignals: {
+      shortContextIntent: classifyShortContextIntent({ rawInput: input }),
+      dietContext: parseDietContext(input),
+      workoutExecutionRequest: isWorkoutExecutionRequest(input),
+      proactiveContinuity: classifyProactiveContinuitySignal(input),
+      expectedTrainingPrep: detectTrainingPrep(input),
+    },
+  });
+}
+
+async function generateAndCommitBrainDiet(
+  memory: GutoMemory,
+  language: GutoLanguage
+): Promise<{ plan: DietPlan | null; failure?: { reason: DietGenerationFailureReason | "missing_profile_fields" | "needs_clarification" | "coach_locked_plan"; missing?: string[]; message: string; expectedResponse?: ExpectedResponse | null } }> {
+  const existingDiet = await getDietPlan(memory.userId).catch(() => null);
+  if (existingDiet?.lockedByCoach) {
+    return {
+      plan: null,
+      failure: {
+        reason: "coach_locked_plan",
+        message: "Plano bloqueado pelo coach. O GUTO não pode sobrescrever sem liberação do supervisor.",
+      },
+    };
+  }
+  if (existingDiet?.manualOverride) return { plan: existingDiet };
+
+  const meaningfulFoodLimits = collectMeaningfulFoodRestrictionTexts(memory);
+  const foodRestrictionForResolver = meaningfulFoodLimits.join("; ");
+  if (meaningfulFoodLimits.length > 0 && !memory.resolvedFields?.foodRestriction) {
+    memory.resolvedFields = await resolveProfileFreeFields({
+      country: memory.country,
+      pathology: memory.trainingPathology || memory.trainingLimitations,
+      foodRestriction: foodRestrictionForResolver,
+      previous: memory.resolvedFields,
+    });
+    saveMemory(memory);
+  }
+
+  const missing: string[] = [];
+  if (!memory.biologicalSex) missing.push("biologicalSex");
+  if (!memory.userAge) missing.push("userAge");
+  if (!memory.heightCm || memory.heightCm <= 0) missing.push("heightCm");
+  if (!memory.weightKg || memory.weightKg <= 0) missing.push("weightKg");
+  if (!memory.country) missing.push("country");
+  if (!memory.countryCode) missing.push("countryCode");
+  const effectiveLevel = memory.trainingLevel || memory.trainingStatus;
+  const effectiveGoal = memory.trainingGoal;
+  if (!effectiveLevel) missing.push("trainingLevel");
+  if (!effectiveGoal) missing.push("trainingGoal");
+
+  if (missing.length > 0) {
+    memory.dietGenerationStatus = "needs_clarification";
+    appendMemoryAudit(memory, "diet_generated", ["dietGenerationStatus"], "Dieta bloqueada pelo cérebro soberano: perfil incompleto.");
+    commitMemoryDecision(memory);
+    return {
+      plan: null,
+      failure: {
+        reason: "missing_profile_fields",
+        missing,
+        message: missingDietProfileMessage(language, missing),
+      },
+    };
+  }
+
+  const pendingDietClarification = getPendingClarification(memory.resolvedFields, "diet");
+  const unresolvedFoodRestriction = getUnresolvedFoodRestriction(memory);
+  if (pendingDietClarification?.field === "foodRestriction" || unresolvedFoodRestriction) {
+    memory.dietGenerationStatus = "needs_clarification";
+    appendMemoryAudit(memory, "diet_generated", ["dietGenerationStatus"], "Dieta bloqueada pelo cérebro soberano: restrição alimentar incerta.");
+    commitMemoryDecision(memory);
+    return {
+      plan: null,
+      failure: {
+        reason: "needs_clarification",
+        message: dietClarificationMessage(
+          language,
+          pendingDietClarification?.rawValue || unresolvedFoodRestriction || "",
+          getGutoCallName(memory)
+        ),
+        expectedResponse: {
+          type: "text",
+          context: "food_restrictions" as ExpectedResponse["context"],
+          instruction: pendingDietClarification?.hint || "Ask one short question to clarify the user's food restriction before generating diet.",
+        },
+      },
+    };
+  }
+
+  if (!GEMINI_API_KEY) {
+    return {
+      plan: null,
+      failure: {
+        reason: "model_unavailable",
+        message: dietGenerationFailedMessage(language, "model_unavailable"),
+      },
+    };
+  }
+
+  memory.dietGenerationStatus = "generating";
+  appendMemoryAudit(memory, "diet_generated", ["dietGenerationStatus"], "Dieta entrou em geração estruturada pelo cérebro soberano.");
+  commitMemoryDecision(memory);
+
+  const userCountry = String(memory.country).trim();
+  const effectiveFoodRestrictions = isNoFoodRestrictionText(memory.foodRestrictions || "")
+    ? "none"
+    : memory.foodRestrictions || "none";
+  const nutritionProfile: NutritionProfile = {
+    biologicalSex: memory.biologicalSex || "male",
+    userAge: Number(memory.userAge),
+    heightCm: Number(memory.heightCm),
+    weightKg: Number(memory.weightKg),
+    trainingLevel: (effectiveLevel as NutritionProfile["trainingLevel"]) || "beginner",
+    trainingGoal: (effectiveGoal as NutritionProfile["trainingGoal"]) || "consistency",
+    country: userCountry,
+    countryCode: memory.countryCode,
+    city: memory.city,
+    foodRestrictions: effectiveFoodRestrictions,
+  };
+
+  const macros = calculateMacros(nutritionProfile);
+  const maxRetries = 3;
+  let meals: DietMeal[] = [];
+  let lastFailure: DietGenerationFailure | null = null;
+  const basePrompt = buildDietPrompt(nutritionProfile, macros, language);
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const reinforcement = buildDietRetryReinforcement(lastFailure, nutritionProfile);
+      const prompt = reinforcement
+        ? buildDietPrompt(nutritionProfile, macros, language, reinforcement)
+        : basePrompt;
+      const { response, data } = await fetchJsonWithTimeout<any>(
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.4,
+              maxOutputTokens: 8192,
+              responseMimeType: "application/json",
+            },
+          }),
+        },
+        20_000
+      );
+      if (!response.ok || data?.error) {
+        lastFailure = { reason: "model_unavailable", issues: [`HTTP ${response.status}`] };
+        continue;
+      }
+      const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      if (!rawText) {
+        lastFailure = { reason: "model_response_invalid", issues: ["empty model response"] };
+        continue;
+      }
+      let parsed: { meals?: DietMeal[]; mealPlan?: DietMeal[] } = {};
+      try {
+        parsed = JSON.parse(tryCleanJson(rawText));
+      } catch {
+        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+          lastFailure = { reason: "model_response_invalid", issues: ["invalid diet JSON"] };
+          continue;
+        }
+        parsed = JSON.parse(tryCleanJson(jsonMatch[0]));
+      }
+      const mealsArray = Array.isArray(parsed.meals) ? parsed.meals : Array.isArray(parsed.mealPlan) ? parsed.mealPlan : [];
+      if (mealsArray.length === 0) {
+        lastFailure = { reason: "model_response_invalid", issues: ["empty meals array"] };
+        continue;
+      }
+      const { correctedMeals } = validateAndCorrectPortions(mealsArray);
+      let calorieCheckedMeals = normalizeMealCalories(correctedMeals);
+      const repairedMeals = scaleDietToTarget(calorieCheckedMeals, macros.targetKcal);
+      if (!repairedMeals) {
+        lastFailure = { reason: "calorie_validation", issues: ["plano calórico fora da faixa segura para reparo"] };
+        continue;
+      }
+      calorieCheckedMeals = normalizeMealCalories(repairedMeals);
+      const calorieValidation = validateDietCalories(calorieCheckedMeals, macros.targetKcal);
+      if (!calorieValidation.valid) {
+        lastFailure = { reason: "calorie_validation", issues: calorieValidation.issues };
+        continue;
+      }
+      const restrictionIssues = validateDietAgainstRestrictions(calorieCheckedMeals, nutritionProfile.foodRestrictions);
+      if (restrictionIssues.length > 0) {
+        lastFailure = { reason: "food_restriction", issues: restrictionIssues };
+        continue;
+      }
+      let localizedMeals = calorieCheckedMeals;
+      const locationIssues = validateDietAgainstLocation(localizedMeals, userCountry, memory.countryCode);
+      if (locationIssues.length > 0) {
+        const repair = repairDietLocation(
+          localizedMeals,
+          userCountry,
+          memory.countryCode,
+          nutritionProfile.foodRestrictions,
+          language
+        );
+        if (repair.repaired) localizedMeals = repair.meals;
+        const remainingLocation = validateDietAgainstLocation(localizedMeals, userCountry, memory.countryCode);
+        const restrictionAfterRepair = validateDietAgainstRestrictions(localizedMeals, nutritionProfile.foodRestrictions);
+        if (remainingLocation.length > 0 || restrictionAfterRepair.length > 0) {
+          lastFailure = {
+            reason: remainingLocation.length > 0 ? "location" : "food_restriction",
+            issues: [...remainingLocation, ...restrictionAfterRepair, ...repair.unresolved],
+          };
+          continue;
+        }
+      }
+      meals = localizedMeals;
+      break;
+    } catch (error) {
+      lastFailure = { reason: "internal", issues: [error instanceof Error ? error.message : String(error)] };
+    }
+  }
+
+  if (!meals.length) {
+    const deterministicMeals = buildDeterministicSovereignDietMeals({
+      nutritionProfile,
+      macros,
+      language,
+      country: userCountry,
+      countryCode: memory.countryCode,
+    });
+    if (deterministicMeals) {
+      meals = deterministicMeals;
+      appendMemoryAudit(
+        memory,
+        "diet_generated",
+        ["dietGenerationStatus"],
+        `Geração de dieta pelo modelo falhou (${lastFailure?.reason || "unknown"}); executor soberano usou fallback determinístico validado.`
+      );
+    }
+  }
+
+  if (!meals.length) {
+    memory.dietGenerationStatus = "failed";
+    appendMemoryAudit(memory, "diet_generated", ["dietGenerationStatus"], "Geração de dieta pelo cérebro soberano falhou após validações.");
+    commitMemoryDecision(memory);
+    return {
+      plan: null,
+      failure: {
+        reason: lastFailure?.reason || "internal",
+        message: dietGenerationFailedMessage(language, lastFailure?.reason),
+      },
+    };
+  }
+
+  const dailyPresenceContext = await buildDailyPresenceContext(memory, {
+    dateKey: todayKey(),
+    language,
+    allowExternalFetch: false,
+  });
+  const plan: DietPlan = applyTravelContextToDiet({
+    userId: memory.userId,
+    source: "guto_generated",
+    lockedByCoach: false,
+    planSource: "ai_generated",
+    language,
+    generatedAt: new Date().toISOString(),
+    country: userCountry,
+    macros,
+    meals,
+    foodRestrictions: nutritionProfile.foodRestrictions,
+  }, memory, language, todayKey(), dailyPresenceContext);
+
+  await saveDietPlan(plan);
+  memory.dietGenerationStatus = "generated";
+  appendMemoryAudit(memory, "diet_generated", ["dietGenerationStatus"], "Dieta gerada e persistida pelo cérebro soberano.");
+  commitMemoryDecision(memory);
+  return { plan };
+}
+
+function commitBrainExerciseSwap(params: {
+  memory: GutoMemory;
+  input: string;
+  history: GutoHistoryItem[];
+  language: GutoLanguage;
+  response: GutoModelResponse;
+}): GutoModelResponse {
+  const { memory, input, history, language, response } = params;
+  const previous = getFreshSubstitutionContext(memory, "exercise");
+  const rejectedFollowUp = isSubstitutionRejectionFollowUp(input);
+  const resolvedOriginal = resolveWorkoutExerciseForSubstitution({ input, history, memory });
+  const original: {
+    id: string;
+    name: string;
+    planExercise?: WorkoutExercise | Pick<WorkoutExercise, "sets" | "reps" | "rest"> | null;
+    catalogEntry?: CatalogExercise;
+  } | null = resolvedOriginal || (rejectedFollowUp && previous
+    ? {
+        id: previous.originalId,
+        name: previous.originalName,
+        planExercise: previous.planExercise || null,
+        catalogEntry: getCatalogById(previous.originalId),
+      }
+    : null);
+  const substitute = extractSubstituteFromResponseText(response.fala);
+  const originalEntry = original ? getCatalogById(original.id) || original.catalogEntry : null;
+  if (!original || !originalEntry || !substitute) {
+    return buildSovereignSafeFallback(language, "Preciso saber qual exercício deve ser trocado e por qual substituto seguro.");
+  }
+  const validation = validateExerciseSubstitute(originalEntry, substitute);
+  if (!validation.valid) {
+    return buildSovereignSafeFallback(language, "A troca proposta não passou na validação do catálogo.");
+  }
+  const plan = memory.lastWorkoutPlan;
+  if (!plan?.exercises?.length) {
+    return buildSovereignSafeFallback(language, "Não encontrei treino ativo para aplicar a troca.");
+  }
+  let index = plan.exercises.findIndex((exercise) => exercise.id === original.id || normalize(exercise.name) === normalize(original.name));
+  if (index < 0 && rejectedFollowUp && previous?.lastSuggestedId) {
+    index = plan.exercises.findIndex((exercise) => exercise.id === previous.lastSuggestedId);
+  }
+  if (index < 0) {
+    return buildSovereignSafeFallback(language, "Não encontrei o exercício original no treino atual.");
+  }
+  const updatedExercise = catalogEntryToWorkoutExercise(substitute, plan.exercises[index], language);
+  const nextPlan: WorkoutPlan = {
+    ...plan,
+    exercises: plan.exercises.map((exercise, i) => i === index ? updatedExercise : exercise),
+  };
+  const recoveredSuggestedId = !previous?.lastSuggestedId && rejectedFollowUp
+    ? recoverLastSuggestedSubstituteIdFromHistory(history)
+    : null;
+  const rejectedIds = rejectedFollowUp
+    ? mergeRejectedIds(
+        previous?.rejectedIds,
+        [previous?.lastSuggestedId, recoveredSuggestedId].filter((id): id is string => typeof id === "string" && id.length > 0)
+      )
+    : mergeRejectedIds(previous?.originalId === original.id ? previous?.rejectedIds : undefined);
+  memory.lastWorkoutPlan = nextPlan;
+  memory.substitutionContext = {
+    kind: "exercise",
+    originalId: original.id,
+    originalName: original.name,
+    lastSuggestedId: substitute.id,
+    rejectedIds,
+    planExercise: {
+      sets: plan.exercises[index].sets,
+      reps: plan.exercises[index].reps,
+      rest: plan.exercises[index].rest,
+    },
+    updatedAt: new Date().toISOString(),
+  };
+  appendMemoryAudit(memory, "chat_patch", ["lastWorkoutPlan", "substitutionContext"], "Troca de exercício executada pelo dispatcher soberano.");
+  commitMemoryDecision(memory);
+  return {
+    ...response,
+    workoutPlan: nextPlan,
+    memoryPatch: {
+      ...(response.memoryPatch || {}),
+      lastWorkoutPlan: nextPlan,
+    },
+  };
+}
+
+async function commitBrainProactiveCard(params: {
+  userId: string;
+  memory: GutoMemory;
+  input: string;
+  response: GutoModelResponse;
+  resolverResult?: ResolverResult | null;
+  turnId?: string;
+}): Promise<GutoModelResponse> {
+  const { userId, memory, input, response, resolverResult, turnId } = params;
+  const action = resolverResult?.action || validateProactiveMemoryAction(response.proactiveMemoryAction) || null;
+  if (action) {
+    const actionResult = await applyBackendProactiveAction(userId, action).catch(() => null);
+    if (actionResult?.memoryPatch) {
+      return {
+        ...response,
+        fala: actionResult.fala || response.fala,
+        expectedResponse: actionResult.expectedResponse || response.expectedResponse,
+        proactiveMemoryAction: null,
+        memoryPatch: {
+          ...(response.memoryPatch || {}),
+          ...actionResult.memoryPatch,
+        },
+      };
+    }
+    return {
+      ...response,
+      fala: actionResult?.fala || response.fala,
+      expectedResponse: actionResult?.expectedResponse || response.expectedResponse,
+      proactiveMemoryAction: null,
+    };
+  }
+
+  const memoryItem = buildImmediateProactiveMemory(
+    memory,
+    input,
+    classifyProactiveContinuitySignal(input),
+    turnId
+  );
+  if (memoryItem) {
+    persistDecisionImpactInMemoryObject(memory, memoryItem, normalizeLanguage(memory.language));
+    commitMemoryDecision(memory);
+    return {
+      ...response,
+      memoryPatch: {
+        ...(response.memoryPatch || {}),
+        ...buildProactiveMemoryPatch(memory),
+      },
+    };
+  }
+  return response;
+}
+
+async function buildNoModelOperationalFallback(params: {
+  userId: string;
+  memory: GutoMemory;
+  input: string;
+  history: GutoHistoryItem[];
+  language: GutoLanguage;
+  resolverResult?: ResolverResult | null;
+  turnId?: string;
+  scope?: "proactivity" | "continuity" | "all";
+}): Promise<GutoModelResponse | null> {
+  const { userId, memory, input, language, resolverResult, turnId } = params;
+  const scope = params.scope || "all";
+  const normalizedInput = normalize(input);
+  const schedulerInput = input.includes("Evento proativo devido:");
+  if (scope === "proactivity" && schedulerInput) return null;
+  const context = syncCanonicalConversationContext(memory);
+
+  const pendingValidationTrip = (memory.proactiveMemories || []).find((item) =>
+    item.type === "trip" &&
+    item.status === "pending_validation" &&
+    /\b(adiad|remarc|posterg|postpon|rimand|sexta|sabado|sábado|domingo|segunda|terca|terça|quarta|quinta)\b/.test(normalizedInput)
+  );
+  if (pendingValidationTrip) {
+    const parsedDate = resolveProactiveDate(input, todayKey());
+    if (parsedDate) {
+      const updated = await updateProactiveMemory(userId, pendingValidationTrip.id, {
+        dateText: parsedDate.dateText,
+        dateParsed: parsedDate.dateParsed,
+        status: "pending_confirmation",
+        stage: "continuity_question",
+        confirmationStage: "event",
+        proposedTrainingAdapted: undefined,
+        trainingAdapted: undefined,
+        confirmedAt: undefined,
+        validatedAt: new Date().toISOString(),
+      });
+      setProactiveImpactsStatusForMemory(userId, pendingValidationTrip.id, "discarded");
+      replaceProactiveMemoryInMemoryObject(memory, updated);
+      const prompt = updated ? buildTravelTrainingPrompt(memory, updated, language) : null;
+      syncCanonicalConversationContext(memory);
+      saveMemory(memory);
+      return {
+        fala: prompt?.fala || "Viagem adiada. Você consegue fazer um treino adaptado nesse dia?",
+        acao: "none",
+        expectedResponse: prompt?.expectedResponse as ExpectedResponse | null,
+        avatarEmotion: "default",
+        memoryPatch: buildProactiveMemoryPatch(memory),
+      };
+    }
+  }
+
+  if (context.kind === "travel_date_correction" && context.relatedMemoryId) {
+    const parsedDate = resolveProactiveDate(input, todayKey());
+    if (parsedDate) {
+      const updated = await updateProactiveMemory(userId, context.relatedMemoryId, {
+        dateText: parsedDate.dateText,
+        dateParsed: parsedDate.dateParsed,
+        status: "pending_confirmation",
+        stage: "impact_confirmation",
+        confirmationStage: "impact",
+        trainingAdapted: undefined,
+        proposedTrainingAdapted: undefined,
+        confirmedAt: undefined,
+      });
+      replaceProactiveMemoryInMemoryObject(memory, updated);
+      clearActiveProactivePrompt(memory);
+      syncCanonicalConversationContext(memory);
+      saveMemory(memory);
+      return {
+        fala: "Data corrigida. Confirma no card se esse dia fica adaptado ou protegido.",
+        acao: "none",
+        expectedResponse: null,
+        avatarEmotion: "default",
+        memoryPatch: buildProactiveMemoryPatch(memory),
+      };
+    }
+  }
+
+  if (context.kind === "travel_impact_confirmation" && context.relatedMemoryId) {
+    const signal = resolveTravelPromptSignal(input);
+    if (signal === "cannot_train" || signal === "can_train") {
+      const target = (memory.proactiveMemories || []).find((item) => item.id === context.relatedMemoryId);
+      if (target) {
+        const updated = await updateProactiveMemory(userId, target.id, {
+          ...appendTravelImpactText(target, input, signal),
+          status: "pending_confirmation",
+          stage: "impact_confirmation",
+          confirmationStage: "impact",
+          proposedTrainingAdapted: signal === "can_train",
+          trainingAdapted: undefined,
+          confirmedAt: undefined,
+        });
+        replaceProactiveMemoryInMemoryObject(memory, updated);
+        clearActiveProactivePrompt(memory);
+        syncCanonicalConversationContext(memory);
+        saveMemory(memory);
+        return {
+          fala: signal === "can_train"
+            ? "Treino adaptado possível. Confirma no card para eu ajustar esse dia sem inventar."
+            : "Entendi. Antes de proteger esse dia, confirma no card.",
+          acao: "none",
+          expectedResponse: null,
+          avatarEmotion: "default",
+          memoryPatch: buildProactiveMemoryPatch(memory),
+        };
+      }
+    }
+  }
+
+  if (resolverResult?.action) {
+    let action = resolverResult.action;
+    if (action.type === "validate" && action.outcome === "postponed") {
+      const parsedDate = resolveProactiveDate(input, todayKey());
+      if (parsedDate) {
+        action = {
+          ...action,
+          patch: {
+            ...(action.patch || {}),
+            dateText: parsedDate.dateText,
+            dateParsed: parsedDate.dateParsed,
+          },
+        };
+      }
+    }
+    return commitBrainProactiveCard({
+      userId,
+      memory,
+      input,
+      response: {
+        fala: "Fechado. Resolvo isso pelo card.",
+        acao: "openProactiveCard",
+        expectedResponse: null,
+        avatarEmotion: "default",
+        proactiveMemoryAction: action,
+      },
+      resolverResult: { ...resolverResult, action },
+      turnId,
+      });
+  }
+
+  if (scope === "all") {
+    const foodRestrictionFact = await buildFoodRestrictionFactResponse(memory, input, language);
+    if (foodRestrictionFact) return foodRestrictionFact;
+
+    const physicalLimitation = buildPhysicalLimitationOperationalResponse(memory, input, language);
+    if (physicalLimitation) return physicalLimitation;
+
+    const activeSwapClarity = buildActiveExerciseSwapClarityResponse(memory, input, language);
+    if (activeSwapClarity) return activeSwapClarity;
+
+    const genericSwapClarity = buildGenericExerciseSwapClarificationResponse(input, language);
+    if (genericSwapClarity) return genericSwapClarity;
+  }
+
+  const blocking = getBlockingCardContext(memory);
+  const explicitDietIntent = isExplicitDietIntent(input);
+  if (blocking && explicitDietIntent) return null;
+  if (blocking) {
+    return buildBlockingConversationResponse(blocking, memory, language);
+  }
+
+  const signal = classifyProactiveContinuitySignal(input);
+  if (signal !== "generic" && (scope === "all" || scope === "continuity")) {
+    if (signal === "short_window") {
+      const response: GutoModelResponse = {
+        fala: getTodayMissionPlan(memory)
+          ? "Janela curta hoje. Eu adapto para o mínimo seguro."
+          : buildNoMissionShortWindowFala(language, getGutoCallName(memory)),
+        acao: "none",
+        expectedResponse: null,
+        avatarEmotion: "default",
+      };
+      appendPostConfirmationRedirect(response, memory, language);
+      return response;
+    }
+
+    const proactiveMemory = buildImmediateProactiveMemory(memory, input, signal, turnId);
+    const travelPrompt = proactiveMemory?.type === "trip" && signal === "travel_unknown"
+      ? buildTravelTrainingPrompt(memory, proactiveMemory, language)
+      : null;
+    syncCanonicalConversationContext(memory);
+    commitMemoryDecision(memory);
+    return {
+      fala: travelPrompt?.fala || buildProactiveContinuityFala(signal, language, getGutoCallName(memory)),
+      acao: "none",
+      expectedResponse: (travelPrompt?.expectedResponse as ExpectedResponse | null) || buildProactiveExpectedResponse(signal, language),
+      avatarEmotion: "default",
+      memoryPatch: buildProactiveMemoryPatch(memory),
+    };
+  }
+
+  if (scope === "proactivity") return null;
+  if (scope === "continuity") return null;
+
+  if (mentionsPainInjuryOrIllness(input, language)) {
+    captureReportedLimitation(memory, input);
+    const response: GutoModelResponse = {
+      fala: "Dor registrada. Hoje reduz impacto, protege sem irritar e nada de forçar ego.",
+      acao: "none",
+      expectedResponse: null,
+      avatarEmotion: "alert",
+    };
+    appendPostConfirmationRedirect(response, memory, language);
+    return response;
+  }
+
+  return null;
+}
+
+function buildDeterministicContextResolverResponse(params: {
+  input: string;
+  history: GutoHistoryItem[];
+  memory: GutoMemory;
+  language: GutoLanguage;
+}): GutoModelResponse | null {
+  const { input, history, memory, language } = params;
+
+  const objection = buildExerciseSubstitutionObjectionResponse({ input, memory, language });
+  if (objection) return objection;
+
+  const exerciseSwap = buildEquipmentBusyFallbackResponse({ input, history, memory, language });
+  if (exerciseSwap) return exerciseSwap;
+
+  const shortContext = buildShortContextFallbackResponse(input, memory, language);
+  if (shortContext) return shortContext;
+
+  return null;
+}
+
+async function buildImmediateSovereignOperationalResponse(params: {
+  input: string;
+  memory: GutoMemory;
+  language: GutoLanguage;
+}): Promise<GutoModelResponse | null> {
+  const { input, memory, language } = params;
+
+  if (!isExplicitDietIntent(input)) {
+    const foodRestrictionFact = await buildFoodRestrictionFactResponse(memory, input, language);
+    if (foodRestrictionFact) return foodRestrictionFact;
+  }
+
+  return null;
+}
+
+function buildDirectOperationalRecoveryResponse(memory: GutoMemory, input: string, language: GutoLanguage): GutoModelResponse | null {
+  const physicalLimitation = buildPhysicalLimitationOperationalResponse(memory, input, language);
+  if (physicalLimitation) return physicalLimitation;
+
+  const activeSwapClarity = buildActiveExerciseSwapClarityResponse(memory, input, language);
+  if (activeSwapClarity) return activeSwapClarity;
+
+  const genericSwapClarity = buildGenericExerciseSwapClarificationResponse(input, language);
+  if (genericSwapClarity) return genericSwapClarity;
+
+  return null;
+}
+
+async function dispatchSovereignBrainAction(params: {
+  userId: string;
+  memory: GutoMemory;
+  input: string;
+  history: GutoHistoryItem[];
+  language: GutoLanguage;
+  response: GutoModelResponse;
+  worldState: WorldStateV2;
+  resolverResult?: ResolverResult | null;
+  turnId?: string;
+}): Promise<GutoModelResponse> {
+  const { response, memory, language } = params;
+  switch (response.acao) {
+    case "none": {
+      if (
+        response.fala &&
+        offersExercisePreferenceMenu(response.fala) &&
+        normalizeActiveExerciseContext(memory.activeExercise)?.name &&
+        isExplicitExerciseSwapIntent(params.input)
+      ) {
+        const original = resolveWorkoutExerciseForSubstitution({
+          input: params.input,
+          history: params.history,
+          memory,
+        });
+        if (original) {
+          return buildValidatedEquipmentBusyResponse({ original, memory, language });
+        }
+      }
+      const substitute = extractSubstituteFromResponseText(response.fala);
+      if (substitute) {
+        const original = resolveWorkoutExerciseForSubstitution({
+          input: params.input,
+          history: params.history,
+          memory,
+        });
+        const originalEntry = original ? getCatalogById(original.id) || original.catalogEntry : null;
+        if (original && originalEntry && !validateExerciseSubstitute(originalEntry, substitute).valid) {
+          return buildSovereignSafeFallback(language, "A troca proposta não passou na validação do catálogo.");
+        }
+      }
+      const previous = getFreshSubstitutionContext(memory, "exercise");
+      if (previous?.lastSuggestedId && isSubstitutionRejectionFollowUp(params.input)) {
+        memory.substitutionContext = {
+          ...previous,
+          rejectedIds: mergeRejectedIds(previous.rejectedIds, [previous.lastSuggestedId]),
+          updatedAt: new Date().toISOString(),
+        };
+        appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Rejeição de substituto registrada pelo dispatcher soberano.");
+        commitMemoryDecision(memory);
+      }
+      return response;
+    }
+    case "updateWorkout": {
+      const missingTrainingFields = getSovereignWorkoutMissingFields(memory);
+      if (missingTrainingFields.length > 0) {
+        return buildMissingTrainingFieldsResponse(language, missingTrainingFields);
+      }
+      const focusHint = (response.memoryPatch as { nextWorkoutFocus?: string } | undefined)?.nextWorkoutFocus;
+      const plan = await generateAndCommitBrainWorkout(memory, language, focusHint);
+      if (!plan) return buildSovereignSafeFallback(language, "Não consegui executar o treino com segurança agora.");
+      return {
+        ...response,
+        workoutPlan: plan,
+        expectedResponse: null,
+      };
+    }
+    case "generateDiet": {
+      const generated = await generateAndCommitBrainDiet(memory, language);
+      if (!generated.plan) {
+        return {
+          ...buildSovereignSafeFallback(language, generated.failure?.message || "Não consegui executar a dieta com segurança agora."),
+          expectedResponse: generated.failure?.expectedResponse || null,
+          avatarEmotion: response.avatarEmotion || "default",
+        };
+      }
+      return {
+        ...response,
+        expectedResponse: null,
+        memoryPatch: {
+          ...(response.memoryPatch || {}),
+          dietGenerationStatus: "generated",
+        },
+      };
+    }
+    case "swapExercise":
+      return commitBrainExerciseSwap({
+        memory,
+        input: params.input,
+        history: params.history,
+        language,
+        response,
+      });
+    case "openProactiveCard":
+      return commitBrainProactiveCard({
+        userId: params.userId,
+        memory,
+        input: params.input,
+        response,
+        resolverResult: params.resolverResult,
+        turnId: params.turnId,
+      });
+    case "callCoach":
+      return response;
+    default:
+      return buildSovereignSafeFallback(language, "Ação fora do dispatcher soberano.");
+  }
+}
+
+async function runSovereignBrainTurn(params: {
+  memory: GutoMemory;
+  input: string;
+  history: GutoHistoryItem[];
+  language: GutoLanguage;
+  expectedResponse?: ExpectedResponse | null;
+  proactivityContext?: string | null;
+  dailyPresenceContext?: DailyPresenceContext | null;
+  operationalContext: OperationalContext;
+  resolverResult?: ResolverResult | null;
+  turnId?: string;
+  decide?: typeof decideTurn;
+  classifyRiskFn?: typeof classifyRisk;
+}): Promise<GutoModelResponse> {
+  const { memory, input, history, language, operationalContext } = params;
+  const decide = params.decide ?? decideTurn;
+  const classifyRiskFn = params.classifyRiskFn ?? classifyRisk;
+  const risk = await classifyRiskFn(input, language as ClassifierLanguage, { timeoutMs: 1800 }).catch(() => null);
+  const riskActive = Boolean(risk && risk.flag && risk.confidence >= 0.6);
+  const safetyOverride = riskActive && risk?.flag
+    ? buildSafetyOverrideBlock(risk.flag, language as ClassifierLanguage)
+    : null;
+
+  const worldState = await buildWorldStateV2ForTurn({
+    memory,
+    input,
+    history,
+    language,
+    risk,
+    proactivityContext: params.proactivityContext ?? null,
+    dailyPresenceContext: params.dailyPresenceContext ?? null,
+    operationalContext,
+    resolverResult: params.resolverResult ?? null,
+  });
+  const proactiveStateFallback = await buildNoModelOperationalFallback({
+    userId: memory.userId,
+    memory,
+    input,
+    history,
+    language,
+    resolverResult: params.resolverResult ?? null,
+    turnId: params.turnId,
+    scope: "proactivity",
+  });
+  if (proactiveStateFallback) return finalizeSovereignBrainResponse(proactiveStateFallback, input, language);
+
+  const deterministicContextResolver = buildDeterministicContextResolverResponse({
+    input,
+    history,
+    memory,
+    language,
+  });
+  if (deterministicContextResolver) {
+    return finalizeSovereignBrainResponse(deterministicContextResolver, input, language);
+  }
+
+  const immediateOperationalResponse = await buildImmediateSovereignOperationalResponse({
+    input,
+    memory,
+    language,
+  });
+  if (immediateOperationalResponse) {
+    return finalizeSovereignBrainResponse(immediateOperationalResponse, input, language);
+  }
+
+  if (!GEMINI_API_KEY) {
+    const operationalFallback = await buildNoModelOperationalFallback({
+      userId: memory.userId,
+      memory,
+      input,
+      history,
+      language,
+      resolverResult: params.resolverResult ?? null,
+      turnId: params.turnId,
+      scope: "all",
+    });
+    if (operationalFallback) return finalizeSovereignBrainResponse(operationalFallback, input, language);
+    const dietFallback = await buildDietIntentFallbackResponse({
+      userId: memory.userId,
+      memory,
+      input,
+      history,
+      language,
+      worldState,
+      resolverResult: params.resolverResult ?? null,
+      turnId: params.turnId,
+    });
+    if (dietFallback) return finalizeSovereignBrainResponse(dietFallback, input, language);
+    const completionFallback = buildWorkoutCompletionFallbackResponse(memory, input, language);
+    if (completionFallback) return finalizeSovereignBrainResponse(completionFallback, input, language);
+    const prepFallback = await buildTrainingPrepFallbackResponse(memory, language, input);
+    if (prepFallback) return finalizeSovereignBrainResponse(prepFallback, input, language);
+    const noModelFallback = buildNoModelSovereignFallback(memory, input, language);
+    if (noModelFallback) return finalizeSovereignBrainResponse(noModelFallback, input, language);
+  }
+  const missingTrainingFields = getSovereignWorkoutMissingFields(memory);
+  const noModelTrainingContext =
+    isWorkoutExecutionRequest(input) ||
+    Boolean(detectTrainingPrep(input)) ||
+    /\b(treino|treinar|treinando|allen|allenando|allenamento|ripresa|fermo|ritmo|workout|training)\b/i.test(normalize(input));
+  if (!GEMINI_API_KEY && noModelTrainingContext && missingTrainingFields.length > 0) {
+    return buildMissingTrainingFieldsResponse(language, missingTrainingFields);
+  }
+  if (!GEMINI_API_KEY && noModelTrainingContext) {
+    const fallbackWorkoutResponse: GutoModelResponse = {
+      fala: {
+        "pt-BR": "Fechado. Vou montar teu treino de hoje com o que já sei de você.",
+        "en-US": "Done. I will build today's workout with what I already know about you.",
+        "it-IT": "Fatto. Creo l'allenamento di oggi con quello che so già di te.",
+      }[language],
+      acao: "updateWorkout",
+      expectedResponse: null,
+      avatarEmotion: "default",
+    };
+    const workoutResult = await dispatchSovereignBrainAction({
+      userId: memory.userId,
+      memory,
+      input,
+      history,
+      language,
+      response: fallbackWorkoutResponse,
+      worldState,
+      resolverResult: params.resolverResult ?? null,
+      turnId: params.turnId,
+    });
+    return finalizeSovereignBrainResponse(workoutResult, input, language);
+  }
+
+  const deps: DecideTurnDeps = {
+    buildPrompt: () =>
+      buildSovereignBrainPrompt({
+        worldState,
+        input,
+        history: mapHistoryForBrain(history),
+        safetyOverride,
+      }),
+    callModel: async (prompt) => {
+      if (!GEMINI_API_KEY) return { ok: false };
+      const { response, data } = await fetchJsonWithTimeout<any>(
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: {
+              response_mime_type: "application/json",
+              temperature: Math.min(GUTO_MODEL_TEMPERATURE, 0.3),
+              topP: 0.8,
+            },
+          }),
+        },
+        GUTO_MODEL_TIMEOUT_MS
+      );
+      if (!response.ok || data?.error) return { ok: false };
+      return { ok: true, rawText: data?.candidates?.[0]?.content?.parts?.[0]?.text };
+    },
+    parseResponse: (rawText, lang) => parseSovereignBrainResponse(rawText, lang),
+    persist: async (_userId, patch) => {
+      await applyMemoryPatch(memory, patch as GutoModelResponse["memoryPatch"], undefined, input);
+    },
+  };
+
+  const contract = await decide({ worldState, input, history: mapHistoryForBrain(history) }, deps);
+  if (contract.validation !== "ok") {
+    const operationalFallback = await buildNoModelOperationalFallback({
+      userId: memory.userId,
+      memory,
+      input,
+      history,
+      language,
+      resolverResult: params.resolverResult ?? null,
+      turnId: params.turnId,
+      scope: "all",
+    });
+    if (operationalFallback) return finalizeSovereignBrainResponse(operationalFallback, input, language);
+    const dietFallback = await buildDietIntentFallbackResponse({
+      userId: memory.userId,
+      memory,
+      input,
+      history,
+      language,
+      worldState,
+      resolverResult: params.resolverResult ?? null,
+      turnId: params.turnId,
+    });
+    if (dietFallback) return finalizeSovereignBrainResponse(dietFallback, input, language);
+    const completionFallback = buildWorkoutCompletionFallbackResponse(memory, input, language);
+    if (completionFallback) return finalizeSovereignBrainResponse(completionFallback, input, language);
+    const prepFallback = await buildTrainingPrepFallbackResponse(memory, language, input);
+    if (prepFallback) return finalizeSovereignBrainResponse(prepFallback, input, language);
+    const noModelFallback = buildNoModelSovereignFallback(memory, input, language);
+    if (noModelFallback) return finalizeSovereignBrainResponse(noModelFallback, input, language);
+    const directRecovery = buildDirectOperationalRecoveryResponse(memory, input, language);
+    if (directRecovery) return finalizeSovereignBrainResponse(directRecovery, input, language);
+    return finalizeSovereignBrainResponse(buildSovereignSafeFallback(language, "O cérebro não conseguiu fechar um contrato válido neste turno."), input, language);
+  }
+
+  const response = publicTurnToGutoResponse(contract.response);
+  if (isSovereignSafeFallbackText(response.fala)) {
+    const operationalFallback = await buildNoModelOperationalFallback({
+      userId: memory.userId,
+      memory,
+      input,
+      history,
+      language,
+      resolverResult: params.resolverResult ?? null,
+      turnId: params.turnId,
+      scope: "all",
+    });
+    if (operationalFallback && !isSovereignSafeFallbackText(operationalFallback.fala)) {
+      return finalizeSovereignBrainResponse(operationalFallback, input, language);
+    }
+    const directRecovery = buildDirectOperationalRecoveryResponse(memory, input, language);
+    if (directRecovery) return finalizeSovereignBrainResponse(directRecovery, input, language);
+  }
+  if (shouldPromoteNoneToDietAction(input, response)) {
+    const dietFallback = await buildDietIntentFallbackResponse({
+      userId: memory.userId,
+      memory,
+      input,
+      history,
+      language,
+      worldState,
+      resolverResult: params.resolverResult ?? null,
+      turnId: params.turnId,
+    });
+    if (dietFallback) return finalizeSovereignBrainResponse(dietFallback, input, language);
+  }
+  if (
+    response.acao === "none" &&
+    !response.expectedResponse &&
+    classifyExerciseDoubtMessage(input) === "swap_needs_reason" &&
+    !extractSubstituteFromResponseText(response.fala)
+  ) {
+    const exerciseClarity = buildExerciseSwapClarityResponse({ input, language });
+    if (exerciseClarity) return finalizeSovereignBrainResponse(exerciseClarity, input, language);
+  }
+  if (response.acao === "none" && !response.expectedResponse && isExplicitExerciseSwapIntent(input)) {
+    const swapped = await dispatchSovereignBrainAction({
+      userId: memory.userId,
+      memory,
+      input,
+      history,
+      language,
+      response: {
+        ...response,
+        fala: response.fala && !/não vou inventar|nao vou inventar/i.test(response.fala)
+          ? response.fala
+          : "Fechado. Vou trocar mantendo o mesmo foco muscular e sem inventar movimento fora do catálogo.",
+        acao: "swapExercise",
+        expectedResponse: null,
+      },
+      worldState,
+      resolverResult: params.resolverResult ?? null,
+      turnId: params.turnId,
+    });
+    return finalizeSovereignBrainResponse(swapped, input, language);
+  }
+  if (response.acao === "none") {
+    const continuityFallback = await buildNoModelOperationalFallback({
+      userId: memory.userId,
+      memory,
+      input,
+      history,
+      language,
+      resolverResult: params.resolverResult ?? null,
+      turnId: params.turnId,
+      scope: "continuity",
+    });
+    if (continuityFallback) return finalizeSovereignBrainResponse(continuityFallback, input, language);
+  }
+  const dispatched = await dispatchSovereignBrainAction({
+    userId: memory.userId,
+    memory,
+    input,
+    history,
+    language,
+    response,
+    worldState,
+    resolverResult: params.resolverResult ?? null,
+    turnId: params.turnId,
+  });
+
+  return finalizeSovereignBrainResponse(dispatched, input, language);
+}
+
 // ─── Cérebro soberano — Fatia 2A/2B (atrás de GUTO_BRAIN_SLICE1) ───────────────
 // Possui conversa/emoção/identidade/fragilidade/retorno como acao:"none" e, na 2B,
 // execução de treino simples como acao:"updateWorkout". NÃO defere por risco: compõe
@@ -12405,12 +14427,13 @@ async function runSovereignBrainSlice1(params: {
 }
 
 app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision, async (req, res) => {
-  const { input, language, history, expectedResponse, turnId } = req.body as {
+  const { input, language, history, expectedResponse, turnId, profile: requestProfile } = req.body as {
     input?: string;
     language?: string;
     history?: GutoHistoryItem[];
     expectedResponse?: ExpectedResponse | null;
     turnId?: string;
+    profile?: Profile;
   };
 
   const userId = req.gutoUser!.userId;
@@ -12423,8 +14446,11 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
     });
   }
 
-  const memory = getMemory(userId);
+  let memory = getMemory(userId);
   const selectedLanguage = normalizeLanguage(language || memory.language || "pt-BR");
+  if (requestProfile && requestProfile.userId === userId) {
+    memory = mergeMemory({ ...requestProfile, userId }, selectedLanguage);
+  }
   const promptAtTurnStart = activeProactivePrompt(memory);
   if (promptAtTurnStart && promptAtTurnStart.kind !== "travel_training") {
     clearActiveProactivePrompt(memory);
@@ -12469,6 +14495,65 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
     foodRestrictions: memory.foodRestrictions,
   };
 
+  try {
+    await enrichPendingMemories(userId, memory.country || "", memory.countryCode, selectedLanguage).catch(() => {});
+    const resolverResult = await resolveProactiveMemoryActionFromUserReply(userId, input || "", selectedLanguage).catch(() => ({
+      engaged: false,
+      action: null,
+      reason: "resolver_error",
+    }) as ResolverResult);
+    const opCtx = getOperationalContext(new Date(), selectedLanguage);
+    const proactivityCtx = await buildProactivityContextBlock(userId, opCtx.weekday, selectedLanguage).catch(() => null);
+    const effectiveProactivityCtx = shouldDeferWeeklyOpeningForTurn(proactivityCtx, input || "")
+      ? null
+      : proactivityCtx;
+    const dailyPresenceContext = await buildDailyPresenceContext(memory, {
+      dateKey: todayKey(),
+      language: selectedLanguage,
+      allowExternalFetch: false,
+    }).catch(() => null);
+    const result = await runSovereignBrainTurn({
+      memory,
+      input: input || "",
+      history: history || [],
+      language: selectedLanguage,
+      expectedResponse: normalizeExpectedResponse(expectedResponse),
+      proactivityContext: effectiveProactivityCtx,
+      dailyPresenceContext,
+      operationalContext: opCtx,
+      resolverResult,
+      turnId,
+    });
+    return res.json(attachAvatarEmotion({
+      response: result,
+      memory: getMemory(userId),
+      context: opCtx,
+      input: input || "",
+    }));
+  } catch (e) {
+    console.error("Erro na rota /guto soberana:", e);
+    const fallbackMemory = mergeMemory(profile, selectedLanguage);
+    const fallbackContext = getOperationalContext(new Date(), selectedLanguage || fallbackMemory.language);
+    return res.json({
+      message: localizedHttpMessage("model_error", selectedLanguage || fallbackMemory.language),
+      ...attachAvatarEmotion({
+        response: assertAndRepairVisibleLanguage(
+          buildSovereignSafeFallback(selectedLanguage || fallbackMemory.language, "Falha técnica do fluxo soberano."),
+          selectedLanguage || fallbackMemory.language
+        ),
+        memory: fallbackMemory,
+        context: fallbackContext,
+        input: input || "",
+      }),
+    });
+  }
+
+  /*
+   * LEGADO /guto BYPASSADO:
+   * O fluxo principal retorna acima via runSovereignBrainTurn.
+   * O bloco abaixo continha resolvers L1 decisores, askGutoModel e pós-processadores
+   * que reescreviam fala; não participa mais da decisão do produto.
+   *
   // Run deterministic resolver in parallel with proactivity context build.
   // The resolver checks pending memories and decides action from user's text alone.
   let resolverResultForRoute: import("./src/proactivity/memory-action-resolver.js").ResolverResult = {
@@ -12703,6 +14788,7 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
       }),
     });
   }
+  */
 });
 
 app.post("/voz", requireActiveUser, async (req, res) => {
@@ -12805,35 +14891,32 @@ app.post("/guto-audio", requireActiveUser, upload.single("audio"), async (req, r
 
     const userId = req.gutoUser!.userId;
     const memory = getMemory(userId);
-    const profile = {
-      userId: memory.userId,
-      name: memory.name,
-      language: memory.language,
-      trainingGoal: memory.trainingGoal,
-      preferredTrainingLocation: memory.preferredTrainingLocation,
-      trainingPathology: memory.trainingPathology,
-      biologicalSex: memory.biologicalSex,
-      userAge: memory.userAge,
-      heightCm: memory.heightCm,
-      weightKg: memory.weightKg,
-      country: memory.country,
-      countryCode: memory.countryCode,
-      city: memory.city,
-      foodRestrictions: memory.foodRestrictions,
-    };
+    const selectedLanguage = normalizeLanguage(language || memory.language);
 
     const history = req.body.history ? JSON.parse(String(req.body.history)) : [];
     const expectedResponse = req.body.expectedResponse
       ? normalizeExpectedResponse(JSON.parse(String(req.body.expectedResponse)))
       : null;
 
-    const gutoData = await askGutoModel({
-      input: transcript,
-      language,
-      profile,
-      history,
-      expectedResponse,
-    });
+    const safetyPre = await enforceSafetyAndLimitationBeforeGates(transcript, memory, selectedLanguage);
+    const opCtx = getOperationalContext(new Date(), selectedLanguage);
+    const gutoData = safetyPre.acuteResponse
+      ? safetyPre.acuteResponse
+      : await runSovereignBrainTurn({
+          memory,
+          input: transcript,
+          history,
+          language: selectedLanguage,
+          expectedResponse,
+          proactivityContext: null,
+          dailyPresenceContext: await buildDailyPresenceContext(memory, {
+            dateKey: todayKey(),
+            language: selectedLanguage,
+            allowExternalFetch: false,
+          }).catch(() => null),
+          operationalContext: opCtx,
+          resolverResult: null,
+        });
 
     const fala = gutoData.fala?.trim();
     if (!fala) {
@@ -14344,7 +16427,15 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   res.status(500).json({ error: fallbackLine(language, "internal_error"), acao: "none", fala: fallbackLine(language, "internal_error") });
 });
 
-export { app, askGutoModel, applyMemoryPatch, invalidateDietIfNeeded, runSovereignBrainSlice1 };
+export {
+  app,
+  askGutoModel,
+  applyMemoryPatch,
+  invalidateDietIfNeeded,
+  runSovereignBrainSlice1,
+  runSovereignBrainTurn,
+  dispatchSovereignBrainAction,
+};
 
 if (process.env.GUTO_DISABLE_LISTEN !== "1") {
   app.listen(PORT, () => console.log(`🦾 GUTO ONLINE NA PORTA ${PORT}`));

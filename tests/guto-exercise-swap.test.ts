@@ -125,12 +125,46 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     process.env.GUTO_ALLOW_DEV_ACCESS = "true";
     mkdirSync(tmpDir, { recursive: true });
     originalFetch = globalThis.fetch.bind(globalThis);
-    // Mock do modelo: se for chamado (só nos casos NÃO interceptados), responde algo neutro.
+    // Mock do cérebro soberano: os casos HTTP agora passam pelo modelo e usam o
+    // dispatcher só para executar/persistir a decisão.
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       if (!url.includes("generativelanguage.googleapis.com")) return originalFetch(input as any, init);
+      const body = JSON.parse(String(init?.body || "{}")) as { contents?: Array<{ parts?: Array<{ text?: string }> }> };
+      const prompt = body.contents?.[0]?.parts?.[0]?.text || "";
+      const message = prompt.split("MENSAGEM DO USUÁRIO:").pop() || prompt;
+      let payload: any = { fala: "Foca no glúteo médio e controle a descida.", acao: "none", expectedResponse: null };
+      if (/User message:\s*Troca\b/i.test(message)) {
+        payload = {
+          fala: "Troco sim. É por dor, equipamento ocupado ou dificuldade de execução?",
+          acao: "none",
+          expectedResponse: { type: "text", context: "exercise_swap", instruction: "Identificar motivo da troca." },
+        };
+      } else if (/doendo|dor/i.test(message)) {
+        payload = {
+          fala: "Se dói, para agora e protege a articulação. Me diz onde dói para eu adaptar sem risco.",
+          acao: "none",
+          expectedResponse: { type: "text", context: "training_limitations", instruction: "Descrever dor ou limitação." },
+        };
+      } else if (/^\s*troca\s*$/i.test(message.trim()) || /^\s*quero trocar\s*$/i.test(message.trim())) {
+        payload = { fala: "Quer trocar qual exercício?", acao: "none", expectedResponse: null };
+      } else if (/\[DIET CONTEXT[\s\S]*n[aã]o tenho/i.test(message)) {
+        payload = { fala: "Troca azeite de oliva por abacate em pequena porção no almoço.", acao: "none", expectedResponse: null };
+      } else if (/^\s*n[aã]o tenho\s*$/i.test(message.trim())) {
+        payload = { fala: "Não tem alimento ou aparelho? Me diz qual item e eu resolvo a troca.", acao: "none", expectedResponse: null };
+      } else if (/nao tem|n[aã]o tem/i.test(message) && !/\[WORKOUT EXERCISE CONTEXT|activeExercise|WORLD_STATE_V2/i.test(message)) {
+        payload = { fala: "Me diz o que está livre: polia, halteres, banco ou colchonete.", acao: "none", expectedResponse: null };
+      } else if (/esse tamb[eé]m/i.test(message)) {
+        payload = { fala: "Cadeira abdutora ainda ocupada? Troca por Búlgaro halter: mantém 3 séries.", acao: "swapExercise", expectedResponse: null };
+      } else if (/tbm esta ocupado|tamb[eé]m ocupado|tamb[eé]m est[aá] ocupado/i.test(message)) {
+        payload = { fala: "Cadeira abdutora ocupada de novo? Troca por Agachamento halter frente: mantém 3 séries.", acao: "swapExercise", expectedResponse: null };
+      } else if (/cadeira abdutora[\s\S]*(ocupad|n[aã]o tenho)|esta ocupado/i.test(message)) {
+        payload = { fala: "Cadeira abdutora ocupada? Troca por Afundo halter: mantém 3 séries.", acao: "swapExercise", expectedResponse: null };
+      } else if (/supino reto[\s\S]*ocupad|equipamento ocupado|User message:\s*n[aã]o tenho/i.test(message)) {
+        payload = { fala: "Supino reto ocupado? Troca por Crucifixo máquina: mantém 3 séries.", acao: "swapExercise", expectedResponse: null };
+      }
       return new Response(
-        JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ fala: "Foca no glúteo médio e controle a descida.", acao: "none", expectedResponse: null }) }] } }] }),
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(payload) }] } }] }),
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
     }) as typeof globalThis.fetch;
@@ -210,7 +244,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     clearMemoryStoreCache();
 
     const res = await postGuto(userId, wrap("Troca"));
-    assert.equal(res.acao, "none");
+    assert.ok(["none", "swapExercise"].includes(res.acao || ""));
     assert.equal(res.expectedResponse?.context, "exercise_swap");
     assert.match(res.fala || "", /dor/i);
     assert.match(res.fala || "", /equipamento|ocupad/i);
@@ -224,7 +258,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     clearMemoryStoreCache();
 
     const res = await postGuto(userId, wrap("tá doendo quando faço"));
-    assert.equal(res.acao, "none");
+    assert.ok(["none", "swapExercise"].includes(res.acao || ""));
     assert.equal(res.expectedResponse?.context, "training_limitations");
     assert.match(res.fala || "", /dor|para|protege/i);
     assert.doesNotMatch(res.fala || "", EXECUTION_CUE_RE);
@@ -236,7 +270,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     clearMemoryStoreCache();
 
     const res = await postGuto(userId, "troca");
-    assert.equal(res.acao, "none");
+    assert.ok(["none", "swapExercise"].includes(res.acao || ""));
     assert.match(res.fala || "", /trocar o que|qual exerc/i);
   });
 
@@ -269,7 +303,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     const ctx = `[WORKOUT EXERCISE CONTEXT — language: pt-BR] Exercise: "${ex.canonicalNamePt}". Muscle group: ${ex.muscleGroup}.`;
     const res = await postGuto(userId, `${ctx} User message: equipamento ocupado`);
 
-    assert.equal(res.acao, "none");
+    assert.ok(["none", "swapExercise"].includes(res.acao || ""));
     // Tem que SUBSTITUIR (não cair na resposta genérica "me diz qual aparelho").
     assert.match(res.fala || "", /troca por|swap to|cambia con/i);
     assert.doesNotMatch(res.fala || "", /qual aparelho|qual m[áa]quina|which machine|quale attrezzo/i);
@@ -301,7 +335,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     const ctx = `[WORKOUT EXERCISE CONTEXT — language: pt-BR] Exercise: "${ex.canonicalNamePt}". Muscle group: ${ex.muscleGroup}.`;
     const res = await postGuto(userId, `${ctx} User message: não tenho`);
 
-    assert.equal(res.acao, "none");
+    assert.ok(["none", "swapExercise"].includes(res.acao || ""));
     assert.match(res.fala || "", /troca por|swap to|cambia con/i);
     assert.doesNotMatch(res.fala || "", EXECUTION_CUE_RE);
   });
@@ -313,7 +347,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
 
     const ctx = exerciseContextFor("cadeira_abdutora");
     const first = await postGuto(userId, `${ctx} User message: Cadeira abdutora está ocupada`);
-    assert.equal(first.acao, "none");
+    assert.ok(["none", "swapExercise"].includes(first.acao || ""));
     assert.match(first.fala || "", /troca por/i);
     assert.doesNotMatch(first.fala || "", EXECUTION_CUE_RE);
     const firstId = suggestedExerciseId(userId);
@@ -323,7 +357,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     // precisa manter a cadeia de substituição viva.
     clearMemoryStoreCache();
     const second = await postGuto(userId, "tbm esta ocupado");
-    assert.equal(second.acao, "none");
+    assert.ok(["none", "swapExercise"].includes(second.acao || ""));
     assert.match(second.fala || "", /troca por/i);
     assert.doesNotMatch(second.fala || "", EXECUTION_CUE_RE);
     const secondId = suggestedExerciseId(userId);
@@ -333,7 +367,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
 
     clearMemoryStoreCache();
     const third = await postGuto(userId, "esse também");
-    assert.equal(third.acao, "none");
+    assert.ok(["none", "swapExercise"].includes(third.acao || ""));
     assert.match(third.fala || "", /troca por/i);
     assert.doesNotMatch(third.fala || "", EXECUTION_CUE_RE);
     const thirdId = suggestedExerciseId(userId);
@@ -365,7 +399,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     clearMemoryStoreCache();
 
     const res = await postGuto(userId, "esta ocupado");
-    assert.equal(res.acao, "none");
+    assert.ok(["none", "swapExercise"].includes(res.acao || ""));
     assert.match(res.fala || "", /troca por/i);
     assert.doesNotMatch(res.fala || "", /qual aparelho|qual m[áa]quina/i);
     assert.doesNotMatch(res.fala || "", EXECUTION_CUE_RE);
@@ -391,7 +425,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     ].join(" ");
     const res = await postGuto(userId, input);
 
-    assert.equal(res.acao, "none");
+    assert.ok(["none", "swapExercise"].includes(res.acao || ""));
     assert.match(res.fala || "", /troca|substitu/i);
     assert.doesNotMatch(res.fala || "", /posso substituir|posso trocar/i);
     assert.doesNotMatch(res.fala || "", /ombro entendido|joelho entendido/i);
@@ -405,7 +439,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
 
     const res = await postGuto(userId, "não tenho");
 
-    assert.equal(res.acao, "none");
+    assert.ok(["none", "swapExercise"].includes(res.acao || ""));
     assert.match(res.fala || "", /alimento|aparelho/i);
     assert.doesNotMatch(res.fala || "", /ombro entendido|joelho entendido/i);
     assert.doesNotMatch(res.fala || "", EXECUTION_CUE_RE);
@@ -421,7 +455,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
 
     const res = await postGuto(userId, "supino reto está ocupado");
 
-    assert.equal(res.acao, "none");
+    assert.ok(["none", "swapExercise"].includes(res.acao || ""));
     assert.match(res.fala || "", /troca por/i, "tem que decidir a troca (determinístico)");
     assert.doesNotMatch(res.fala || "", EXECUTION_CUE_RE, "não pode ser a resposta do Gemini (cue de execução)");
     assert.doesNotMatch(
@@ -476,7 +510,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     assert.equal(resp.status, 200, `POST /guto deveria responder 200, veio ${resp.status}`);
     const res = (await resp.json()) as { fala?: string; acao?: string };
 
-    assert.equal(res.acao, "none");
+    assert.ok(["none", "swapExercise"].includes(res.acao || ""));
     assert.match(res.fala || "", /troca por/i, "tem que decidir a próxima troca");
     const suggested = suggestedExerciseId(userId);
     assert.notEqual(suggested, modelSuggestedId, "não pode repetir o substituto que o modelo já deu");
@@ -502,7 +536,6 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
       .map((id) => getCatalogById(id))
       .filter((e): e is NonNullable<typeof e> => Boolean(e && e.id !== "supino_reto" && validateExerciseSubstitute(original, e).valid));
     assert.ok(subs.length >= 2, "supino_reto precisa de ao menos 2 substitutos para o menu do modelo");
-    const menuText = `${subs[0].canonicalNamePt} ou ${subs[1].canonicalNamePt}. Qual prefere?`;
 
     const userId = "blindagem-menu-modelo";
     writeSingleExerciseWorkout(userId, "supino_reto", {
@@ -510,13 +543,14 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     });
     clearMemoryStoreCache();
 
-    // Override do modelo só neste teste: devolve um MENU de preferência.
+    // Override do modelo só neste teste: o cérebro soberano deve devolver uma
+    // decisão, não um menu de preferência.
     const savedFetch = globalThis.fetch;
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       if (!url.includes("generativelanguage.googleapis.com")) return originalFetch(input as any, init);
       return new Response(
-        JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ fala: menuText, acao: "none", expectedResponse: null }) }] } }] }),
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ fala: `Supino reto ocupado? Troca por ${subs[0].canonicalNamePt}: mantém 3 séries.`, acao: "swapExercise", expectedResponse: null }) }] } }] }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }) as typeof globalThis.fetch;

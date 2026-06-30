@@ -65,8 +65,8 @@ export interface ReducedWorldState {
 
 /**
  * Ação estrutural do turno. Compatível com o campo `acao` (Acao) do GutoModelResponse.
- * A Fatia 1 só DECIDE 'none' (turno conversacional simples); as demais existem apenas
- * para serem RECONHECIDAS e retornarem validation:'defer' (caem na escada antiga).
+ * No fluxo soberano V2, todas estas ações são responsabilidade do cérebro; módulos
+ * abaixo dele apenas executam/validam.
  */
 export type TurnAcao =
   | "none"
@@ -98,9 +98,10 @@ export interface PublicTurnResponse {
   avatarEmotion?: string;
   workoutPlan?: unknown | null;
   memoryPatch?: Record<string, unknown> | null;
+  proactiveMemoryAction?: Record<string, unknown> | null;
 }
 
-/** Resultado da decisão: 'ok' => usar response; 'defer' => cair na escada antiga (askGutoModel). */
+/** Resultado da decisão: 'ok' => usar response; 'defer' => fallback seguro estruturado. */
 export type TurnValidation = "ok" | "defer";
 
 /**
@@ -113,7 +114,7 @@ export interface TurnMeta {
   /** Por que o cérebro decidiu assim (texto interno; nunca vai ao usuário). */
   reasoning?: string;
   /** Origem da decisão. */
-  via: "sovereign_brain_slice1";
+  via: "sovereign_brain_slice1" | "sovereign_brain_v2";
   /** Houve chamada governada ao modelo neste turno? */
   modelCalled: boolean;
   /** Persistência honesta: true só se realmente gravou (commit 5). */

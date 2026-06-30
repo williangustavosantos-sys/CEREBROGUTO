@@ -66,8 +66,8 @@ function installGeminiMock() {
     }
 
     const prompt = extractPrompt(init);
-    const isBrainTurn = prompt.includes("Mensagem atual do usuário");
-    const inputMatch = prompt.match(/Mensagem atual do usuário: (.*)/);
+    const isBrainTurn = prompt.includes("CÉREBRO SOBERANO V2");
+    const inputMatch = prompt.match(/MENSAGEM DO USUÁRIO:\s*([\s\S]*)$/);
     const inputMsg = inputMatch ? inputMatch[1].trim().toLowerCase() : "";
 
     if (isBrainTurn && inputMsg.includes("dor nas pernas")) {

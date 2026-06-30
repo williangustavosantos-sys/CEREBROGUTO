@@ -149,7 +149,7 @@ describe("Golden Transcripts — Fatia 1 do Cérebro Soberano", () => {
   beforeEach(() => {
     modelCallCount = 0;
     stubPayload = { flag: null, confidence: 0, fala: MARKER, acao: "none", expectedResponse: null };
-    setBrainSlice1(false); // estado padrão = legado; cada GT liga explicitamente se precisar
+    setBrainSlice1(false); // flag legada não desliga mais o cérebro principal
   });
 
   after(async () => {
@@ -158,20 +158,17 @@ describe("Golden Transcripts — Fatia 1 do Cérebro Soberano", () => {
     rmSync(file, { force: true });
   });
 
-  // ─── GT-1 — Flag OFF mantém o legado ───────────────────────────────────────
-  describe("GT-1 — flag OFF mantém o legado", () => {
-    it("flag OFF: o cérebro NÃO intercepta — resposta vem do legado (askGutoModel)", async () => {
+  // ─── GT-1 — Flag OFF não reativa o legado ──────────────────────────────────
+  describe("GT-1 — flag OFF não reativa o legado", () => {
+    it("flag OFF: resposta vem do cérebro soberano principal", async () => {
       setBrainSlice1(false);
       seed("gt1-off");
       const { status, body } = await chat("gt1-off", "queria só te agradecer pela parceria de hoje", "gt1-fixed-turn");
 
       assert.equal(status, 200);
-      // Legado roda o pipeline completo: askGutoModel re-classifica risco + brain +
-      // classifyContractIntent. São MAIS chamadas que o cérebro puro (que faria 2).
-      assert.ok(modelCallCount > 2, `legado deveria fazer >2 chamadas, fez ${modelCallCount}`);
-      // Mesmo no legado, nenhum marcador interno do cérebro pode aparecer.
+      assert.equal(modelCallCount, 2, "flag OFF não reativa askGutoModel; só risk + brain");
       for (const k of ["validation", "meta", "via", "modelCalled", "persisted"]) {
-        assert.ok(!(k in body), `body legado não pode conter '${k}'`);
+        assert.ok(!(k in body), `body não pode conter '${k}'`);
       }
     });
 
@@ -182,7 +179,7 @@ describe("Golden Transcripts — Fatia 1 do Cérebro Soberano", () => {
       seed("gt1-snap"); // reseta o mesmo estado inicial
       const b = await chat("gt1-snap", "obrigado guto, tô gostando muito da nossa parceria", "gt1-snap-turn");
 
-      // turnId fixo + exclusão de createdAt/turnDecision → o legado é estável.
+      // turnId fixo + exclusão de createdAt/turnDecision → o fluxo soberano é estável.
       assert.deepEqual(stripUnstable(a.body), stripUnstable(b.body));
     });
   });
@@ -223,20 +220,20 @@ describe("Golden Transcripts — Fatia 1 do Cérebro Soberano", () => {
     });
   });
 
-  // ─── GT-3 — Forma inválida / ação complexa → defer ─────────────────────────
-  describe("GT-3 — forma inválida / ação complexa → defer", () => {
-    it("ação complexa (updateWorkout): cérebro defere e o legado assume", async () => {
+  // ─── GT-3 — Forma inválida / ações ampliadas ───────────────────────────────
+  describe("GT-3 — forma inválida / ações ampliadas", () => {
+    it("ação updateWorkout: cérebro executa e não chama legado", async () => {
       setBrainSlice1(true);
       stubPayload = { flag: null, confidence: 0, fala: "vou montar", acao: "updateWorkout", expectedResponse: null };
       seed("gt3-complex");
-      const { status } = await chat("gt3-complex", "guto, atualiza meu treino de hoje");
+      const { status, body } = await chat("gt3-complex", "guto, atualiza meu treino de hoje");
 
       assert.equal(status, 200);
-      // Defer → cai no askGutoModel legado → MAIS chamadas que o cérebro puro (2).
-      assert.ok(modelCallCount > 2, `defer deveria cair no legado (>2 chamadas), fez ${modelCallCount}`);
+      assert.equal(body.acao, "updateWorkout");
+      assert.ok(modelCallCount >= 2, "cérebro chamou risk + brain e executor pode chamar curador");
     });
 
-    it("validateContract: forma inválida (fala vazia) → defer; ação complexa → defer; nunca persiste pelo cérebro", () => {
+    it("validateContract: forma inválida → defer; ações soberanas ampliadas → ok", () => {
       // Contrato de FORMA (função pura) — o juiz determinístico do que a Fatia 1 aceita.
       const valida = validateContract({ fala: "bora", acao: "none", expectedResponse: null });
       assert.equal(valida.validation, "ok");
@@ -245,24 +242,26 @@ describe("Golden Transcripts — Fatia 1 do Cérebro Soberano", () => {
       assert.equal(falaVazia.ok, false);
       assert.equal(falaVazia.validation, "defer");
 
-      // 2B: updateWorkout passou a ser SUPORTADO (execução no server); dieta/swap deferem.
       const treino = validateContract({ fala: "bora, peito hoje", acao: "updateWorkout", expectedResponse: null });
       assert.equal(treino.validation, "ok");
-      const complexa = validateContract({ fala: "vou montar tua dieta", acao: "generateDiet", expectedResponse: null });
-      assert.equal(complexa.validation, "defer");
+      const dieta = validateContract({ fala: "vou montar tua dieta", acao: "generateDiet", expectedResponse: null });
+      assert.equal(dieta.validation, "ok");
+      const swap = validateContract({ fala: "troca por leg press", acao: "swapExercise", expectedResponse: null });
+      assert.equal(swap.validation, "ok");
 
       const metaLeak = validateContract({ fala: "oi", acao: "none", expectedResponse: null, via: "x" });
       assert.equal(metaLeak.ok, false, "chave de meta no payload reprova (LEI 11)");
     });
 
-    it("forma inválida no fluxo real: modelo devolve fala vazia → cérebro defere ao legado", async () => {
+    it("forma inválida no fluxo real: modelo devolve fala vazia → fallback seguro sem legado", async () => {
       setBrainSlice1(true);
       stubPayload = { flag: null, confidence: 0, fala: "", acao: "none", expectedResponse: null };
       seed("gt3-invalid");
-      const { status } = await chat("gt3-invalid", "guto, e ai, como vai voce hoje");
+      const { status, body } = await chat("gt3-invalid", "guto, e ai, como vai voce hoje");
 
       assert.equal(status, 200);
-      assert.ok(modelCallCount > 2, `forma inválida deveria deferir ao legado (>2 chamadas), fez ${modelCallCount}`);
+      assert.equal(modelCallCount, 2, "forma inválida não reativa askGutoModel");
+      assert.equal(body.acao, "none");
     });
   });
 

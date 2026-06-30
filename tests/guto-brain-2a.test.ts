@@ -116,13 +116,13 @@ describe("Fatia 2A — cérebro possui conversa/emoção/identidade (arquitetura
     assert.equal(callsByKind.contractIntent || 0, 0, "cérebro possui: legado (contractIntent) não roda");
   });
 
-  it("flag OFF: legado NÃO recebe a diretriz 2A (buildGutoBrainPrompt intocado)", async () => {
+  it("flag OFF: fluxo soberano continua principal e recebe a diretriz 2A", async () => {
     setBrainSlice1(false);
     seed("dir-off");
     const { status } = await chat("dir-off", "valeu guto, parceria firme");
     assert.equal(status, 200);
-    assert.ok(lastBrainBody.length > 0, "o legado também monta um brain prompt");
-    assert.ok(!lastBrainBody.includes(DIRECTIVE_MARKER), "a diretriz 2A NÃO pode aparecer no prompt legado");
+    assert.ok(lastBrainBody.includes(DIRECTIVE_MARKER), "a flag não desliga mais o cérebro principal");
+    assert.equal(callsByKind.contractIntent || 0, 0, "flag OFF não reativa o parlamento legado");
   });
 
   it("flag ON + risco ativo: cérebro POSSUI e compõe SAFETY_OVERRIDE (não defere, sem resposta dupla)", async () => {
@@ -138,22 +138,23 @@ describe("Fatia 2A — cérebro possui conversa/emoção/identidade (arquitetura
     for (const k of META_KEYS) assert.ok(!(k in body), `meta não pode vazar: ${k}`);
   });
 
-  it("flag OFF + risco ativo: legado assume (paridade — SAFETY_OVERRIDE pelo askGutoModel)", async () => {
+  it("flag OFF + risco ativo: cérebro soberano ainda assume com SAFETY_OVERRIDE", async () => {
     setBrainSlice1(false);
     stubPayload = { flag: "suicide_self_harm", confidence: 0.95, fala: MARKER, acao: "none", expectedResponse: null };
     seed("risk-off");
     const { status } = await chat("risk-off", "não aguento mais nada, queria sumir");
     assert.equal(status, 200);
-    // Legado clássico: askGutoModel roda classifyContractIntent.
-    assert.ok((callsByKind.contractIntent || 0) >= 1, "flag OFF mantém o legado (contractIntent roda)");
+    assert.equal(callsByKind.contractIntent || 0, 0, "flag OFF não reativa askGutoModel");
+    assert.ok(lastBrainBody.includes(SAFETY_MARKER), "risco continua como override no cérebro soberano");
   });
 
-  it("flag ON + turno que EXIGE treino → defere ao legado (acao != none)", async () => {
+  it("turno que EXIGE treino → cérebro executa sem legado", async () => {
     setBrainSlice1(true);
     stubPayload = { flag: null, confidence: 0, fala: "bora montar", acao: "updateWorkout", expectedResponse: null };
     seed("train-on");
-    const { status } = await chat("train-on", "guto, monta meu treino de hoje");
+    const { status, body } = await chat("train-on", "guto, monta meu treino de hoje");
     assert.equal(status, 200);
-    assert.ok((callsByKind.contractIntent || 0) >= 1, "treino real defere ao legado");
+    assert.equal(body.acao, "updateWorkout");
+    assert.equal(callsByKind.contractIntent || 0, 0, "treino não defere ao legado");
   });
 });

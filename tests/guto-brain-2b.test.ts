@@ -110,13 +110,14 @@ describe("Fatia 2B — cérebro possui updateWorkout (execução de treino)", ()
     rmSync(file, { force: true });
   });
 
-  it("flag OFF: updateWorkout continua legado (askGutoModel/contractIntent)", async () => {
+  it("flag OFF: updateWorkout continua no fluxo soberano principal", async () => {
     setBrainSlice1(false);
     seed("2b-off");
     const { status, body } = await chat("2b-off", "bora treinar");
     assert.equal(status, 200);
-    assert.ok((callsByKind.contractIntent || 0) >= 1, "flag OFF mantém o legado");
-    assert.ok(!lastBrainBody.includes(KNOWN_MARKER), "legado não recebe a diretriz 2A/2B");
+    assert.equal(body.acao, "updateWorkout");
+    assert.equal(callsByKind.contractIntent || 0, 0, "flag OFF não reativa askGutoModel");
+    assert.ok(lastBrainBody.includes(KNOWN_MARKER), "prompt soberano recebe dados conhecidos");
   });
 
   it("perfil completo + updateWorkout → cérebro EXECUTA (sem askGutoModel) e preserva a fala", async () => {
@@ -145,12 +146,14 @@ describe("Fatia 2B — cérebro possui updateWorkout (execução de treino)", ()
     assert.equal(body.acao, "updateWorkout");
   });
 
-  it("perfil INCOMPLETO + updateWorkout → defer ao legado (não executa às cegas)", async () => {
+  it("perfil INCOMPLETO + updateWorkout → não executa às cegas e não cai no legado", async () => {
     setBrainSlice1(true);
     seed("2b-incompleto", { trainingLimitations: "", trainingStatus: "", userAge: undefined });
-    const { status } = await chat("2b-incompleto", "bora treinar");
+    const { status, body } = await chat("2b-incompleto", "bora treinar");
     assert.equal(status, 200);
-    assert.ok((callsByKind.contractIntent || 0) >= 1, "perfil incompleto → defer ao legado");
+    assert.equal(body.acao, "none");
+    assert.equal(callsByKind.contractIntent || 0, 0, "perfil incompleto não reativa legado");
+    assert.ok(!body.workoutPlan, "não executa treino sem campos mínimos");
   });
 
   it("perfil INCOMPLETO + cérebro pergunta (acao:none) → possui, sem template legado", async () => {
@@ -180,14 +183,13 @@ describe("Fatia 2B — cérebro possui updateWorkout (execução de treino)", ()
     assert.equal(mem.trainingLimitations, "dor no joelho", "limitação preservada na memória");
   });
 
-  it("ação fora de escopo (generateDiet) → cérebro NÃO executa (defer)", async () => {
+  it("generateDiet → não vira treino e não cai no legado", async () => {
     setBrainSlice1(true);
     stubPayload = { flag: null, confidence: 0, fala: "vou montar tua dieta", acao: "generateDiet", expectedResponse: null };
     seed("2b-diet");
     const { status, body } = await chat("2b-diet", "monta minha dieta");
     assert.equal(status, 200);
-    // 2B só executa updateWorkout. generateDiet defere (validateContract) → tratado
-    // fora do cérebro (gate de dieta ou askGutoModel) — nunca executa treino.
+    assert.equal(callsByKind.contractIntent || 0, 0, "generateDiet não cai no askGutoModel");
     assert.ok(!(body.acao === "updateWorkout" && body.workoutPlan), "o cérebro NÃO pode executar treino para um pedido de dieta");
   });
 });

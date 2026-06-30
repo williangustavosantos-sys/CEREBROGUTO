@@ -118,10 +118,7 @@ export function validateContract(raw: unknown): ContractValidationResult {
   }
 
   const ok = errors.length === 0;
-  // Fatia 1: só "none". Fatia 2B: "updateWorkout" também é suportado (execução de
-  // treino simples). Demais acoes (swap/diet/proativo/coach) ainda caem no legado.
-  const SUPPORTED = new Set<string>(["none", "updateWorkout"]);
-  const validation: TurnValidation = ok && SUPPORTED.has(String(r.acao)) ? "ok" : "defer";
+  const validation: TurnValidation = ok && VALID_ACOES.has(String(r.acao)) ? "ok" : "defer";
 
   return { ok, errors, validation };
 }
