@@ -12095,12 +12095,141 @@ QUANDO o usuário PEDIR explicitamente treino, dieta, troca de exercício ou aç
 `.trim();
 }
 
-// ─── Cérebro soberano — Fatia 2A (atrás de GUTO_BRAIN_SLICE1) ──────────────────
-// Possui conversa/emoção/identidade/fragilidade/retorno como acao:"none". NÃO
-// defere mais por risco: compõe a segurança no PRÓPRIO call via riskOverride (mesmo
-// SAFETY_OVERRIDE do legado). Só defere quando o turno EXIGE treino/dieta/swap/
-// proatividade (acao != "none"). Retorna a resposta PÚBLICA (contract.response) ou
-// null para deferir. meta/validation NUNCA saem daqui.
+// ─── Executor de treino do cérebro soberano (Fatia 2B) ────────────────────────
+// EXECUTOR puro: o cérebro JÁ decidiu (fala + acao:"updateWorkout"); aqui só geramos
+// o plano e persistimos. Reusa as MESMAS primitivas do legado (curador → fallback
+// determinístico → segurança → volume → nível → progressão → dedupe → validação),
+// mantendo o legado intocado (flag OFF byte-idêntica). Sem dailyPresence (suprimido
+// no caminho do cérebro na 2A). NÃO substitui a fala do cérebro. Retorna o plano
+// oficial (já gravado em memory.lastWorkoutPlan) ou null se falhar (→ defer honesto).
+async function generateAndCommitBrainWorkout(
+  memory: GutoMemory,
+  language: GutoLanguage,
+  focusHint: WorkoutFocus | string | undefined
+): Promise<WorkoutPlan | null> {
+  const semanticFocus: WorkoutFocus = chooseNextWorkoutFocus(memory, (focusHint || memory.nextWorkoutFocus) as WorkoutFocus | undefined);
+  const baseLocationRaw = memory.preferredTrainingLocation || memory.trainingLocation || "casa";
+  const locationRaw = getWeatherAdjustedTrainingLocation(memory, baseLocationRaw, null);
+  const locationMode = getLocationMode(locationRaw) as CuratorLocationMode;
+  const conservativeTraining = shouldEnterConservativeMode(memory.resolvedFields, "training");
+
+  const curated = await curateWorkout(
+    {
+      name: memory.name || (memory as any).preferredName || "Aluno",
+      age: memory.userAge,
+      heightCm: memory.heightCm,
+      weightKg: memory.weightKg,
+      pathology: conservativeTraining
+        ? `${memory.trainingLimitations || memory.trainingPathology || ""}; unclear limitation — use conservative low-impact choices`
+        : memory.trainingLimitations || memory.trainingPathology || undefined,
+      foodRestrictions: memory.foodRestrictions,
+      goal: memory.trainingGoal,
+      level: [resolveTrainingLevel(memory.trainingLevel, memory.trainingStatus), memory.trainingStatus].filter(Boolean).join(" — "),
+      lastWeekFeedback: summarizeWorkoutFeedback(memory.workoutFeedbackHistory) || (memory as any).lastWeekFeedback,
+      focus: semanticFocus,
+      location: locationMode,
+      recentTrainingHistory: (memory.recentTrainingHistory || []).slice(0, 14).map((h: any) => ({
+        date: h.date || h.dateLabel || "recent",
+        exerciseIds: Array.isArray(h.exerciseIds) ? h.exerciseIds : [],
+      })),
+      language: language as "pt-BR" | "en-US" | "it-IT",
+    },
+    { apiKey: GEMINI_API_KEY, model: GEMINI_MODEL, timeoutMs: 18_000 }
+  );
+
+  let workoutPlan: WorkoutPlan | null = null;
+  if (curated && curated.exercises.length > 0) {
+    const hydrated = hydrateCuratedExercises(curated.exercises, language as "pt-BR" | "en-US" | "it-IT");
+    if (hydrated.length > 0) {
+      workoutPlan = {
+        focus: curated.summary ? curated.summary.split(".")[0] : localizeMuscleGroup(semanticFocus, language),
+        focusKey: semanticFocus,
+        locationMode,
+        dateLabel: getWorkoutDateLabel(language, new Date()),
+        scheduledFor: new Date().toISOString(),
+        summary: curated.summary || "",
+        exercises: hydrated as any,
+      } as WorkoutPlan;
+    }
+  }
+  if (!workoutPlan) {
+    workoutPlan = {
+      ...buildWorkoutPlanFromSemanticFocus({
+        language,
+        location: locationRaw,
+        status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
+        limitation: memory.trainingLimitations || memory.trainingPathology || "sem dor",
+        age: memory.userAge ?? memory.trainingAge,
+        scheduleIntent: memory.trainingSchedule,
+        focus: semanticFocus,
+        trainingGoal: memory.trainingGoal,
+      }),
+      locationMode,
+    };
+  }
+
+  workoutPlan = safetyFilterWorkoutPlan(workoutPlan, memory);
+  workoutPlan = enforceMinimumWorkoutVolume(workoutPlan, { focus: semanticFocus, locationMode, language, memory });
+  workoutPlan = applyLevelStructure(workoutPlan as any, {
+    level: memory.trainingLevel,
+    status: memory.trainingStatus,
+    goal: memory.trainingGoal,
+    hasLimitation: Boolean(deriveBodyRegionFromPathology(memory)),
+    language: language as WorkoutLanguage,
+  }) as WorkoutPlan;
+  workoutPlan = applyWorkoutProgression(workoutPlan, memory.workoutFeedbackHistory, language as CatalogLanguage) as WorkoutPlan;
+  workoutPlan = dedupeAndRepairWorkoutPlan(workoutPlan, { focus: semanticFocus, locationMode, language });
+  const proactiveAdaptation = getAdaptationForDate(memory, todayKey());
+  workoutPlan = applyProactiveWorkoutAdaptation(workoutPlan, proactiveAdaptation, language);
+
+  const pv = validateWorkoutPlan(workoutPlan, memory.recentTrainingHistory || [], locationMode);
+  if (!pv.valid) {
+    const repairLocation = locationMode === "gym" ? "academia" : "casa";
+    let repairedPlan = dedupeAndRepairWorkoutPlan(
+      safetyFilterWorkoutPlan(buildWorkoutPlanFromSemanticFocus({
+        language,
+        location: repairLocation,
+        status: memory.trainingStatus || memory.trainingLevel || focusToStatusHint(semanticFocus),
+        limitation: memory.trainingLimitations || memory.trainingPathology || "",
+        focus: semanticFocus,
+        scheduleIntent: memory.trainingSchedule || "today",
+      }), memory),
+      { focus: semanticFocus, locationMode: getLocationMode(repairLocation) as CuratorLocationMode, language }
+    );
+    repairedPlan = applyProactiveWorkoutAdaptation(repairedPlan, proactiveAdaptation, language);
+    const repairedValidation = validateWorkoutPlan(repairedPlan, memory.recentTrainingHistory || [], getLocationMode(repairLocation) as CuratorLocationMode);
+    workoutPlan = repairedValidation.valid ? repairedPlan : null;
+  }
+  if (!workoutPlan) return null;
+
+  // Finalização + persistência (espelha o legado 10857-10888): segurança final,
+  // respeito a treino travado pelo coach, grava o plano oficial e commita.
+  workoutPlan = applyProactiveWorkoutAdaptation(workoutPlan, getAdaptationForDate(memory, todayKey()), language);
+  workoutPlan = safetyFilterWorkoutPlan(workoutPlan, memory);
+  const lockedOfficialPlan = isCoachLockedWorkout(memory.lastWorkoutPlan) ? memory.lastWorkoutPlan : null;
+  const officialPlan = lockedOfficialPlan || markGutoGeneratedWorkout(workoutPlan, language as CatalogLanguage);
+  memory.lastWorkoutPlan = officialPlan;
+  if (officialPlan.focusKey) {
+    memory.lastSuggestedFocus = officialPlan.focusKey as WorkoutFocus;
+    memory.nextWorkoutFocus = officialPlan.focusKey as WorkoutFocus;
+  }
+  memory.dietGenerationStatus = "ready_to_generate";
+  appendMemoryAudit(
+    memory,
+    "workout_generated",
+    ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus", "dietGenerationStatus"],
+    lockedOfficialPlan ? "Treino manual do coach preservado (cérebro 2B)." : "Treino oficial gerado pelo cérebro soberano (2B)."
+  );
+  commitMemoryDecision(memory);
+  return officialPlan;
+}
+
+// ─── Cérebro soberano — Fatia 2A/2B (atrás de GUTO_BRAIN_SLICE1) ───────────────
+// Possui conversa/emoção/identidade/fragilidade/retorno como acao:"none" e, na 2B,
+// execução de treino simples como acao:"updateWorkout". NÃO defere por risco: compõe
+// a segurança no PRÓPRIO call via riskOverride (mesmo SAFETY_OVERRIDE do legado). Só
+// defere quando o turno EXIGE dieta/swap/proatividade ou perfil incompleto/exec falha.
+// Retorna a resposta PÚBLICA (contract.response) ou null para deferir.
 // `decide`/`classifyRiskFn` são injetáveis só para teste; produção usa os reais.
 async function runSovereignBrainSlice1(params: {
   memory: GutoMemory;
@@ -12210,7 +12339,22 @@ async function runSovereignBrainSlice1(params: {
   const contract = await decide({ worldState, input, history: brainHistory }, deps);
   if (contract.validation !== "ok") return null;
   // SOMENTE contract.response segue adiante — meta/validation ficam retidos aqui (LEI 11).
-  return contract.response as unknown as GutoModelResponse;
+  const response = contract.response as unknown as GutoModelResponse;
+
+  // ─── Fatia 2B: execução de treino governada pelo cérebro ────────────────────
+  // O cérebro decidiu fala + acao:"updateWorkout". Aqui o EXECUTOR gera o plano e
+  // persiste — a fala do cérebro é PRESERVADA. Sem askGutoModel, sem template legado.
+  if (response.acao === "updateWorkout") {
+    // Perfil incompleto: o cérebro deveria ter perguntado na própria voz (acao:none,
+    // 2A). Se mesmo assim pediu treino, não executamos às cegas → defer honesto.
+    if (worldState.missingFields.length > 0) return null;
+    const focusHint = (response.memoryPatch as { nextWorkoutFocus?: string } | undefined)?.nextWorkoutFocus;
+    const plan = await generateAndCommitBrainWorkout(memory, language, focusHint);
+    if (!plan) return null; // executor falhou → defer ao legado (rede de segurança)
+    response.workoutPlan = plan;
+    response.expectedResponse = null; // treino nunca pergunta (paridade com o legado)
+  }
+  return response;
 }
 
 app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision, async (req, res) => {
@@ -12409,16 +12553,14 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
       resolverResult,
       turnId,
     });
-    // ─── Fatia 2A.2: trava de neutralidade da L3 para turno conversacional ────
-    // Quando o cérebro soberano entrega acao:"none" (conversa/emoção/identidade), a
-    // fala dele NÃO pode ser mutada pelos pós-processadores de swap/proatividade —
-    // eles existem para o legado. applyBackendProactiveAction já não roda (sem
-    // proactiveMemoryAction); aqui travamos também enforceDecisiveSwap e
-    // repairInvalidExerciseSubstitutionResponse. A fala sai IDÊNTICA (só o sanitizer
-    // global de res.json roda — LEI 11). Gated por brainResult => flag OFF / legado
-    // nunca entram neste atalho. Forward-safe: turnos do cérebro com acao != "none"
-    // (Fatia 2B) caem no pipeline normal abaixo.
-    if (brainResult && result.acao === "none") {
+    // ─── Fatia 2A.2/2B: trava de neutralidade da L3 para turno do cérebro ─────
+    // Quando o cérebro soberano entrega acao:"none" (conversa/emoção/identidade) OU
+    // acao:"updateWorkout" (treino já executado e persistido pelo executor 2B), a
+    // fala/plano dele NÃO podem ser mutados pelos pós-processadores de swap/proativo
+    // nem pela escada — eles existem para o legado. A resposta sai IDÊNTICA (só o
+    // sanitizer global de res.json roda — LEI 11). Gated por brainResult => flag OFF
+    // nunca entra neste atalho. acoes fora de escopo já viraram null (defer) acima.
+    if (brainResult && (result.acao === "none" || result.acao === "updateWorkout")) {
       return res.json(result);
     }
     if (result.proactiveMemoryAction) {

@@ -104,15 +104,36 @@ test("resposta válida SEM memoryPatch → não persiste + persisted:false", asy
   assert.equal(contract.meta.persisted, false);
 });
 
-// ─── Ação complexa → defer ─────────────────────────────────────────────────────
+// ─── Fatia 2B: updateWorkout é suportado (a execução roda no server) ──────────
 
-test("ação complexa (updateWorkout) → defer, sem persistir", async () => {
+test("2B: updateWorkout → ok, preserva acao e persiste o memoryPatch", async () => {
+  const { deps, counters } = makeDeps({
+    modelResult: { ok: true, rawText: "{}" },
+    parsed: {
+      fala: "Fechado, foco em peito hoje.",
+      acao: "updateWorkout",
+      expectedResponse: null,
+      memoryPatch: { nextWorkoutFocus: "chest_triceps" },
+    },
+    persist: async () => {},
+  });
+  const contract = await decideTurn({ worldState: baseWorldState, input: "bora treinar" }, deps);
+
+  assert.equal(contract.validation, "ok");
+  assert.equal(contract.response.acao, "updateWorkout", "a acao do cérebro é preservada");
+  assert.equal(counters.persist, 1, "persiste o memoryPatch (a execução do plano roda no server)");
+  assert.equal(counters.model, 1);
+});
+
+// ─── Ação ainda complexa → defer ───────────────────────────────────────────────
+
+test("ação complexa (generateDiet) → defer, sem persistir", async () => {
   let persistCalled = false;
   const { deps, counters } = makeDeps({
     modelResult: { ok: true, rawText: "{}" },
     parsed: {
-      fala: "Vou montar teu treino.",
-      acao: "updateWorkout",
+      fala: "Vou montar tua dieta.",
+      acao: "generateDiet",
       expectedResponse: null,
       memoryPatch: { x: 1 },
     },
@@ -120,10 +141,10 @@ test("ação complexa (updateWorkout) → defer, sem persistir", async () => {
       persistCalled = true;
     },
   });
-  const contract = await decideTurn({ worldState: baseWorldState, input: "monta meu treino" }, deps);
+  const contract = await decideTurn({ worldState: baseWorldState, input: "monta minha dieta" }, deps);
 
   assert.equal(contract.validation, "defer");
-  assert.equal(persistCalled, false, "ação complexa NÃO pode persistir");
+  assert.equal(persistCalled, false, "ação fora de escopo NÃO pode persistir");
   assert.equal(counters.persist, 0);
   assert.equal(contract.meta.persisted, false);
   assert.equal(counters.model, 1, "uma chamada para descobrir que é complexa; depois defere");

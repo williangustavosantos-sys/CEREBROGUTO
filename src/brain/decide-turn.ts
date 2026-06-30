@@ -19,6 +19,7 @@ import type {
   TurnContract,
   PublicTurnResponse,
   TurnExpectedResponse,
+  TurnAcao,
   ReducedWorldState,
   Language,
 } from "./types.js";
@@ -163,12 +164,14 @@ export async function decideTurn(
     );
   }
 
-  // ─── Turno simples válido (acao="none") ───────────────────────────────────
+  // ─── Turno suportado válido (acao="none" ou, na 2B, "updateWorkout") ──────
   // Monta o response PÚBLICO campo-a-campo: nunca espalha o candidato inteiro,
-  // para que nenhuma chave estranha/meta vaze (LEI 11).
+  // para que nenhuma chave estranha/meta vaze (LEI 11). PRESERVA a acao decidida
+  // pelo cérebro (a execução do treino é feita pelo executor no server, depois).
+  const decidedAcao: TurnAcao = candidate.acao === "updateWorkout" ? "updateWorkout" : "none";
   const response: PublicTurnResponse = {
     fala: String(candidate.fala),
-    acao: "none",
+    acao: decidedAcao,
     expectedResponse: coerceExpectedResponse(candidate.expectedResponse),
   };
   if (typeof candidate.avatarEmotion === "string") {
@@ -197,8 +200,8 @@ export async function decideTurn(
     response,
     validation: "ok",
     meta: {
-      kind: "conversational_simple",
-      reasoning: `turno simples decidido pelo cérebro soberano${persistNote}`,
+      kind: decidedAcao === "updateWorkout" ? "workout_execution" : "conversational_simple",
+      reasoning: `turno (${decidedAcao}) decidido pelo cérebro soberano${persistNote}`,
       via: "sovereign_brain_slice1",
       modelCalled: true,
       persisted,

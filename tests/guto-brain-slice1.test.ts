@@ -245,7 +245,10 @@ describe("Golden Transcripts — Fatia 1 do Cérebro Soberano", () => {
       assert.equal(falaVazia.ok, false);
       assert.equal(falaVazia.validation, "defer");
 
-      const complexa = validateContract({ fala: "vou montar", acao: "updateWorkout", expectedResponse: null });
+      // 2B: updateWorkout passou a ser SUPORTADO (execução no server); dieta/swap deferem.
+      const treino = validateContract({ fala: "bora, peito hoje", acao: "updateWorkout", expectedResponse: null });
+      assert.equal(treino.validation, "ok");
+      const complexa = validateContract({ fala: "vou montar tua dieta", acao: "generateDiet", expectedResponse: null });
       assert.equal(complexa.validation, "defer");
 
       const metaLeak = validateContract({ fala: "oi", acao: "none", expectedResponse: null, via: "x" });

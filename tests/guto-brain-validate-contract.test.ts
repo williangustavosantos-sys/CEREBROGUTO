@@ -76,13 +76,19 @@ test("fala ausente (undefined) → ok:false", () => {
 
 // ─── acao ────────────────────────────────────────────────────────────────────
 
-test("acao='updateWorkout' → defer (Fatia 1 não suporta, shape válido)", () => {
+test("acao='updateWorkout' → ok (Fatia 2B suporta execução de treino)", () => {
   const r = validateContract({ ...valid, acao: "updateWorkout" });
+  assert.equal(r.ok, true);
+  assert.equal(r.validation, "ok");
+});
+
+test("acao='generateDiet' → defer (dieta ainda é legado)", () => {
+  const r = validateContract({ ...valid, acao: "generateDiet" });
   assert.equal(r.validation, "defer");
 });
 
-test("acao='generateDiet' → defer", () => {
-  const r = validateContract({ ...valid, acao: "generateDiet" });
+test("acao='swapExercise' → defer (swap ainda é legado)", () => {
+  const r = validateContract({ ...valid, acao: "swapExercise" });
   assert.equal(r.validation, "defer");
 });
 
