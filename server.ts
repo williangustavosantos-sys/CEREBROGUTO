@@ -2592,6 +2592,12 @@ export function finalizeTurn(response: GutoModelResponse, ctx: FinalizeTurnConte
   return out;
 }
 
+/**
+ * @deprecated Parlamento legado de proatividade.
+ * Mantido fisicamente para testes/rotas históricas enquanto a limpeza estrutural
+ * não remove o bloco antigo. O fluxo principal de fala/persona deve usar
+ * runSovereignBrainTurn + buildSovereignBrainPrompt.
+ */
 function buildProactiveInput(memory: GutoMemory, slot: string, context: OperationalContext) {
   const slotGoal: Record<string, string> = {
     "12": "assumir que ainda dá tempo hoje e pedir contexto operacional em uma frase",
@@ -2643,6 +2649,11 @@ function buildProactiveInput(memory: GutoMemory, slot: string, context: Operatio
   ].join("\n");
 }
 
+/**
+ * @deprecated Prompt/persona legado com templates antigos.
+ * Não deve ser usado como autoridade de conversa, intenção, emoção ou próxima ação
+ * no chat principal. A autoridade atual é buildSovereignBrainPrompt.
+ */
 function buildGutoSystemPrompt(language = "pt-BR") {
   const selectedLanguage = normalizeLanguage(language);
   const nativeLanguageInstruction: Record<GutoLanguage, string> = {
@@ -8049,6 +8060,11 @@ export function classifyContractIntentFallback(input: {
   return emptyContractIntent("fallback_none");
 }
 
+/**
+ * @deprecated Classificador do parlamento legado.
+ * Não participa de /guto nem de /guto-audio soberanos; permanece apenas para
+ * compatibilidade de rotas/testes históricos até a remoção física do legado.
+ */
 async function classifyContractIntent(input: {
   rawInput: string;
   language: GutoLanguage;
@@ -9170,6 +9186,11 @@ function fallbackGriefReply(memory: GutoMemory, language: GutoLanguage): string 
   });
 }
 
+/**
+ * @deprecated Gate determinístico do parlamento legado.
+ * Contém templates antigos e não pode reescrever fala/persona no fluxo soberano.
+ * Mantido temporariamente para caminhos históricos fora de /guto e /guto-audio.
+ */
 function enforceTrainingFlowCertainty(
   response: GutoModelResponse,
   memory: GutoMemory,
@@ -10407,6 +10428,11 @@ function markGutoGeneratedWorkout(plan: WorkoutPlan, language: CatalogLanguage):
   };
 }
 
+/**
+ * @deprecated Cérebro antigo/parlamento legado.
+ * Não é fallback de /guto nem de /guto-audio. Use runSovereignBrainTurn para
+ * qualquer decisão de fala, intenção, emoção, estratégia ou próxima ação.
+ */
 async function askGutoModel({
   input,
   language,
@@ -10674,12 +10700,14 @@ async function askGutoModel({
     // "tô bêbado e me sentindo péssimo" (parece luto) ou "tomei todas, tô zuado"
     // (parece recusa) seriam mandados treinar/insistidos. Com risco ativo, pula
     // a escada e deixa o enforceTrainingFlowCertainty (guard riskActive) confirmar.
+    // @deprecated Booleanos da escada legada. Não são autoridade no fluxo soberano.
     const isResistance =
       !riskOverride &&
       contractIntent.confidence >= 0.6 &&
       (contractIntent.kind === "resistance_common" ||
        contractIntent.kind === "fatigue_common" ||
        contractIntent.kind === "postpone");
+    // @deprecated Booleano de luto do parlamento legado. O cérebro soberano decide a fala.
     const isGrief =
       !riskOverride &&
       (contractIntent.kind === "emotional_collapse" || looksLikeGrief(input || ""));
@@ -14275,13 +14303,10 @@ async function runSovereignBrainTurn(params: {
   return finalizeSovereignBrainResponse(dispatched, input, language);
 }
 
-// ─── Cérebro soberano — Fatia 2A/2B (atrás de GUTO_BRAIN_SLICE1) ───────────────
-// Possui conversa/emoção/identidade/fragilidade/retorno como acao:"none" e, na 2B,
-// execução de treino simples como acao:"updateWorkout". NÃO defere por risco: compõe
-// a segurança no PRÓPRIO call via riskOverride (mesmo SAFETY_OVERRIDE do legado). Só
-// defere quando o turno EXIGE dieta/swap/proatividade ou perfil incompleto/exec falha.
-// Retorna a resposta PÚBLICA (contract.response) ou null para deferir.
-// `decide`/`classifyRiskFn` são injetáveis só para teste; produção usa os reais.
+// ─── Helper histórico do cérebro por fatias ───────────────────────────────────
+// @deprecated: substituído por runSovereignBrainTurn/WorldStateV2.
+// Permanece apenas para testes históricos das Fatias 1/2A/2B/2C e não é o fluxo
+// principal de /guto nem /guto-audio.
 async function runSovereignBrainSlice1(params: {
   memory: GutoMemory;
   input: string;
@@ -14924,19 +14949,31 @@ app.post("/guto-audio", requireActiveUser, upload.single("audio"), async (req, r
     }
 
     let audioContent: string | undefined;
-    try {
-      const vozResp = await fetch(`http://localhost:${PORT}/voz`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: fala, language }),
-      });
-      const vozData = await vozResp.json().catch(() => ({}));
-      audioContent = vozResp.ok ? vozData.audioContent : undefined;
-    } catch (voiceError) {
-      console.warn("Voz do GUTO indisponível no áudio:", voiceError);
+    let voiceUsed: string | undefined;
+    let languageCode: string | undefined;
+    if (VOICE_API_KEY) {
+      try {
+        // Vercel/serverless não garante um listener local em :3001. Chamar o
+        // executor TTS diretamente evita depender de processo local para áudio.
+        const canonicalVoice = resolveCanonicalVoiceText({ text: fala, language: selectedLanguage });
+        const voice = GUTO_VOICES[selectedLanguage];
+        const synthesized = await synthesizeGutoVoice({
+          text: canonicalVoice.text,
+          language: selectedLanguage,
+          voiceName: voice.primaryName,
+          applyGutoStyle: false,
+        });
+        if (synthesized.ok) {
+          audioContent = synthesized.data.audioContent;
+          voiceUsed = synthesized.voiceUsed;
+          languageCode = synthesized.languageCode;
+        }
+      } catch (voiceError) {
+        console.warn("Voz do GUTO indisponível no áudio:", voiceError);
+      }
     }
 
-    res.json({ ...gutoData, fala, transcript, audioContent, mimeType: audioContent ? "audio/wav" : undefined });
+    res.json({ ...gutoData, fala, transcript, audioContent, voiceUsed, languageCode, mimeType: audioContent ? "audio/wav" : undefined });
   } catch (error) {
     console.warn("Erro no Guto Audio:", error);
     res.status(500).json({ error: fallbackLine(language, "internal_error") });

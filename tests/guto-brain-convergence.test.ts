@@ -1,5 +1,8 @@
 import "./test-env.js";
 process.env.GEMINI_API_KEY = "test-key-convergence";
+process.env.OPENAI_API_KEY = "test-openai-key-convergence";
+process.env.VOICE_API_KEY = "";
+process.env.PORT = "3001";
 process.env.GUTO_CURATOR_MAX_ATTEMPTS = "1";
 process.env.ENABLE_PROACTIVE_JOB = "false";
 process.env.ENABLE_DAILY_BRIEFING = "false";
@@ -28,16 +31,30 @@ let stubPayload: Record<string, unknown> = {
   acao: "none",
   expectedResponse: null,
 };
+let transcriptStub = "oi pelo audio";
 
 function installFetchStub() {
   globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
     const u = String(url);
+    if (/^http:\/\/localhost:3001\/voz\b/.test(u)) {
+      callsByKind.localVoice = (callsByKind.localVoice || 0) + 1;
+      throw new Error("/guto-audio não deve depender de localhost:3001/voz");
+    }
+    if (u.includes("api.openai.com/v1/audio/transcriptions")) {
+      callsByKind.transcription = (callsByKind.transcription || 0) + 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ text: transcriptStub }),
+      } as unknown as Response;
+    }
     if (u.includes("generativelanguage")) {
       const body = String(init?.body ?? "");
       let kind = "other";
       if (body.includes("strict semantic safety classifier")) kind = "risk";
       else if (body.includes("semantic contract classifier")) kind = "contractIntent";
       else if (body.includes("CÉREBRO SOBERANO V2")) kind = "brain";
+      else if (body.includes("Regra de ouro: sempre mantenha o usuário dentro da dieta") || body.includes("VOCÊ É GUTO.\nNão é assistente")) kind = "legacyBrain";
       else if (body.includes("meal") || body.includes("calories") || body.includes("macros")) kind = "diet";
       else kind = "executorModel";
       callsByKind[kind] = (callsByKind[kind] || 0) + 1;
@@ -137,6 +154,20 @@ async function chat(userId: string, input: string, language = "pt-BR") {
   return { status: r.status, body: (await r.json()) as Record<string, any> };
 }
 
+async function audioChat(userId: string, language = "pt-BR") {
+  const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
+  callsByKind = {};
+  const form = new FormData();
+  form.append("language", language);
+  form.append("audio", new Blob([new Uint8Array(1200).fill(1)], { type: "audio/webm" }), "voice.webm");
+  const r = await fetch(`${baseUrl}/guto-audio`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  return { status: r.status, body: (await r.json()) as Record<string, any> };
+}
+
 describe("Convergência arquitetural — cérebro soberano principal", () => {
   before(async () => {
     process.env.GUTO_MEMORY_FILE = file;
@@ -160,6 +191,7 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
 
   beforeEach(() => {
     stubPayload = { flag: null, confidence: 0, fala: MARKER, acao: "none", expectedResponse: null };
+    transcriptStub = "oi pelo audio";
   });
 
   after(async () => {
@@ -175,6 +207,35 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.equal(status, 200);
     assert.equal(body.fala, MARKER);
     assert.equal(callsByKind.contractIntent || 0, 0);
+    for (const key of META_KEYS) assert.ok(!(key in body), `meta não pode vazar: ${key}`);
+  });
+
+  it("smoke /guto em ambiente production-like não depende de listener local em :3001", async () => {
+    seed("conv-vercel-smoke");
+    assert.notEqual(new URL(baseUrl).port, "3001", "teste deve usar porta efêmera, não o processo local :3001");
+    const { status, body } = await chat("conv-vercel-smoke", "oi no vercel");
+    assert.equal(status, 200);
+    assert.equal(body.fala, MARKER);
+    assert.equal(callsByKind.brain || 0, 1);
+    assert.equal(callsByKind.contractIntent || 0, 0);
+    assert.equal(callsByKind.legacyBrain || 0, 0);
+    for (const key of META_KEYS) assert.ok(!(key in body), `meta não pode vazar: ${key}`);
+  });
+
+  it("/guto-audio usa transcrição como input soberano, sem prompt legado nem resposta dupla", async () => {
+    transcriptStub = "estou feliz pelo audio";
+    seed("conv-audio");
+    const { status, body } = await audioChat("conv-audio");
+    assert.equal(status, 200);
+    assert.equal(body.transcript, transcriptStub);
+    assert.equal(body.fala, MARKER);
+    assert.equal(body.acao, "none");
+    assert.equal(callsByKind.transcription || 0, 1);
+    assert.equal(callsByKind.brain || 0, 1);
+    assert.equal(callsByKind.contractIntent || 0, 0);
+    assert.equal(callsByKind.legacyBrain || 0, 0);
+    assert.equal(callsByKind.localVoice || 0, 0);
+    assert.ok(!("error" in body), "não pode gerar payload duplo com error + fala");
     for (const key of META_KEYS) assert.ok(!(key in body), `meta não pode vazar: ${key}`);
   });
 

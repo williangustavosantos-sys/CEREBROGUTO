@@ -20,12 +20,13 @@
 - **Convergência:** `/guto` usa o Cérebro Soberano como fluxo principal mesmo com flag OFF; a flag não reativa o parlamento legado.
 - **Nenhum merge feito.** PR continua draft.
 - **Frontend intocado. Produção intocada.** Flag NÃO ativada no `.env` (default OFF).
-- **Último commit:** o commit da **Convergência Arquitetural** (seção 14). `b447318` era o handoff; antes, `f865e01` (2B).
+- **Último commit:** o commit de **preparação para smoke Vercel** (seção 15). `c770910` foi a convergência; `b447318` era o handoff; antes, `f865e01` (2B).
 - **Node:** `/opt/homebrew/bin/node` (export `PATH="/opt/homebrew/bin:$PATH"` antes de rodar).
 - **Rodar testes:** `cd guto-backend && npm run typecheck` e `node --import tsx --test --test-concurrency=1 <arquivo>`. Suíte completa: `node scripts/run-guto-tests.mjs`.
 
 ### Commits da migração (mais recentes no topo)
 ```
+<VERCEL> chore(guto): prepare sovereign brain for vercel smoke test
 <CONV>  feat(guto): converge fluxo principal para cérebro soberano
 <2C>    feat(guto): cérebro possui adaptação/dor/continuidade — L3 vira trilho/validador (2C)
 b447318 docs: add sovereign brain implementation handoff
@@ -100,7 +101,7 @@ e3b45e9 feat(brain): validateContract — validação só de forma + suporte Fat
 
 ## 3. Estado de testes conhecido (mais recente)
 
-- **Cérebro/convergência: 131/131** ✅ (`node --import tsx --test --test-concurrency=1 tests/guto-brain-*.test.ts`)
+- **Cérebro/convergência: 133/133** ✅ (`node --import tsx --test --test-concurrency=1 tests/guto-brain-*.test.ts`)
 - **Backend completo: 869/869** ✅ (`node scripts/run-guto-tests.mjs`)
 - **Typecheck: verde** ✅ (`npm run typecheck`)
 - **Validação viva 2A:** 14 cenários com Gemini real — chantagem 0, agenda 0, presença OK.
@@ -352,6 +353,8 @@ Resposta
 
 **O que perdeu autoridade:**
 - `/guto` não usa `askGutoModel` como fallback de cérebro.
+- `/guto-audio` usa transcrição → `runSovereignBrainTurn`; não chama prompt legado,
+  `classifyContractIntent` nem `localhost:3001/voz`.
 - `classifyContractIntent`, `isResistance`, `isGrief`, `enforceTrainingFlowCertainty`
   e templates hardcoded não participam do fluxo soberano principal.
 - Resolvers L1 de dieta/swap viraram resolução operacional/trilho/fallback estruturado,
@@ -367,7 +370,7 @@ Resposta
 
 **Testes finais da convergência:**
 - `npm run typecheck` ✅
-- `node --import tsx --test --test-concurrency=1 tests/guto-brain-*.test.ts` → **131/131** ✅
+- `node --import tsx --test --test-concurrency=1 tests/guto-brain-*.test.ts` → **133/133** ✅
 - `node scripts/run-guto-tests.mjs` → **869/869** ✅
 
 **Validação viva com Gemini real (memória temporária, sem produção):**
@@ -386,3 +389,48 @@ Resposta
   limpeza, mas já não têm autoridade no fluxo principal.
 - Alguns testes históricos ainda mencionam "flag OFF"; hoje isso significa "não quebra",
   não "volta ao cérebro antigo".
+
+---
+
+## 15. Preparação para smoke Vercel — IMPLEMENTADA
+
+**Objetivo executado:** preparar o commit da convergência para teste real via link do
+Vercel sem alterar a lógica soberana validada.
+
+**Auditoria de autoridade por rota:**
+- `/guto`: fluxo principal exclusivo em `runSovereignBrainTurn`; bloco legado abaixo fica
+  comentado/bypassado e sem autoridade.
+- `/guto-audio`: áudio → OpenAI transcription → texto transcrito → `runSovereignBrainTurn`;
+  não cai em `askGutoModel`, `classifyContractIntent` nem prompt legado.
+- `/guto/proactive`: usa `runSovereignBrainTurn` no caminho ativo de fala/persona; o bloco
+  antigo com `askGutoModel/buildProactiveInput` está comentado como referência temporária.
+- Rotas de dieta, treino, Arena, validação, stores, TTS e memória permanecem como executores,
+  sanitizers ou estado, não como cérebro do chat principal.
+
+**Marcação de legado:**
+- `askGutoModel`, `classifyContractIntent`, `enforceTrainingFlowCertainty`,
+  `buildProactiveInput`, `buildGutoSystemPrompt`, os booleanos internos `isResistance` /
+  `isGrief` e `runSovereignBrainSlice1` foram marcados como deprecated em comentários.
+- A marcação deixa explícito que eles existem fisicamente só para compatibilidade de
+  rotas/testes históricos até a limpeza estrutural.
+
+**Áudio:**
+- `/guto-audio` foi validado por teste determinístico: transcrição entra como `input`
+  soberano, resposta vem do cérebro V2, sem prompt legado, sem `contractIntent`, sem
+  resposta dupla.
+- Não há fixture de áudio real versionada nesta etapa; a cobertura usa multipart com
+  blob de áudio sintético e stub da transcrição OpenAI para validar o roteamento backend.
+- A síntese de voz deixou de fazer `fetch("http://localhost:${PORT}/voz")`; o executor TTS
+  é chamado diretamente quando `VOICE_API_KEY` existe. Se a voz falhar/ausentar, a resposta
+  textual soberana continua válida.
+
+**Smoke Vercel/local-port:**
+- Teste production-like sobe o app em porta efêmera mesmo com `PORT=3001` e valida `/guto`.
+- O teste bloqueia chamada a `localhost:3001/voz`, garantindo que o preparo não depende do
+  processo local já aberto nessa porta.
+
+**Não alterado:**
+- Frontend.
+- Produção.
+- Merge/PR draft.
+- Lógica soberana de decisão.
