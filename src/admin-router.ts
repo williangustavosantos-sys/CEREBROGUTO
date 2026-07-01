@@ -1,7 +1,7 @@
 import express, { Request, Response } from "express";
 import crypto from "crypto";
 import bcrypt from "bcrypt";
-import { getAggregatedExerciseCatalog, getCatalogById, type CatalogLanguage, type CatalogMuscleGroup } from "../exercise-catalog";
+import { getAggregatedExerciseCatalog, getCatalogById, type CatalogLanguage, type CatalogMuscleGroup } from "../exercise-catalog.js";
 import {
   requireCoachOrAdmin,
   requireAdmin,

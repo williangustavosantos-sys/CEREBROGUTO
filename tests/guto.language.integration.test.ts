@@ -186,9 +186,16 @@ function installGeminiMock() {
 
     const prompt = extractPrompt(init);
 
-    const memory = extractFirstJsonObjectAfterMarker(prompt, ["Memória do usuário", "Memoria do usuario", "User memory", "MEMÓRIA"]);
+    const worldState = extractFirstJsonObjectAfterMarker(prompt, ["WORLD_STATE_V2", "Memória do usuário", "Memoria do usuario", "User memory", "MEMÓRIA"]);
+    const memory = worldState.memory || worldState;
+    const visibleFocus =
+      worldState.workout?.currentPlan?.focusKey ||
+      worldState.workout?.nextFocus ||
+      memory.lastSuggestedFocus ||
+      memory.lastWorkoutFocus ||
+      (/\b(peito|chest|petto)\b/i.test(prompt) ? "chest_triceps" : undefined);
 
-    const inputMatch = prompt.match(/Mensagem atual do usuário: (.*)/);
+    const inputMatch = prompt.match(/MENSAGEM DO USUÁRIO:\s*([\s\S]*)$/) || prompt.match(/Mensagem atual do usuário: (.*)/);
     const inputMsg = inputMatch ? inputMatch[1].trim().toLowerCase() : prompt.toLowerCase();
 
     // Check if it's a full workout request
@@ -226,10 +233,10 @@ function installGeminiMock() {
       const isIt = inputMsg.includes("ieri");
       const isEs = inputMsg.includes("ayer");
 
-      if (memory.lastSuggestedFocus || memory.lastWorkoutFocus) {
+      if (visibleFocus) {
         let fala = "Não repito.";
         if (isPt) fala = "não repito peito e tríceps";
-        if (isEn) fala = "not repeating chest and triceps";
+        if (isEn) fala = "History registered. I will not repeat chest and triceps.";
         if (isIt) fala = "non ripeto petto e tricipiti";
         if (isEs) fala = "no repito pecho y tríceps";
 
@@ -247,8 +254,10 @@ function installGeminiMock() {
                   ? "età e dolore"
                   : "edad y dolor",
           },
-          trainedReference: {
-            dateLabel: "yesterday"
+          memoryPatch: {
+            recentTrainingHistory: [
+              { dateLabel: "yesterday", muscleGroup: visibleFocus, raw: inputMsg }
+            ]
           }
         }))), { status: 200, headers: { "Content-Type": "application/json" } });
       } else {

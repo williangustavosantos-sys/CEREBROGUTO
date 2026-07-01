@@ -6,8 +6,8 @@ import type {
   ProactiveMemory,
   ProactiveMissionEffect,
   ProactiveWorkoutEffect,
-} from './types'
-import { resolveProactiveDate } from './date-resolver'
+} from './types.js'
+import { resolveProactiveDate } from './date-resolver.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 

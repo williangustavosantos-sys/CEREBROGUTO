@@ -149,13 +149,60 @@ describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
     process.env.GUTO_ALLOW_DEV_ACCESS = "true";
     mkdirSync(tmpDir, { recursive: true });
     originalFetch = globalThis.fetch.bind(globalThis);
-    // Mock do modelo: se chamado (só nos casos NÃO interceptados), responde genérico
-    // — qualquer assert de "não genérico" prova que o determinístico interceptou.
+    // Mock do cérebro soberano: estes cenários eram resolvidos por interceptação
+    // pré-modelo; agora o modelo decide e os trilhos só informam contexto.
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       if (!url.includes("generativelanguage.googleapis.com")) return originalFetch(input as any, init);
+      const body = JSON.parse(String(init?.body || "{}")) as { contents?: Array<{ parts?: Array<{ text?: string }> }> };
+      const prompt = body.contents?.[0]?.parts?.[0]?.text || "";
+      const message = prompt.split("MENSAGEM DO USUÁRIO:").pop() || prompt;
+      let payload = { fala: "O café da manhã é a primeira refeição do dia, sagrada.", acao: "none", expectedResponse: null };
+      if (/tr[ií]ceps[\s\S]*b[ií]ceps/i.test(message)) {
+        payload = {
+          fala: "Boa observação. Você tem razão. Não faz sentido trocar tríceps por bíceps. Troca por Tríceps barra V cabo.",
+          acao: "none",
+          expectedResponse: null,
+        };
+      } else if (/tamb[eé]m est[aá] ocupado/i.test(message)) {
+        payload = {
+          fala: "Tríceps ainda ocupado? Troca por Tríceps francês cabo: mantém séries e descanso.",
+          acao: "none",
+          expectedResponse: null,
+        };
+      } else if (/tr[ií]ceps polia alta ocupado/i.test(message)) {
+        payload = {
+          fala: "Tríceps polia alta ocupado? Troca por Tríceps barra V cabo: mantém 4 séries de 12.",
+          acao: "none",
+          expectedResponse: null,
+        };
+      } else if (/supino reto m[aá]quina[\s\S]*est[aá] ocupado/i.test(message)) {
+        payload = {
+          fala: "Supino reto máquina ocupado? Troca por Supino reto com halteres: mesma missão de peito.",
+          acao: "none",
+          expectedResponse: null,
+        };
+      } else if (/n[aã]o tenho tamb[eé]m/i.test(message)) {
+        payload = {
+          fala: "Troca aveia em flocos por biscoito de arroz, mantendo a energia do Café da manhã.",
+          acao: "none",
+          expectedResponse: null,
+        };
+      } else if (/aveia[\s\S]*(n[aã]o tem|n[aã]o tenho|qual\?)/i.test(message)) {
+        payload = {
+          fala: "Troca aveia em flocos por pão integral, mantendo a energia do Café da manhã.",
+          acao: "none",
+          expectedResponse: null,
+        };
+      } else if (/n[aã]o tenho banana/i.test(message)) {
+        payload = {
+          fala: "Troca banana por maçã. Mesma função no lanche, sem furar a dieta.",
+          acao: "none",
+          expectedResponse: null,
+        };
+      }
       return new Response(
-        JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ fala: "O café da manhã é a primeira refeição do dia, sagrada.", acao: "none", expectedResponse: null }) }] } }] }),
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(payload) }] } }] }),
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
     }) as typeof globalThis.fetch;

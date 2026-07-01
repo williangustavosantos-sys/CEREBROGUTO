@@ -29,6 +29,7 @@ pnpm-debug.log*
 # runtime data + next
 tmp/
 .next/
+.vercel/
 
 # aider AI tool
 .aider*

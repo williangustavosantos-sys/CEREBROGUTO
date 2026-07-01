@@ -130,9 +130,16 @@ function installGeminiMock() {
 
     const prompt = extractPrompt(init);
 
-    const memory = extractFirstJsonObjectAfterMarker(prompt, ["Memória do usuário", "Memoria do usuario", "User memory", "MEMÓRIA"]);
+    const worldState = extractFirstJsonObjectAfterMarker(prompt, ["WORLD_STATE_V2", "Memória do usuário", "Memoria do usuario", "User memory", "MEMÓRIA"]);
+    const memory = worldState.memory || worldState;
+    const visibleFocus =
+      worldState.workout?.currentPlan?.focusKey ||
+      worldState.workout?.nextFocus ||
+      memory.lastSuggestedFocus ||
+      memory.lastWorkoutFocus ||
+      (/\b(peito|chest|petto)\b/i.test(prompt) ? "chest_triceps" : undefined);
 
-    const inputMatch = prompt.match(/Mensagem atual do usuário: (.*)/);
+    const inputMatch = prompt.match(/MENSAGEM DO USUÁRIO:\s*([\s\S]*)$/) || prompt.match(/Mensagem atual do usuário: (.*)/);
     const inputMsg = inputMatch ? inputMatch[1].trim().toLowerCase() : "";
 
     // 1. Treino completo com tudo fornecido
@@ -143,7 +150,7 @@ function installGeminiMock() {
         expectedResponse: null,
         memoryPatch: {
           trainingSchedule: "tomorrow",
-          trainingLocation: "academia",
+          trainingLocation: "gym",
           trainingStatus: "voltando agora",
           trainingAge: 30,
           trainingLimitations: "sem dor"
@@ -161,12 +168,12 @@ function installGeminiMock() {
 
     if (isVagueHistoryRef) {
       // Focus can come from memory OR from the conversation history text (real model reads both)
-      const hasFocusInMemory = memory.lastSuggestedFocus || memory.lastWorkoutFocus;
+      const hasFocusInMemory = Boolean(visibleFocus);
       const hasFocusInHistory = /peito e tr[íi]ceps|chest and triceps|petto e tricipiti/i.test(prompt);
 
       if (hasFocusInMemory || hasFocusInHistory) {
         // Return response in the correct language to avoid assertAndRepairVisibleLanguage replacing it
-        const lang = (memory.language as string) || "pt-BR";
+        const lang = (worldState.language as string) || (memory.language as string) || "pt-BR";
         const fala =
           lang === "en-US"
             ? "Got it. Not repeating chest and triceps. Give me your age and any pain."
@@ -184,7 +191,11 @@ function installGeminiMock() {
             context: "training_limitations",
             instruction,
           },
-          trainedReference: { dateLabel: "yesterday" },
+          memoryPatch: {
+            recentTrainingHistory: [
+              { dateLabel: "yesterday", muscleGroup: visibleFocus || "chest_triceps", raw: inputMsg }
+            ]
+          },
         }))), { status: 200, headers: { "Content-Type": "application/json" } });
       } else {
         return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
@@ -205,9 +216,10 @@ function installGeminiMock() {
           context: "training_limitations",
           instruction: "idade e dor",
         },
-        trainedReference: {
-          dateLabel: "day_before_yesterday",
-          explicitMuscleGroup: "back_biceps"
+        memoryPatch: {
+          recentTrainingHistory: [
+            { dateLabel: "day_before_yesterday", muscleGroup: "back_biceps", raw: inputMsg }
+          ]
         }
       }))), { status: 200, headers: { "Content-Type": "application/json" } });
     }

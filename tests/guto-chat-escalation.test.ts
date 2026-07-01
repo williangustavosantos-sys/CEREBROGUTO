@@ -1,7 +1,6 @@
 import "./test-env.js";
-// Força o classificador determinístico (fallback por palavra-chave): sem chave,
-// classifyContractIntent usa classifyContractIntentFallback e o caminho de
-// resposta aplica a escada de persistência sem depender do modelo.
+// Força o caminho determinístico sem modelo: o fluxo soberano continua dono da
+// fala e só pode usar fallback estruturado sem culpa por streak/vínculo/XP.
 process.env.GEMINI_API_KEY = "";
 process.env.GUTO_GEMINI_MODEL = process.env.GUTO_GEMINI_MODEL || "gemini-3.1-flash-lite";
 process.env.ENABLE_PROACTIVE_JOB = "false";
@@ -76,8 +75,8 @@ after(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-describe("Escada de persistência do chat (recusa / luto / dias parados)", () => {
-  it("recusa por preguiça escala 1=vínculo → 2=adapta → 3=aceita+XP e PARA", async () => {
+describe("Fallback soberano do chat (recusa / luto / dias parados)", () => {
+  it("recusa por preguiça escala 1=passo mínimo → 2=adapta → 3=aceita sem culpa e PARA", async () => {
     const userId = "esc-lazy";
     seed(userId, { ...BASE, streak: 2, lastWorkoutCompletedAt: new Date(Date.now() - DAY).toISOString() });
     const history: any[] = [];
@@ -92,11 +91,12 @@ describe("Escada de persistência do chat (recusa / luto / dias parados)", () =>
     const t3 = await turn("tô enrolando");
     const t4 = await turn("tô enrolando");
 
-    assert.match(t1.fala || "", /nome|evolu|junto/i, "estágio 1 deve usar o vínculo da dupla");
+    assert.match(t1.fala || "", /menor passo|10 minutos|adapto/i, "estágio 1 deve reduzir para o passo mínimo");
+    assert.doesNotMatch(t1.fala || "", /teu nome|dupla|perco força|perco forca|perde XP|streak|pacto/i, "estágio 1 não pode usar culpa por vínculo/streak");
     assert.match(t2.fala || "", /caminhada|rota|15/i, "estágio 2 deve adaptar a rota");
-    assert.match(t3.fala || "", /xp/i, "estágio 3 deve expor a consequência de XP");
-    assert.match(t3.fala || "", /amanh/i, "estágio 3 deve manter a porta aberta pra amanhã");
-    assert.match(t4.fala || "", /xp/i, "estágio 4 deve manter o aceite (não voltar a martelar)");
+    assert.doesNotMatch(t3.fala || "", /xp|perde|perco força|perco forca|streak|pacto/i, "estágio 3 não pode ameaçar XP/streak");
+    assert.match(t3.fala || "", /amanh|mínimo seguro|minimo seguro|retomo/i, "estágio 3 deve manter a porta aberta pra amanhã");
+    assert.doesNotMatch(t4.fala || "", /xp|perde|perco força|perco forca|streak|pacto/i, "estágio 4 deve manter o aceite sem voltar a martelar");
     assert.notEqual(t1.fala, t2.fala, "não pode repetir a mesma frase entre estágios");
   });
 
@@ -110,11 +110,12 @@ describe("Escada de persistência do chat (recusa / luto / dias parados)", () =>
     assert.doesNotMatch(String(mem?.trainingLimitations || ""), /faleceu|mãe|mae/i, "luto não vira limitação de treino");
   });
 
-  it("vários dias parado deixa o estágio 1 mais forte (sobrevivência da dupla)", async () => {
+  it("vários dias parado reduz para retomada mínima sem chantagem emocional", async () => {
     const userId = "esc-days";
     seed(userId, { ...BASE, streak: 0, lastWorkoutCompletedAt: new Date(Date.now() - 6 * DAY).toISOString() });
     const r = await chat(userId, "tô enrolando");
-    assert.match(r.fala || "", /sumiu|perco força|perco forca/i, "muitos dias parado deve acionar a alavanca de sobrevivência");
+    assert.match(r.fala || "", /voltou|retomar|10 minutos/i, "muitos dias parado deve virar retomada mínima");
+    assert.doesNotMatch(r.fala || "", /sumiu|perco força|perco forca|perde XP|streak|pacto/i, "muitos dias parado não pode acionar chantagem emocional");
   });
 });
 

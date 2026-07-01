@@ -137,13 +137,20 @@ function installGeminiMock() {
 
     const prompt = extractPrompt(init);
 
-    const memory = extractFirstJsonObjectAfterMarker(prompt, ["Memória do usuário", "Memoria do usuario", "User memory", "MEMÓRIA"]);
+    const worldState = extractFirstJsonObjectAfterMarker(prompt, ["WORLD_STATE_V2", "Memória do usuário", "Memoria do usuario", "User memory", "MEMÓRIA"]);
+    const memory = worldState.memory || worldState;
+    const visibleFocus =
+      worldState.workout?.currentPlan?.focusKey ||
+      worldState.workout?.nextFocus ||
+      memory.lastSuggestedFocus ||
+      memory.lastWorkoutFocus ||
+      (/\b(pernas|inferiores|legs|gambe)\b/i.test(prompt) ? "legs_core" : undefined);
 
-    const inputMatch = prompt.match(/Mensagem atual do usuário: (.*)/);
+    const inputMatch = prompt.match(/MENSAGEM DO USUÁRIO:\s*([\s\S]*)$/) || prompt.match(/Mensagem atual do usuário: (.*)/);
     const inputMsg = inputMatch ? inputMatch[1].trim().toLowerCase() : "";
 
     if (inputMsg.includes("treinei isso ontem") || inputMsg.includes("treinei isso anteontem") || inputMsg.includes("ayer") || inputMsg.includes("ieri") || inputMsg.includes("yesterday")) {
-      if (memory.lastSuggestedFocus || memory.lastWorkoutFocus) {
+      if (visibleFocus) {
         const isPt = inputMsg.includes("treinei");
         const isEn = inputMsg.includes("trained");
         const isIt = inputMsg.includes("allenato");
@@ -161,8 +168,14 @@ function installGeminiMock() {
           fala,
           acao: "none",
           expectedResponse: null,
-          trainedReference: {
-            dateLabel: inputMsg.includes("anteontem") || inputMsg.includes("before") || inputMsg.includes("antes") || inputMsg.includes("avantieri") ? "day_before_yesterday" : "yesterday",
+          memoryPatch: {
+            recentTrainingHistory: [
+              {
+                dateLabel: inputMsg.includes("anteontem") || inputMsg.includes("before") || inputMsg.includes("antes") || inputMsg.includes("avantieri") ? "day_before_yesterday" : "yesterday",
+                muscleGroup: visibleFocus,
+                raw: inputMsg,
+              }
+            ]
           }
         }))), { status: 200, headers: { "Content-Type": "application/json" } });
       } else {

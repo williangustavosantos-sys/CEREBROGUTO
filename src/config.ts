@@ -34,6 +34,9 @@ export const config = {
   // Dev access bypass — never true in production
   allowDevAccess: process.env.GUTO_ALLOW_DEV_ACCESS === "true",
   enableLegacyCoachRoutes: process.env.GUTO_ENABLE_LEGACY_COACH_ROUTES === "true",
+  // Cérebro soberano — Fatia 1 (assembleWorldState + decideTurn atrás de feature flag).
+  // Default OFF: escada antiga 100% intacta. Só "true" liga o caminho novo (fluxo simples).
+  brainSlice1: process.env.GUTO_BRAIN_SLICE1 === "true",
   // Web Push (VAPID) — see scripts/generate-vapid-keys.mjs
   pushVapidPublicKey: process.env.PUSH_VAPID_PUBLIC_KEY || "",
   pushVapidPrivateKey: process.env.PUSH_VAPID_PRIVATE_KEY || "",

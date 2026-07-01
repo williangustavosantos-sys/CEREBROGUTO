@@ -1,18 +1,18 @@
 // ─── GUTO Proactivity — Public API ───────────────────────────────────────────
 
-export { buildProactivityContextBlock } from './proactivity-injector'
-export { resolveProactiveMemoryActionFromUserReply } from './memory-action-resolver'
-export type { ResolverResult, ResolvedAction } from './memory-action-resolver'
-export { extractEventsFromConversation, buildPendingMemoryData } from './memory-extractor'
-export { resolveProactiveDate, addDaysToDateKey } from './date-resolver'
-export { enrichPendingMemories } from './memory-enricher'
+export { buildProactivityContextBlock } from './proactivity-injector.js'
+export { resolveProactiveMemoryActionFromUserReply } from './memory-action-resolver.js'
+export type { ResolverResult, ResolvedAction } from './memory-action-resolver.js'
+export { extractEventsFromConversation, buildPendingMemoryData } from './memory-extractor.js'
+export { resolveProactiveDate, addDaysToDateKey } from './date-resolver.js'
+export { enrichPendingMemories } from './memory-enricher.js'
 export {
   decideFromProactiveMemory,
   buildImpactFromDecision,
   resolveEffectiveImpacts,
   getAdaptationForDate,
-} from './decision-engine'
-export { openWeeklyConversation, getWeeklyCheckResult } from './weekly-conversation'
+} from './decision-engine.js'
+export { openWeeklyConversation, getWeeklyCheckResult } from './weekly-conversation.js'
 export {
   getProactiveMemories,
   getProactiveMemoriesByStatus,
@@ -28,7 +28,7 @@ export {
   markPastActiveMemoriesPendingValidation,
   getDateKey,
   getWeekKey,
-} from './proactive-store'
+} from './proactive-store.js'
 
 export type {
   ProactiveMemory,
@@ -43,4 +43,4 @@ export type {
   ProactivePromptKind,
   WeeklyConversation,
   ProactivityContext,
-} from './types'
+} from './types.js'

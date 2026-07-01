@@ -10,7 +10,8 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname } from "path";
-import { config } from "./config";
+import { Redis } from "@upstash/redis";
+import { config } from "./config.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -18,7 +19,8 @@ export type MemoryStore = Record<string, unknown>;
 
 // ─── Redis client (lazy) ──────────────────────────────────────────────────────
 
-let redisClient: { get: (key: string) => Promise<unknown>; set: (key: string, value: unknown) => Promise<unknown> } | null = null;
+type RedisClient = { get: (key: string) => Promise<unknown>; set: (key: string, value: unknown) => Promise<unknown> };
+let redisClient: RedisClient | null = null;
 const REDIS_KEY = "guto:memory";
 
 function getRedisClient() {
@@ -40,9 +42,7 @@ function getRedisClient() {
   if (!url || !token) return null;
 
   try {
-    // Dynamic import so the module doesn't crash if not installed
-    const { Redis } = require("@upstash/redis");
-    redisClient = new Redis({ url, token }) as typeof redisClient;
+    redisClient = new Redis({ url, token }) as unknown as RedisClient;
     return redisClient;
   } catch {
     return null;
@@ -53,6 +53,18 @@ function getRedisClient() {
 
 const globalMemoryStore: MemoryStore = {};
 let globalMemoryLoaded = false;
+
+function cloneStoreValue<T>(value: T): T {
+  if (value == null || typeof value !== "object") return value;
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function replaceGlobalMemoryStore(store: MemoryStore): void {
+  for (const key in globalMemoryStore) {
+    delete globalMemoryStore[key];
+  }
+  Object.assign(globalMemoryStore, store);
+}
 
 // ─── Filesystem helpers ───────────────────────────────────────────────────────
 
@@ -89,7 +101,7 @@ export async function readMemoryStoreAsync(): Promise<MemoryStore> {
       const raw = await redis.get(REDIS_KEY);
       if (raw) {
         const store = typeof raw === "string" ? JSON.parse(raw) : raw;
-        Object.assign(globalMemoryStore, store);
+        replaceGlobalMemoryStore(store as MemoryStore);
         return store as MemoryStore;
       }
     } catch (err) {
@@ -100,7 +112,7 @@ export async function readMemoryStoreAsync(): Promise<MemoryStore> {
   // Filesystem
   const fromFile = readFromFile();
   if (Object.keys(fromFile).length > 0) {
-    Object.assign(globalMemoryStore, fromFile);
+    replaceGlobalMemoryStore(fromFile);
     return fromFile;
   }
 
@@ -136,9 +148,17 @@ export async function writeMemoryStoreAsync(store: MemoryStore): Promise<void> {
  * Synchronous read — uses in-memory cache or filesystem only.
  */
 export function readMemoryStoreSync(): MemoryStore {
+  // In serverless production, data/guto-memory.json is a build artifact. When
+  // Redis is configured, sync reads must use the already-hydrated cache instead
+  // of that packaged file, or newly calibrated users appear to lose their
+  // profile on the next request.
+  if (getRedisClient()) {
+    return { ...globalMemoryStore };
+  }
+
   const fromFile = readFromFile();
   if (Object.keys(fromFile).length > 0) {
-    Object.assign(globalMemoryStore, fromFile);
+    replaceGlobalMemoryStore(fromFile);
     return fromFile;
   }
   return { ...globalMemoryStore };
@@ -179,17 +199,18 @@ export function ensureMemoryHydrated(): Promise<void> {
 
 let memWriteChain: Promise<void> = Promise.resolve();
 
-export function persistUserMemory(userId: string, memory: unknown): void {
-  globalMemoryStore[userId] = memory;       // cache imediato p/ leituras sync
+export function persistUserMemory(userId: string, memory: unknown): Promise<void> {
+  const snapshot = cloneStoreValue(memory);
+  globalMemoryStore[userId] = snapshot;     // cache imediato p/ leituras sync
   writeToFile(globalMemoryStore);
   const redis = getRedisClient();
-  if (!redis) return;
+  if (!redis) return Promise.resolve();
   memWriteChain = memWriteChain
     .then(async () => {
       await ensureMemoryHydrated();           // cache passa a refletir o Redis (full)
       if (!memHydrated) return;               // Redis indisponível: não arrisca clobber
-      globalMemoryStore[userId] = memory;     // re-aplica sobre o store hidratado
-      await redis.set(REDIS_KEY, globalMemoryStore);
+      globalMemoryStore[userId] = snapshot;   // re-aplica sobre o store hidratado
+      await redis.set(REDIS_KEY, cloneStoreValue(globalMemoryStore));
       writeToFile(globalMemoryStore);
     })
     .catch((err) => {
@@ -198,6 +219,11 @@ export function persistUserMemory(userId: string, memory: unknown): void {
       // nos caminhos de leitura/escrita acima.
       console.warn("[GUTO] Redis memory write failed (async write chain):", err);
     });
+  return memWriteChain;
+}
+
+export function flushMemoryStoreWrites(): Promise<void> {
+  return memWriteChain;
 }
 
 // Bootstrap: hidrata o cache no init do módulo (encolhe a janela de clobber p/ TODOS

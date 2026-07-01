@@ -1,0 +1,132 @@
+// src/brain/types.ts
+// Tipos NARROW e auto-contidos da Fatia 1 do cérebro soberano.
+// - NÃO importa server.ts (evita acoplamento/circular com o parlamento antigo).
+// - NÃO contém lógica de decisão.
+// - É estruturalmente compatível com o que o handler /guto já envia ao cliente
+//   (GutoModelResponse: fala/acao/expectedResponse/avatarEmotion/workoutPlan/memoryPatch),
+//   para que os commits 5/6 encaixem sem atrito ao fazer res.json(contract.response).
+
+/** Idiomas suportados (lei do produto). */
+export type Language = "pt-BR" | "en-US" | "it-IT";
+
+/** Dificuldade do feedback pós-treino JÁ capturada hoje em workoutFeedbackHistory. */
+export type FeedbackDifficulty = "easy" | "ok" | "hard" | "pain";
+
+/** Sinal de progressão derivado do feedback (saída de getProgressionSignal). */
+export type ProgressionSignal = "progress" | "hold" | "deload";
+
+/**
+ * Observação de segurança — saída do classifyRisk (TRILHO, não decisão).
+ * O cérebro LÊ isto e decide; o gate de risco não decide o turno fora do cérebro.
+ * `flag` null = sem sinal de risco. "Ativo" (consumidor decide) = flag != null && confidence >= 0.6.
+ */
+export interface RiskObservation {
+  flag: string | null;
+  confidence: number;
+}
+
+/**
+ * Campos soberanos cuja ausência impede execução SEGURA de treino.
+ * É OBSERVAÇÃO (o cérebro lê e decide perguntar na própria voz) — uso pleno na Fatia 2B.
+ */
+export type SovereignField = "trainingStatus" | "userAge" | "trainingLimitations";
+
+/**
+ * Subconjunto REDUZIDO do estado lido por assembleWorldState (commit 4).
+ * Sem DuoHealth / risco de abandono / morte / Arena / Avatar / XP / Proatividade.
+ * `risk`/`missingFields` (Fatia 2A) são OBSERVAÇÕES (trilho), nunca decisões.
+ */
+export interface ReducedWorldState {
+  userId: string;
+  language: Language;
+  name?: string;
+  country?: string;
+  city?: string;
+  trainingGoal?: string;
+  trainingLimitations?: string[] | string;
+  trainingStatus?: string;
+  trainingLocation?: string;
+  /**
+   * Treino atual do usuário — subconjunto mínimo de GutoMemory.lastWorkoutPlan.
+   * null = plano existe mas sem dados de foco/data; undefined = nenhum plano ainda.
+   */
+  todayWorkout?: { focus?: string; title?: string; scheduledFor?: string } | null;
+  /** true se há plano de dieta semanal ativo (não copiamos a estrutura inteira). */
+  hasDietPlan?: boolean;
+  /** Feedback Fácil/Normal/Difícil já capturado (LIDO, não recapturado na Fatia 1). */
+  recentDifficulty: FeedbackDifficulty[];
+  /** Sinal agregado (progress|hold|deload) ou null se não há feedback suficiente. */
+  feedbackSignal: ProgressionSignal | null;
+  /** Observação de segurança (Fatia 2A). null = sem risco classificado. TRILHO, não decisão. */
+  risk: RiskObservation | null;
+  /** Campos soberanos ausentes p/ execução de treino (Fatia 2A). Observação; uso pleno na 2B. */
+  missingFields: SovereignField[];
+}
+
+/**
+ * Ação estrutural do turno. Compatível com o campo `acao` (Acao) do GutoModelResponse.
+ * No fluxo soberano V2, todas estas ações são responsabilidade do cérebro; módulos
+ * abaixo dele apenas executam/validam.
+ */
+export type TurnAcao =
+  | "none"
+  | "updateWorkout"
+  | "generateDiet"
+  | "openProactiveCard"
+  | "swapExercise"
+  | "callCoach";
+
+/**
+ * Botões rápidos / próximo passo. Shape mínimo compatível com ExpectedResponse do server.ts
+ * (tolera campos extras do contrato real via index signature).
+ */
+export interface TurnExpectedResponse {
+  type?: string;
+  instruction?: string;
+  options?: string[];
+  [key: string]: unknown;
+}
+
+/**
+ * Payload PÚBLICO devolvido ao cliente (res.json). Shape-compatível com GutoModelResponse.
+ * INVARIANTE: nunca contém meta interno do cérebro (LEI 11). É o ÚNICO que vai ao cliente.
+ */
+export interface PublicTurnResponse {
+  fala: string;
+  acao: TurnAcao;
+  expectedResponse: TurnExpectedResponse | null;
+  avatarEmotion?: string;
+  workoutPlan?: unknown | null;
+  memoryPatch?: Record<string, unknown> | null;
+  proactiveMemoryAction?: Record<string, unknown> | null;
+}
+
+/** Resultado da decisão: 'ok' => usar response; 'defer' => fallback seguro estruturado. */
+export type TurnValidation = "ok" | "defer";
+
+/**
+ * Meta INTERNO do cérebro — auditoria/diagnóstico. NUNCA é serializado ao cliente.
+ * Mantido FORA de `response` por design (chaves disjuntas de PublicTurnResponse).
+ */
+export interface TurnMeta {
+  /** Classe do turno (ex.: "conversational_simple", "deferred:updateWorkout"). */
+  kind: string;
+  /** Por que o cérebro decidiu assim (texto interno; nunca vai ao usuário). */
+  reasoning?: string;
+  /** Origem da decisão. */
+  via: "sovereign_brain_slice1" | "sovereign_brain_v2";
+  /** Houve chamada governada ao modelo neste turno? */
+  modelCalled: boolean;
+  /** Persistência honesta: true só se realmente gravou (commit 5). */
+  persisted: boolean;
+}
+
+/**
+ * Contrato de turno da Fatia 1. Separa o PÚBLICO (response) do INTERNO (meta/validation).
+ * O handler envia SOMENTE contract.response ao res.json; meta e validation ficam no servidor.
+ */
+export interface TurnContract {
+  response: PublicTurnResponse;
+  validation: TurnValidation;
+  meta: TurnMeta;
+}

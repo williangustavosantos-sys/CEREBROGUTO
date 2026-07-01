@@ -166,7 +166,7 @@ describe("classifyContractIntentFallback — preparação ≠ recusa", () => {
 // ─── Comportamento ponta-a-ponta (/guto, sem Gemini → fallback determinístico) ──
 describe("GUTO chat — preparação antes do treino mantém treino + dieta", () => {
   const PREP = /come e volta|bebe e volta|se ajeita e volta|te puxo pro treino|continua de pé|continua de pe/i;
-  const REFUSAL = /caminhada|ninguém desiste|ninguem desiste|perde xp/i;
+  const REFUSAL = /caminhada|ninguém desiste|ninguem desiste|perde xp|perco força|perco forca|streak|pacto/i;
 
   it("'vou tomar café primeiro' COM dieta → menciona café/refeição e mantém treino", async () => {
     const userId = "prep-cafe-diet";
@@ -220,6 +220,7 @@ describe("GUTO chat — preparação antes do treino mantém treino + dieta", ()
     seed(userId, {});
     const r = await chat(userId, "vou deixar pra amanhã");
     assert.doesNotMatch(r.fala || "", /te puxo pro treino|hidrata/i, "recusa NÃO pode usar a fala de preparação");
-    assert.match(r.fala || "", /20 minutos|evolui|junto|xp|amanh/i, "deve seguir a escada de recusa");
+    assert.match(r.fala || "", /amanh|mínimo seguro|minimo seguro|10 minutos/i, "deve tratar como recusa real sem virar preparação");
+    assert.doesNotMatch(r.fala || "", REFUSAL, "recusa real não pode usar culpa por XP/streak/vínculo");
   });
 });
