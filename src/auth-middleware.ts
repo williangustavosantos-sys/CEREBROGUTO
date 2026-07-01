@@ -5,8 +5,10 @@ import { GUTO_CORE_TEAM_ID } from "./team-store.js";
 import {
   getAllUserAccess,
   getEffectiveUserAccess,
+  getEffectiveUserAccessAsync,
   getUserAccess,
   requireActiveUserAccess,
+  requireActiveUserAccessAsync,
   type UserAccess,
 } from "./user-access-store.js";
 
@@ -190,19 +192,27 @@ export function requireActiveUser(req: Request, res: Response, next: NextFunctio
     return;
   }
 
-  const access = requireActiveUserAccess(req.gutoUser.userId);
-  if (!access) {
-    const code = resolveBlockedAccessCode(getEffectiveUserAccess(req.gutoUser.userId));
-    res.status(403).json({
-      message:
-        code === "SUBSCRIPTION_EXPIRED"
-          ? "Assinatura expirada ou cancelada."
-          : "Acesso pausado ou inativo.",
-      code,
-    });
-    return;
-  }
-  next();
+  void (async () => {
+    const access = await requireActiveUserAccessAsync(req.gutoUser!.userId);
+    if (!access) {
+      const effectiveAccess = await getEffectiveUserAccessAsync(req.gutoUser!.userId);
+      const code = resolveBlockedAccessCode(effectiveAccess);
+      res.status(403).json({
+        message:
+          code === "SUBSCRIPTION_EXPIRED"
+            ? "Assinatura expirada ou cancelada."
+            : "Acesso pausado ou inativo.",
+        code,
+      });
+      return;
+    }
+    next();
+  })().catch((error) => {
+    console.error("[GUTO_AUTH] active access check failed", error);
+    if (!res.headersSent) {
+      res.status(500).json({ message: "Falha ao validar acesso.", code: "ACCESS_CHECK_FAILED" });
+    }
+  });
 }
 
 // Requires role = admin or super_admin.
