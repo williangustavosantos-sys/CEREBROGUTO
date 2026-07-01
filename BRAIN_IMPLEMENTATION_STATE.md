@@ -19,13 +19,14 @@
 - **Flag principal histórica:** `GUTO_BRAIN_SLICE1` (estrita `=== "true"`, default OFF), mantida por compatibilidade de testes/config.
 - **Convergência:** `/guto` usa o Cérebro Soberano como fluxo principal mesmo com flag OFF; a flag não reativa o parlamento legado.
 - **Nenhum merge feito.** PR continua draft.
-- **Frontend intocado. Produção intocada.** Flag NÃO ativada no `.env` (default OFF).
-- **Último commit:** o commit de **validação smoke Vercel** (seção 16). `5c490cc` foi a preparação para smoke; `c770910` foi a convergência; `b447318` era o handoff; antes, `f865e01` (2B).
+- **Frontend conectado ao preview soberano para teste local/staging** (seção 17). Produção intocada.
+- **Último commit:** o commit de **conexão do frontend ao preview soberano** (seção 17). `0b81999` foi a validação smoke Vercel; `5c490cc` foi a preparação para smoke; `c770910` foi a convergência; `b447318` era o handoff; antes, `f865e01` (2B).
 - **Node:** `/opt/homebrew/bin/node` (export `PATH="/opt/homebrew/bin:$PATH"` antes de rodar).
 - **Rodar testes:** `cd guto-backend && npm run typecheck` e `node --import tsx --test --test-concurrency=1 <arquivo>`. Suíte completa: `node scripts/run-guto-tests.mjs`.
 
 ### Commits da migração (mais recentes no topo)
 ```
+<FRONT> chore(guto): connect frontend to sovereign brain preview
 <SMOKE> chore(guto): validate sovereign brain on vercel smoke test
 <VERCEL> chore(guto): prepare sovereign brain for vercel smoke test
 <CONV>  feat(guto): converge fluxo principal para cérebro soberano
@@ -522,3 +523,75 @@ dieta roteou por `generateDiet`, viagem criou trilho proativo por `openProactive
 - O projeto de smoke está isolado e com proteção SSO desativada para permitir chamadas públicas
   do teste; não confundir com produção.
 - `server.ts` continua grande; limpeza estrutural física fica para etapa posterior.
+
+---
+
+## 17. Frontend real conectado ao preview soberano — VALIDADO
+
+**Objetivo executado:** conectar o app real (`guto-app-v0`) ao backend soberano validado no
+Vercel Preview sem criar feature nova, sem alterar UI/design/avatar/onboarding e sem tocar
+produção.
+
+**Backend usado:**
+- `https://cerebroguto-sovereign-smoke-p4jbstvux.vercel.app`
+- `/health` já validado na seção 16.
+
+**Configuração do frontend:**
+- Variável nova preferencial: `NEXT_PUBLIC_GUTO_API_URL`.
+- Compatibilidade preservada: `NEXT_PUBLIC_API_URL` continua aceito como legado.
+- Proxy Next local/preview: `GUTO_BACKEND_PROXY_URL` continua sendo o caminho server-side.
+- `.env.local` local apontado para o preview soberano (não commitado).
+- Vercel Preview do frontend (`corpoguto`, branch `test/card-block-contract-e2e`) recebeu:
+  `GUTO_BACKEND_PROXY_URL`, `NEXT_PUBLIC_GUTO_API_URL` e `NEXT_PUBLIC_API_URL`, todas apontando
+  para o backend soberano de smoke.
+
+**Arquivos do frontend alterados:**
+- `guto-app-v0/lib/api/client.ts` — resolve `NEXT_PUBLIC_GUTO_API_URL` e adiciona
+  `suppressAuthRedirect` para chamadas laterais opcionais.
+- `guto-app-v0/app/api/guto/[...path]/route.ts` — proxy lê `NEXT_PUBLIC_GUTO_API_URL`.
+- `guto-app-v0/lib/api/guto.ts` — contrato aceita ações soberanas (`generateDiet`,
+  `swapExercise`, `openProactiveCard`, `callCoach`) e trilhos opcionais de telemetria/proatividade
+  não comandam navegação de auth.
+- `guto-app-v0/.env.example` e `guto-app-v0/README.md` — documentam o apontamento por env.
+
+**Smoke real pelo navegador:**
+- Frontend local: `http://127.0.0.1:3100/?skip-intro=1`
+- Backend: `https://cerebroguto-sovereign-smoke-p4jbstvux.vercel.app`
+- Horário: `2026-07-01T11:18:38.828Z` (`2026-07-01 13:18:38 CEST`)
+- Usuário temporário: `G-SMOKE-ROFAEA` (`Smoke rofaea`)
+
+| Cenário | Status | Ação | UI |
+|---|---:|---|---|
+| `oi` | 200 | `none` | 1 resposta GUTO, sem duplicar |
+| `estou triste` | 200 | `none` | 1 resposta GUTO, sem duplicar |
+| `bora treinar` | 200 | `updateWorkout` | payload aceito; UI continua no chat |
+| `quero treinar braço` | 200 | `updateWorkout` | payload aceito; UI continua no chat |
+| `quero dieta` | 200 | `generateDiet` | payload aceito; UI continua no chat |
+| `voltei depois de duas semanas` | 200 | `none` | 1 resposta GUTO, sem duplicar |
+| `viajo amanhã` | 200 | `none` + resposta rápida | prompt de confirmação aceito; UI sem crash |
+
+**Resultado:** usuário consegue falar com o GUTO pela interface real. Respostas vêm do backend
+soberano via `/api/guto/guto` → `/guto`; sem CORS, sem loading infinito, sem resposta dupla, sem
+texto visível de meta/validation/prompt e sem padrões legados no payload checado. Treino e dieta
+preservam ações soberanas (`updateWorkout`, `generateDiet`).
+
+**Testes após a conexão frontend:**
+- Frontend `guto-app-v0`: `npx tsc --noEmit` ✅
+- Frontend `guto-app-v0`: `npm test` → 95/95 ✅
+- Frontend `guto-app-v0`: `npm run build` ✅
+- Backend `guto-backend`: `npm run typecheck` ✅
+- Backend `guto-backend`: `node --import tsx --test --test-concurrency=1 tests/guto-brain-*.test.ts` → 133/133 ✅
+- Backend `guto-backend`: `node scripts/run-guto-tests.mjs` ✅ (exit 0; blocos exibidos com `fail 0`)
+
+**Ajuste mínimo encontrado durante o smoke:**
+- Subchamadas laterais (`/guto/events`, `/guto/proactive`, `/guto/proactivity/memories`,
+  `/guto/proactivity/extract`, `/guto/proactivity/open-weekly`) podiam redirecionar a tela para
+  `/acesso-pausado` ao receber 403 transitório/isolado, mesmo quando `/auth/me`, memória e `/guto`
+  estavam válidos. Elas agora usam `suppressAuthRedirect`; continuam falhando silenciosamente
+  quando não críticas, sem assumir autoridade sobre o chat principal.
+
+**Falhas/observações:**
+- Um `GET /guto/proactivity/memories` retornou 403 uma vez logo após criar o aluno temporário no
+  preview; depois retornou 200. Com o ajuste, não houve redirect nem quebra da UI.
+- Áudio real segue pendente porque o preview do backend não tem `OPENAI_API_KEY` configurada.
+- Produção, frontend visual e fluxo soberano do backend não foram alterados.
