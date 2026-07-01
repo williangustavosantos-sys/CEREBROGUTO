@@ -658,3 +658,74 @@ final.
 - O preview público direto ainda exige Vercel Authentication; para teste externo sem login Vercel,
   gerar nova URL `_vercel_share` ou desativar proteção apenas no ambiente de staging.
 - Áudio real segue pendente enquanto `OPENAI_API_KEY` não estiver configurada no backend Preview.
+
+---
+
+## 19. Estado pronto para PR — HANDOFF FINAL
+
+**Objetivo executado:** preparar o contexto final de revisão da convergência soberana, sem
+alterar fluxo, UI/design, produção ou criar feature nova.
+
+**Status arquitetural para revisão:**
+- O fluxo principal do chat é o Cérebro Soberano.
+- `/guto` usa `runSovereignBrainTurn` com `WorldStateV2`, `buildSovereignBrainPrompt` e
+  `dispatchSovereignBrainAction`.
+- `/guto-audio` usa transcrição → `runSovereignBrainTurn`; o áudio real no preview ainda depende
+  de `OPENAI_API_KEY`.
+- `/guto/proactive` foi validado onde há ação soberana `openProactiveCard` e não devolve autoridade
+  ao parlamento legado no chat principal.
+- `askGutoModel`, `classifyContractIntent`, `isResistance`, `isGrief`,
+  `enforceTrainingFlowCertainty` e templates antigos continuam fisicamente no código para
+  compatibilidade/testes históricos, mas não são autoridade do fluxo principal.
+- Sanitizers, segurança aguda, autenticação, rate limit, stores, persistência, curador de treino,
+  dieta, TTS/transcrição, XP/Arena e proatividade permanecem como proteção/estado/executores.
+
+**Documento de PR criado:**
+- `docs/SOVEREIGN_BRAIN_PR_HANDOFF.md`
+  - resumo técnico para PR;
+  - arquitetura atual;
+  - fluxo `/guto`;
+  - fluxo `/guto-audio`;
+  - env vars necessárias;
+  - rotas e previews validados;
+  - smoke scenarios;
+  - riscos remanescentes;
+  - rollback.
+
+**Previews validados:**
+- Backend soberano inicial: `https://cerebroguto-sovereign-smoke-p4jbstvux.vercel.app`
+- Backend soberano final usado no staging: `https://cerebroguto-sovereign-smoke-j5l1k8oh3.vercel.app`
+- Frontend staging público: `https://corpoguto-avnyttjoa-williangustavosantos-sys-projects.vercel.app`
+
+**Commits envolvidos na convergência final:**
+- `c770910` — `feat(guto): converge fluxo principal para cérebro soberano`
+- `5c490cc` — `chore(guto): prepare sovereign brain for vercel smoke test`
+- `0b81999` — `chore(guto): validate sovereign brain on vercel smoke test`
+- `528903c` — `chore(guto): connect frontend to sovereign brain preview`
+- `2c29770` — `chore(guto): validate sovereign brain on frontend staging`
+- Frontend relacionado: `4f0cb01` — `chore(guto): connect frontend to sovereign brain preview`
+- Este handoff: `docs(guto): prepare sovereign brain pr handoff`
+
+**Checklist de validação registrada:**
+- Validação desta preparação de PR: `2026-07-01T16:08:12Z` (`2026-07-01 18:08:12 CEST`).
+- Backend `npm run typecheck`: verde.
+- Backend `node --import tsx --test --test-concurrency=1 tests/guto-brain-*.test.ts`:
+  133/133 verde.
+- Backend completo: `node scripts/run-guto-tests.mjs` verde nas validações de smoke/convergência.
+- Frontend local: `npx tsc --noEmit` verde.
+- Frontend local: `npm test` 95/95 verde.
+- Frontend local: `npm run build` verde.
+- Frontend staging público: smoke 7/7 verde.
+- Backend Vercel `/guto`: smoke real 10/10 verde com Gemini real.
+- Payload público: sem meta leak, sem validation leak, sem prompt legado, sem resposta dupla.
+- Produção: intocada.
+- PR: segue draft até decisão explícita de revisão/merge.
+
+**Pendências conhecidas para revisão/release:**
+- Testar áudio real no preview depois de configurar `OPENAI_API_KEY`.
+- Para teste externo do frontend staging, gerar novo `_vercel_share` ou desativar Vercel
+  Authentication apenas no ambiente de staging.
+- Limpeza física do legado (`askGutoModel` e parlamento antigo) fica para etapa posterior; não
+  deve ser feita neste PR de preparação sem nova autorização.
+- `server.ts` continua grande; refatoração estrutural é dívida controlada, não bloqueio de smoke.
+- Antes de promover produção, repetir checklist de release com envs de produção e rollback pronto.
