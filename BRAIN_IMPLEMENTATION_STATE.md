@@ -14,13 +14,13 @@
 ## 1. Estado atual
 
 - **Repo:** CEREBROGUTO (submódulo local em `guto-backend/`; este arquivo está na raiz dele).
-- **Branch atual:** `feat/brain-slice1`
-- **PR:** **#87 — DRAFT** (https://github.com/williangustavosantos-sys/CEREBROGUTO/pull/87)
+- **Branch atual:** `main`
+- **PR:** **#87 — MERGED** (https://github.com/williangustavosantos-sys/CEREBROGUTO/pull/87)
 - **Flag principal histórica:** `GUTO_BRAIN_SLICE1` (estrita `=== "true"`, default OFF), mantida por compatibilidade de testes/config.
 - **Convergência:** `/guto` usa o Cérebro Soberano como fluxo principal mesmo com flag OFF; a flag não reativa o parlamento legado.
-- **Nenhum merge feito.** PR continua draft.
-- **Frontend conectado ao preview soberano para teste local/staging** (seção 17). Produção intocada.
-- **Último commit:** o commit de **conexão do frontend ao preview soberano** (seção 17). `0b81999` foi a validação smoke Vercel; `5c490cc` foi a preparação para smoke; `c770910` foi a convergência; `b447318` era o handoff; antes, `f865e01` (2B).
+- **Merge feito:** PR #87 foi mergeado em `main` no commit `dce6cfe`.
+- **Produção backend:** promovida para Vercel Production e validada em `/health` + `/guto` (seção 20). Frontend produção continua intocado.
+- **Último commit funcional:** `dce6cfe` (`feat(guto): converge chat to sovereign brain (#87)`). `a25fdef` foi o handoff de PR; `2c29770` validou staging frontend; `528903c` conectou frontend ao preview; `0b81999` validou smoke Vercel; `5c490cc` preparou smoke; `c770910` fez a convergência; `b447318` era o handoff; antes, `f865e01` (2B).
 - **Node:** `/opt/homebrew/bin/node` (export `PATH="/opt/homebrew/bin:$PATH"` antes de rodar).
 - **Rodar testes:** `cd guto-backend && npm run typecheck` e `node --import tsx --test --test-concurrency=1 <arquivo>`. Suíte completa: `node scripts/run-guto-tests.mjs`.
 
@@ -110,7 +110,7 @@ e3b45e9 feat(brain): validateContract — validação só de forma + suporte Fat
 - **Validação viva 2A:** 14 cenários com Gemini real — chantagem 0, agenda 0, presença OK.
 - **Validação viva 2B:** 10 cenários com Gemini real — 5/5 treinos executados pelo cérebro, template legado 0, re-ask 0, chantagem 0.
 - **Validação viva Convergência:** 12 cenários com Gemini real — status 200 em todos, sem vazamento de meta, sem resposta dupla, sem `askGutoModel` como fallback de cérebro; treino executado em pedidos explícitos, dieta via `generateDiet`, restrição alimentar capturada, viagem via trilho proativo, dor/troca sem fallback genérico.
-- Sem vazamento de meta/validation. Sem resposta dupla. PR #87 continua draft.
+- Sem vazamento de meta/validation. Sem resposta dupla. PR #87 mergeado.
 
 *(Números históricos por etapa: Fatia 1 = 80/80 + 818 backend; 2A = 99/99 + 837 backend; 2B = 109/109 + 847 backend; 2C = 120/120 + 858 backend.)*
 
@@ -729,3 +729,85 @@ alterar fluxo, UI/design, produção ou criar feature nova.
   deve ser feita neste PR de preparação sem nova autorização.
 - `server.ts` continua grande; refatoração estrutural é dívida controlada, não bloqueio de smoke.
 - Antes de promover produção, repetir checklist de release com envs de produção e rollback pronto.
+
+---
+
+## 20. Produção backend soberana — VALIDADA
+
+**Objetivo executado:** promover o backend soberano para produção Vercel com rollback preparado,
+sem alterar frontend produção, UI/design ou código funcional.
+
+**Merge:**
+- PR #87 mergeado em `main`.
+- Merge commit: `dce6cfe804519fb13fdc1bd523d230b2163778af`
+  (`feat(guto): converge chat to sovereign brain (#87)`).
+
+**Produção final validada:**
+- URL pública: `https://cerebroguto-sovereign-smoke.vercel.app`
+- Deployment final: `dpl_2HtW5gRa8buptWX7oDh3kjqCA6yj`
+- URL do deployment: `https://cerebroguto-sovereign-smoke-7j8h1cfsd.vercel.app`
+- Commit do deployment: `dce6cfe`
+- Horário do smoke: `2026-07-01T17:51:53Z` (`2026-07-01 19:51:53 CEST`).
+
+**Env vars Production verificadas/configuradas:**
+- Presentes: `GEMINI_API_KEY`, `GUTO_GEMINI_MODEL`, `JWT_SECRET`,
+  `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, `GUTO_TIME_ZONE=Europe/Rome`,
+  `GUTO_ALLOWED_ORIGINS`, `GUTO_RATE_LIMIT_MAX_REQUESTS`, `GUTO_RATE_LIMIT_WINDOW_MS`,
+  `VOICE_API_KEY`, `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH`.
+- Ausente: `OPENAI_API_KEY`; áudio real em produção não foi testado.
+
+**Falhas encontradas e correção mínima:**
+- O primeiro deploy automático de `main` (`dpl_GsR5zuyViHLTMh5kxzZHNVQtCmfP`) subiu, mas
+  `/health` retornou 500 por `JWT_SECRET` ausente/fraco em Production.
+- O rollback para o deployment anterior (`dpl_EWcvBgXeT8pHJ3pHwe3ySaxuepDL`) não ficou
+  funcional nesse projeto porque aquele build antigo falhava no wrapper ESM (`api/index.js`
+  sem `"type":"module"`).
+- A promoção do preview validado (`dpl_ELwQpycxC9vgzWcDuvdRZq9WAqpY`) também falhou em runtime
+  ao reconstruir com env Production vazio.
+- Correção aplicada: configurar somente as env vars Production necessárias e fazer redeploy
+  production de `main`, gerando `dpl_2HtW5gRa8buptWX7oDh3kjqCA6yj`.
+
+**Smoke produção:**
+- `/health`: 200, `service:"guto-cerebro"`, Gemini configurado.
+- Usuário temporário de smoke: `u-ba7d6cd778e846b0`.
+
+| Cenário | Status | Ação | Resultado |
+|---|---:|---|---|
+| `oi` | 200 | `none` | passou |
+| `estou triste` | 200 | `none` | passou |
+| `bora treinar` | 200 | `updateWorkout` | passou |
+| `quero dieta` | 200 | `generateDiet` | passou |
+| `viajo amanhã` | 200 | `openProactiveCard` | passou |
+
+**Verificações do payload público:**
+- Sem meta leak.
+- Sem validation leak.
+- Sem prompt legado/`askGutoModel`/`classifyContractIntent`/`enforceTrainingFlowCertainty`
+  no payload.
+- Sem resposta dupla.
+- Treino roteado por `updateWorkout`.
+- Dieta roteada por `generateDiet`.
+- Viagem roteada por `openProactiveCard`.
+
+**Rollback preparado:**
+- Deployment final `dpl_2HtW5gRa8buptWX7oDh3kjqCA6yj` está marcado como rollback candidate
+  pelo Vercel depois do release.
+- O rollback automático para os deployments imediatamente anteriores não deve ser usado sem
+  revalidação: `dpl_GsR5...` e `dpl_ELw...` falharam por env Production ausente, e
+  `dpl_EWcv...` falhou por ESM antigo.
+- Caminho seguro de rollback operacional, se necessário: promover novamente o último preview
+  saudável (`dpl_HLo4kFCYP7Ydbsh62v2WwM19bSnh`) ou redeployar `main` com as envs Production
+  agora configuradas, seguido de `/health` + smoke `/guto`.
+
+**Não alterado:**
+- Frontend produção.
+- UI/design/avatar/onboarding.
+- Legado físico.
+- Fluxo soberano funcional além de configuração Production.
+
+**Riscos/pendências:**
+- `OPENAI_API_KEY` ausente: `/guto-audio` real em produção ainda não foi validado.
+- Runtime logs do deployment final registram warning Node `DEP0169` (`url.parse()`); não bloqueou
+  `/health` nem `/guto`, mas deve ser limpo em dívida técnica separada.
+- O deploy CLI indicou `gitDirty: 1` por haver scripts de auditoria não rastreados no worktree
+  local (`scripts/audit-workout-quality.*`). Eles não fazem parte do fluxo funcional validado.
