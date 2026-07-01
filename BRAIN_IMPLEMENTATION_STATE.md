@@ -811,3 +811,77 @@ sem alterar frontend produção, UI/design ou código funcional.
   `/health` nem `/guto`, mas deve ser limpo em dívida técnica separada.
 - O deploy CLI indicou `gitDirty: 1` por haver scripts de auditoria não rastreados no worktree
   local (`scripts/audit-workout-quality.*`). Eles não fazem parte do fluxo funcional validado.
+
+---
+
+## 21. Frontend produção conectado ao backend soberano — VALIDADO
+
+**Objetivo executado:** conectar o app público de produção ao backend soberano de produção,
+sem alterar UI/design, sem criar feature nova e sem mexer no cérebro.
+
+**Frontend produção:**
+- URL pública: `https://corpoguto.vercel.app`
+- Deployment funcional validado: `dpl_CX3t6PuYqNEZr76pUQ3FrGN8C4oC`
+- Commit frontend usado: `4f0cb01 chore(guto): connect frontend to sovereign brain preview`
+- Env vars Production confirmadas:
+  - `GUTO_BACKEND_PROXY_URL=https://cerebroguto-sovereign-smoke.vercel.app`
+  - `NEXT_PUBLIC_GUTO_API_URL=https://cerebroguto-sovereign-smoke.vercel.app`
+  - `NEXT_PUBLIC_API_URL=https://cerebroguto-sovereign-smoke.vercel.app`
+
+**Backend produção usado pelo frontend:**
+- URL pública: `https://cerebroguto-sovereign-smoke.vercel.app`
+- Deployment final validado: `dpl_Hpf232GJAURmRmjckfggoSuqkjY8`
+- Commit backend final: `2018e45 fix(guto): validate active access through redis`
+- `/health`: 200, `service:"guto-cerebro"`, Gemini configurado.
+- CORS production validado para `https://corpoguto.vercel.app`.
+
+**Falhas encontradas no caminho e correções mínimas:**
+- Env-only no frontend não bastou no `origin/main` antigo: o app ainda não tinha o adaptador
+  validado para `NEXT_PUBLIC_GUTO_API_URL`/ações soberanas/supressão de redirects laterais.
+  Solução: promover o commit frontend já validado em staging (`4f0cb01`), sem alteração visual.
+- O primeiro smoke do frontend apontado ao backend soberano revelou CORS ausente para
+  `corpoguto.vercel.app`. Solução operacional: adicionar o domínio em `GUTO_ALLOWED_ORIGINS`
+  production e redeployar o backend.
+- O smoke com usuário recém-criado revelou uma inconsistência serverless no backend:
+  `requireActiveUser` consultava `user-access-store` síncrono, enquanto login/`/auth/me`
+  consultavam Redis async. Em cold start, uma instância podia devolver 403 `ACCESS_PAUSED`
+  para aluno ativo. Solução mínima: `requireActiveUser` agora valida acesso ativo por Redis
+  async (`requireActiveUserAccessAsync`/`getEffectiveUserAccessAsync`). **Não toca cérebro.**
+
+**Smoke produção pelo navegador:**
+- Horário: `2026-07-01T20:02:31Z` (`2026-07-01 22:02:31 CEST`).
+- Usuário temporário ativo: `u-prod-ui-smoke-3ab8ec9f`.
+- Screenshot: `/tmp/guto-frontend-production-smoke-final-passed.png`.
+
+| Cenário | Status | Ação | UI |
+|---|---:|---|---|
+| `oi` | 200 | `none` | 1 resposta GUTO |
+| `estou triste` | 200 | `none` | 1 resposta GUTO |
+| `bora treinar` | 200 | `updateWorkout` | treino aceito pela UI |
+| `quero dieta` | 200 | `generateDiet` | dieta aceita pela UI |
+| `viajo amanhã` | 200 | `openProactiveCard` | proatividade aceita pela UI |
+
+**Resultado:** 5/5 passaram. Sem loading infinito, sem CORS, sem redirect indevido para
+`/login` ou `/acesso-pausado`, sem meta/validation/prompt leak, sem resposta dupla, sem padrões
+legados no payload visível e sem HTTP 4xx/5xx relevante durante o smoke final. O app público de
+produção fala com o backend soberano.
+
+**Testes após a correção mínima de auth:**
+- Backend `npm run typecheck` ✅
+- Backend `node --import tsx --test --test-concurrency=1 tests/guto-access-blocking.test.ts`
+  → 10/10 ✅
+- Backend `node --import tsx --test --test-concurrency=1 tests/guto-brain-*.test.ts`
+  → 133/133 ✅
+- Backend `node scripts/run-guto-tests.mjs` ✅ (suíte completa exit 0)
+- Vercel backend build production: `npm ci` + `npm run typecheck` ✅
+
+**Rollback disponível:**
+- Frontend: deployment anterior original `dpl_5nViiok5WCWu4tEBc3gsuB7eR2vY` volta o app para
+  o backend anterior/desconectado do soberano. O deploy env-only `dpl_5EC8FzZ97Ryc4dGMHKhpnPpo5Dj6`
+  não é recomendado como rollback porque falhou no smoke.
+- Backend: deployment atual estável é `dpl_Hpf232GJAURmRmjckfggoSuqkjY8`. Deployments anteriores
+  a ele podem reintroduzir CORS ausente ou a corrida serverless de `ACCESS_PAUSED` para aluno ativo.
+
+**Pendências:**
+- Áudio real continua pendente enquanto `OPENAI_API_KEY` não estiver configurada/validada.
+- Legado físico permanece no código, mas sem autoridade no fluxo principal soberano.
