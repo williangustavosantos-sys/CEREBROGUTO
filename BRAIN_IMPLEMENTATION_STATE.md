@@ -595,3 +595,66 @@ preservam ações soberanas (`updateWorkout`, `generateDiet`).
   preview; depois retornou 200. Com o ajuste, não houve redirect nem quebra da UI.
 - Áudio real segue pendente porque o preview do backend não tem `OPENAI_API_KEY` configurada.
 - Produção, frontend visual e fluxo soberano do backend não foram alterados.
+
+---
+
+## 18. Frontend Vercel staging público — VALIDADO
+
+**Objetivo executado:** validar o frontend Vercel Preview público/staging na branch
+`test/card-block-contract-e2e`, apontado para o backend soberano Preview, sem alterar produção,
+sem mudar UI/design e sem criar feature nova.
+
+**Frontend Preview testado:**
+- URL final: `https://corpoguto-avnyttjoa-williangustavosantos-sys-projects.vercel.app`
+- Deployment: `dpl_CU9wpJ4S2RBG8xssEJceYhdKca3d`
+- Commit frontend: `4f0cb01 chore(guto): connect frontend to sovereign brain preview`
+- O deployment é protegido por Vercel Authentication; o smoke usou URL temporária oficial
+  (`_vercel_share`) expirada em 2026-07-02. O app em si respondeu 200 após o bypass.
+
+**Backend Preview usado no smoke final:**
+- URL final: `https://cerebroguto-sovereign-smoke-j5l1k8oh3.vercel.app`
+- Deployment: `dpl_12gf3B9WhpbAsQDb8Bfc6Pi8BYUZ`
+- Commit backend: `528903c chore(guto): connect frontend to sovereign brain preview`
+- `/health`: 200, `service:"guto-cerebro"`, Gemini configurado.
+- Persistência validada antes do smoke: aluno temporário criado via admin/invite, consentimento,
+  calibragem e `initialXpGranted` persistiram e foram relidos do Preview.
+
+**Config Preview corrigida/confirmada:**
+- Frontend branch `test/card-block-contract-e2e`:
+  `GUTO_BACKEND_PROXY_URL`, `NEXT_PUBLIC_GUTO_API_URL`, `NEXT_PUBLIC_API_URL` apontando para
+  `https://cerebroguto-sovereign-smoke-j5l1k8oh3.vercel.app`.
+- Backend branch `feat/brain-slice1`: envs críticas sobrescritas no Preview com os valores
+  corretos (`UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, `JWT_SECRET`,
+  `GEMINI_API_KEY`, `GUTO_GEMINI_MODEL`, `VOICE_API_KEY`) e `GUTO_TIME_ZONE=Europe/Rome`.
+- Correção operacional encontrada: o primeiro backend redeploy herdou `TZ=:UTC`, inválido para
+  `Intl.DateTimeFormat`; fixado por `GUTO_TIME_ZONE=Europe/Rome`. Produção não foi alterada.
+
+**Smoke público pelo navegador:**
+- Horário: `2026-07-01T12:10:31.523Z` (`2026-07-01 14:10:31 CEST`)
+- Usuário temporário: `G-ALUNO-SMOKE-MGRE`
+
+| Cenário | Status | Ação | UI |
+|---|---:|---|---|
+| `oi` | 200 | `none` | 1 resposta GUTO |
+| `estou triste` | 200 | `none` | 1 resposta GUTO |
+| `bora treinar` | 200 | `updateWorkout` | treino aceito pela UI |
+| `quero treinar braço` | 200 | `updateWorkout` | treino aceito pela UI |
+| `quero dieta` | 200 | `generateDiet` | payload aceito pela UI |
+| `viajo amanhã` | 200 | `openProactiveCard` | trilho proativo aceito |
+| `voltei depois de duas semanas` | 200 | `none` | continuidade soberana, sem card obrigatório |
+
+**Resultado:** 7/7 passaram. Sem CORS, sem loading infinito, sem redirect para
+`/acesso-pausado`, sem redirect para `/login`, sem meta/validation/prompt leak, sem resposta
+dupla, sem padrões legados no payload/UI e sem HTTP 4xx/5xx em `/api/guto/*` durante o smoke
+final.
+
+**Não alterado:**
+- Produção.
+- UI/design/avatar/onboarding.
+- Legado físico.
+- Fluxo soberano validado.
+
+**Pendências:**
+- O preview público direto ainda exige Vercel Authentication; para teste externo sem login Vercel,
+  gerar nova URL `_vercel_share` ou desativar proteção apenas no ambiente de staging.
+- Áudio real segue pendente enquanto `OPENAI_API_KEY` não estiver configurada no backend Preview.
