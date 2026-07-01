@@ -7,9 +7,9 @@ import {
   saveWeeklyConversation,
   getWeekKey,
   getProactiveMemoriesByStatus,
-} from './proactive-store'
+} from './proactive-store.js'
 
-import type { WeeklyConversation } from './types'
+import type { WeeklyConversation } from './types.js'
 
 // ─── Checks ───────────────────────────────────────────────────────────────────
 

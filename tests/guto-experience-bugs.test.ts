@@ -27,7 +27,7 @@ import { test } from "node:test";
 // devolver texto quando o usuário não tem limitação real.
 
 // ─── Helpers compartilhados ─────────────────────────────────────────────────
-import { existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import jwt from "jsonwebtoken";
@@ -52,14 +52,14 @@ let baseUrl: string;
 const secret = process.env.JWT_SECRET!;
 
 function seedMemory(userId: string, data: Record<string, unknown>) {
-  const store = existsSync(memFile) ? JSON.parse(require("fs").readFileSync(memFile, "utf8")) : {};
+  const store = existsSync(memFile) ? JSON.parse(readFileSync(memFile, "utf8")) : {};
   store[userId] = { userId, ...data };
-  require("fs").writeFileSync(memFile, JSON.stringify(store, null, 2));
+  writeFileSync(memFile, JSON.stringify(store, null, 2));
   _clear?.();
 }
 
 function readMemory(userId: string): Record<string, unknown> {
-  const store = existsSync(memFile) ? JSON.parse(require("fs").readFileSync(memFile, "utf8")) : {};
+  const store = existsSync(memFile) ? JSON.parse(readFileSync(memFile, "utf8")) : {};
   return store[userId] || {};
 }
 

@@ -7,6 +7,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
+import { Redis } from "@upstash/redis";
 import type { DietPlan } from "./nutrition.js";
 
 const DIET_FILE = process.env.GUTO_DIET_FILE || join(process.cwd(), "data", "guto-diet.json");
@@ -18,10 +19,11 @@ const inMemoryStore: Record<string, DietPlan> = {};
 
 // ─── Redis client (lazy, same pattern as memory-store) ───────────────────────
 
-let redisClient: {
+type RedisClient = {
   get: (key: string) => Promise<unknown>;
   set: (key: string, value: unknown) => Promise<unknown>;
-} | null = null;
+};
+let redisClient: RedisClient | null = null;
 
 function getRedisClient() {
   if (redisClient) return redisClient;
@@ -29,8 +31,7 @@ function getRedisClient() {
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return null;
   try {
-    const { Redis } = require("@upstash/redis");
-    redisClient = new Redis({ url, token }) as typeof redisClient;
+    redisClient = new Redis({ url, token }) as unknown as RedisClient;
     return redisClient;
   } catch {
     return null;

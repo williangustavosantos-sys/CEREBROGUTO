@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import type { CatalogExercise, CatalogLanguage, CatalogMuscleGroup } from "../exercise-catalog";
+import type { CatalogExercise, CatalogLanguage, CatalogMuscleGroup } from "../exercise-catalog.js";
 import { validateExerciseVideoMetadata } from "./exercise-video-validation.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

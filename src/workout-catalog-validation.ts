@@ -1,4 +1,4 @@
-import { getCatalogById, type CatalogExercise, type CatalogLanguage } from "../exercise-catalog";
+import { getCatalogById, type CatalogExercise, type CatalogLanguage } from "../exercise-catalog.js";
 
 const LOCAL_VIDEO_PREFIX = "/exercise/visuals/";
 

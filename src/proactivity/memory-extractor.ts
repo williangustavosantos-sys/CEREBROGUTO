@@ -2,10 +2,10 @@
 // Uses Gemini to extract proactive events from conversation text.
 // Returns null if nothing relevant found. Never throws.
 
-import { config } from '../config'
-import { getWeekKey } from './proactive-store'
-import { addDaysToDateKey, resolveProactiveDate } from './date-resolver'
-import type { ProactiveMemoryType } from './types'
+import { config } from '../config.js'
+import { getWeekKey } from './proactive-store.js'
+import { addDaysToDateKey, resolveProactiveDate } from './date-resolver.js'
+import type { ProactiveMemoryType } from './types.js'
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -260,7 +260,7 @@ export async function extractEventsFromConversation(
 export function buildPendingMemoryData(
   userId: string,
   event: ExtractedEvent
-): Omit<import('./types').ProactiveMemory, 'id' | 'userId' | 'createdAt' | 'updatedAt'> {
+): Omit<import('./types.js').ProactiveMemory, 'id' | 'userId' | 'createdAt' | 'updatedAt'> {
   return {
     type: event.type,
     status: 'pending_confirmation',

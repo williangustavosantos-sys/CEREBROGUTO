@@ -4,7 +4,9 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { v2 as cloudinary } from "cloudinary";
 import { config } from "./config.js";
 
-const UPLOADS_DIR = path.join(process.cwd(), "tmp", "validation-images");
+const UPLOADS_DIR = process.env.VERCEL
+  ? path.join("/tmp", "guto", "validation-images")
+  : path.join(process.cwd(), "tmp", "validation-images");
 const URL_PREFIX = "/uploads/validation-images";
 
 // As selfies de validação são dado pessoal sensível.

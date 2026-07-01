@@ -5,12 +5,12 @@
 // Why: GUTO cannot save "if user says X then Y"; it must understand context,
 // but state transitions still need guardrails and memory-id validation.
 
-import { getProactiveMemoriesByStatus, getProactiveMemories, getDateKey } from './proactive-store'
-import { detectTravelTrainingSignal } from './decision-engine'
-import { resolveProactiveDate } from './date-resolver'
-import type { ProactiveMemory } from './types'
-import { config } from '../config'
-import { sanitizeUserFacingText } from '../output-sanitizer'
+import { getProactiveMemoriesByStatus, getProactiveMemories, getDateKey } from './proactive-store.js'
+import { detectTravelTrainingSignal } from './decision-engine.js'
+import { resolveProactiveDate } from './date-resolver.js'
+import type { ProactiveMemory } from './types.js'
+import { config } from '../config.js'
+import { sanitizeUserFacingText } from '../output-sanitizer.js'
 
 // ─── Output types ──────────────────────────────────────────────────────────────
 

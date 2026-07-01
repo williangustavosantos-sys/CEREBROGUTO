@@ -6,9 +6,9 @@ import {
   getProactiveMemoriesByStatus,
   updateProactiveMemory,
   getDateKey,
-} from './proactive-store'
+} from './proactive-store.js'
 
-import type { WeatherEnrichment, HolidayEnrichment } from './types'
+import type { WeatherEnrichment, HolidayEnrichment } from './types.js'
 
 // ─── Weather via wttr.in ──────────────────────────────────────────────────────
 
@@ -210,12 +210,12 @@ export async function fetchHolidaysForWeek(
 export async function enrichMemory(
   userId: string,
   memoryId: string,
-  memory: import('./types').ProactiveMemory,
+  memory: import('./types.js').ProactiveMemory,
   userCountry: string,
   userCountryCode: string | undefined,
   language: string
 ): Promise<void> {
-  const updates: Partial<import('./types').ProactiveMemory> = {
+  const updates: Partial<import('./types.js').ProactiveMemory> = {
     status: 'enriched',
   }
 

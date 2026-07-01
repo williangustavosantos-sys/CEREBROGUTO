@@ -3,9 +3,9 @@
 import {
   readMemoryStoreAsync,
   writeMemoryStoreAsync,
-} from "../memory-store";
+} from "../memory-store.js";
 
-import type { ContextItem, ContextState, ContextType } from "./types";
+import type { ContextItem, ContextState, ContextType } from "./types.js";
 
 const MAX_HYPOTHESES_PER_USER = 20;
 

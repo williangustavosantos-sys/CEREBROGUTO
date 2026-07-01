@@ -1,7 +1,7 @@
 // Mapeia sinais extraídos para Context Items persistidos
 
-import { addContextItem, isDuplicate } from "./context-bank";
-import type { ContextState, ContextType, ExtractedSignal } from "./types";
+import { addContextItem, isDuplicate } from "./context-bank.js";
+import type { ContextState, ContextType, ExtractedSignal } from "./types.js";
 
 // ─── Mapeamento de tipo de sinal para tipo de contexto ────────────────────────
 

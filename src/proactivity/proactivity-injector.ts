@@ -6,10 +6,10 @@
 import {
   getProactiveMemoriesByStatus,
   markPastActiveMemoriesPendingValidation,
-} from './proactive-store'
+} from './proactive-store.js'
 
-import { getWeeklyCheckResult } from './weekly-conversation'
-import type { ProactiveMemory } from './types'
+import { getWeeklyCheckResult } from './weekly-conversation.js'
+import type { ProactiveMemory } from './types.js'
 
 // ─── Format helpers ────────────────────────────────────────────────────────────
 

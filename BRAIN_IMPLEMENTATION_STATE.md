@@ -20,12 +20,13 @@
 - **Convergência:** `/guto` usa o Cérebro Soberano como fluxo principal mesmo com flag OFF; a flag não reativa o parlamento legado.
 - **Nenhum merge feito.** PR continua draft.
 - **Frontend intocado. Produção intocada.** Flag NÃO ativada no `.env` (default OFF).
-- **Último commit:** o commit de **preparação para smoke Vercel** (seção 15). `c770910` foi a convergência; `b447318` era o handoff; antes, `f865e01` (2B).
+- **Último commit:** o commit de **validação smoke Vercel** (seção 16). `5c490cc` foi a preparação para smoke; `c770910` foi a convergência; `b447318` era o handoff; antes, `f865e01` (2B).
 - **Node:** `/opt/homebrew/bin/node` (export `PATH="/opt/homebrew/bin:$PATH"` antes de rodar).
 - **Rodar testes:** `cd guto-backend && npm run typecheck` e `node --import tsx --test --test-concurrency=1 <arquivo>`. Suíte completa: `node scripts/run-guto-tests.mjs`.
 
 ### Commits da migração (mais recentes no topo)
 ```
+<SMOKE> chore(guto): validate sovereign brain on vercel smoke test
 <VERCEL> chore(guto): prepare sovereign brain for vercel smoke test
 <CONV>  feat(guto): converge fluxo principal para cérebro soberano
 <2C>    feat(guto): cérebro possui adaptação/dor/continuidade — L3 vira trilho/validador (2C)
@@ -104,6 +105,7 @@ e3b45e9 feat(brain): validateContract — validação só de forma + suporte Fat
 - **Cérebro/convergência: 133/133** ✅ (`node --import tsx --test --test-concurrency=1 tests/guto-brain-*.test.ts`)
 - **Backend completo: 869/869** ✅ (`node scripts/run-guto-tests.mjs`)
 - **Typecheck: verde** ✅ (`npm run typecheck`)
+- **Smoke Vercel `/guto`: 10/10** ✅ (`https://cerebroguto-sovereign-smoke-p4jbstvux.vercel.app`, seção 16)
 - **Validação viva 2A:** 14 cenários com Gemini real — chantagem 0, agenda 0, presença OK.
 - **Validação viva 2B:** 10 cenários com Gemini real — 5/5 treinos executados pelo cérebro, template legado 0, re-ask 0, chantagem 0.
 - **Validação viva Convergência:** 12 cenários com Gemini real — status 200 em todos, sem vazamento de meta, sem resposta dupla, sem `askGutoModel` como fallback de cérebro; treino executado em pedidos explícitos, dieta via `generateDiet`, restrição alimentar capturada, viagem via trilho proativo, dor/troca sem fallback genérico.
@@ -434,3 +436,89 @@ Vercel sem alterar a lógica soberana validada.
 - Produção.
 - Merge/PR draft.
 - Lógica soberana de decisão.
+
+---
+
+## 16. Smoke Vercel real — VALIDADO
+
+**Objetivo executado:** testar o Cérebro Soberano em endpoint público Vercel, sem frontend,
+sem produção e sem criar feature nova.
+
+**Deploy testado:**
+- Projeto Vercel isolado: `cerebroguto-sovereign-smoke`.
+- URL pública: `https://cerebroguto-sovereign-smoke-p4jbstvux.vercel.app`.
+- Deployment: `dpl_5o6c7QbBJRDQzJ68hPCQgPc6zxh5`.
+- Horário do smoke: `2026-07-01T05:42:32.024Z` (`2026-07-01 07:42:32 CEST`).
+- `/health`: 200, `service:"guto-cerebro"`, Gemini configurado.
+
+**Config Vercel confirmada:**
+- `installCommand`: `npm ci`.
+- `buildCommand`: `npm run typecheck`.
+- `startCommand`: não existe no preview; runtime é Vercel Function via `api/index.ts`.
+- Runtime Node: `24.x`.
+- Rewrite: `/(.*)` → `/api/index`.
+- `GUTO_DISABLE_LISTEN=1` é setado no wrapper serverless; o app Express exportado atende a
+  função, sem depender de processo local em `:3001`.
+- Aviso conhecido: `memory` em `vercel.json` é ignorado com Active CPU billing; não afeta o smoke.
+
+**Env vars do preview:**
+- Presentes para `/guto`: `GEMINI_API_KEY`, `JWT_SECRET`, `UPSTASH_REDIS_REST_URL`,
+  `UPSTASH_REDIS_REST_TOKEN`, `GUTO_GEMINI_MODEL`, `GUTO_ALLOWED_ORIGINS`,
+  `GUTO_RATE_LIMIT_MAX_REQUESTS`, `GUTO_RATE_LIMIT_WINDOW_MS`, `GUTO_TIME_ZONE`,
+  `GUTO_MODEL_TIMEOUT_MS`, `GUTO_MODEL_TEMPERATURE`, `GUTO_CURATOR_MAX_ATTEMPTS`,
+  `GUTO_CURATOR_BACKOFF_MS`, `FRONTEND_PUBLIC_URL`.
+- `VOICE_API_KEY` presente; TTS não foi exercitado neste smoke textual.
+- `OPENAI_API_KEY` ausente; áudio real não foi testado no Vercel. `/guto-audio` segue coberto por
+  teste determinístico de roteamento transcrição → cérebro soberano.
+
+**Correções mínimas exigidas pelo preview:**
+- Adicionado wrapper serverless `api/index.ts` e `vercel.json`.
+- Backend marcado como ESM (`"type":"module"`) e imports locais ajustados com extensão `.js`
+  para Node/Vercel.
+- Uploads de validação usam `/tmp/guto/validation-images` em Vercel.
+- Store de memória: quando Redis está configurado, leitura síncrona usa cache hidratado/Redis,
+  não `data/guto-memory.json` empacotado no build. O endpoint `/guto/memory` aguarda a fila de
+  persistência para que o próximo turno do chat veja o perfil completo.
+- Teste histórico `guto-experience-bugs` atualizado para ESM (`readFileSync/writeFileSync` em
+  vez de `require("fs")`).
+
+**Smoke `/guto` com Gemini real:**
+Perfil temporário do aluno de smoke persistido no preview: idade 32, objetivo `muscle_gain`,
+altura 178, peso 82, sexo biológico `male`, academia, joelho sensível, `não como lactose`.
+
+| Cenário | Status | Ação |
+|---|---:|---|
+| `oi` | 200 | `none` |
+| `estou triste` | 200 | `none` |
+| `bora treinar` | 200 | `updateWorkout` |
+| `quero treinar braço` | 200 | `updateWorkout` |
+| `meu joelho está ruim` | 200 | `none` |
+| `quero trocar esse exercício` | 200 | `none` |
+| `quero dieta` | 200 | `generateDiet` |
+| `não como lactose` | 200 | `none` |
+| `viajo amanhã` | 200 | `openProactiveCard` |
+| `voltei depois de duas semanas` | 200 | `none` |
+
+**Resultado:** 10/10 passaram. Sem vazamento de meta/validation/prompt, sem resposta dupla,
+sem padrões legados (`askGutoModel`, `classifyContractIntent`, `buildGutoBrainPrompt`,
+`enforceTrainingFlowCertainty`) no payload público. Treino executou com `updateWorkout`,
+dieta roteou por `generateDiet`, viagem criou trilho proativo por `openProactiveCard`.
+
+**Testes locais após o smoke:**
+- `npm run typecheck` ✅
+- `node --import tsx --test --test-concurrency=1 tests/guto-brain-*.test.ts` → 133/133 ✅
+- `node scripts/run-guto-tests.mjs` ✅ (suíte completa verde; todos os blocos com `fail 0`)
+
+**Não alterado:**
+- Frontend.
+- Produção.
+- Merge/PR draft.
+- Lógica soberana de decisão.
+- Legado físico ainda existe para compatibilidade/testes históricos, mas não tem autoridade no
+  fluxo principal de `/guto`.
+
+**Riscos/pendências:**
+- Teste real de áudio no Vercel depende de `OPENAI_API_KEY` e fixture/arquivo real; ainda pendente.
+- O projeto de smoke está isolado e com proteção SSO desativada para permitir chamadas públicas
+  do teste; não confundir com produção.
+- `server.ts` continua grande; limpeza estrutural física fica para etapa posterior.

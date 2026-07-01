@@ -1,12 +1,12 @@
 // Extração de sinais via Gemini — fetch direto, timeout 5s
 
-import { config } from "../config";
+import { config } from "../config.js";
 import type {
   DetectedLanguage,
   ExtractedSignal,
   ExtractionResult,
   SignalType,
-} from "./types";
+} from "./types.js";
 
 const EXTRACTOR_TIMEOUT_MS = 5_000;
 

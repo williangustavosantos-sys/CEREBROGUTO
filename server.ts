@@ -5,10 +5,10 @@ import multer from "multer";
 import { existsSync, mkdirSync } from "fs";
 import path from "path";
 
-import { config, isProductionEnv } from "./src/config";
-import { createRateLimit } from "./src/http/rate-limit";
-import { requestLog } from "./src/http/request-log";
-import { readMemoryStoreSync, writeMemoryStoreSync, readMemoryStoreAsync, writeMemoryStoreAsync, persistUserMemory } from "./src/memory-store";
+import { config, isProductionEnv } from "./src/config.js";
+import { createRateLimit } from "./src/http/rate-limit.js";
+import { requestLog } from "./src/http/request-log.js";
+import { readMemoryStoreSync, writeMemoryStoreSync, readMemoryStoreAsync, writeMemoryStoreAsync, persistUserMemory, ensureMemoryHydrated, flushMemoryStoreWrites } from "./src/memory-store.js";
 import {
   getCatalogById,
   getAggregatedExerciseCatalog,
@@ -21,10 +21,10 @@ import {
   type CatalogExercise,
   type CatalogLanguage,
   type CatalogLocation,
-} from "./exercise-catalog";
-import { sanitizeDisplayName } from "./server-utils";
-import { generateWorkoutPoster } from "./src/poster";
-import { initStorage, uploadImage, deleteImage, signImageUrl, verifyImageSignature } from "./src/storage";
+} from "./exercise-catalog.js";
+import { sanitizeDisplayName } from "./server-utils.js";
+import { generateWorkoutPoster } from "./src/poster.js";
+import { initStorage, uploadImage, deleteImage, signImageUrl, verifyImageSignature } from "./src/storage.js";
 import {
   awardArenaXp,
   getWeeklyRanking,
@@ -34,7 +34,7 @@ import {
   getMyArenaProfile,
   syncArenaDisplayName,
   DEFAULT_ARENA_GROUP,
-} from "./src/arena";
+} from "./src/arena.js";
 import { curateWorkout, getCandidatePool, hydrateCuratedExercises, type LocationMode as CuratorLocationMode } from "./src/workout-curator.js";
 import { coachRankingsRouter, coachRouter } from "./src/coach-router.js";
 import { authRouter } from "./src/auth-router.js";
@@ -68,7 +68,7 @@ import {
   isWorkoutCatalogValidationError,
   normalizeWorkoutPlanAgainstCatalog,
   validateWorkoutExerciseAgainstCatalog,
-} from "./src/workout-catalog-validation";
+} from "./src/workout-catalog-validation.js";
 import {
   appendWorkoutFeedback,
   applySafeExerciseSubstitutions,
@@ -727,6 +727,10 @@ app.use(createRateLimit({
 }));
 app.use(requestLog);
 app.use(parseAuth);
+app.use(async (_req, _res, next) => {
+  await ensureMemoryHydrated().catch(() => {});
+  next();
+});
 
 // LEI 11 — NENHUM marcador interno do cérebro sai do backend. Chokepoint único:
 // envolve res.json e limpa toda resposta (fala, memória, instruções) de qualquer
@@ -742,7 +746,9 @@ app.use((_req, res, next) => {
 // Servidas só com URL assinada (HMAC, ver storage.signImageUrl): a assinatura vai
 // na query, então funciona com <img src> (sem header Authorization) e mata o acesso
 // público/enumerável que existia com express.static. Request sem/!= assinatura → 403.
-const uploadsDir = path.join(process.cwd(), "tmp", "validation-images");
+const uploadsDir = process.env.VERCEL
+  ? path.join("/tmp", "guto", "validation-images")
+  : path.join(process.cwd(), "tmp", "validation-images");
 if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
 app.get("/uploads/validation-images/:filename", (req, res) => {
   const filename = String(req.params.filename || "");
@@ -11668,6 +11674,7 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
   if (memory.name) {
     syncArenaDisplayName(userId, memory.name, getUserArenaGroup(userId));
   }
+  await flushMemoryStoreWrites();
 
   // Background pass: o resolver IA pode refinar depois (typo, contexto rico).
   // Já temos um snapshot 'clear' garantido acima — esse void só serve para

@@ -1,10 +1,12 @@
 import { Router, raw, type Request, type Response } from "express";
+import { createRequire } from "module";
 import Stripe from "stripe";
 import { config } from "./config.js";
 import { requireActiveUser } from "./auth-middleware.js";
 import { getUserAccess, upsertUserAccess, upsertUserAccessAsync, type SubscriptionStatus } from "./user-access-store.js";
 import { addLog } from "./log-store.js";
 
+const require = createRequire(import.meta.url);
 export const stripeEnabled = Boolean(config.stripeSecretKey);
 
 const stripe = stripeEnabled ? new Stripe(config.stripeSecretKey) : null;

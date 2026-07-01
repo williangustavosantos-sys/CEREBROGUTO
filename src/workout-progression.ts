@@ -4,7 +4,7 @@ import {
   suggestExerciseSubstitutes,
   type CatalogLanguage,
   type CatalogLocation,
-} from "../exercise-catalog";
+} from "../exercise-catalog.js";
 
 export type WorkoutFocus =
   | "chest_triceps"

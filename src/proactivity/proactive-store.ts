@@ -5,14 +5,14 @@
 import {
   readMemoryStoreAsync,
   writeMemoryStoreAsync,
-} from '../memory-store'
-import { config } from '../config'
+} from '../memory-store.js'
+import { config } from '../config.js'
 
 import type {
   ProactiveMemory,
   ProactiveMemoryStatus,
   WeeklyConversation,
-} from './types'
+} from './types.js'
 
 type ProactiveMemoryCandidate = Pick<
   ProactiveMemory,
