@@ -520,6 +520,11 @@ interface GutoMemory {
   turnJournal?: AtomicTurnRecord[];
 }
 
+function toPublicGutoMemoryPayload(memory: GutoMemory): Omit<GutoMemory, "turnJournal"> {
+  const { turnJournal: _turnJournal, ...publicMemory } = memory;
+  return publicMemory;
+}
+
 interface ActiveExerciseContext {
   source: "chat" | "online";
   name: string;
@@ -11230,16 +11235,17 @@ app.get("/guto/memory", requireActiveUser, async (req, res) => {
     syncArenaDisplayName(userId, memory.name, getUserArenaGroup(userId));
   }
   saveMemory(memory);
+  const publicMemory = toPublicGutoMemoryPayload(memory);
   if (memory.lastWorkoutPlan) {
     try {
       res.json({
-        ...memory,
+        ...publicMemory,
         lastWorkoutPlan: localizeWorkoutPlan(memory.lastWorkoutPlan, memory.language)
       });
     } catch (error) {
       if (!isWorkoutCatalogValidationError(error)) throw error;
       res.status(409).json({
-        ...memory,
+        ...publicMemory,
         lastWorkoutPlan: null,
         lastWorkoutPlanError: "WORKOUT_PLAN_REQUIRES_CATALOG_VIDEO",
         issues: error.issues,
@@ -11247,7 +11253,7 @@ app.get("/guto/memory", requireActiveUser, async (req, res) => {
     }
     return;
   }
-  res.json(memory);
+  res.json(publicMemory);
 });
 
 app.delete("/guto/account", requireActiveUser, async (req, res) => {
@@ -11716,13 +11722,13 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
   if (memory.lastWorkoutPlan) {
     try {
       return res.json({
-        ...memory,
+        ...toPublicGutoMemoryPayload(memory),
         lastWorkoutPlan: localizeWorkoutPlan(memory.lastWorkoutPlan, memory.language)
       });
     } catch (error) {
       if (!isWorkoutCatalogValidationError(error)) throw error;
       return res.status(409).json({
-        ...memory,
+        ...toPublicGutoMemoryPayload(memory),
         lastWorkoutPlan: null,
         lastWorkoutPlanError: "WORKOUT_PLAN_REQUIRES_CATALOG_VIDEO",
         issues: error.issues,
@@ -11730,7 +11736,7 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
     }
   }
 
-  res.json(memory);
+  res.json(toPublicGutoMemoryPayload(memory));
 });
 
 app.get("/guto/proactive", requireActiveUser, async (req, res) => {

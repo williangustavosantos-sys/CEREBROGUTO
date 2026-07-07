@@ -334,6 +334,68 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.equal(body.proactiveMemories?.[0]?.eventKey, undefined);
   });
 
+  it("GET/POST /guto/memory não expõem turnJournal nem expectedResponse interno", async () => {
+    const userId = "conv-memory-public-payload";
+    seed(userId, {
+      turnJournal: [{
+        decision: {
+          turnId: "turn-private",
+          userMessage: "oi",
+          previousState: { activeContext: null, stage: "none" },
+          activeContext: null,
+          intent: "conversation",
+          relatedMemoryId: undefined,
+          stage: "none",
+          nextState: { activeContext: null, stage: "none" },
+          effects: [],
+          response: {
+            fala: "fala interna",
+            acao: "none",
+            expectedResponse: {
+              type: "text",
+              instruction: "Evento proativo devido: arrival. Decida a fala e a próxima ação.",
+            },
+            avatarEmotion: "neutral",
+          },
+          cards: [],
+          memoryPatch: {},
+          workoutEffect: "none",
+          dietEffect: "none",
+          pathEffect: "none",
+        },
+        responsePayload: {
+          fala: "fala interna",
+          acao: "none",
+          expectedResponse: {
+            type: "text",
+            instruction: "Não use culpa por streak nem template de agenda.",
+          },
+        },
+        createdAt: new Date().toISOString(),
+      }],
+    });
+    const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
+
+    for (const request of [
+      () => fetch(`${baseUrl}/guto/memory`, { headers: { Authorization: `Bearer ${token}` } }),
+      () => fetch(`${baseUrl}/guto/memory`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ language: "pt-BR" }),
+      }),
+    ]) {
+      const response = await request();
+      const body = await response.json() as Record<string, any>;
+      const serialized = JSON.stringify(body);
+
+      assert.equal(response.status, 200);
+      assert.ok(!("turnJournal" in body), "turnJournal é diário interno e não pode ir ao frontend");
+      assert.doesNotMatch(serialized, /expectedResponse|responsePayload|memoryPatch|Evento proativo devido|Decida a fala|template de agenda|culpa por streak/i);
+    }
+
+    assert.ok(readMem(userId).turnJournal?.length > 0, "turnJournal continua persistido internamente");
+  });
+
   it("ação fora do contrato vira fallback seguro estruturado", async () => {
     stubPayload = { flag: null, confidence: 0, fala: "travando", acao: "lock", expectedResponse: null };
     seed("conv-invalid-action");
