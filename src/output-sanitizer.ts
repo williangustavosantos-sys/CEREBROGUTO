@@ -26,6 +26,12 @@ const INTERNAL_PHRASES: RegExp[] = [
   /\bworkout only\b/gi,
   /\bUser (?:message|question):\s*/gi,
   /\blanguage:\s*[a-z]{2}-[A-Z]{2}\b/g,
+  /\bEvento proativo devido:[^.\n]*\.?/gi,
+  /\bPrompt ativo:[^\n]*/gi,
+  /\bCard pendente:[^\n]*/gi,
+  /\bTreino já planejado para hoje:[^\n]*/gi,
+  /\bDecida a fala e a próxima ação[^.\n]*\.?/gi,
+  /\bNão use culpa por streak[^.\n]*\.?/gi,
 ];
 
 // Linhas inteiras claramente reservadas ao backend.
@@ -39,6 +45,12 @@ const RESERVED_DETECTOR = new RegExp(
     /\bUser opened chat from\b/i.source,
     /\bnutrition only\b/i.source,
     /\blanguage:\s*[a-z]{2}-[A-Z]{2}\b/.source,
+    /\bEvento proativo devido:/i.source,
+    /\bPrompt ativo:/i.source,
+    /\bCard pendente:/i.source,
+    /\bTreino já planejado para hoje:/i.source,
+    /\bDecida a fala e a próxima ação\b/i.source,
+    /\bNão use culpa por streak\b/i.source,
     /^\s*(?:SYSTEM|INTERNAL|DEBUG|SAFETY_OVERRIDE)\b/im.source,
   ].join("|"),
   "im",
