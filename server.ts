@@ -12973,6 +12973,8 @@ function sanitizeSovereignIdentityResponse(response: GutoModelResponse, input: s
     const agendaTick =
       /\b(como esta a sua semana|como ta a sua semana|como esta tua semana|como ta tua semana)\b/.test(normalized) ||
       /\b(tem algo vindo por ai|algo vindo por ai|atrapalhar seus planos|atrapalhar teus planos|mudar o ritmo|mudar seus planos|mudar teus planos)\b/.test(normalized) ||
+      (/\b(agenda|viagem|compromisso|evento|semana)\b/.test(normalized) &&
+        /\b(se tiver|me avisa|me fala|preciso considerar|no radar|radar|alinhad|ajustar o ritmo|mudar o ritmo)\b/.test(normalized)) ||
       (/\?/.test(sentence) && /\b(agenda|viagem|compromisso|semana)\b/.test(normalized));
     return !agendaTick;
   });

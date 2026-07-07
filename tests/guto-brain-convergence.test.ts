@@ -210,6 +210,22 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     for (const key of META_KEYS) assert.ok(!(key in body), `meta não pode vazar: ${key}`);
   });
 
+  it("saudação simples não puxa agenda, viagem ou compromisso", async () => {
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Oi, Pietro! Tudo certo por aí? Se tiver algum compromisso ou viagem no radar, me avisa pra gente deixar tudo alinhado.",
+      acao: "none",
+      expectedResponse: null,
+    };
+    seed("conv-no-agenda-tick");
+    const { body } = await chat("conv-no-agenda-tick", "oi");
+
+    assert.equal(body.acao, "none");
+    assert.match(body.fala, /Oi|Tudo certo/i);
+    assert.doesNotMatch(body.fala, /agenda|viagem|compromisso|radar|semana/i);
+  });
+
   it("smoke /guto em ambiente production-like não depende de listener local em :3001", async () => {
     seed("conv-vercel-smoke");
     assert.notEqual(new URL(baseUrl).port, "3001", "teste deve usar porta efêmera, não o processo local :3001");
