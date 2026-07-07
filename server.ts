@@ -11194,8 +11194,9 @@ app.post("/guto/validate-name", requireActiveUser, (req, res) => {
   res.json(result);
 });
 
-app.get("/guto/memory", requireActiveUser, (req, res) => {
+app.get("/guto/memory", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
+  await ensureMemoryHydrated();
   const memory = applyPendingMissPenalties(getMemory(userId));
   memory.lastActiveAt = new Date().toISOString();
 
@@ -11312,6 +11313,7 @@ app.post("/guto/consent/revoke", requireActiveUser, async (req, res) => {
 app.post("/guto/consent/accept", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
   try {
+    await ensureMemoryHydrated();
     // Via rápida + durável (igual aos outros writes): grava no cache na hora e
     // persiste no Redis em background. A via async whole-store bloqueava 17-28s
     // → o front abortava por timeout e o usuário travava no consentimento.
@@ -11328,6 +11330,7 @@ app.post("/guto/consent/accept", requireActiveUser, async (req, res) => {
       targetUserId: userId,
       metadata: {},
     });
+    await flushMemoryStoreWrites();
     res.status(200).json(getMemory(userId));
   } catch (error) {
     console.error("[GUTO] consent accept failed", error);
@@ -11534,6 +11537,7 @@ async function runFreeFieldsResolution(userId: string, memorySnapshot: GutoMemor
 
 app.post("/guto/memory", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
+  await ensureMemoryHydrated();
   const memory = applyPendingMissPenalties(getMemory(userId));
   const changedFields = new Set<string>();
 
