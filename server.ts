@@ -14664,6 +14664,7 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
       resolverResult,
       turnId,
     });
+    await flushMemoryStoreWrites();
     return res.json(attachAvatarEmotion({
       response: result,
       memory: getMemory(userId),
@@ -15057,6 +15058,7 @@ app.post("/guto-audio", requireActiveUser, upload.single("audio"), async (req, r
           operationalContext: opCtx,
           resolverResult: null,
         });
+    await flushMemoryStoreWrites();
 
     const fala = gutoData.fala?.trim();
     if (!fala) {
