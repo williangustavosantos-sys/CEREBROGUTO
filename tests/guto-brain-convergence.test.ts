@@ -257,6 +257,31 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.ok(!body.workoutPlan, "pedido de dieta não pode virar treino");
   });
 
+  it("pedido explícito de treino não fica preso em acao none quando perfil está executável", async () => {
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "O treino atual já trabalha braços. Vamos manter?",
+      acao: "none",
+      expectedResponse: {
+        type: "text",
+        instruction: "Confirmar se quer manter o treino atual.",
+        options: ["Manter", "Ajustar"],
+      },
+    };
+    seed("conv-workout-focus-promote", {
+      lastWorkoutPlan: abdutoraPlan(),
+      nextWorkoutFocus: "back_biceps",
+    });
+    const { body } = await chat("conv-workout-focus-promote", "quero treinar braço");
+
+    assert.equal(callsByKind.contractIntent || 0, 0);
+    assert.equal(body.acao, "updateWorkout");
+    assert.equal(body.expectedResponse, null);
+    assert.ok(body.workoutPlan?.exercises?.length > 0, "Missão foi atualizada pelo executor oficial");
+    assert.doesNotMatch(JSON.stringify(body), /Confirmar se quer manter|Vamos manter/i);
+  });
+
   it("swapExercise não vira resolver L1 e preserva a fala em troca válida", async () => {
     const sub = validAbdutoraSubstituteName();
     const fala = `Troca por ${sub}, mesma missão sem irritar o movimento.`;
