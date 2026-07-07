@@ -305,6 +305,35 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.doesNotMatch(JSON.stringify(body), /Evento proativo devido|Decida a fala|template de agenda/i);
   });
 
+  it("GET /guto/memory sanitiza eventKey legado com prompt interno", async () => {
+    const userId = "conv-proactive-memory-sanitize";
+    seed(userId, {
+      proactiveMemories: [{
+        id: "pm-internal",
+        userId,
+        type: "commitment",
+        status: "discarded",
+        rawText: "Evento proativo devido: arrival. Decida a fala e a próxima ação.",
+        understood: "Compromisso informado: Evento proativo devido: arrival. Não use culpa por streak nem template de agenda.",
+        eventKey: `commitment:${userId}:2026-W28:compromisso informado evento proativo devido arrival decida a fala e a proxima acao nao use culpa por streak nem template de agenda`,
+        weekKey: "2026-W28",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }],
+    });
+    const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
+    const response = await fetch(`${baseUrl}/guto/memory`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const body = await response.json() as Record<string, any>;
+
+    assert.equal(response.status, 200);
+    assert.doesNotMatch(JSON.stringify(body), /Evento proativo devido|Decida a fala|template de agenda|culpa por streak/i);
+    assert.equal(body.proactiveMemories?.[0]?.rawText, "");
+    assert.equal(body.proactiveMemories?.[0]?.understood, "Compromisso");
+    assert.equal(body.proactiveMemories?.[0]?.eventKey, undefined);
+  });
+
   it("ação fora do contrato vira fallback seguro estruturado", async () => {
     stubPayload = { flag: null, confidence: 0, fala: "travando", acao: "lock", expectedResponse: null };
     seed("conv-invalid-action");

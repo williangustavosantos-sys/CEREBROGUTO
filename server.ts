@@ -3849,14 +3849,39 @@ function normalizeActiveConversationContext(value: unknown): ActiveConversationC
 }
 
 function normalizeProactiveMemoryForConversationState(memory: ProactiveMemory): ProactiveMemory {
-  if (memory.type !== "trip" || memory.status !== "pending_confirmation") return memory;
-  if (memory.stage) return memory;
-  const confirmationStage = memory.confirmationStage === "impact" ? "impact" : "event";
+  const normalized: ProactiveMemory = { ...memory };
+  if (containsInternalProactiveSchedulerText(normalized.rawText)) {
+    normalized.rawText = "";
+  }
+  if (
+    containsInternalProactiveSchedulerText(normalized.understood) ||
+    /^(Viagem|Compromisso|Contexto) informado:\s*$/i.test(normalized.understood || "")
+  ) {
+    normalized.understood = proactiveMemoryPublicLabel(normalized.type);
+  }
+  if (containsInternalProactiveSchedulerText(normalized.eventKey)) {
+    normalized.eventKey = undefined;
+  }
+  if (normalized.type !== "trip" || normalized.status !== "pending_confirmation") return normalized;
+  if (normalized.stage) return normalized;
+  const confirmationStage = normalized.confirmationStage === "impact" ? "impact" : "event";
   return {
-    ...memory,
+    ...normalized,
     confirmationStage,
     stage: confirmationStage === "impact" ? "impact_confirmation" : "event_confirmation",
   };
+}
+
+function containsInternalProactiveSchedulerText(value: unknown): boolean {
+  return typeof value === "string" && /Evento proativo devido:|Decida a fala e a próxima ação|Não use culpa por streak|template de agenda/i.test(value);
+}
+
+function proactiveMemoryPublicLabel(type: ProactiveMemory["type"]): string {
+  if (type === "trip") return "Viagem";
+  if (type === "commitment") return "Compromisso";
+  if (type === "schedule") return "Agenda";
+  if (type === "health") return "Saúde";
+  return "Contexto";
 }
 
 function getFreshSubstitutionContext(memory: GutoMemory, kind: SubstitutionContext["kind"]): SubstitutionContext | null {
@@ -8663,6 +8688,7 @@ function buildImmediateProactiveMemory(
   signal: ProactiveContinuitySignal,
   turnId?: string,
 ): ProactiveMemory | null {
+  if (isInternalProactiveSchedulerInput(rawInput)) return null;
   const type = inferImmediateProactiveMemoryType(rawInput);
   if (!type) return null;
   const dateText = resolveDateText(rawInput);
@@ -13670,7 +13696,7 @@ async function commitBrainProactiveCard(params: {
 }
 
 function isInternalProactiveSchedulerInput(input: string): boolean {
-  return /Evento proativo devido:|Decida a fala e a próxima ação|Não use culpa por streak|template de agenda/i.test(input);
+  return containsInternalProactiveSchedulerText(input);
 }
 
 async function buildNoModelOperationalFallback(params: {
