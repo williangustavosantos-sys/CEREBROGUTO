@@ -283,6 +283,28 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.ok(Array.isArray(mem.proactiveMemories) && mem.proactiveMemories.length > 0, "card proativo criado como executor/trilho");
   });
 
+  it("openProactiveCard não cria memória a partir de prompt interno do scheduler", async () => {
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Cheguei, PIETRO. Eu olho tua semana e sigo contigo.",
+      acao: "openProactiveCard",
+      expectedResponse: null,
+    };
+    seed("conv-proactive-internal");
+    const internalInput = [
+      "Evento proativo devido: arrival.",
+      "Decida a fala e a próxima ação. Não use culpa por streak nem template de agenda.",
+    ].join("\n");
+    const { body } = await chat("conv-proactive-internal", internalInput);
+
+    assert.equal(body.fala, "Cheguei, PIETRO. Eu olho tua semana e sigo contigo.");
+    assert.equal(body.acao, "none");
+    const mem = readMem("conv-proactive-internal");
+    assert.equal((mem.proactiveMemories || []).length, 0);
+    assert.doesNotMatch(JSON.stringify(body), /Evento proativo devido|Decida a fala|template de agenda/i);
+  });
+
   it("ação fora do contrato vira fallback seguro estruturado", async () => {
     stubPayload = { flag: null, confidence: 0, fala: "travando", acao: "lock", expectedResponse: null };
     seed("conv-invalid-action");

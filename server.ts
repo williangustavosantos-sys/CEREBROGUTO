@@ -13641,6 +13641,14 @@ async function commitBrainProactiveCard(params: {
     };
   }
 
+  if (isInternalProactiveSchedulerInput(input)) {
+    return {
+      ...response,
+      acao: "none",
+      proactiveMemoryAction: null,
+    };
+  }
+
   const memoryItem = buildImmediateProactiveMemory(
     memory,
     input,
@@ -13659,6 +13667,10 @@ async function commitBrainProactiveCard(params: {
     };
   }
   return response;
+}
+
+function isInternalProactiveSchedulerInput(input: string): boolean {
+  return /Evento proativo devido:|Decida a fala e a próxima ação|Não use culpa por streak|template de agenda/i.test(input);
 }
 
 async function buildNoModelOperationalFallback(params: {
