@@ -11730,24 +11730,25 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
     syncArenaDisplayName(userId, memory.name, getUserArenaGroup(userId));
   }
   await flushMemoryStoreWrites();
+  const responseMemory = getMemory(userId);
 
   // Background pass: o resolver IA pode refinar depois (typo, contexto rico).
   // Já temos um snapshot 'clear' garantido acima — esse void só serve para
   // melhorar precisão sem segurar a resposta do POST.
-  void runFreeFieldsResolution(userId, memory).catch((err) => {
+  void runFreeFieldsResolution(userId, responseMemory).catch((err) => {
     console.warn("[GUTO] Free-fields resolution failed:", err);
   });
 
-  if (memory.lastWorkoutPlan) {
+  if (responseMemory.lastWorkoutPlan) {
     try {
       return res.json({
-        ...toPublicGutoMemoryPayload(memory),
-        lastWorkoutPlan: localizeWorkoutPlan(memory.lastWorkoutPlan, memory.language)
+        ...toPublicGutoMemoryPayload(responseMemory),
+        lastWorkoutPlan: localizeWorkoutPlan(responseMemory.lastWorkoutPlan, responseMemory.language)
       });
     } catch (error) {
       if (!isWorkoutCatalogValidationError(error)) throw error;
       return res.status(409).json({
-        ...toPublicGutoMemoryPayload(memory),
+        ...toPublicGutoMemoryPayload(responseMemory),
         lastWorkoutPlan: null,
         lastWorkoutPlanError: "WORKOUT_PLAN_REQUIRES_CATALOG_VIDEO",
         issues: error.issues,
@@ -11755,7 +11756,7 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
     }
   }
 
-  res.json(toPublicGutoMemoryPayload(memory));
+  res.json(toPublicGutoMemoryPayload(responseMemory));
 });
 
 app.get("/guto/proactive", requireActiveUser, async (req, res) => {

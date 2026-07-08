@@ -59,6 +59,134 @@ function cloneStoreValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function toTime(value: unknown): number | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : null;
+}
+
+function mergeStringList(existing: unknown, incoming: unknown): unknown {
+  const values = [
+    ...(Array.isArray(existing) ? existing : []),
+    ...(Array.isArray(incoming) ? incoming : []),
+  ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+  return Array.from(new Set(values)).sort();
+}
+
+function eventKey(event: unknown): string {
+  if (!isRecord(event)) return JSON.stringify(event);
+  const id = typeof event.id === "string" ? event.id : "";
+  if (id) return id;
+  return JSON.stringify({
+    type: event.type,
+    date: event.date,
+    amount: event.amount,
+    createdAt: event.createdAt,
+  });
+}
+
+function mergeXpEvents(existing: unknown, incoming: unknown): unknown[] {
+  const merged: unknown[] = [];
+  const seen = new Set<string>();
+  for (const event of [
+    ...(Array.isArray(existing) ? existing : []),
+    ...(Array.isArray(incoming) ? incoming : []),
+  ]) {
+    const key = eventKey(event);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(event);
+  }
+  return merged;
+}
+
+function eventAmount(event: unknown): number {
+  if (!isRecord(event)) return 0;
+  const amount = event.amount;
+  return typeof amount === "number" && Number.isFinite(amount) ? amount : 0;
+}
+
+function hasAllEventKeys(source: unknown, target: unknown): boolean {
+  if (!Array.isArray(target) || target.length === 0) return true;
+  if (!Array.isArray(source)) return false;
+  const sourceKeys = new Set(source.map(eventKey));
+  return target.every((event) => sourceKeys.has(eventKey(event)));
+}
+
+function hasNewNegativeEvent(source: unknown, target: unknown): boolean {
+  if (!Array.isArray(source)) return false;
+  const targetKeys = new Set(Array.isArray(target) ? target.map(eventKey) : []);
+  return source.some((event) => !targetKeys.has(eventKey(event)) && eventAmount(event) < 0);
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function mergeProtectedUserMemorySnapshot(existing: unknown, incoming: unknown): unknown {
+  if (!isRecord(existing) || !isRecord(incoming)) return incoming;
+
+  const merged: Record<string, unknown> = { ...existing, ...incoming };
+
+  const existingRevokedAt = toTime(existing.consentRevokedAt);
+  const incomingAcceptedAt = toTime(incoming.consentAcceptedAt);
+  const incomingConsented = incoming.consentHealthFitness === true && incoming.acceptedTerms === true;
+  if (incomingConsented) {
+    merged.consentHealthFitness = true;
+    merged.acceptedTerms = true;
+    delete merged.consentRevokedAt;
+  } else if (existingRevokedAt !== null && (incomingAcceptedAt === null || existingRevokedAt > incomingAcceptedAt)) {
+    merged.consentHealthFitness = false;
+    merged.acceptedTerms = false;
+    merged.consentRevokedAt = existing.consentRevokedAt;
+  } else {
+    if (existing.consentHealthFitness === true || incoming.consentHealthFitness === true) {
+      merged.consentHealthFitness = true;
+    }
+    if (existing.acceptedTerms === true || incoming.acceptedTerms === true) {
+      merged.acceptedTerms = true;
+    }
+    if (typeof existing.consentAcceptedAt === "string" && typeof incoming.consentAcceptedAt !== "string") {
+      merged.consentAcceptedAt = existing.consentAcceptedAt;
+    }
+  }
+
+  if (existing.initialXpGranted === true || incoming.initialXpGranted === true) {
+    merged.initialXpGranted = true;
+  }
+  if (existing.initialXpRewardSeen === true || incoming.initialXpRewardSeen === true) {
+    merged.initialXpRewardSeen = true;
+  }
+
+  const xpEvents = mergeXpEvents(existing.xpEvents, incoming.xpEvents);
+  if (xpEvents.length > 0) {
+    merged.xpEvents = xpEvents;
+  }
+
+  const existingTotal = numberValue(existing.totalXp);
+  const incomingTotal = numberValue(incoming.totalXp);
+  const eventTotal: number | null = xpEvents.length > 0
+    ? xpEvents.reduce<number>((sum, event) => sum + eventAmount(event), 0)
+    : null;
+  const incomingContainsExistingEvents = hasAllEventKeys(incoming.xpEvents, existing.xpEvents);
+  if (incomingContainsExistingEvents && hasNewNegativeEvent(incoming.xpEvents, existing.xpEvents) && incomingTotal !== null) {
+    merged.totalXp = incomingTotal;
+  } else {
+    merged.totalXp = Math.max(existingTotal ?? 0, incomingTotal ?? 0, eventTotal ?? 0);
+  }
+
+  for (const field of ["completedWorkoutDates", "adaptedMissionDates", "missedMissionDates"]) {
+    const list = mergeStringList(existing[field], incoming[field]);
+    if (Array.isArray(list) && list.length > 0) merged[field] = list;
+  }
+
+  return merged;
+}
+
 function replaceGlobalMemoryStore(store: MemoryStore): void {
   for (const key in globalMemoryStore) {
     delete globalMemoryStore[key];
@@ -201,15 +329,16 @@ let memWriteChain: Promise<void> = Promise.resolve();
 
 export function persistUserMemory(userId: string, memory: unknown): Promise<void> {
   const snapshot = cloneStoreValue(memory);
-  globalMemoryStore[userId] = snapshot;     // cache imediato p/ leituras sync
+  globalMemoryStore[userId] = mergeProtectedUserMemorySnapshot(globalMemoryStore[userId], snapshot); // cache imediato p/ leituras sync
   writeToFile(globalMemoryStore);
   const redis = getRedisClient();
   if (!redis) return Promise.resolve();
   memWriteChain = memWriteChain
     .then(async () => {
-      await ensureMemoryHydrated();           // cache passa a refletir o Redis (full)
+      await readMemoryStoreAsync();           // cache passa a refletir o Redis atual (full)
+      memHydrated = true;
       if (!memHydrated) return;               // Redis indisponível: não arrisca clobber
-      globalMemoryStore[userId] = snapshot;   // re-aplica sobre o store hidratado
+      globalMemoryStore[userId] = mergeProtectedUserMemorySnapshot(globalMemoryStore[userId], snapshot); // re-aplica sobre o store hidratado
       await redis.set(REDIS_KEY, cloneStoreValue(globalMemoryStore));
       writeToFile(globalMemoryStore);
     })
