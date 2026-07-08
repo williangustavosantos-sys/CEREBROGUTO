@@ -262,6 +262,13 @@ describe("diet generation contract", () => {
     const memory = readMemory(userId);
     assert.equal(memory.dietGenerationStatus, "generated");
     assert.ok(memory.memoryAudit.some((entry: any) => entry.source === "diet_generated"));
+
+    const memoryRes = await originalFetch(`${baseUrl}/guto/memory`, {
+      headers: authHeaders(userId),
+    });
+    assert.equal(memoryRes.status, 200);
+    const memoryBody = await memoryRes.json() as { lastDietPlan?: { meals?: unknown[] } };
+    assert.ok(memoryBody.lastDietPlan?.meals?.length, "GET /guto/memory deve expor o plano oficial como lastDietPlan");
   });
 
   it("gera dieta base mesmo com confirmação de viagem pendente", async () => {

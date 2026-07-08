@@ -44,12 +44,15 @@ describe("memory-store — merge anti-clobber por usuário", () => {
         consentHealthFitness: true,
         acceptedTerms: true,
         consentAcceptedAt: "2026-07-08T00:00:00.000Z",
-        initialXpGranted: true,
-        initialXpRewardSeen: false,
-        totalXp: 100,
-        xpEvents: [grantEvent],
-      },
-    });
+      initialXpGranted: true,
+      initialXpRewardSeen: false,
+      totalXp: 100,
+      xpEvents: [grantEvent],
+      lastWorkoutPlan: { title: "Treino oficial", exercises: [{ id: "ex-1" }] },
+      weeklyDietPlan: { meals: [{ name: "Almoço", foods: [{ name: "Tofu" }] }] },
+      dietGenerationStatus: "generated",
+    },
+  });
 
     await persistUserMemory(userId, {
       userId,
@@ -61,6 +64,9 @@ describe("memory-store — merge anti-clobber por usuário", () => {
       initialXpRewardSeen: true,
       totalXp: 0,
       xpEvents: [],
+      lastWorkoutPlan: null,
+      weeklyDietPlan: null,
+      dietGenerationStatus: "idle",
     });
     await flushMemoryStoreWrites();
 
@@ -71,5 +77,8 @@ describe("memory-store — merge anti-clobber por usuário", () => {
     assert.equal(saved.initialXpRewardSeen, true);
     assert.equal(saved.totalXp, 100);
     assert.deepEqual(saved.xpEvents, [grantEvent]);
+    assert.equal((saved.lastWorkoutPlan as { title?: string }).title, "Treino oficial");
+    assert.equal((saved.weeklyDietPlan as { meals?: unknown[] }).meals?.length, 1);
+    assert.equal(saved.dietGenerationStatus, "generated");
   });
 });

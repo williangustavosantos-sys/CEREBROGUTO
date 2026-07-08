@@ -179,6 +179,18 @@ function mergeProtectedUserMemorySnapshot(existing: unknown, incoming: unknown):
     merged.totalXp = Math.max(existingTotal ?? 0, incomingTotal ?? 0, eventTotal ?? 0);
   }
 
+  for (const field of ["lastWorkoutPlan", "weeklyWorkoutPlan", "weeklyDietPlan"]) {
+    if ((incoming[field] === null || incoming[field] === undefined) && existing[field] !== null && existing[field] !== undefined) {
+      merged[field] = existing[field];
+    }
+  }
+
+  const existingDietStatus = typeof existing.dietGenerationStatus === "string" ? existing.dietGenerationStatus : "";
+  const incomingDietStatus = typeof incoming.dietGenerationStatus === "string" ? incoming.dietGenerationStatus : "";
+  if (existingDietStatus === "generated" && (!incomingDietStatus || ["idle", "ready_to_generate", "generating"].includes(incomingDietStatus))) {
+    merged.dietGenerationStatus = "generated";
+  }
+
   for (const field of ["completedWorkoutDates", "adaptedMissionDates", "missedMissionDates"]) {
     const list = mergeStringList(existing[field], incoming[field]);
     if (Array.isArray(list) && list.length > 0) merged[field] = list;
