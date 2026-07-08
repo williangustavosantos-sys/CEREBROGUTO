@@ -5053,6 +5053,25 @@ async function invalidateDietIfNeeded(memory: GutoMemory, changedFields: Iterabl
   );
 }
 
+function mergeFoodRestrictions(existingRaw: string | undefined, incomingRaw: string): string {
+  const incoming = normalizeMemoryValue(incomingRaw);
+  const existing = normalizeMemoryValue(existingRaw || "");
+  if (!incoming) return existing;
+  if (!existing || isNoFoodRestrictionText(existing) || isNoFoodRestrictionText(incoming)) return incoming;
+
+  const parts = [existing, incoming]
+    .flatMap((value) => value.split(/[;,]/g))
+    .map((value) => normalizeMemoryValue(value))
+    .filter((value) => value && !isNoFoodRestrictionText(value));
+  const merged: string[] = [];
+  for (const part of parts) {
+    const normalizedPart = normalize(part);
+    if (merged.some((item) => normalize(item) === normalizedPart)) continue;
+    merged.push(part);
+  }
+  return merged.join(", ");
+}
+
 async function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["memoryPatch"], trainedRef?: GutoModelResponse["trainedReference"], rawInput?: string): Promise<GutoMemory> {
   const changedFields = new Set<string>();
   if (trainedRef) {
@@ -5215,7 +5234,7 @@ async function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["m
     memory.city = next;
   }
   if (typeof patch.foodRestrictions === "string") {
-    const next = normalizeMemoryValue(patch.foodRestrictions);
+    const next = mergeFoodRestrictions(memory.foodRestrictions, patch.foodRestrictions);
     if (next !== memory.foodRestrictions) freeFieldChanged = true;
     if (next !== memory.foodRestrictions) changedFields.add("foodRestrictions");
     memory.foodRestrictions = next;
@@ -12844,18 +12863,19 @@ function detectFoodRestrictionFact(input: string): string | null {
 async function buildFoodRestrictionFactResponse(memory: GutoMemory, input: string, language: GutoLanguage): Promise<GutoModelResponse | null> {
   const restriction = detectFoodRestrictionFact(input);
   if (!restriction) return null;
-  await applyMemoryPatch(memory, { foodRestrictions: restriction }, undefined, input);
+  const mergedRestriction = mergeFoodRestrictions(memory.foodRestrictions, restriction);
+  await applyMemoryPatch(memory, { foodRestrictions: mergedRestriction }, undefined, input);
   const fala: Record<GutoLanguage, string> = {
-    "pt-BR": `Fechado. Vou considerar ${restriction} na dieta e nas trocas de alimento.`,
-    "en-US": `Got it. I will account for ${restriction} in diet and food swaps.`,
-    "it-IT": `Chiaro. Terrò conto di ${restriction} nella dieta e nei cambi alimentari.`,
+    "pt-BR": `Fechado. Vou considerar ${mergedRestriction} na dieta e nas trocas de alimento.`,
+    "en-US": `Got it. I will account for ${mergedRestriction} in diet and food swaps.`,
+    "it-IT": `Chiaro. Terrò conto di ${mergedRestriction} nella dieta e nei cambi alimentari.`,
   };
   return {
     fala: fala[language],
     acao: "none",
     expectedResponse: null,
     avatarEmotion: "default",
-    memoryPatch: { foodRestrictions: restriction },
+    memoryPatch: { foodRestrictions: mergedRestriction },
   };
 }
 

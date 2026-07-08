@@ -273,6 +273,30 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.ok(!body.workoutPlan, "pedido de dieta não pode virar treino");
   });
 
+  it("restrição alimentar incremental não apaga restrições calibradas nem invalida dieta", async () => {
+    seed("conv-food-restriction-merge", {
+      foodRestrictions: "vegetariano, sem lactose",
+      dietGenerationStatus: "generated",
+      weeklyDietPlan: {
+        generatedAt: new Date().toISOString(),
+        targetKcal: 2200,
+        macros: { proteinG: 130, carbsG: 260, fatG: 70 },
+        meals: [{
+          name: "Almoço",
+          foods: [{ name: "Arroz, feijão e tofu", quantity: "1 prato", kcal: 650 }],
+          totalKcal: 650,
+        }],
+      },
+    });
+    const { body } = await chat("conv-food-restriction-merge", "não como lactose");
+    const mem = readMem("conv-food-restriction-merge");
+
+    assert.equal(body.acao, "none");
+    assert.equal(mem.foodRestrictions, "vegetariano, sem lactose");
+    assert.equal(mem.dietGenerationStatus, "generated");
+    assert.ok(mem.weeklyDietPlan?.meals?.length > 0, "dieta gerada continua disponível");
+  });
+
   it("pedido explícito de treino não fica preso em acao none quando perfil está executável", async () => {
     stubPayload = {
       flag: null,
