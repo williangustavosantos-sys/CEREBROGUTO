@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   clearMemoryStoreCache,
   flushMemoryStoreWrites,
+  mergeFetchedMemoryStoreWithCache,
   persistUserMemory,
   readMemoryStoreSync,
   writeMemoryStoreSync,
@@ -134,6 +135,66 @@ describe("memory-store — merge anti-clobber por usuário", () => {
     assert.equal(saved.weightKg, 64.8);
     assert.equal(saved.foodRestrictions, "vegetariano, sem lactose");
     assert.deepEqual(saved.resolvedFields, { trainingLimitations: { bodyRegion: "lower_back" } });
+  });
+
+  it("read stale do Redis não troca cache recém-calibrado por snapshot antigo", () => {
+    const userId = "memory-stale-read-after-calibration";
+    const cached = {
+      [userId]: {
+        userId,
+        name: "PIETRO",
+        language: "pt-BR",
+        consentHealthFitness: true,
+        acceptedTerms: true,
+        consentAcceptedAt: "2026-07-10T14:00:00.000Z",
+        userAge: 24,
+        biologicalSex: "male",
+        trainingLevel: "beginner",
+        trainingStatus: "beginner",
+        trainingGoal: "muscle_gain",
+        preferredTrainingLocation: "gym",
+        trainingPathology: "lombar",
+        trainingLimitations: "lombar",
+        country: "Brasil",
+        countryCode: "BR",
+        city: "Agronômica",
+        heightCm: 163,
+        weightKg: 64.8,
+        foodRestrictions: "vegetariano, sem lactose",
+        initialXpGranted: true,
+        totalXp: 100,
+        xpEvents: [{
+          id: "2026-07-10:grant_initial_xp",
+          type: "grant_initial_xp",
+          amount: 100,
+          date: "2026-07-10",
+        }],
+      },
+    };
+    const staleFetched = {
+      [userId]: {
+        userId,
+        name: "PIETRO",
+        language: "pt-BR",
+        consentHealthFitness: true,
+        acceptedTerms: true,
+        initialXpGranted: false,
+        totalXp: 0,
+      },
+    };
+
+    const merged = mergeFetchedMemoryStoreWithCache(staleFetched, cached);
+    const saved = merged[userId] as Record<string, unknown>;
+    assert.equal(saved.userAge, 24);
+    assert.equal(saved.biologicalSex, "male");
+    assert.equal(saved.trainingGoal, "muscle_gain");
+    assert.equal(saved.preferredTrainingLocation, "gym");
+    assert.equal(saved.countryCode, "BR");
+    assert.equal(saved.heightCm, 163);
+    assert.equal(saved.weightKg, 64.8);
+    assert.equal(saved.foodRestrictions, "vegetariano, sem lactose");
+    assert.equal(saved.initialXpGranted, true);
+    assert.equal(saved.totalXp, 100);
   });
 
   it("write parcial não preserva biologicalSex legado inválido", async () => {

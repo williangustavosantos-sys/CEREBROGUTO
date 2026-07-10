@@ -268,6 +268,15 @@ function mergeProtectedUserMemorySnapshot(existing: unknown, incoming: unknown):
   return merged;
 }
 
+export function mergeFetchedMemoryStoreWithCache(fetched: MemoryStore, cache: MemoryStore): MemoryStore {
+  const merged: MemoryStore = { ...fetched };
+  for (const [userId, cachedSnapshot] of Object.entries(cache)) {
+    if (!isRecord(fetched[userId])) continue;
+    merged[userId] = mergeProtectedUserMemorySnapshot(fetched[userId], cachedSnapshot);
+  }
+  return merged;
+}
+
 function replaceGlobalMemoryStore(store: MemoryStore): void {
   for (const key in globalMemoryStore) {
     delete globalMemoryStore[key];
@@ -310,8 +319,9 @@ export async function readMemoryStoreAsync(): Promise<MemoryStore> {
       const raw = await redis.get(REDIS_KEY);
       if (raw) {
         const store = typeof raw === "string" ? JSON.parse(raw) : raw;
-        replaceGlobalMemoryStore(store as MemoryStore);
-        return store as MemoryStore;
+        const merged = mergeFetchedMemoryStoreWithCache(store as MemoryStore, globalMemoryStore);
+        replaceGlobalMemoryStore(merged);
+        return merged;
       }
     } catch (err) {
       console.warn("[GUTO] Redis read failed, falling back to filesystem:", err);

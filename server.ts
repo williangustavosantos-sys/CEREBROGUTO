@@ -11256,14 +11256,30 @@ app.post("/guto/validate-name", requireActiveUser, (req, res) => {
 app.get("/guto/memory", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
   await readMemoryStoreAsync();
-  const memory = applyPendingMissPenalties(getMemory(userId));
-  memory.lastActiveAt = new Date().toISOString();
+  const rawMemory = readMemoryStore()[userId] as (GutoMemory & { phone?: unknown }) | undefined;
+  const legacyPhoneRemoved = Boolean(rawMemory && Object.prototype.hasOwnProperty.call(rawMemory, "phone"));
+  const memory = getMemory(userId);
+  const beforePenaltyState = JSON.stringify({
+    totalXp: memory.totalXp,
+    streak: memory.streak,
+    missedMissionDates: memory.missedMissionDates,
+    xpEvents: memory.xpEvents,
+  });
+  applyPendingMissPenalties(memory);
+  const penaltyChanged = JSON.stringify({
+    totalXp: memory.totalXp,
+    streak: memory.streak,
+    missedMissionDates: memory.missedMissionDates,
+    xpEvents: memory.xpEvents,
+  }) !== beforePenaltyState;
 
   if (memory.name) {
     syncArenaDisplayName(userId, memory.name, getUserArenaGroup(userId));
   }
-  saveMemory(memory);
-  await flushMemoryStoreWrites();
+  if (penaltyChanged || legacyPhoneRemoved) {
+    saveMemory(memory);
+    await flushMemoryStoreWrites();
+  }
   const publicMemory = await buildPublicGutoMemoryPayload(memory);
   if (memory.lastWorkoutPlan) {
     try {
