@@ -15510,6 +15510,22 @@ app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
 
     const selectedLanguage = normalizeLanguage(getMemory(userId).language || "pt-BR");
     if (current.type === "trip") {
+      const isPendingTripEventCard = current.status === "pending_confirmation" && (
+        current.stage === "event_confirmation" ||
+        current.stage === "continuity_question" ||
+        (!current.stage && current.confirmationStage !== "impact")
+      );
+      if (isPendingTripEventCard) {
+        const result = await confirmTripEventAndOpenImpactPrompt(userId, current, selectedLanguage);
+        return res.json({
+          ok: true,
+          memory: result.memory,
+          impact: null,
+          fala: result.fala,
+          expectedResponse: result.expectedResponse ?? null,
+          memoryPatch: result.memoryPatch,
+        });
+      }
       if (current.status === "pending_confirmation" && current.stage !== "impact_confirmation") {
         return res.status(409).json({ error: "trip is not ready for card confirmation" });
       }

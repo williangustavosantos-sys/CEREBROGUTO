@@ -250,6 +250,51 @@ describe("proactivity HTTP cycle", () => {
     assert.equal(body.memoryPatch?.proactiveImpacts?.filter((item) => item.memoryId === memory.id).length, 1)
   })
 
+  it("POST card CONFIRMAR de viagem em continuity_question abre pergunta de treino sem 409", async () => {
+    const { addProactiveMemory } = await import("../src/proactivity/proactive-store.js")
+    const tripDate = dateKey(1)
+    const memory = await addProactiveMemory(USER_ID, {
+      type: "trip",
+      status: "pending_confirmation",
+      rawText: "viajo amanhã",
+      understood: "Viagem amanhã",
+      dateText: "amanhã",
+      dateParsed: tripDate,
+      stage: "continuity_question",
+      confirmationStage: "event",
+      weekKey: currentWeekKey(),
+    })
+
+    const res = await fetch(`${baseUrl}/guto/proactivity/confirm`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ memoryId: memory.id }),
+    })
+    assert.equal(res.status, 200)
+    const body = (await res.json()) as {
+      ok?: boolean
+      memory?: { status?: string; stage?: string; trainingAdapted?: boolean }
+      impact?: unknown
+      fala?: string
+      expectedResponse?: unknown
+      memoryPatch?: {
+        proactivePrompt?: { kind?: string; relatedMemoryId?: string; status?: string }
+        proactiveImpacts?: Array<{ memoryId?: string; status?: string }>
+      }
+    }
+    assert.equal(body.ok, true)
+    assert.equal(body.memory?.status, "confirmed")
+    assert.equal(body.memory?.stage, "continuity_question")
+    assert.equal(body.memory?.trainingAdapted, undefined)
+    assert.equal(body.impact, null)
+    assert.equal(body.memoryPatch?.proactivePrompt?.kind, "travel_training")
+    assert.equal(body.memoryPatch?.proactivePrompt?.relatedMemoryId, memory.id)
+    assert.equal(body.memoryPatch?.proactivePrompt?.status, "active")
+    assert.equal(body.memoryPatch?.proactiveImpacts?.some((impact) => impact.memoryId === memory.id && impact.status === "active"), false)
+    assert.match(body.fala || "", /treino adaptado|consegue treinar|rotina por lá/i)
+    assert.ok(body.expectedResponse)
+  })
+
   it("POST discard pending trip before card → memory discarded and no proactiveImpact created", async () => {
     const { addProactiveMemory } = await import("../src/proactivity/proactive-store.js")
     const memory = await addProactiveMemory(USER_ID, {
