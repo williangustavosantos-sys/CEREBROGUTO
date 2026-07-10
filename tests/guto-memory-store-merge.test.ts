@@ -135,4 +135,114 @@ describe("memory-store — merge anti-clobber por usuário", () => {
     assert.equal(saved.foodRestrictions, "vegetariano, sem lactose");
     assert.deepEqual(saved.resolvedFields, { trainingLimitations: { bodyRegion: "lower_back" } });
   });
+
+  it("write parcial não preserva biologicalSex legado inválido", async () => {
+    const userId = "memory-invalid-biological-sex";
+
+    writeMemoryStoreSync({
+      [userId]: {
+        userId,
+        name: "PIETRO",
+        language: "pt-BR",
+        biologicalSex: "prefer_not_to_say",
+      },
+    });
+
+    await persistUserMemory(userId, {
+      userId,
+      name: "PIETRO",
+      language: "pt-BR",
+      weightKg: 82,
+    });
+    await flushMemoryStoreWrites();
+
+    const saved = readMemoryStoreSync()[userId] as Record<string, unknown>;
+    assert.equal(saved.weightKg, 82);
+    assert.equal(Object.prototype.hasOwnProperty.call(saved, "biologicalSex"), false);
+  });
+
+  it("write com país alterado não preserva countryCode antigo", async () => {
+    const userId = "memory-country-clears-code";
+
+    writeMemoryStoreSync({
+      [userId]: {
+        userId,
+        name: "PIETRO",
+        language: "pt-BR",
+        country: "Brasil",
+        countryCode: "BR",
+      },
+    });
+
+    await persistUserMemory(userId, {
+      userId,
+      name: "PIETRO",
+      language: "pt-BR",
+      country: "Italia",
+    });
+    await flushMemoryStoreWrites();
+
+    const saved = readMemoryStoreSync()[userId] as Record<string, unknown>;
+    assert.equal(saved.country, "Italia");
+    assert.equal(Object.prototype.hasOwnProperty.call(saved, "countryCode"), false);
+  });
+
+  it("write parcial não reintroduz telefone legado", async () => {
+    const userId = "memory-phone-clears-legacy";
+
+    writeMemoryStoreSync({
+      [userId]: {
+        userId,
+        name: "PIETRO",
+        language: "pt-BR",
+        phone: "+390212345678",
+      },
+    });
+
+    await persistUserMemory(userId, {
+      userId,
+      name: "PIETRO",
+      language: "pt-BR",
+      weightKg: 82,
+    });
+    await flushMemoryStoreWrites();
+
+    const saved = readMemoryStoreSync()[userId] as Record<string, unknown>;
+    assert.equal(saved.weightKg, 82);
+    assert.equal(Object.prototype.hasOwnProperty.call(saved, "phone"), false);
+  });
+
+  it("permite invalidar treino quando limitação nova limpa lastWorkoutPlan", async () => {
+    const userId = "memory-new-pain-clears-workout";
+
+    writeMemoryStoreSync({
+      [userId]: {
+        userId,
+        name: "PIETRO",
+        language: "pt-BR",
+        trainingLimitations: "sem dor",
+        trainingPathology: "sem dor",
+        lastWorkoutPlan: {
+          focusKey: "legs_core",
+          source: "guto_generated",
+          lockedByCoach: false,
+          exercises: [{ id: "agachamento_livre" }],
+        },
+      },
+    });
+
+    await persistUserMemory(userId, {
+      userId,
+      name: "PIETRO",
+      language: "pt-BR",
+      trainingLimitations: "estou com dor no joelho direito",
+      trainingPathology: "estou com dor no joelho direito",
+      lastWorkoutPlan: null,
+    });
+    await flushMemoryStoreWrites();
+
+    const saved = readMemoryStoreSync()[userId] as Record<string, unknown>;
+    assert.equal(saved.trainingLimitations, "estou com dor no joelho direito");
+    assert.equal(saved.lastWorkoutPlan, null);
+  });
 });

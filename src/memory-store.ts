@@ -136,10 +136,33 @@ function hasMeaningfulMemoryValue(value: unknown): boolean {
   return true;
 }
 
+function hasProtectedMemoryValue(field: string, value: unknown): boolean {
+  if (field === "biologicalSex") return value === "female" || value === "male";
+  return hasMeaningfulMemoryValue(value);
+}
+
+function hasOwnField(record: Record<string, unknown>, field: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, field);
+}
+
+function isCoachLockedWorkoutSnapshot(value: unknown): boolean {
+  return isRecord(value) && value.lockedByCoach === true;
+}
+
 function mergeProtectedUserMemorySnapshot(existing: unknown, incoming: unknown): unknown {
   if (!isRecord(existing) || !isRecord(incoming)) return incoming;
 
   const merged: Record<string, unknown> = { ...existing, ...incoming };
+  delete merged.phone;
+  const countryChanged =
+    hasMeaningfulMemoryValue(incoming.country) &&
+    hasMeaningfulMemoryValue(existing.country) &&
+    incoming.country !== existing.country;
+  const limitationChangedForWorkout = ["trainingPathology", "trainingLimitations"].some((field) =>
+    hasOwnField(incoming, field) &&
+    hasProtectedMemoryValue(field, incoming[field]) &&
+    incoming[field] !== existing[field]
+  );
 
   for (const field of [
     "userAge",
@@ -158,8 +181,14 @@ function mergeProtectedUserMemorySnapshot(existing: unknown, incoming: unknown):
     "foodRestrictions",
     "resolvedFields",
   ]) {
-    if (!hasMeaningfulMemoryValue(incoming[field]) && hasMeaningfulMemoryValue(existing[field])) {
+    if (field === "countryCode" && countryChanged && !hasProtectedMemoryValue(field, incoming[field])) {
+      delete merged[field];
+      continue;
+    }
+    if (!hasProtectedMemoryValue(field, incoming[field]) && hasProtectedMemoryValue(field, existing[field])) {
       merged[field] = existing[field];
+    } else if (!hasProtectedMemoryValue(field, incoming[field]) && !hasProtectedMemoryValue(field, existing[field])) {
+      delete merged[field];
     }
   }
 
@@ -211,6 +240,15 @@ function mergeProtectedUserMemorySnapshot(existing: unknown, incoming: unknown):
   }
 
   for (const field of ["lastWorkoutPlan", "weeklyWorkoutPlan", "weeklyDietPlan"]) {
+    if (
+      field === "lastWorkoutPlan" &&
+      incoming[field] === null &&
+      limitationChangedForWorkout &&
+      !isCoachLockedWorkoutSnapshot(existing[field])
+    ) {
+      merged[field] = null;
+      continue;
+    }
     if ((incoming[field] === null || incoming[field] === undefined) && existing[field] !== null && existing[field] !== undefined) {
       merged[field] = existing[field];
     }
