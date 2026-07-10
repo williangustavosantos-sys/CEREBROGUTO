@@ -15494,20 +15494,24 @@ app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
 
     const selectedLanguage = normalizeLanguage(getMemory(userId).language || "pt-BR");
     if (current.type === "trip") {
-      if (typeof trainingAdapted !== "boolean") {
-        return res.status(400).json({ error: "trainingAdapted required for trip confirmation" });
-      }
       if (current.status === "pending_confirmation" && current.stage !== "impact_confirmation") {
         return res.status(409).json({ error: "trip is not ready for card confirmation" });
       }
+      const resolvedTrainingAdapted = typeof trainingAdapted === "boolean"
+        ? trainingAdapted
+        : typeof current.proposedTrainingAdapted === "boolean"
+          ? current.proposedTrainingAdapted
+          : typeof current.trainingAdapted === "boolean"
+            ? current.trainingAdapted
+            : true;
 
       const confirmedAt = new Date().toISOString();
       const updated = await updateProactiveMemory(userId, memoryId, {
         status: "confirmed",
         confirmedAt,
-        trainingAdapted,
-        proposedTrainingAdapted: trainingAdapted,
-        stage: trainingAdapted ? "confirmed_adapted" : "confirmed_protected",
+        trainingAdapted: resolvedTrainingAdapted,
+        proposedTrainingAdapted: resolvedTrainingAdapted,
+        stage: resolvedTrainingAdapted ? "confirmed_adapted" : "confirmed_protected",
         confirmationStage: "impact",
         discardRequestedAt: undefined,
       });
@@ -15520,7 +15524,7 @@ app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
         freshMemory,
         "proactivity_action",
         ["proactiveMemories", "proactiveImpacts"],
-        `Viagem ${memoryId} validada no card com treinoAdaptado=${trainingAdapted}.`
+        `Viagem ${memoryId} validada no card com treinoAdaptado=${resolvedTrainingAdapted}.`
       );
       saveMemory(freshMemory);
 
@@ -15534,7 +15538,7 @@ app.post("/guto/proactivity/confirm", requireActiveUser, async (req, res) => {
       const day = current.dateParsed
         ? formatRelativeProactiveDay(current.dateParsed, selectedLanguage)
         : selectedLanguage === "en-US" ? "that day" : selectedLanguage === "it-IT" ? "quel giorno" : "esse dia";
-      const baseFala = trainingAdapted
+      const baseFala = resolvedTrainingAdapted
         ? selectedLanguage === "en-US"
           ? `Done. I saved your trip for ${day}. I will adapt that day's mission instead of cancelling it.`
           : selectedLanguage === "it-IT"

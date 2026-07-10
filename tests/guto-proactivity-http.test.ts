@@ -204,6 +204,52 @@ describe("proactivity HTTP cycle", () => {
     assert.equal(store[USER_ID]?.proactiveImpacts?.filter((impact) => impact.memoryId === memory.id).length, 1)
   })
 
+  it("POST card CONFIRMAR de viagem sem trainingAdapted não retorna 400", async () => {
+    const { addProactiveMemory } = await import("../src/proactivity/proactive-store.js")
+    const tripDate = dateKey(1)
+    const memory = await addProactiveMemory(USER_ID, {
+      type: "trip",
+      status: "pending_confirmation",
+      rawText: "viajo amanhã",
+      understood: "Viagem amanhã",
+      dateText: "amanhã",
+      dateParsed: tripDate,
+      stage: "impact_confirmation",
+      confirmationStage: "impact",
+      weekKey: currentWeekKey(),
+    })
+
+    const res = await fetch(`${baseUrl}/guto/proactivity/confirm`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ memoryId: memory.id }),
+    })
+    assert.equal(res.status, 200)
+    const body = (await res.json()) as {
+      ok?: boolean
+      memory?: { status?: string; stage?: string; trainingAdapted?: boolean }
+      impact?: { memoryId?: string; workoutEffect?: string } | null
+      fala?: string
+      memoryPatch?: {
+        proactiveMemories?: Array<{ id?: string; rawText?: string; understood?: string; stage?: string }>
+        proactiveImpacts?: Array<{ memoryId?: string }>
+      }
+    }
+    assert.equal(body.ok, true)
+    assert.equal(body.memory?.status, "confirmed")
+    assert.equal(body.memory?.stage, "confirmed_adapted")
+    assert.equal(body.memory?.trainingAdapted, true)
+    assert.equal(body.impact?.memoryId, memory.id)
+    assert.equal(body.impact?.workoutEffect, "short_light")
+    assert.match(body.fala || "", /adap/i)
+    assert.doesNotMatch(
+      JSON.stringify(body),
+      /trainingAdapted required|Evento proativo devido|Decida a fala|buildSovereignBrainPrompt|prompt interno|texto interno/i,
+    )
+    assert.equal(body.memoryPatch?.proactiveMemories?.filter((item) => item.id === memory.id).length, 1)
+    assert.equal(body.memoryPatch?.proactiveImpacts?.filter((item) => item.memoryId === memory.id).length, 1)
+  })
+
   it("POST discard pending trip before card → memory discarded and no proactiveImpact created", async () => {
     const { addProactiveMemory } = await import("../src/proactivity/proactive-store.js")
     const memory = await addProactiveMemory(USER_ID, {
