@@ -127,10 +127,41 @@ function numberValue(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function hasMeaningfulMemoryValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value).length > 0;
+  return true;
+}
+
 function mergeProtectedUserMemorySnapshot(existing: unknown, incoming: unknown): unknown {
   if (!isRecord(existing) || !isRecord(incoming)) return incoming;
 
   const merged: Record<string, unknown> = { ...existing, ...incoming };
+
+  for (const field of [
+    "userAge",
+    "biologicalSex",
+    "trainingLevel",
+    "trainingStatus",
+    "trainingGoal",
+    "preferredTrainingLocation",
+    "trainingPathology",
+    "trainingLimitations",
+    "country",
+    "countryCode",
+    "city",
+    "heightCm",
+    "weightKg",
+    "foodRestrictions",
+    "resolvedFields",
+  ]) {
+    if (!hasMeaningfulMemoryValue(incoming[field]) && hasMeaningfulMemoryValue(existing[field])) {
+      merged[field] = existing[field];
+    }
+  }
 
   const existingRevokedAt = toTime(existing.consentRevokedAt);
   const incomingAcceptedAt = toTime(incoming.consentAcceptedAt);

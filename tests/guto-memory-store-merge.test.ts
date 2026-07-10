@@ -81,4 +81,58 @@ describe("memory-store — merge anti-clobber por usuário", () => {
     assert.equal((saved.weeklyDietPlan as { meals?: unknown[] }).meals?.length, 1);
     assert.equal(saved.dietGenerationStatus, "generated");
   });
+
+  it("write parcial de boot não apaga calibragem completa do usuário", async () => {
+    const userId = "memory-stale-calibration";
+
+    writeMemoryStoreSync({
+      [userId]: {
+        userId,
+        name: "PIETRO",
+        language: "pt-BR",
+        consentHealthFitness: true,
+        acceptedTerms: true,
+        userAge: 24,
+        biologicalSex: "male",
+        trainingLevel: "beginner",
+        trainingStatus: "beginner",
+        trainingGoal: "muscle_gain",
+        preferredTrainingLocation: "gym",
+        trainingPathology: "lombar",
+        trainingLimitations: "lombar",
+        country: "Brasil",
+        countryCode: "BR",
+        city: "Agronômica",
+        heightCm: 163,
+        weightKg: 64.8,
+        foodRestrictions: "vegetariano, sem lactose",
+        resolvedFields: { trainingLimitations: { bodyRegion: "lower_back" } },
+      },
+    });
+
+    await persistUserMemory(userId, {
+      userId,
+      name: "PIETRO",
+      language: "pt-BR",
+      resolvedFields: {},
+    });
+    await flushMemoryStoreWrites();
+
+    const saved = readMemoryStoreSync()[userId] as Record<string, unknown>;
+    assert.equal(saved.userAge, 24);
+    assert.equal(saved.biologicalSex, "male");
+    assert.equal(saved.trainingLevel, "beginner");
+    assert.equal(saved.trainingStatus, "beginner");
+    assert.equal(saved.trainingGoal, "muscle_gain");
+    assert.equal(saved.preferredTrainingLocation, "gym");
+    assert.equal(saved.trainingPathology, "lombar");
+    assert.equal(saved.trainingLimitations, "lombar");
+    assert.equal(saved.country, "Brasil");
+    assert.equal(saved.countryCode, "BR");
+    assert.equal(saved.city, "Agronômica");
+    assert.equal(saved.heightCm, 163);
+    assert.equal(saved.weightKg, 64.8);
+    assert.equal(saved.foodRestrictions, "vegetariano, sem lactose");
+    assert.deepEqual(saved.resolvedFields, { trainingLimitations: { bodyRegion: "lower_back" } });
+  });
 });
