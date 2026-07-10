@@ -15195,14 +15195,6 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
     });
   }
 
-  const validationAccess = getEffectiveUserAccess(userId);
-  if (!validationAccess || !validationAccess.active || validationAccess.archived) {
-    return res.status(403).json({
-      error: "access_blocked",
-      message: "Seu acesso ao GUTO está pausado. Fale com seu coach para reativar.",
-    });
-  }
-
   const validLocationModes: LocationMode[] = ["gym", "home", "park"];
   if (!validLocationModes.includes(locationMode as LocationMode)) {
     return res.status(400).json({ error: "Invalid locationMode. Must be gym, home, or park." });
@@ -15365,8 +15357,8 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
         : "Registro de treino sem câmera persistido como pendente, sem XP pleno."
     );
 
-    store[userId] = memory;
-    writeMemoryStore(store);
+    saveMemory(memory);
+    await flushMemoryStoreWrites();
 
     // Award Arena XP — espelha EXATAMENTE o delta creditado na memória por
     // completeWorkout: se a missão adaptada já deu +50 hoje (e já contou como
