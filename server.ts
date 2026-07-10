@@ -15032,19 +15032,26 @@ app.post("/voz", requireActiveUser, async (req, res) => {
     // Não troca para outra voz. A identidade vocal do GUTO é parte do produto:
     // se Charon falha, é melhor ficar sem áudio neste turno do que virar outra
     // entidade no meio da conversa.
-    console.error("[GUTO_VOICE] synth_failed", {
+    console.warn("[GUTO_VOICE] synth_unavailable", {
       userId,
       language: selectedLanguage,
       primaryStatus: primary.status,
       detail: primary.data?.error?.message,
     });
-    return res.status(primary.status || 502).json({
+    return res.json({
+      audioContent: null,
+      voiceUnavailable: true,
       message: localizedHttpMessage("voice_error", selectedLanguage),
-      detail: primary.data?.error?.message,
+      reason: primary.status === 429 ? "quota" : "synthesis_failed",
     });
   } catch (error) {
-    console.error("[GUTO_VOICE] synth_connect_failed", { userId, language: selectedLanguage, error });
-    res.status(502).json({ message: localizedHttpMessage("voice_connect", selectedLanguage) });
+    console.warn("[GUTO_VOICE] synth_connect_unavailable", { userId, language: selectedLanguage, error });
+    res.json({
+      audioContent: null,
+      voiceUnavailable: true,
+      message: localizedHttpMessage("voice_connect", selectedLanguage),
+      reason: "connect_failed",
+    });
   }
 });
 
