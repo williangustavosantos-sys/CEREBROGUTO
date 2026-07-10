@@ -11255,7 +11255,7 @@ app.post("/guto/validate-name", requireActiveUser, (req, res) => {
 
 app.get("/guto/memory", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
-  await ensureMemoryHydrated();
+  await readMemoryStoreAsync();
   const memory = applyPendingMissPenalties(getMemory(userId));
   memory.lastActiveAt = new Date().toISOString();
 
@@ -11263,6 +11263,7 @@ app.get("/guto/memory", requireActiveUser, async (req, res) => {
     syncArenaDisplayName(userId, memory.name, getUserArenaGroup(userId));
   }
   saveMemory(memory);
+  await flushMemoryStoreWrites();
   const publicMemory = await buildPublicGutoMemoryPayload(memory);
   if (memory.lastWorkoutPlan) {
     try {
@@ -11597,7 +11598,7 @@ async function runFreeFieldsResolution(userId: string, memorySnapshot: GutoMemor
 
 app.post("/guto/memory", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
-  await ensureMemoryHydrated();
+  await readMemoryStoreAsync();
   const memory = applyPendingMissPenalties(getMemory(userId));
   const changedFields = new Set<string>();
 
@@ -11773,6 +11774,7 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
 app.get("/guto/proactive", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
   const force = req.query.force === "1";
+  await readMemoryStoreAsync();
   await markPastActiveMemoriesPendingValidation(userId).catch(() => []);
   let memory = getMemory(userId);
   // Idioma é lei: quando o cliente não envia ?language, o idioma soberano é o da
@@ -14618,6 +14620,7 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
     });
   }
 
+  await readMemoryStoreAsync();
   let memory = getMemory(userId);
   const selectedLanguage = normalizeLanguage(language || memory.language || "pt-BR");
   if (requestProfile && requestProfile.userId === userId) {
@@ -15063,6 +15066,7 @@ app.post("/guto-audio", requireActiveUser, upload.single("audio"), async (req, r
     }
 
     const userId = req.gutoUser!.userId;
+    await readMemoryStoreAsync();
     const memory = getMemory(userId);
     const selectedLanguage = normalizeLanguage(language || memory.language);
 
@@ -15174,6 +15178,7 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
 
   const { imageBase64, workoutFocus, workoutLabel, locationMode, language, workoutPlan, feedback } = body;
   const userId = req.gutoUser!.userId;
+  await readMemoryStoreAsync();
 
   if (!workoutFocus || !workoutLabel || !locationMode) {
     return res.status(400).json({ error: "Missing required fields: workoutFocus, workoutLabel, locationMode" });
@@ -16062,6 +16067,7 @@ function applyTravelContextToDiet(
 app.get("/guto/diet", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
   try {
+    await readMemoryStoreAsync();
     const plan = await getDietPlan(userId);
     if (!plan) {
       return res.status(404).json({ error: "diet_not_found", message: "Nenhuma dieta gerada ainda." });
