@@ -210,6 +210,25 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     for (const key of META_KEYS) assert.ok(!(key in body), `meta não pode vazar: ${key}`);
   });
 
+  it("não promete marcar treino por conversa quando o modelo escapa", async () => {
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Boa! Que bom que já garantiu o treino hoje. Vou marcar aqui no seu histórico.",
+      acao: "none",
+      expectedResponse: null,
+    };
+    seed("conv-workout-completion-sanitizer");
+    const { status, body } = await chat("conv-workout-completion-sanitizer", "já treinei, marca aí");
+
+    assert.equal(status, 200);
+    assert.equal(body.acao, "none");
+    assert.match(body.fala, /XP|Arena|valida/i);
+    assert.doesNotMatch(body.fala, /vou marcar|marquei|registrad|anotei|hist[óo]rico|garantiu o treino|feito conta/i);
+    assert.equal(callsByKind.contractIntent || 0, 0);
+    assert.equal(callsByKind.legacyBrain || 0, 0);
+  });
+
   it("saudação simples não puxa agenda, viagem ou compromisso", async () => {
     stubPayload = {
       flag: null,

@@ -38,7 +38,8 @@ const BASE = {
 };
 
 const REASK = /manda idade|sua idade|quantos anos|tem dor|se está sem dor|se esta sem dor|dor ou limita|send age/i;
-const ACK = /feito|conta|como foi|sentiu|amanh|sequ[êe]ncia|próxima|proxima|valida/i;
+const ACK = /feito|como foi|sentiu|dor|xp|arena|valida/i;
+const UNSAFE_MARK = /feito conta|vou marcar|vou registrar|vou anotar|marquei|registrei|anotei|marcado|registrado|anotado|hist[óo]rico|conta como feito/i;
 
 async function chat(userId: string, input: string) {
   const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
@@ -75,13 +76,15 @@ describe("Conclusão de treino (B-3: 'fiz o treino' não re-pergunta idade/dor)"
     ["fiz o treino agora", "fiz o treino agora, terminei tudo"],
     ["Ja fiz o treino (eval conclusao_treino_01)", "Ja fiz o treino."],
     ["terminei o treino", "terminei o treino"],
+    ["já treinei, marca aí", "já treinei, marca aí"],
   ] as const) {
     it(`${tag} → reconhece e fecha continuidade, sem reabrir intake`, async () => {
       const userId = `done-${tag.slice(0, 6)}`;
       seed(userId, { ...BASE });
       const r = await chat(userId, input);
       assert.doesNotMatch(r.fala || "", REASK, "conclusão não pode re-perguntar idade/dor (Regra 2)");
-      assert.match(r.fala || "", ACK, "deve reconhecer execução / fechar continuidade");
+      assert.match(r.fala || "", ACK, "deve reconhecer execução e conduzir para validação");
+      assert.doesNotMatch(r.fala || "", UNSAFE_MARK, "não pode prometer marcação/registro/histórico por chat");
       assert.notEqual(r.acao, "updateWorkout", "conclusão não dispara novo treino");
     });
   }

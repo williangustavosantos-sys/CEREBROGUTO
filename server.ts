@@ -13033,6 +13033,60 @@ function sanitizeSovereignIdentityResponse(response: GutoModelResponse, input: s
   return fala && fala !== response.fala ? { ...response, fala } : response;
 }
 
+function isWorkoutCompletionClaim(input: string): boolean {
+  const text = normalize(input || "");
+  if (isWorkoutCompletionReport(input)) return true;
+  const asksToMark = /\b(marca|marcar|registra|registrar|anota|anotar)\b/.test(text);
+  const referencesPastHistory =
+    /\b(ontem|anteontem|ultim[oa]s?|ultimos|dias?|semana\s+passada|recent|recentes|yesterday|day\s+before|ieri|giorni|ultimi)\b/.test(text);
+  if (referencesPastHistory && !asksToMark) return false;
+  return (
+    /\bja\s+treinei\b/.test(text) ||
+    /\b(treinei|terminei|completei|fiz)\b.*\b(treino|missao|missão)\b/.test(text) ||
+    /\b(marca|marcar|registra|registrar|anota|anotar)\b.*\b(treino|missao|missão)\b/.test(text)
+  );
+}
+
+function hasWorkoutValidationGuidance(text: string): boolean {
+  const normalized = normalize(text || "");
+  return /\b(validacao|validation|validate|validazione|valida|xp|arena|prova|selfie|confirm)\b/.test(normalized);
+}
+
+function hasUnsafeWorkoutCompletionClaim(text: string): boolean {
+  const normalized = normalize(text || "");
+  return (
+    /\b(vou\s+marcar|vou\s+registrar|vou\s+anotar|marquei|registrei|anotei)\b/.test(normalized) ||
+    /\b(marcado|registrado|registrada|anotado|anotada|historico|histórico)\b/.test(normalized) ||
+    /\b(feito\s+conta|conta\s+como\s+feito|ja\s+garantiu\s+o\s+treino)\b/.test(normalized) ||
+    /\b(i\s+will\s+mark|i'll\s+mark|marked\s+it|registered|saved\s+it|workout\s+done\s+counts)\b/.test(normalized) ||
+    /\b(registro|registrato|registrata|salvato|segnato)\b/.test(normalized)
+  );
+}
+
+function buildWorkoutCompletionValidationGuidance(language: GutoLanguage): GutoModelResponse {
+  return {
+    fala: pickByLanguage(language, {
+      "pt-BR": "Boa por ter feito. Para contar XP e Arena, precisa passar pela validação do treino; por aqui eu acompanho como foi. Me diz: fácil, ok, pesado ou teve dor?",
+      "en-US": "Good job getting it done. To count XP and Arena, it needs to go through workout validation; here I track how it felt. Tell me: easy, ok, heavy, or any pain?",
+      "it-IT": "Bene per averlo fatto. Per contare XP e Arena deve passare dalla validazione dell'allenamento; qui seguo come è andata. Dimmi: facile, ok, pesante o dolore?",
+    }),
+    acao: "none",
+    expectedResponse: null,
+    avatarEmotion: "default",
+  };
+}
+
+function sanitizeWorkoutCompletionResponse(response: GutoModelResponse, input: string, language: GutoLanguage): GutoModelResponse {
+  if (!isWorkoutCompletionClaim(input)) return response;
+  const fala = String(response.fala || "");
+  const shouldReplace =
+    response.acao !== "none" ||
+    hasUnsafeWorkoutCompletionClaim(fala) ||
+    !hasWorkoutValidationGuidance(fala);
+  if (!shouldReplace) return response;
+  return buildWorkoutCompletionValidationGuidance(language);
+}
+
 function finalizeSovereignBrainResponse(response: GutoModelResponse, input: string, language: GutoLanguage): GutoModelResponse {
   if (isSovereignSafeFallbackText(response.fala)) {
     const instruction = normalize(String(response.expectedResponse?.instruction || ""));
@@ -13044,7 +13098,10 @@ function finalizeSovereignBrainResponse(response: GutoModelResponse, input: stri
     const physicalRecovery = buildGenericPhysicalLimitationResponse(input, language);
     if (physicalRecovery) return assertAndRepairVisibleLanguage(physicalRecovery, language);
   }
-  return assertAndRepairVisibleLanguage(sanitizeSovereignIdentityResponse(response, input), language);
+  return assertAndRepairVisibleLanguage(
+    sanitizeSovereignIdentityResponse(sanitizeWorkoutCompletionResponse(response, input, language), input),
+    language
+  );
 }
 
 async function buildDietIntentFallbackResponse(params: {
@@ -13165,7 +13222,7 @@ function buildDeterministicSovereignDietMeals(params: {
 
 function isWorkoutCompletionReport(input: string): boolean {
   const text = normalize(input || "");
-  return /\b(fiz o treino|fiz meu treino|ja fiz o treino|terminei o treino|terminei tudo|acabei o treino|completei o treino|treino feito|treino concluido|done the workout|workout done|finished (my |the )?workout|allenamento fatto|ho fatto (il )?allenamento|finito l ?allenamento)\b/.test(text);
+  return /\b(fiz o treino|fiz meu treino|ja fiz o treino|ja treinei|terminei o treino|terminei tudo|acabei o treino|completei o treino|treino feito|treino concluido|done the workout|workout done|finished (my |the )?workout|allenamento fatto|ho fatto (il )?allenamento|finito l ?allenamento)\b/.test(text);
 }
 
 function buildWorkoutCompletionFallbackResponse(
@@ -13188,9 +13245,9 @@ function buildWorkoutCompletionFallbackResponse(
   commitMemoryDecision(memory);
   return {
     fala: pickByLanguage(language, {
-      "pt-BR": "Feito conta. Me conta como foi e se sentiu algum ponto de atenção. Valida na aba treino para registrar a execução; amanhã eu sigo a próxima.",
-      "en-US": "Done counts. Tell me how it went and if anything felt off. Validate it on the workout tab to register it; tomorrow I keep the next one ready.",
-      "it-IT": "Fatto conta. Dimmi com'è andata e se hai sentito qualcosa. Valida nella scheda allenamento per registrarlo; domani continuo con la prossima.",
+      "pt-BR": "Boa por ter feito. Para contar XP e Arena, precisa passar pela validação do treino; por aqui eu acompanho como foi. Me diz: fácil, ok, pesado ou teve dor?",
+      "en-US": "Good job getting it done. To count XP and Arena, it needs to go through workout validation; here I track how it felt. Tell me: easy, ok, heavy, or any pain?",
+      "it-IT": "Bene per averlo fatto. Per contare XP e Arena deve passare dalla validazione dell'allenamento; qui seguo come è andata. Dimmi: facile, ok, pesante o dolore?",
     }),
     acao: "none",
     expectedResponse: null,
