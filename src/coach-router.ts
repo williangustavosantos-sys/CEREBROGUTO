@@ -17,10 +17,9 @@ import {
 } from "./arena-store.js";
 import { getAvatarStage, getWeeklyRanking, getMonthlyRanking, getGlobalIndividualRanking, DEFAULT_ARENA_GROUP } from "./arena.js";
 import {
-  readMemoryStoreAsync,
   writeMemoryStoreAsync,
   readMemoryStoreSync,
-  writeMemoryStoreSync,
+  updateUserMemoryAtomically,
 } from "./memory-store.js";
 import { deleteDietPlan } from "./diet-store.js";
 import { createInvite, findInviteByUserId } from "./invite-store.js";
@@ -169,9 +168,7 @@ function getManagedStudent(req: Request, res: Response, userId: string): UserAcc
  */
 async function deleteUserEverywhere(userId: string): Promise<void> {
   // 1. Memory store — async para garantir limpeza no Redis em produção
-  const memStore = await readMemoryStoreAsync();
-  delete memStore[userId];
-  await writeMemoryStoreAsync(memStore);
+  await updateUserMemoryAtomically(userId, () => null);
 
   // 2. Arena store (filesystem)
   const arenaStore = readArenaStore();
@@ -239,7 +236,7 @@ coachRouter.get("/student/:userId", (req: Request, res: Response) => {
 });
 
 // PATCH /guto/coach/student/:userId
-coachRouter.patch("/student/:userId", express.json(), (req: Request, res: Response) => {
+coachRouter.patch("/student/:userId", express.json(), async (req: Request, res: Response) => {
   const userId = req.params["userId"] as string;
   const actor = requireActor(req, res);
   if (!actor) return;
@@ -261,16 +258,18 @@ coachRouter.patch("/student/:userId", express.json(), (req: Request, res: Respon
   }
 
   if (typeof name === "string" && name.trim()) {
-    const store = readMemoryStoreSync() as Record<string, StoredMemory>;
-    const memory: StoredMemory = store[userId] ?? { userId };
-    memory.name = name.trim();
+    await updateUserMemoryAtomically(userId, (snapshot) => {
+      const memory: StoredMemory = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+        ? snapshot as StoredMemory
+        : { userId };
+      memory.name = name.trim();
+      return memory;
+    });
     const arena = getArenaProfile(userId);
     if (arena) {
       arena.displayName = name.trim();
       saveArenaProfile(arena);
     }
-    store[userId] = memory;
-    writeMemoryStoreSync(store);
   }
 
   const patch: Partial<Omit<UserAccess, "userId" | "createdAt">> = {};
@@ -320,7 +319,7 @@ coachRouter.patch("/student/:userId/archive", (req: Request, res: Response) => {
 });
 
 // POST /guto/coach/student/:userId/reset — apenas admin/super_admin
-coachRouter.post("/student/:userId/reset", requireAdmin, express.json(), (req: Request, res: Response) => {
+coachRouter.post("/student/:userId/reset", requireAdmin, express.json(), async (req: Request, res: Response) => {
   const userId = req.params["userId"] as string;
   const existing = getManagedStudent(req, res, userId);
   if (!existing) return;
@@ -358,19 +357,21 @@ coachRouter.post("/student/:userId/reset", requireAdmin, express.json(), (req: R
   }
 
   if (scope === "validationHistory" || scope === "all") {
-    const store = readMemoryStoreSync() as Record<string, StoredMemory>;
-    const memory: StoredMemory = store[userId] ?? {};
-    memory.validationHistory = [];
-    if (scope === "all") {
-      memory.streak = 0;
-      memory.totalXp = 0;
-      memory.xpEvents = [];
-      memory.completedWorkoutDates = [];
-      memory.adaptedMissionDates = [];
-      memory.missedMissionDates = [];
-    }
-    store[userId] = memory;
-    writeMemoryStoreSync(store);
+    await updateUserMemoryAtomically(userId, (snapshot) => {
+      const memory: StoredMemory = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+        ? snapshot as StoredMemory
+        : {};
+      memory.validationHistory = [];
+      if (scope === "all") {
+        memory.streak = 0;
+        memory.totalXp = 0;
+        memory.xpEvents = [];
+        memory.completedWorkoutDates = [];
+        memory.adaptedMissionDates = [];
+        memory.missedMissionDates = [];
+      }
+      return memory;
+    });
   }
 
   res.json({ success: true, scope, userId });

@@ -1146,7 +1146,10 @@ describe("proactivity HTTP cycle", () => {
       proactiveMemories: [],
       proactiveImpacts: [],
       weeklyConversation: null,
-      lastWorkoutPlan: missionPlan(),
+      // A abertura semanal só precede a criação da missão. Se já existe uma
+      // missão persistida, o retry soberano deve mostrá-la em vez de escondê-la
+      // atrás de uma nova pergunta contextual.
+      lastWorkoutPlan: null,
       trainingGoal: "fat_loss",
       preferredTrainingLocation: "gym",
       trainingLevel: "returning",
@@ -1178,14 +1181,14 @@ describe("proactivity HTTP cycle", () => {
         totalXp?: number
         xpEvents?: unknown[]
         completedWorkoutDates?: unknown[]
-        lastWorkoutPlan?: { title?: string }
+        lastWorkoutPlan?: { title?: string } | null
         proactivePrompt?: { status?: string; fala?: string }
       }
     >
     assert.equal(store[USER_ID]?.totalXp, 100)
     assert.equal(store[USER_ID]?.xpEvents?.length, 0)
     assert.equal(store[USER_ID]?.completedWorkoutDates?.length, 0)
-    assert.equal(store[USER_ID]?.lastWorkoutPlan?.title, "Corpo inteiro controlado")
+    assert.equal(store[USER_ID]?.lastWorkoutPlan, null)
     assert.equal(store[USER_ID]?.proactivePrompt?.status, "active")
     assert.equal(store[USER_ID]?.proactivePrompt?.fala, body.fala)
   })

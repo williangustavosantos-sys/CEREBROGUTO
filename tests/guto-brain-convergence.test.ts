@@ -9,7 +9,7 @@ process.env.ENABLE_DAILY_BRIEFING = "false";
 
 import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Server } from "node:http";
@@ -24,6 +24,7 @@ const META_KEYS = ["validation", "meta", "kind", "via", "reasoning", "modelCalle
 
 const originalFetch = globalThis.fetch;
 let callsByKind: Record<string, number> = {};
+let brainModelDelayMs = 0;
 let stubPayload: Record<string, unknown> = {
   flag: null,
   confidence: 0,
@@ -58,6 +59,9 @@ function installFetchStub() {
       else if (body.includes("meal") || body.includes("calories") || body.includes("macros")) kind = "diet";
       else kind = "executorModel";
       callsByKind[kind] = (callsByKind[kind] || 0) + 1;
+      if (kind === "brain" && brainModelDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, brainModelDelayMs));
+      }
       return {
         ok: true,
         status: 200,
@@ -72,6 +76,12 @@ let app: { listen: (p: number, h: string, cb?: () => void) => Server };
 let server: Server;
 let baseUrl = "";
 let clearCache: () => void = () => {};
+let runSovereignBrainTurnForTest: (params: any) => Promise<Record<string, any>>;
+type AtomicMemoryUpdate = <T>(
+  userId: string,
+  updater: (current: unknown) => T | null | Promise<T | null>
+) => Promise<T | null>;
+let updateMemoryAtomically: AtomicMemoryUpdate;
 
 const COMPLETE = {
   name: "Will",
@@ -168,6 +178,23 @@ async function audioChat(userId: string, language = "pt-BR") {
   return { status: r.status, body: (await r.json()) as Record<string, any> };
 }
 
+async function proactiveArrival(userId: string, language = "pt-BR") {
+  const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
+  callsByKind = {};
+  const r = await fetch(`${baseUrl}/guto/proactive?force=1&language=${encodeURIComponent(language)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return { status: r.status, body: (await r.json()) as Record<string, any> };
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for test condition.");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 describe("Convergência arquitetural — cérebro soberano principal", () => {
   before(async () => {
     process.env.GUTO_MEMORY_FILE = file;
@@ -179,9 +206,18 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     writeFileSync(file, JSON.stringify({}, null, 2));
     writeFileSync(dietFile, JSON.stringify({}, null, 2));
     installFetchStub();
-    const mod = (await import(pathToFileURL(join(process.cwd(), "server.ts")).href)) as { app: typeof app };
+    const mod = (await import(pathToFileURL(join(process.cwd(), "server.ts")).href)) as {
+      app: typeof app;
+      runSovereignBrainTurn: typeof runSovereignBrainTurnForTest;
+    };
     app = mod.app;
-    clearCache = ((await import(pathToFileURL(join(process.cwd(), "src/memory-store.ts")).href)) as { clearMemoryStoreCache: () => void }).clearMemoryStoreCache;
+    runSovereignBrainTurnForTest = mod.runSovereignBrainTurn;
+    const memoryStore = (await import(pathToFileURL(join(process.cwd(), "src/memory-store.ts")).href)) as {
+      clearMemoryStoreCache: () => void;
+      updateUserMemoryAtomically: AtomicMemoryUpdate;
+    };
+    clearCache = memoryStore.clearMemoryStoreCache;
+    updateMemoryAtomically = memoryStore.updateUserMemoryAtomically;
     await new Promise<void>((resolve, reject) => {
       server = app.listen(0, "127.0.0.1", () => resolve());
       server.once("error", reject);
@@ -192,6 +228,7 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
   beforeEach(() => {
     stubPayload = { flag: null, confidence: 0, fala: MARKER, acao: "none", expectedResponse: null };
     transcriptStub = "oi pelo audio";
+    brainModelDelayMs = 0;
   });
 
   after(async () => {
@@ -285,7 +322,7 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
 
   it("generateDiet não vira legado e executa com fallback determinístico validado quando o modelo falha", async () => {
     stubPayload = { flag: null, confidence: 0, fala: "vou montar tua dieta", acao: "generateDiet", expectedResponse: null };
-    seed("conv-diet");
+    seed("conv-diet", { lastWorkoutPlan: abdutoraPlan() });
     const { body } = await chat("conv-diet", "quero dieta");
     assert.equal(callsByKind.contractIntent || 0, 0);
     assert.equal(body.acao, "generateDiet");
@@ -314,6 +351,53 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.equal(mem.foodRestrictions, "vegetariano, sem lactose");
     assert.equal(mem.dietGenerationStatus, "generated");
     assert.ok(mem.weeklyDietPlan?.meals?.length > 0, "dieta gerada continua disponível");
+  });
+
+  it("não chama dieta antiga de pronta quando o estado exige regeneração", async () => {
+    const userId = "conv-stale-diet-fallback";
+    const oldGeneratedAt = "2025-01-01T00:00:00.000Z";
+    seed(userId, {
+      dietGenerationStatus: "ready_to_generate",
+      lastWorkoutPlan: abdutoraPlan(),
+      resolvedFields: {
+        foodRestriction: { rawValue: "sem lactose", status: "clear", normalizedValue: "lactose_intolerance" },
+      },
+    });
+    writeFileSync(dietFile, JSON.stringify({
+      [userId]: {
+        userId,
+        language: "pt-BR",
+        generatedAt: oldGeneratedAt,
+        country: "Brasil",
+        countryCode: "BR",
+        macros: { bmr: 1800, tdee: 2200, targetKcal: 2100, proteinG: 140, carbsG: 240, fatG: 65, goal: "muscle_gain" },
+        meals: [{
+          id: "old-meal",
+          name: "PLANO ANTIGO",
+          time: "08:00",
+          totalKcal: 400,
+          gutoNote: "desatualizado",
+          foods: [{ name: "Alimento antigo", quantity: "1", kcal: 400 }],
+        }],
+      },
+    }, null, 2));
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Não consegui gerar a dieta.",
+      acao: "none",
+      expectedResponse: null,
+    };
+
+    const { status, body } = await chat(userId, "qual é minha dieta?");
+
+    assert.equal(status, 200);
+    assert.equal(body.acao, "generateDiet");
+    assert.doesNotMatch(body.fala || "", /PLANO ANTIGO|dieta est[aá] pronta/i);
+    assert.ok((callsByKind.diet || 0) > 0, "o executor deve tentar regenerar em vez de reutilizar o plano vencido");
+    const storedDiet = JSON.parse(readFileSync(dietFile, "utf8"))[userId];
+    assert.notEqual(storedDiet.generatedAt, oldGeneratedAt);
+    assert.equal(readMem(userId).dietGenerationStatus, "generated");
   });
 
   it("pedido explícito de treino não fica preso em acao none quando perfil está executável", async () => {
@@ -387,6 +471,479 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     const mem = readMem("conv-proactive-internal");
     assert.equal((mem.proactiveMemories || []).length, 0);
     assert.doesNotMatch(JSON.stringify(body), /Evento proativo devido|Decida a fala|template de agenda/i);
+  });
+
+  it("chegada de usuário novo não interpreta o scheduler como compromisso e entrega a primeira missão", async () => {
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Fechado, Will. Esse período fica bloqueado, então eu puxo o treino pra antes. Prefere de manhã ou de tarde?",
+      acao: "updateWorkout",
+      expectedResponse: null,
+      memoryPatch: {
+        trainingSchedule: "morning",
+        trainingLimitations: "compromisso inventado pelo modelo",
+      },
+    };
+    seed("conv-new-user-arrival", {
+      biologicalSex: "male",
+      userAge: 20,
+      heightCm: 178,
+      weightKg: 83.5,
+      trainingGoal: "fat_loss",
+      trainingPathology: "lombar",
+      trainingLimitations: "lombar",
+      trainedToday: false,
+      hasSeenChatOpening: false,
+      lastWorkoutPlan: undefined,
+      weeklyWorkoutPlan: undefined,
+      proactiveMemories: [],
+      proactiveImpacts: [],
+      proactiveSent: {},
+    });
+
+    const { status, body } = await proactiveArrival("conv-new-user-arrival");
+
+    assert.equal(status, 200);
+    assert.equal(body.slot, "arrival");
+    assert.equal(body.deliveryCommitted, true);
+    assert.equal(body.acao, "updateWorkout");
+    assert.ok(body.workoutPlan?.exercises?.length > 0, "a primeira missão deve nascer na chegada");
+    assert.match(body.workoutPlan?.summary || "", /lombar|coluna|protegendo|reduzindo/i, "o plano deve evidenciar o cuidado da calibragem");
+    assert.ok(body.memoryPatch?.lastWorkoutPlan?.exercises?.length > 0, "o plano oficial deve voltar no patch atômico");
+    assert.equal(body.memoryPatch?.lastWorkoutPlan?.summary, body.workoutPlan?.summary);
+    assert.equal(body.memoryPatch?.trainingSchedule, undefined);
+    assert.equal(body.memoryPatch?.trainingLimitations, undefined);
+    assert.equal(body.memoryPatch?.dietGenerationStatus, "ready_to_generate");
+    assert.match(body.fala, /primeira missão|Bora/i);
+    assert.doesNotMatch(body.fala, /período fica bloqueado|prefere de manhã|compromisso/i);
+    const persisted = readMem("conv-new-user-arrival");
+    assert.ok(persisted.lastWorkoutPlan?.exercises?.length > 0, "a missão deve persistir antes de concluir a chegada");
+    assert.equal(persisted.lastWorkoutPlan?.summary, body.workoutPlan?.summary, "o plano persistido deve ser o mesmo plano mostrado");
+    assert.equal(persisted.trainingSchedule, undefined, "turno de sistema não pode persistir horário inventado pelo modelo");
+    assert.equal(persisted.trainingLimitations, "lombar", "turno de sistema não pode sobrescrever calibragem validada");
+    assert.equal(persisted.dietGenerationStatus, "ready_to_generate");
+    assert.equal(persisted.hasSeenChatOpening, true);
+    assert.equal((persisted.proactiveMemories || []).length, 0);
+    assert.equal(callsByKind.risk || 0, 0, "scheduler não deve passar como fala humana pelo classificador de risco");
+  });
+
+  it("serializa duas chegadas concorrentes e ambas recebem a mesma missão persistida", async () => {
+    const userId = "conv-concurrent-arrivals";
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Primeira missão pronta.",
+      acao: "updateWorkout",
+      expectedResponse: null,
+    };
+    brainModelDelayMs = 140;
+    seed(userId, {
+      trainedToday: false,
+      hasSeenChatOpening: false,
+      lastWorkoutPlan: undefined,
+      weeklyWorkoutPlan: undefined,
+      proactiveMemories: [],
+      proactiveImpacts: [],
+      proactiveSent: {},
+    });
+    callsByKind = {};
+    const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
+    const request = () => fetch(`${baseUrl}/guto/proactive?force=1&language=pt-BR`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const [firstResponse, secondResponse] = await Promise.all([request(), request()]);
+    const [first, second] = await Promise.all([firstResponse.json(), secondResponse.json()]) as Array<Record<string, any>>;
+    assert.equal(firstResponse.status, 200);
+    assert.equal(secondResponse.status, 200);
+    assert.equal(first.deliveryCommitted, true);
+    assert.equal(second.deliveryCommitted, true);
+    assert.equal(callsByKind.brain, 1, "o segundo request deve reutilizar a missão vencedora");
+    assert.equal(
+      JSON.stringify(first.workoutPlan?.exercises?.map((exercise: any) => exercise.id)),
+      JSON.stringify(second.workoutPlan?.exercises?.map((exercise: any) => exercise.id))
+    );
+    const persisted = readMem(userId);
+    assert.equal(
+      JSON.stringify(persisted.lastWorkoutPlan?.exercises?.map((exercise: any) => exercise.id)),
+      JSON.stringify(first.workoutPlan?.exercises?.map((exercise: any) => exercise.id))
+    );
+  });
+
+  it("cancela a chegada se a limitação muda enquanto o treino é montado", async () => {
+    const userId = "conv-arrival-profile-race";
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Missão pronta com o perfil antigo.",
+      acao: "updateWorkout",
+      expectedResponse: null,
+    };
+    brainModelDelayMs = 180;
+    seed(userId, {
+      trainingPathology: "lombar",
+      trainingLimitations: "lombar",
+      trainedToday: false,
+      hasSeenChatOpening: false,
+      lastWorkoutPlan: undefined,
+      weeklyWorkoutPlan: undefined,
+      proactiveMemories: [],
+      proactiveImpacts: [],
+      proactiveSent: {},
+    });
+    callsByKind = {};
+    const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
+    const arrival = fetch(`${baseUrl}/guto/proactive?force=1&language=pt-BR`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    await waitUntil(() => (callsByKind.brain || 0) >= 1);
+
+    const update = await fetch(`${baseUrl}/guto/memory`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        language: "pt-BR",
+        trainingPathology: "dor no joelho direito",
+        trainingLimitations: "dor no joelho direito",
+      }),
+    });
+    assert.equal(update.status, 200);
+
+    const response = await arrival;
+    const body = await response.json() as Record<string, any>;
+    assert.equal(response.status, 200);
+    assert.equal(body.deliveryCommitted, false);
+    const persisted = readMem(userId);
+    assert.equal(persisted.trainingLimitations, "dor no joelho direito");
+    assert.equal(persisted.lastWorkoutPlan == null, true);
+    assert.equal(persisted.hasSeenChatOpening, false);
+  });
+
+  it("cancela a chegada se chuva muda o local efetivo enquanto o treino é montado", async () => {
+    const userId = "conv-arrival-weather-race";
+    const now = new Date().toISOString();
+    const today = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Europe/Rome",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Missão ao ar livre pronta.",
+      acao: "updateWorkout",
+      expectedResponse: null,
+    };
+    brainModelDelayMs = 180;
+    seed(userId, {
+      preferredTrainingLocation: "park",
+      trainingLocation: "park",
+      trainedToday: false,
+      hasSeenChatOpening: false,
+      lastWorkoutPlan: undefined,
+      weeklyWorkoutPlan: undefined,
+      proactiveMemories: [{
+        id: "weather-race",
+        userId,
+        type: "trip",
+        status: "confirmed",
+        rawText: "Vou treinar no parque.",
+        understood: "Treino ao ar livre.",
+        createdAt: now,
+        updatedAt: now,
+        weekKey: "weather-race",
+      }],
+      proactiveImpacts: [],
+      proactiveSent: {},
+    });
+    callsByKind = {};
+    const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
+    const arrival = fetch(`${baseUrl}/guto/proactive?force=1&language=pt-BR`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    await waitUntil(() => (callsByKind.brain || 0) >= 1);
+
+    await updateMemoryAtomically<Record<string, any>>(userId, (current) => {
+      const persisted = { ...(current as Record<string, any>) };
+      persisted.proactiveMemories = (persisted.proactiveMemories || []).map((item: Record<string, any>) =>
+        item.id === "weather-race"
+          ? {
+              ...item,
+              status: "enriched",
+              updatedAt: new Date().toISOString(),
+              weatherEnrichment: {
+                city: "Roma",
+                date: today,
+                tempMin: 17,
+                tempMax: 22,
+                condition: "chuva",
+                conditionEn: "Rain",
+                source: "wttr.in",
+                fetchedAt: new Date().toISOString(),
+              },
+            }
+          : item
+      );
+      return persisted;
+    });
+
+    const response = await arrival;
+    const body = await response.json() as Record<string, any>;
+    assert.equal(response.status, 200);
+    assert.equal(body.deliveryCommitted, false);
+    const persisted = readMem(userId);
+    assert.equal(persisted.proactiveMemories?.[0]?.weatherEnrichment?.conditionEn, "Rain");
+    assert.equal(persisted.lastWorkoutPlan == null, true);
+    assert.equal(persisted.hasSeenChatOpening, false);
+  });
+
+  it("mantém a chegada se só o enriquecimento de feriado muda durante a montagem", async () => {
+    const userId = "conv-arrival-holiday-enrichment";
+    const now = new Date().toISOString();
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Missão pronta sem mudança operacional.",
+      acao: "updateWorkout",
+      expectedResponse: null,
+    };
+    brainModelDelayMs = 180;
+    seed(userId, {
+      trainedToday: false,
+      hasSeenChatOpening: false,
+      lastWorkoutPlan: undefined,
+      weeklyWorkoutPlan: undefined,
+      proactiveMemories: [{
+        id: "holiday-enrichment",
+        userId,
+        type: "trip",
+        status: "confirmed",
+        rawText: "Semana normal de treino.",
+        understood: "Sem mudança operacional no treino.",
+        createdAt: now,
+        updatedAt: now,
+        weekKey: "holiday-race",
+      }],
+      proactiveImpacts: [],
+      proactiveSent: {},
+    });
+    callsByKind = {};
+    const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
+    const arrival = fetch(`${baseUrl}/guto/proactive?force=1&language=pt-BR`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    await waitUntil(() => (callsByKind.brain || 0) >= 1);
+
+    await updateMemoryAtomically<Record<string, any>>(userId, (current) => {
+      const persisted = { ...(current as Record<string, any>) };
+      persisted.proactiveMemories = (persisted.proactiveMemories || []).map((item: Record<string, any>) =>
+        item.id === "holiday-enrichment"
+          ? {
+              ...item,
+              status: "enriched",
+              updatedAt: new Date().toISOString(),
+              holidayEnrichment: [{
+                name: "Republic Day",
+                nameLocal: "Festa della Repubblica",
+                date: "2026-06-02",
+                country: "IT",
+              }],
+            }
+          : item
+      );
+      return persisted;
+    });
+
+    const response = await arrival;
+    const body = await response.json() as Record<string, any>;
+    assert.equal(response.status, 200);
+    assert.equal(body.deliveryCommitted, true);
+    assert.ok(body.workoutPlan?.exercises?.length > 0);
+    const persisted = readMem(userId);
+    assert.equal(persisted.proactiveMemories?.[0]?.holidayEnrichment?.[0]?.country, "IT");
+    assert.ok(persisted.lastWorkoutPlan?.exercises?.length > 0);
+    assert.equal(persisted.hasSeenChatOpening, true);
+  });
+
+  it("scheduler sem requiredAction não executa mutação arbitrária do modelo", async () => {
+    const userId = "conv-system-trigger-no-authority";
+    seed(userId, {
+      dietGenerationStatus: "idle",
+      lastWorkoutPlan: undefined,
+      proactiveSent: {},
+    });
+    const memory = readMem(userId);
+    const response = await runSovereignBrainTurnForTest({
+      memory,
+      input: "",
+      history: [],
+      language: "pt-BR",
+      operationalContext: {
+        nowIso: new Date().toISOString(),
+        date: "2026-07-12",
+        time: "10:00",
+        hour: 10,
+        minute: 0,
+        weekday: "domingo",
+        timezone: "Europe/Rome",
+        dayPeriod: "morning",
+      },
+      systemTrigger: {
+        source: "proactive_scheduler",
+        slot: "arrival",
+        objective: "scheduled_presence",
+      },
+      decide: async () => ({
+        response: {
+          fala: "Vou gerar tua dieta agora.",
+          acao: "generateDiet",
+          expectedResponse: null,
+          memoryPatch: { dietGenerationStatus: "generating" },
+        },
+        validation: "ok",
+        meta: { kind: "model", via: "test" },
+      }),
+    });
+    assert.equal(response.acao, "none");
+    assert.equal(response.memoryPatch && Object.keys(response.memoryPatch).length, 0);
+    assert.equal(readMem(userId).dietGenerationStatus, "idle");
+  });
+
+  it("fala da primeira chegada nunca herda afirmação sem fonte mesmo fora de regex conhecidas", async () => {
+    const userId = "conv-new-user-arrival-unbounded-claim";
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Teu médico liberou a lombar e eu removi todos os cuidados do plano.",
+      acao: "updateWorkout",
+      expectedResponse: null,
+    };
+    seed(userId, {
+      trainingPathology: "lombar",
+      trainingLimitations: "lombar",
+      trainedToday: false,
+      hasSeenChatOpening: false,
+      lastWorkoutPlan: undefined,
+      weeklyWorkoutPlan: undefined,
+      proactiveSent: {},
+    });
+
+    const { status, body } = await proactiveArrival(userId);
+
+    assert.equal(status, 200);
+    assert.equal(body.deliveryCommitted, true);
+    assert.equal(body.fala, "Finalmente, Will. Eu já organizei tua primeira missão com o que você me passou. Bora?");
+    assert.doesNotMatch(body.fala, /m[eé]dico|liberou|removi/i);
+    assert.match(body.workoutPlan?.summary || "", /lombar|coluna|protegendo|reduzindo/i);
+  });
+
+  it("chegada cria a primeira missão mesmo quando o contrato do modelo é inválido", async () => {
+    stubPayload = { flag: null, confidence: 0 };
+    const cases = [
+      { language: "pt-BR", limitation: "lombar", expected: /Finalmente, Will|primeira missão|Bora/i, forbidden: /período fica bloqueado|prefere de manhã|compromisso/i, care: /Protegendo.*lombar|lombar.*reduzindo/i },
+      { language: "en-US", limitation: "lower back", expected: /Finally, Will|first mission|Ready/i, forbidden: /window is blocked|morning|commitment/i, care: /Protecting.*lower back|lower back.*reducing/i },
+      { language: "it-IT", limitation: "lombare", expected: /Finalmente, Will|prima missione|Partiamo/i, forbidden: /fascia è bloccata|mattina|impegno/i, care: /Proteggo.*lombare|lombare.*riduco/i },
+    ] as const;
+
+    for (const testCase of cases) {
+      const userId = `conv-new-user-arrival-invalid-model-${testCase.language}`;
+      seed(userId, {
+        language: testCase.language,
+        trainingPathology: testCase.limitation,
+        trainingLimitations: testCase.limitation,
+        trainedToday: false,
+        hasSeenChatOpening: false,
+        lastWorkoutPlan: undefined,
+        weeklyWorkoutPlan: undefined,
+        proactiveMemories: [],
+        proactiveImpacts: [],
+        proactiveSent: {},
+      });
+
+      const { status, body } = await proactiveArrival(userId, testCase.language);
+
+      assert.equal(status, 200);
+      assert.equal(body.slot, "arrival");
+      assert.equal(body.deliveryCommitted, true);
+      assert.equal(body.acao, "updateWorkout");
+      assert.ok(body.workoutPlan?.exercises?.length > 0);
+      assert.match(body.workoutPlan?.summary || "", testCase.care);
+      assert.equal(body.memoryPatch?.dietGenerationStatus, "ready_to_generate");
+      assert.match(body.fala, testCase.expected);
+      assert.doesNotMatch(body.fala, testCase.forbidden);
+      assert.equal(readMem(userId).hasSeenChatOpening, true);
+    }
+  });
+
+  it("chegada incompleta não é consumida e permanece elegível para nova tentativa", async () => {
+    const userId = "conv-new-user-arrival-retry";
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Finalmente, Will. Eu já organizei tua primeira missão com o que você me passou. Bora?",
+      acao: "updateWorkout",
+      expectedResponse: null,
+    };
+    seed(userId, {
+      trainedToday: false,
+      hasSeenChatOpening: false,
+      lastWorkoutPlan: undefined,
+      weeklyWorkoutPlan: undefined,
+      proactiveMemories: [],
+      proactiveImpacts: [],
+      proactiveSent: {},
+      // O gate histórico considera whitespace como campo presente, enquanto o
+      // executor soberano o rejeita. A rota deve responder honestamente sem
+      // consumir a chegada quando a missão não pôde ser persistida.
+      trainingLimitations: "   ",
+      trainingPathology: "   ",
+    });
+
+    const { status, body } = await proactiveArrival(userId);
+
+    assert.equal(status, 200);
+    assert.equal(body.slot, "arrival");
+    assert.equal(body.deliveryCommitted, false);
+    const persisted = readMem(userId);
+    assert.equal(persisted.hasSeenChatOpening, false);
+    assert.equal(persisted.lastWorkoutPlan == null, true);
+    assert.deepEqual(persisted.proactiveSent || {}, {});
+  });
+
+  it("não confirma a chegada quando a missão não consegue ser gravada de forma durável", async () => {
+    const userId = "conv-new-user-arrival-persistence-failure";
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Eu já deixei tudo resolvido para a próxima semana.",
+      acao: "updateWorkout",
+      expectedResponse: null,
+    };
+    seed(userId, {
+      trainedToday: false,
+      hasSeenChatOpening: false,
+      lastWorkoutPlan: undefined,
+      weeklyWorkoutPlan: undefined,
+      proactiveSent: {},
+    });
+
+    chmodSync(file, 0o444);
+    try {
+      const { status, body } = await proactiveArrival(userId);
+      assert.equal(status, 200);
+      assert.equal(body.deliveryCommitted, false);
+      assert.equal(body.acao, "none");
+    } finally {
+      chmodSync(file, 0o644);
+      clearCache();
+    }
+
+    const persisted = readMem(userId);
+    assert.equal(persisted.hasSeenChatOpening, false);
+    assert.equal(persisted.lastWorkoutPlan == null, true);
+    assert.deepEqual(persisted.proactiveSent || {}, {});
   });
 
   it("GET /guto/memory sanitiza eventKey legado com prompt interno", async () => {

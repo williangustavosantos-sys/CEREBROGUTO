@@ -235,6 +235,10 @@ export interface DietMeal {
 
 export interface DietPlan {
   userId: string;
+  /** Opaque revision changed on every persisted write for optimistic locking. */
+  revision?: string;
+  /** Hash dos dados nutricionais usados na geração; impede servir plano stale. */
+  profileFingerprint?: string;
   title?: string;
   // Idioma em que o conteúdo visível (refeições/alimentos/notas) foi gerado.
   // Usado para invalidar/regenerar quando o idioma do usuário muda ("idioma é lei").

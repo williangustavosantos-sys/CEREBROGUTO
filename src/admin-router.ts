@@ -49,12 +49,15 @@ import {
 } from "./arena-store.js";
 import { getAvatarStage, DEFAULT_ARENA_GROUP } from "./arena.js";
 import {
-  readMemoryStoreAsync,
-  writeMemoryStoreAsync,
+  readPersistedUserMemorySnapshot,
+  updateUserMemoryAtomically,
 } from "./memory-store.js";
 import {
   getMemory,
   saveMemory,
+  buildDietProfileFingerprint,
+  hasMissionReadyForDiet,
+  resolveDietFoodRestrictionAtomically,
   buildWorkoutPlanFromSemanticFocus,
   invalidateDietIfNeeded,
   type WeekDayKey,
@@ -62,7 +65,14 @@ import {
   type WeeklyDietDay,
   type WeeklyDietPlan,
 } from "../server.js";
-import { getDietPlan, saveDietPlan, deleteDietPlan } from "./diet-store.js";
+import {
+  DietPlanWriteConflictError,
+  deleteDietPlan,
+  deleteDietPlanIfUnchanged,
+  getDietPlanConcurrencyToken,
+  readPersistedDietPlan,
+  saveDietPlanIfUnchanged,
+} from "./diet-store.js";
 import { addLog, getLogs } from "./log-store.js";
 import { config } from "./config.js";
 import {
@@ -94,7 +104,6 @@ import {
 import type { FoodCountry, FoodLanguage } from "./food-catalog.js";
 import {
   getPendingClarification,
-  resolveProfileFreeFields,
 } from "./dirty-data-resolver.js";
 import {
   buildAliasMap,
@@ -610,9 +619,7 @@ async function updateMemoryFromStudentPatch(userId: string, patch: Partial<UserA
 }
 
 export async function deleteStudentEverywhere(userId: string): Promise<void> {
-  const memStore = await readMemoryStoreAsync();
-  delete (memStore as Record<string, unknown>)[userId];
-  await writeMemoryStoreAsync(memStore);
+  await updateUserMemoryAtomically(userId, () => null);
 
   const arenaStore = readArenaStore();
   delete arenaStore.profiles[userId];
@@ -967,14 +974,10 @@ async function resolveAdminDietConstraints(memory: LooseRecord): Promise<{
   const foodRestrictions = isNoAdminFoodRestrictionText(rawRestriction) ? "none" : rawRestriction;
   if (foodRestrictions === "none") return { foodRestrictions };
 
-  const resolvedFields = await resolveProfileFreeFields({
-    country: asString(memory.country, ""),
-    pathology: asString(memory.trainingPathology || memory.trainingLimitations, ""),
-    foodRestriction: rawRestriction,
-    previous: asRecord(memory.resolvedFields),
-  });
-  memory.resolvedFields = resolvedFields;
-  saveMemory(memory as any);
+  // A rota de geração resolve e persiste este campo atomicamente antes de
+  // capturar o fingerprint. Aqui apenas consumimos o snapshot já confirmado,
+  // evitando um save full-snapshot que poderia sobrescrever perfil/treino.
+  const resolvedFields = asRecord(memory.resolvedFields) as any;
 
   const pending = getPendingClarification(resolvedFields, "diet");
   if (pending?.field === "foodRestriction") {
@@ -1160,6 +1163,7 @@ async function buildAdminGeneratedDietPlan(userId: string, memory: LooseRecord):
     plan: {
       userId,
       title: "Dieta oficial",
+      language,
       generatedAt: new Date().toISOString(),
       country,
       countryCode,
@@ -1229,6 +1233,13 @@ function asyncHandler(fn: (req: Request, res: Response) => Promise<void>) {
   return (req: Request, res: Response) => {
     void fn(req, res).catch((error) => {
       console.error("[GUTO_ADMIN] route error:", error);
+      if (error instanceof DietPlanWriteConflictError) {
+        res.status(409).json({
+          message: "A dieta mudou enquanto esta operação era aplicada. Recarregue e tente novamente.",
+          code: error.code,
+        });
+        return;
+      }
       if (isWorkoutCatalogValidationError(error)) {
         res.status(error.status).json({
           message: error.code === "WORKOUT_EXERCISE_CATALOG_SELECTION_REQUIRED"
@@ -1553,7 +1564,13 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
 adminRouter.get(["/students/:userId", "/users/:userId"], asyncHandler(async (req, res) => {
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
-  const memory = getMemory(student.userId);
+  const persistedMemory = await readPersistedUserMemorySnapshot(student.userId);
+  const memory = {
+    ...getMemory(student.userId),
+    ...(persistedMemory && typeof persistedMemory === "object" && !Array.isArray(persistedMemory)
+      ? persistedMemory as Record<string, unknown>
+      : {}),
+  };
   res.json({ student: buildStudentView(student), user: student, memory });
 }));
 
@@ -2121,7 +2138,7 @@ adminRouter.get("/students/:userId/workout/today", asyncHandler(async (req, res)
 adminRouter.get(["/students/:userId/diet", "/users/:userId/diet"], asyncHandler(async (req, res) => {
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
-  const diet = await getDietPlan(student.userId);
+  const diet = await readPersistedDietPlan(student.userId);
   res.json({ diet });
 }));
 
@@ -2130,14 +2147,14 @@ adminRouter.put(["/students/:userId/diet", "/users/:userId/diet"], asyncHandler(
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
   const body = req.body as { diet?: unknown; reason?: string };
-  const previous = await getDietPlan(student.userId);
+  const previous = await readPersistedDietPlan(student.userId);
   const diet = normalizeDietPlan(body.diet ?? req.body, previous as LooseRecord | null, req, student.userId, body.reason);
   const calorieError = dietCalorieValidationMessage(diet);
   if (calorieError) {
     res.status(400).json({ message: calorieError, code: "DIET_CALORIES_MISMATCH" });
     return;
   }
-  await saveDietPlan(diet as any);
+  await saveDietPlanIfUnchanged(diet as any, getDietPlanConcurrencyToken(previous), { allowLockedCurrent: true });
   addLog({
     action: "diet_edited",
     actorUserId: caller.userId,
@@ -2153,14 +2170,14 @@ adminRouter.patch(["/students/:userId/diet", "/users/:userId/diet"], asyncHandle
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
   const body = req.body as { diet?: unknown; reason?: string };
-  const previous = await getDietPlan(student.userId);
+  const previous = await readPersistedDietPlan(student.userId);
   const diet = normalizeDietPlan({ ...(previous || {}), ...asRecord(body.diet ?? req.body) }, previous as LooseRecord | null, req, student.userId, body.reason);
   const calorieError = dietCalorieValidationMessage(diet);
   if (calorieError) {
     res.status(400).json({ message: calorieError, code: "DIET_CALORIES_MISMATCH" });
     return;
   }
-  await saveDietPlan(diet as any);
+  await saveDietPlanIfUnchanged(diet as any, getDietPlanConcurrencyToken(previous), { allowLockedCurrent: true });
   addLog({
     action: "diet_edited",
     actorUserId: caller.userId,
@@ -2175,13 +2192,29 @@ adminRouter.post("/students/:userId/diet/generate", asyncHandler(async (req, res
   const caller = req.gutoUser!;
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
-  const existing = await getDietPlan(student.userId);
+  const existing = await readPersistedDietPlan(student.userId);
   if (existing?.lockedByCoach) {
     res.status(409).json({ message: "Plano bloqueado pelo coach.", code: "COACH_LOCKED_PLAN" });
     return;
   }
 
-  const memory = getMemory(student.userId);
+  const persistedDietMemory = await readPersistedUserMemorySnapshot(student.userId);
+  let memory = {
+    ...getMemory(student.userId),
+    ...(persistedDietMemory && typeof persistedDietMemory === "object" && !Array.isArray(persistedDietMemory)
+      ? persistedDietMemory as Record<string, unknown>
+      : {}),
+  };
+  if (!hasMissionReadyForDiet(memory)) {
+    res.status(409).json({
+      message: "A primeira missão precisa estar persistida antes da dieta.",
+      code: "MISSION_REQUIRED_FOR_DIET",
+    });
+    return;
+  }
+  memory = await resolveDietFoodRestrictionAtomically(memory as any) as unknown as typeof memory;
+  const profileFingerprint = buildDietProfileFingerprint(memory);
+  const generationLanguage = normalizeAdminDietLanguage(memory.language);
   const generated = await buildAdminGeneratedDietPlan(student.userId, memory as LooseRecord);
   if (generated.error) {
     res.status(generated.error.status).json({
@@ -2194,9 +2227,41 @@ adminRouter.post("/students/:userId/diet/generate", asyncHandler(async (req, res
   }
 
   const diet = generated.plan!;
-  await saveDietPlan(diet);
-  memory.dietGenerationStatus = "generated";
-  saveMemory(memory);
+  const memoryBeforeCommitRaw = await readPersistedUserMemorySnapshot(student.userId);
+  const memoryBeforeCommit = memoryBeforeCommitRaw && typeof memoryBeforeCommitRaw === "object" && !Array.isArray(memoryBeforeCommitRaw)
+    ? memoryBeforeCommitRaw as ReturnType<typeof getMemory>
+    : null;
+  if (
+    !memoryBeforeCommit ||
+    !hasMissionReadyForDiet(memoryBeforeCommit) ||
+    buildDietProfileFingerprint(memoryBeforeCommit) !== profileFingerprint ||
+    normalizeAdminDietLanguage(memoryBeforeCommit.language) !== generationLanguage
+  ) {
+    res.status(409).json({ message: "Perfil ou missão mudou durante a geração da dieta.", code: "DIET_CONTEXT_CHANGED" });
+    return;
+  }
+  diet.profileFingerprint = profileFingerprint;
+  diet.language = generationLanguage;
+  await saveDietPlanIfUnchanged(diet, getDietPlanConcurrencyToken(existing));
+  let statusCommitted = false;
+  await updateUserMemoryAtomically(student.userId, (snapshot) => {
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
+    const current = snapshot as ReturnType<typeof getMemory>;
+    if (
+      !hasMissionReadyForDiet(current) ||
+      buildDietProfileFingerprint(current) !== profileFingerprint ||
+      normalizeAdminDietLanguage(current.language) !== generationLanguage
+    ) {
+      return current;
+    }
+    current.dietGenerationStatus = "generated";
+    statusCommitted = true;
+    return current;
+  });
+  if (!statusCommitted) {
+    res.status(409).json({ message: "Perfil ou missão mudou durante o commit da dieta.", code: "DIET_CONTEXT_CHANGED" });
+    return;
+  }
   addLog({
     action: "diet_generated",
     actorUserId: caller.userId,
@@ -2211,13 +2276,13 @@ adminRouter.post("/students/:userId/diet/lock", asyncHandler(async (req, res) =>
   const caller = req.gutoUser!;
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
-  const existing = await getDietPlan(student.userId);
+  const existing = await readPersistedDietPlan(student.userId);
   if (!existing) {
     res.status(404).json({ message: "Dieta não encontrada." });
     return;
   }
   const diet = { ...existing, lockedByCoach: true, updatedBy: caller.userId, updatedAt: new Date().toISOString() };
-  await saveDietPlan(diet);
+  await saveDietPlanIfUnchanged(diet, getDietPlanConcurrencyToken(existing), { allowLockedCurrent: true });
   addLog({ action: "diet_locked", actorUserId: caller.userId, actorRole: caller.role, targetUserId: student.userId, metadata: { lockedByCoach: true } });
   res.json({ diet });
 }));
@@ -2226,13 +2291,13 @@ adminRouter.post("/students/:userId/diet/unlock", asyncHandler(async (req, res) 
   const caller = req.gutoUser!;
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
-  const existing = await getDietPlan(student.userId);
+  const existing = await readPersistedDietPlan(student.userId);
   if (!existing) {
     res.status(404).json({ message: "Dieta não encontrada." });
     return;
   }
   const diet = { ...existing, lockedByCoach: false, updatedBy: caller.userId, updatedAt: new Date().toISOString() };
-  await saveDietPlan(diet);
+  await saveDietPlanIfUnchanged(diet, getDietPlanConcurrencyToken(existing), { allowLockedCurrent: true });
   addLog({ action: "diet_unlocked", actorUserId: caller.userId, actorRole: caller.role, targetUserId: student.userId, metadata: { lockedByCoach: false } });
   res.json({ diet });
 }));
@@ -2241,8 +2306,8 @@ adminRouter.post("/students/:userId/diet/reset", asyncHandler(async (req, res) =
   const caller = req.gutoUser!;
   const student = await getManagedStudent(req, res, routeParam(req, "userId"));
   if (!student) return;
-  const previous = await getDietPlan(student.userId);
-  await deleteDietPlan(student.userId);
+  const previous = await readPersistedDietPlan(student.userId);
+  await deleteDietPlanIfUnchanged(student.userId, getDietPlanConcurrencyToken(previous));
   addLog({ action: "diet_reset", actorUserId: caller.userId, actorRole: caller.role, targetUserId: student.userId, metadata: { snapshotBefore: previous } });
   res.json({ diet: null });
 }));
@@ -2381,7 +2446,7 @@ adminRouter.get("/students/:userId/diet/today", asyncHandler(async (req, res) =>
     return;
   }
   // Fallback: return existing official diet if no weekly plan day exists
-  const officialDiet = await getDietPlan(student.userId);
+  const officialDiet = await readPersistedDietPlan(student.userId);
   if (officialDiet) {
     res.json({ diet: officialDiet, dayKey: today, fromWeeklyPlan: false, fallback: "official_diet" });
     return;

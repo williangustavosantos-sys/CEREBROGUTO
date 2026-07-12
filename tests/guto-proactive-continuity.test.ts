@@ -99,6 +99,12 @@ describe("Continuidade Primeiro — caso 1: 'viajo quarta' (sem dado crítico)",
     assert.equal(falaHasPassiveMindset(fala), false);
   });
 
+  it("classificador reconhece eventos temporários no plural nos três idiomas", () => {
+    assert.equal(classifyProactiveContinuitySignal("viagens ou compromissos"), "travel_unknown");
+    assert.equal(classifyProactiveContinuitySignal("trips or commitments"), "travel_unknown");
+    assert.equal(classifyProactiveContinuitySignal("impegni questa settimana"), "commitment");
+  });
+
   it("expectedResponse: expõe SIM/NÃO para a UI registrar adaptação ou dia protegido", () => {
     const expected = buildProactiveExpectedResponse("travel_unknown", "pt-BR");
     assert.deepEqual(expected?.options, ["SIM", "NÃO"]);

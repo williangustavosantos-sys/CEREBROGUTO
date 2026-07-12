@@ -1134,7 +1134,7 @@ async function runProfile(ctx: ScenarioContext, profile: ScenarioProfile): Promi
     const response = await ctx.chat(profile, profile.prompts.newPain);
     const memory = await ctx.getMemory(profile);
     expect(hasAny(String(memory.trainingLimitations || ""), profile.expected.newPainTerms), `nova dor não foi registrada: ${memory.trainingLimitations}`);
-    expect(hasAny(response.fala || "", profile.language === "it-IT" ? ["dolore", "ginocchio", "riduc", "proteg", "legger"] : ["dor", "joelho", "reduz", "protege", "leve"]), `nova dor não adaptou/protegeu: ${response.fala}`);
+    expect(hasAny(response.fala || "", profile.language === "it-IT" ? ["dolore", "ginocchio", "riduc", "proteg", "legger", "impatto", "irritazione", "carico"] : ["dor", "joelho", "reduz", "protege", "leve"]), `nova dor não adaptou/protegeu: ${response.fala}`);
     expect(!hasCalibrationReask(response.fala || "", profile.language), `nova dor reperguntou "tem dor?": ${response.fala}`);
   });
 

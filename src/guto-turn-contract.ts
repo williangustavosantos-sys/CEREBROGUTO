@@ -16,6 +16,17 @@ function normalizeContractText(value: string): string {
     .trim();
 }
 
+export function isNegativeWorkoutFeedback(value: string): boolean {
+  const normalized = normalizeContractText(value);
+  const mentionsWorkout = /\b(treinos?|workouts?|training|allenament[oi]|sched[ae]|exercicios?|exercises?|esercizi)\b/.test(normalized);
+  if (!mentionsWorkout) return false;
+  return (
+    /\b(nao gostei|nao curti|odiei|detestei|chato|chata|entediante|pessimo|horrivel)\b/.test(normalized) ||
+    /\b(didnt like|didn t like|did not like|hate|hated|boring|lame|awful)\b/.test(normalized) ||
+    /\b(non mi piace|non mi e piaciuto|non mi e piaciuta|non mi sono piaciuti|non mi sono piaciute|odio|noioso|noiosa)\b/.test(normalized)
+  );
+}
+
 export function isWorkoutExecutionRequest(value: string): boolean {
   const normalized = normalizeContractText(value);
   if (!/\b(treino|treinar|monta|montar|workout|training|allenamento|allenarmi|scheda)\b/.test(normalized)) {
@@ -26,10 +37,10 @@ export function isWorkoutExecutionRequest(value: string): boolean {
   // e "não gostei do treino" caíam no fallback técnico que PROMOVIA treino
   // ("Bora começar" + updateWorkout) — ignorando a recusa/feedback do usuário.
   const refusalOrDislike =
-    /\b(nao quero|nao vou|nao consigo|nao vou conseguir|nao tem como|nao estou a fim|nao to a fim|nao gostei|nao curti|nem a fim|sem vontade|sem saco|odiei|detestei|preguica)\b/.test(normalized) ||
-    /\b(dont want|do not want|wont|won t|cant|can not|cannot|not able|not feeling|didnt like|did not like|hate|boring|lame)\b/.test(normalized) ||
-    /\b(non voglio|non vado|non posso|non riesco|non ce la faccio|non mi va|non mi piace|non mi e piaciuto|non mi e piaciuta|non mi sono piaciuti|non mi sono piaciute|odio|noioso|zero sbatti|non ho voglia)\b/.test(normalized) ||
-    /\b(chato|chata|entediante|pessimo|horrivel)\b/.test(normalized);
+    /\b(nao quero|nao vou|nao consigo|nao vou conseguir|nao tem como|nao estou a fim|nao to a fim|nem a fim|sem vontade|sem saco|preguica)\b/.test(normalized) ||
+    /\b(dont want|do not want|wont|won t|cant|can not|cannot|not able|not feeling)\b/.test(normalized) ||
+    /\b(non voglio|non vado|non posso|non riesco|non ce la faccio|non mi va|zero sbatti|non ho voglia)\b/.test(normalized) ||
+    isNegativeWorkoutFeedback(value);
   // Conclusão de treino ("fiz o treino", "ho fatto l'allenamento", "done the
   // workout") relata algo JÁ FEITO — não é pedido de execução. Sem este guard o
   // it-IT "ho fatto l'allenamento" e "non mi è piaciuto l'allenamento" caíam no
