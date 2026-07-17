@@ -41,6 +41,11 @@ type FounderScenario = {
 
 type DietPlanSeed = {
   userId: string;
+  language: "pt-BR";
+  source: "coach_manual";
+  planSource: "coach_override";
+  manualOverride: true;
+  lockedByCoach: true;
   generatedAt: string;
   country: string;
   countryCode: string;
@@ -187,6 +192,11 @@ async function confirmProactiveMemory(userId: string, memoryId: string, training
 async function seedDiet(userId: string) {
   const plan: DietPlanSeed = {
     userId,
+    language: "pt-BR",
+    source: "coach_manual",
+    planSource: "coach_override",
+    manualOverride: true,
+    lockedByCoach: true,
     generatedAt: new Date().toISOString(),
     country: "Brazil",
     countryCode: "BR",

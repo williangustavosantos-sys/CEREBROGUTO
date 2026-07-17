@@ -146,4 +146,26 @@ describe("Rotação de focos — full_body não deve ser o padrão inicial", () 
       );
     }
   });
+
+  it("pula foco sem volume seguro no local em vez de entregar missão incompleta", async () => {
+    const userId = "rotation-home-safe-volume";
+    seed(userId, {
+      ...CALIBRATED_BASE,
+      biologicalSex: "female",
+      trainingLevel: "returning",
+      trainingStatus: "rotina apertada, voltando",
+      trainingGoal: "consistency",
+      preferredTrainingLocation: "home",
+      trainingLocation: "home",
+      trainingPathology: "dor leve no joelho",
+      trainingLimitations: "dor leve no joelho",
+      nextWorkoutFocus: undefined,
+    });
+
+    const resp = await chat(userId, "monta meu treino de hoje em casa para consistência e saúde");
+    assert.equal(resp.acao, "updateWorkout");
+    const mem = getMemory(userId) as { lastWorkoutPlan?: { exercises?: unknown[]; focusKey?: string } };
+    assert.ok((mem.lastWorkoutPlan?.exercises?.length || 0) >= 4, "missão precisa manter ao menos quatro exercícios seguros");
+    assert.notEqual(mem.lastWorkoutPlan?.focusKey, "chest_triceps", "não pode insistir no foco inviável para casa");
+  });
 });

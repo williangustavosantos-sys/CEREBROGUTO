@@ -255,6 +255,10 @@ function dietModelResponseWithoutGutoNotes() {
 
 describe("diet generation contract", () => {
   before(async () => {
+    // O resolver de campos livres também usa Gemini e é interceptado pelo mock
+    // abaixo. Sem uma chave de teste ele encerra antes do fetch, e os testes de
+    // concorrência sincronizam por engano com a geração da dieta já iniciada.
+    process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || "test-only-gemini-key";
     process.env.GUTO_MEMORY_FILE = testMemoryFile;
     process.env.GUTO_DIET_FILE = testDietFile;
     process.env.GUTO_DISABLE_LISTEN = "1";
