@@ -25,6 +25,7 @@ const META_KEYS = ["validation", "meta", "kind", "via", "reasoning", "modelCalle
 const originalFetch = globalThis.fetch;
 let callsByKind: Record<string, number> = {};
 let brainModelDelayMs = 0;
+let curatorStubPayload: Record<string, unknown> | null = null;
 let stubPayload: Record<string, unknown> = {
   flag: null,
   confidence: 0,
@@ -65,7 +66,15 @@ function installFetchStub() {
       return {
         ok: true,
         status: 200,
-        json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(stubPayload) }] } }] }),
+        json: async () => ({
+          candidates: [{
+            content: {
+              parts: [{
+                text: JSON.stringify(kind === "executorModel" && curatorStubPayload ? curatorStubPayload : stubPayload),
+              }],
+            },
+          }],
+        }),
       } as unknown as Response;
     }
     return originalFetch(url as RequestInfo, init as RequestInit);
@@ -229,6 +238,7 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     stubPayload = { flag: null, confidence: 0, fala: MARKER, acao: "none", expectedResponse: null };
     transcriptStub = "oi pelo audio";
     brainModelDelayMs = 0;
+    curatorStubPayload = null;
   });
 
   after(async () => {
@@ -526,6 +536,51 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.equal(persisted.hasSeenChatOpening, true);
     assert.equal((persisted.proactiveMemories || []).length, 0);
     assert.equal(callsByKind.risk || 0, 0, "scheduler não deve passar como fala humana pelo classificador de risco");
+  });
+
+  it("chegada confirma a mesma missão localizada quando o curador real devolve foco e resumo próprios", async () => {
+    const userId = "conv-new-user-curated-arrival";
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Lucas, finalmente chegou. Tua primeira missão está pronta. Bora?",
+      acao: "updateWorkout",
+      expectedResponse: null,
+    };
+    curatorStubPayload = {
+      exercises: [
+        { id: "supino_reto_maquina", sets: 4, reps: "15-20", rest: "60s", cue: "Costas apoiadas.", note: "Peitoral com suporte." },
+        { id: "supino_inclinado_cross_bilateral", sets: 3, reps: "15-20", rest: "0s", cue: "Controle a volta.", note: "Tensão constante." },
+        { id: "triceps_polia_alta", sets: 3, reps: "15-20", rest: "40s", cue: "Cotovelos fixos.", note: "Densidade metabólica." },
+        { id: "crucifixo_maquina", sets: 3, reps: "15-20", rest: "0s", cue: "Controle o fechamento.", note: "Fadiga de peitoral." },
+        { id: "triceps_barra_v_cabo", sets: 3, reps: "15-20", rest: "40s", cue: "Postura ereta.", note: "Finalização de tríceps." },
+      ],
+      summary: "Resumo autoral longo do curador que será localizado antes do commit.",
+      progressionNote: "",
+    };
+    seed(userId, {
+      name: "Lucas",
+      trainingGoal: "fat_loss",
+      trainingPathology: "lombar",
+      trainingLimitations: "lombar",
+      trainedToday: false,
+      hasSeenChatOpening: false,
+      lastWorkoutPlan: undefined,
+      weeklyWorkoutPlan: undefined,
+      proactiveMemories: [],
+      proactiveImpacts: [],
+      proactiveSent: {},
+    });
+
+    const { status, body } = await proactiveArrival(userId);
+    assert.equal(status, 200);
+    assert.equal(body.deliveryCommitted, true);
+    assert.equal(body.acao, "updateWorkout");
+    assert.ok(body.workoutPlan?.exercises?.length >= 5);
+    const persisted = readMem(userId);
+    assert.deepEqual(body.workoutPlan, persisted.lastWorkoutPlan);
+    assert.deepEqual(body.memoryPatch?.lastWorkoutPlan, persisted.lastWorkoutPlan);
+    assert.equal(persisted.hasSeenChatOpening, true);
   });
 
   it("serializa duas chegadas concorrentes e ambas recebem a mesma missão persistida", async () => {
