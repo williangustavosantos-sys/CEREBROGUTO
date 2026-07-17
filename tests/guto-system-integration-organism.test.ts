@@ -99,7 +99,12 @@ function nowIso(): string {
 }
 
 function dateKey(date = new Date()): string {
-  return date.toISOString().slice(0, 10);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: process.env.GUTO_TIME_ZONE || "Europe/Rome",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
 }
 
 function daysAgo(days: number): string {
