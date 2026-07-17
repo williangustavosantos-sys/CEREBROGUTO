@@ -13051,7 +13051,13 @@ async function generateAndCommitBrainWorkout(
   if (!isCoachLockedWorkout(memory.lastWorkoutPlan)) {
     attachLimitationCareToPlanSummary(workoutPlan, memory, language);
   }
-  const generatedPlan = markGutoGeneratedWorkout(workoutPlan, language as CatalogLanguage);
+  // Persist exactly the same localized representation returned by the sovereign
+  // response finalizer. Otherwise a real curator summary/focus is rewritten only
+  // in the response, and the arrival commit guard rejects its own saved mission.
+  const generatedPlan = markGutoGeneratedWorkout(
+    localizeWorkoutPlan(workoutPlan, language, memory.trainingGoal),
+    language as CatalogLanguage
+  );
   let committedPlan: WorkoutPlan | null = null;
   const committedMemory = await updateUserMemoryAtomically<GutoMemory>(memory.userId, (snapshot) => {
     if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
