@@ -392,4 +392,57 @@ describe("memory-store — merge anti-clobber por usuário", () => {
     );
     assert.equal(memoryStoreSets, 0, "não pode gravar guto:memory sem hidratação Redis bem-sucedida");
   });
+
+  it("lease expirado não publica snapshot stale e reaplica a escrita no store concorrente", async () => {
+    const userId = "redis-expired-lease-user";
+    let remoteStore: Record<string, unknown> = {
+      [userId]: {
+        userId,
+        name: "PIETRO",
+        consentHealthFitness: true,
+        acceptedTerms: true,
+        userAge: 24,
+      },
+    };
+    let commitAttempts = 0;
+
+    setMemoryStoreRedisClientForTests({
+      get: async (key) => key === "guto:memory" ? structuredClone(remoteStore) : null,
+      set: async (key, _value, options) => {
+        if (key === "guto:memory:write-lock:v1" && options?.nx) return "OK";
+        return null;
+      },
+      eval: async (_script, keys, args) => {
+        if (keys.length === 2 && keys[1] === "guto:memory") {
+          commitAttempts += 1;
+          if (commitAttempts === 1) {
+            remoteStore = {
+              ...remoteStore,
+              [userId]: {
+                ...(remoteStore[userId] as Record<string, unknown>),
+                concurrentField: "preserve-me",
+              },
+            };
+            return 0;
+          }
+          remoteStore = JSON.parse(args[1]) as Record<string, unknown>;
+          return 1;
+        }
+        return 1;
+      },
+    });
+
+    await persistUserMemory(userId, {
+      userId,
+      name: "PIETRO",
+      initialXpRewardSeen: true,
+    });
+
+    const saved = remoteStore[userId] as Record<string, unknown>;
+    assert.equal(commitAttempts, 2);
+    assert.equal(saved.concurrentField, "preserve-me");
+    assert.equal(saved.userAge, 24);
+    assert.equal(saved.consentHealthFitness, true);
+    assert.equal(saved.initialXpRewardSeen, true);
+  });
 });

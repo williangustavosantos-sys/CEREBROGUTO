@@ -31,6 +31,14 @@ const REDIS_KEY = "guto:memory";
 const REDIS_WRITE_LOCK_KEY = "guto:memory:write-lock:v1";
 const REDIS_WRITE_LOCK_TTL_MS = 15_000;
 const REDIS_WRITE_LOCK_WAIT_MS = 20_000;
+const REDIS_WRITE_MAX_ATTEMPTS = 3;
+
+class RedisMemoryWriteLeaseLostError extends Error {
+  constructor() {
+    super("Redis memory write lease expired before commit.");
+    this.name = "RedisMemoryWriteLeaseLostError";
+  }
+}
 
 function getRedisClient() {
   if (redisClientOverrideForTests !== undefined) return redisClientOverrideForTests;
@@ -72,7 +80,10 @@ function waitFor(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function acquireRedisWriteLock(redis: RedisClient): Promise<() => Promise<void>> {
+async function acquireRedisWriteLock(redis: RedisClient): Promise<{
+  token: string;
+  release: () => Promise<void>;
+}> {
   const token = randomUUID();
   const deadline = Date.now() + REDIS_WRITE_LOCK_WAIT_MS;
   while (Date.now() < deadline) {
@@ -81,16 +92,19 @@ async function acquireRedisWriteLock(redis: RedisClient): Promise<() => Promise<
       px: REDIS_WRITE_LOCK_TTL_MS,
     });
     if (acquired === "OK") {
-      return async () => {
-        try {
-          await redis.eval(
-            'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end',
-            [REDIS_WRITE_LOCK_KEY],
-            [token]
-          );
-        } catch (error) {
-          console.warn("[GUTO] Failed to release Redis memory write lock:", error);
-        }
+      return {
+        token,
+        release: async () => {
+          try {
+            await redis.eval(
+              'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end',
+              [REDIS_WRITE_LOCK_KEY],
+              [token]
+            );
+          } catch (error) {
+            console.warn("[GUTO] Failed to release Redis memory write lock:", error);
+          }
+        },
       };
     }
     await waitFor(50);
@@ -483,10 +497,10 @@ export async function writeMemoryStoreAsync(store: MemoryStore): Promise<void> {
   const redis = getRedisClient();
   if (redis) {
     try {
-      await withRedisWriteLock(redis, async () => {
-        await redis.set(REDIS_KEY, store);
+      await mutateRedisMemoryStore(redis, (current) => {
+        for (const key in current) delete current[key];
+        Object.assign(current, cloneStoreValue(store));
       });
-      writeToFile(store);
       return;
     } catch (err) {
       console.warn("[GUTO] Redis write failed, falling back to filesystem:", err);
@@ -551,13 +565,51 @@ export function ensureMemoryHydrated(): Promise<void> {
 
 let memWriteChain: Promise<void> = Promise.resolve();
 
-async function withRedisWriteLock(redis: RedisClient, fn: () => Promise<void>): Promise<void> {
-  const release = await acquireRedisWriteLock(redis);
+async function withRedisWriteLock(redis: RedisClient, fn: (token: string) => Promise<void>): Promise<void> {
+  const lease = await acquireRedisWriteLock(redis);
   try {
-    await fn();
+    await fn(lease.token);
   } finally {
-    await release();
+    await lease.release();
   }
+}
+
+async function commitMemoryStoreWhileLeaseOwned(
+  redis: RedisClient,
+  token: string,
+  store: MemoryStore
+): Promise<void> {
+  const committed = await redis.eval(
+    'if redis.call("get", KEYS[1]) == ARGV[1] then redis.call("set", KEYS[2], ARGV[2]); return 1 else return 0 end',
+    [REDIS_WRITE_LOCK_KEY, REDIS_KEY],
+    [token, JSON.stringify(cloneStoreValue(store))]
+  );
+  if (Number(committed) !== 1) throw new RedisMemoryWriteLeaseLostError();
+}
+
+async function mutateRedisMemoryStore(
+  redis: RedisClient,
+  mutate: (store: MemoryStore) => Promise<void> | void
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= REDIS_WRITE_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      await withRedisWriteLock(redis, async (token) => {
+        await hydrateMemoryStoreFromRedisForWrite(redis);
+        await mutate(globalMemoryStore);
+        await commitMemoryStoreWhileLeaseOwned(redis, token, globalMemoryStore);
+        writeToFile(globalMemoryStore);
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof RedisMemoryWriteLeaseLostError) || attempt === REDIS_WRITE_MAX_ATTEMPTS) {
+        throw error;
+      }
+      await waitFor(25 * attempt);
+    }
+  }
+  throw lastError;
 }
 
 async function hydrateMemoryStoreFromRedisForWrite(redis: RedisClient): Promise<void> {
@@ -595,11 +647,8 @@ export function persistUserMemory(userId: string, memory: unknown): Promise<void
   // `memWriteChain` continua resiliente para que uma falha não envenene todas
   // as gravações seguintes. Assim, callers legados podem ignorar a Promise sem
   // gerar unhandled rejection, enquanto callers atômicos podem usar `await`.
-  const writeOperation = memWriteChain.then(() => withRedisWriteLock(redis, async () => {
-    await hydrateMemoryStoreFromRedisForWrite(redis);
+  const writeOperation = memWriteChain.then(() => mutateRedisMemoryStore(redis, async () => {
     globalMemoryStore[userId] = mergeProtectedUserMemorySnapshot(globalMemoryStore[userId], snapshot); // re-aplica sobre o store hidratado
-    await redis.set(REDIS_KEY, cloneStoreValue(globalMemoryStore));
-    writeToFile(globalMemoryStore);
   }));
   memWriteChain = writeOperation.catch((err) => {
     // Antes era silenciado: uma falha de escrita no Redis sumia sem rastro,
@@ -650,11 +699,8 @@ export function persistUserMemoryPatch(
   const redis = getRedisClient();
   const writeOperation = memWriteChain.then(async () => {
     if (redis) {
-      await withRedisWriteLock(redis, async () => {
-        await hydrateMemoryStoreFromRedisForWrite(redis);
+      await mutateRedisMemoryStore(redis, async () => {
         applyPatch(globalMemoryStore);
-        await redis.set(REDIS_KEY, cloneStoreValue(globalMemoryStore));
-        writeToFile(globalMemoryStore);
       });
       return;
     }
@@ -695,11 +741,8 @@ export async function updateUserMemoryAtomically<T>(
     };
 
     if (redis) {
-      await withRedisWriteLock(redis, async () => {
-        await hydrateMemoryStoreFromRedisForWrite(redis);
+      await mutateRedisMemoryStore(redis, async () => {
         await updateStore(globalMemoryStore);
-        await redis.set(REDIS_KEY, cloneStoreValue(globalMemoryStore));
-        writeToFile(globalMemoryStore);
       });
       return;
     }
