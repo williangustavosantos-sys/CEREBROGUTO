@@ -540,7 +540,14 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
         }
         return "OK";
       },
-      eval: async () => 1,
+      eval: async (_script, keys, args) => {
+        if (keys.length === 2 && keys[1] === "guto:memory") {
+          const committed = JSON.parse(args[1]) as Record<string, unknown>;
+          for (const key of Object.keys(redisMemory)) delete redisMemory[key];
+          Object.assign(redisMemory, committed);
+        }
+        return 1;
+      },
     });
 
     try {
