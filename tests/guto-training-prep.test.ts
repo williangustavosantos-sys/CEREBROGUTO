@@ -57,6 +57,9 @@ function seed(userId: string, data: Record<string, any>) {
 async function seedDiet(userId: string) {
   await saveDietPlan({
     userId,
+    source: "coach_manual",
+    planSource: "coach_override",
+    manualOverride: true,
     generatedAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
     country: "Brazil",
     countryCode: "BR",

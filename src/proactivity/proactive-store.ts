@@ -4,7 +4,7 @@
 
 import {
   readMemoryStoreAsync,
-  writeMemoryStoreAsync,
+  updateUserMemoryAtomically,
 } from '../memory-store.js'
 import { config } from '../config.js'
 
@@ -33,15 +33,15 @@ async function atomicUpdateMemories(
 ): Promise<ProactiveMemory[]> {
   let result: ProactiveMemory[] = []
   proactiveWriteQueue = proactiveWriteQueue.catch(() => {}).then(async () => {
-    const store = await readMemoryStoreAsync()
-    const user = asUserMemory(store[userId])
-    const current = Array.isArray(user.proactiveMemories)
-      ? (user.proactiveMemories as ProactiveMemory[])
-      : []
-    result = updater(current)
-    user.proactiveMemories = result
-    store[userId] = user
-    await writeMemoryStoreAsync(store)
+    await updateUserMemoryAtomically(userId, (snapshot) => {
+      const user = asUserMemory(snapshot)
+      const current = Array.isArray(user.proactiveMemories)
+        ? (user.proactiveMemories as ProactiveMemory[])
+        : []
+      result = updater(current)
+      user.proactiveMemories = result
+      return user
+    })
   })
   await proactiveWriteQueue
   return result
@@ -329,11 +329,11 @@ export async function saveWeeklyConversation(
   userId: string,
   wc: WeeklyConversation
 ): Promise<void> {
-  const store = await readMemoryStoreAsync()
-  const user = asUserMemory(store[userId])
-  user.weeklyConversation = wc
-  store[userId] = user
-  await writeMemoryStoreAsync(store)
+  await updateUserMemoryAtomically(userId, (snapshot) => {
+    const user = asUserMemory(snapshot)
+    user.weeklyConversation = wc
+    return user
+  })
 }
 
 export async function markWeeklyConversationDone(
@@ -341,17 +341,17 @@ export async function markWeeklyConversationDone(
   field: 'extractionDone' | 'validationDone'
 ): Promise<void> {
   const weekKey = getWeekKey()
-  const store = await readMemoryStoreAsync()
-  const user = asUserMemory(store[userId])
-  const existing = user.weeklyConversation as WeeklyConversation | undefined
-  const wc = existing?.weekKey === weekKey ? existing : {
-    weekKey,
-    happenedAt: new Date().toISOString(),
-    extractionDone: false,
-    validationDone: false,
-  }
-  wc[field] = true
-  user.weeklyConversation = wc
-  store[userId] = user
-  await writeMemoryStoreAsync(store)
+  await updateUserMemoryAtomically(userId, (snapshot) => {
+    const user = asUserMemory(snapshot)
+    const existing = user.weeklyConversation as WeeklyConversation | undefined
+    const wc = existing?.weekKey === weekKey ? existing : {
+      weekKey,
+      happenedAt: new Date().toISOString(),
+      extractionDone: false,
+      validationDone: false,
+    }
+    wc[field] = true
+    user.weeklyConversation = wc
+    return user
+  })
 }

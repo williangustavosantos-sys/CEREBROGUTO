@@ -6,6 +6,7 @@ import {
   detectImmediateOperationalIntent,
   detectTrainingPrep,
   extractTrainingLocation,
+  isNegativeWorkoutFeedback,
   isWorkoutExecutionRequest,
   looksLikeWeeklyAnswer,
   shouldDeferWeeklyOpeningForTurn,
@@ -50,6 +51,15 @@ describe("GUTO turn contract", () => {
     assert.notEqual(detectImmediateOperationalIntent("não quero treinar hoje"), "workout");
     assert.notEqual(detectImmediateOperationalIntent("não gostei do treino"), "workout");
     assert.notEqual(detectImmediateOperationalIntent("non mi è piaciuto l'allenamento"), "workout");
+  });
+
+  it("identifica feedback negativo de treino sem confundir opinião fora do treino", () => {
+    assert.equal(isNegativeWorkoutFeedback("não gostei do treino"), true);
+    assert.equal(isNegativeWorkoutFeedback("I did not like the workout"), true);
+    assert.equal(isNegativeWorkoutFeedback("I didn't like the workout"), true);
+    assert.equal(isNegativeWorkoutFeedback("non mi è piaciuto l'allenamento"), true);
+    assert.equal(isNegativeWorkoutFeedback("não gostei do filme"), false);
+    assert.equal(isNegativeWorkoutFeedback("monta meu treino"), false);
   });
 
   it("normaliza locais curtos sem virar motor principal de comportamento", () => {

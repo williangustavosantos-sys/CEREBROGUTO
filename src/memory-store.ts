@@ -10,6 +10,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname } from "path";
+import { randomUUID } from "node:crypto";
 import { Redis } from "@upstash/redis";
 import { config } from "./config.js";
 
@@ -19,11 +20,20 @@ export type MemoryStore = Record<string, unknown>;
 
 // ─── Redis client (lazy) ──────────────────────────────────────────────────────
 
-type RedisClient = { get: (key: string) => Promise<unknown>; set: (key: string, value: unknown) => Promise<unknown> };
+type RedisClient = {
+  get: (key: string) => Promise<unknown>;
+  set: (key: string, value: unknown, options?: { nx: true; px: number }) => Promise<unknown>;
+  eval: (script: string, keys: string[], args: string[]) => Promise<unknown>;
+};
 let redisClient: RedisClient | null = null;
+let redisClientOverrideForTests: RedisClient | null | undefined;
 const REDIS_KEY = "guto:memory";
+const REDIS_WRITE_LOCK_KEY = "guto:memory:write-lock:v1";
+const REDIS_WRITE_LOCK_TTL_MS = 15_000;
+const REDIS_WRITE_LOCK_WAIT_MS = 20_000;
 
 function getRedisClient() {
+  if (redisClientOverrideForTests !== undefined) return redisClientOverrideForTests;
   // Hard guard: tests must NEVER touch production Redis.
   // Checked on every call (not cached) so the flag is honored even when env vars
   // are set later via dotenv after the module is imported.
@@ -47,6 +57,82 @@ function getRedisClient() {
   } catch {
     return null;
   }
+}
+
+export function setMemoryStoreRedisClientForTests(client: RedisClient | null | undefined): void {
+  if (process.env.NODE_ENV !== "test" && process.env.GUTO_DISABLE_REDIS_FOR_TESTS !== "1") {
+    throw new Error("Redis test override is only available when NODE_ENV=test.");
+  }
+  redisClientOverrideForTests = client;
+  memHydrated = false;
+  memHydrationPromise = null;
+}
+
+function waitFor(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function acquireRedisWriteLock(redis: RedisClient): Promise<() => Promise<void>> {
+  const token = randomUUID();
+  const deadline = Date.now() + REDIS_WRITE_LOCK_WAIT_MS;
+  while (Date.now() < deadline) {
+    const acquired = await redis.set(REDIS_WRITE_LOCK_KEY, token, {
+      nx: true,
+      px: REDIS_WRITE_LOCK_TTL_MS,
+    });
+    if (acquired === "OK") {
+      return async () => {
+        try {
+          await redis.eval(
+            'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end',
+            [REDIS_WRITE_LOCK_KEY],
+            [token]
+          );
+        } catch (error) {
+          console.warn("[GUTO] Failed to release Redis memory write lock:", error);
+        }
+      };
+    }
+    await waitFor(50);
+  }
+  throw new Error("Timed out waiting for the Redis memory write lock.");
+}
+
+export async function acquireDistributedUserLease(
+  scope: string,
+  userId: string,
+  options: { ttlMs?: number; waitMs?: number } = {}
+): Promise<{ waited: boolean; release: () => Promise<void> }> {
+  const redis = getRedisClient();
+  if (!redis) return { waited: false, release: async () => {} };
+
+  const token = randomUUID();
+  const leaseKey = `guto:lease:${encodeURIComponent(scope)}:${encodeURIComponent(userId)}`;
+  const ttlMs = Math.max(5_000, options.ttlMs || 90_000);
+  const deadline = Date.now() + Math.max(1_000, options.waitMs || ttlMs + 5_000);
+  let waited = false;
+  while (Date.now() < deadline) {
+    const acquired = await redis.set(leaseKey, token, { nx: true, px: ttlMs });
+    if (acquired === "OK") {
+      return {
+        waited,
+        release: async () => {
+          try {
+            await redis.eval(
+              'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end',
+              [leaseKey],
+              [token]
+            );
+          } catch (error) {
+            console.warn(`[GUTO] Failed to release distributed user lease (${scope}):`, error);
+          }
+        },
+      };
+    }
+    waited = true;
+    await waitFor(75);
+  }
+  throw new Error(`Timed out waiting for distributed user lease (${scope}).`);
 }
 
 // ─── In-memory fallback (when filesystem fails in prod without Redis) ─────────
@@ -158,7 +244,20 @@ function mergeProtectedUserMemorySnapshot(existing: unknown, incoming: unknown):
     hasMeaningfulMemoryValue(incoming.country) &&
     hasMeaningfulMemoryValue(existing.country) &&
     incoming.country !== existing.country;
-  const limitationChangedForWorkout = ["trainingPathology", "trainingLimitations"].some((field) =>
+  const workoutProfileChanged = [
+    "userAge",
+    "biologicalSex",
+    "heightCm",
+    "weightKg",
+    "trainingLevel",
+    "trainingStatus",
+    "trainingGoal",
+    "trainingSchedule",
+    "trainingLocation",
+    "preferredTrainingLocation",
+    "trainingPathology",
+    "trainingLimitations",
+  ].some((field) =>
     hasOwnField(incoming, field) &&
     hasProtectedMemoryValue(field, incoming[field]) &&
     incoming[field] !== existing[field]
@@ -243,7 +342,7 @@ function mergeProtectedUserMemorySnapshot(existing: unknown, incoming: unknown):
     if (
       field === "lastWorkoutPlan" &&
       incoming[field] === null &&
-      limitationChangedForWorkout &&
+      workoutProfileChanged &&
       !isCoachLockedWorkoutSnapshot(existing[field])
     ) {
       merged[field] = null;
@@ -312,17 +411,20 @@ function writeToFile(store: MemoryStore): boolean {
  * Priority: Redis → filesystem → in-memory cache
  */
 export async function readMemoryStoreAsync(): Promise<MemoryStore> {
+  // Let locally queued writes settle before hydrating. Once settled, Redis is
+  // authoritative; overlaying an arbitrary historical cache here could undo a
+  // profile/mission change made by another instance.
+  await memWriteChain;
   const redis = getRedisClient();
 
   if (redis) {
     try {
       const raw = await redis.get(REDIS_KEY);
-      if (raw) {
-        const store = typeof raw === "string" ? JSON.parse(raw) : raw;
-        const merged = mergeFetchedMemoryStoreWithCache(store as MemoryStore, globalMemoryStore);
-        replaceGlobalMemoryStore(merged);
-        return merged;
-      }
+      const store = (raw
+        ? (typeof raw === "string" ? JSON.parse(raw) : raw)
+        : {}) as MemoryStore;
+      replaceGlobalMemoryStore(store);
+      return store;
     } catch (err) {
       console.warn("[GUTO] Redis read failed, falling back to filesystem:", err);
     }
@@ -340,6 +442,35 @@ export async function readMemoryStoreAsync(): Promise<MemoryStore> {
 }
 
 /**
+ * Read one user's persisted snapshot without merging the process-local cache.
+ *
+ * Conditional/long-running workflows (for example diet generation) use this
+ * to detect a profile update made by another request or instance. The normal
+ * read path deliberately protects cached fields while hydrating; that is the
+ * right default for continuity, but it would hide a concurrent persisted
+ * change from an optimistic-concurrency guard.
+ */
+export async function readPersistedUserMemorySnapshot(userId: string): Promise<unknown> {
+  const redis = getRedisClient();
+  if (redis) {
+    // A Redis read failure must remain observable. Falling back to a packaged
+    // or partial local file here could falsely authorize a stale commit.
+    const raw = await redis.get(REDIS_KEY);
+    const store = (raw
+      ? (typeof raw === "string" ? JSON.parse(raw) : raw)
+      : {}) as MemoryStore;
+    return cloneStoreValue(store[userId]);
+  }
+
+  if (existsSync(config.memoryFile)) {
+    const store = JSON.parse(readFileSync(config.memoryFile, "utf8")) as MemoryStore;
+    return cloneStoreValue(store[userId]);
+  }
+
+  return cloneStoreValue(globalMemoryStore[userId]);
+}
+
+/**
  * Write the full memory store.
  */
 export async function writeMemoryStoreAsync(store: MemoryStore): Promise<void> {
@@ -352,7 +483,9 @@ export async function writeMemoryStoreAsync(store: MemoryStore): Promise<void> {
   const redis = getRedisClient();
   if (redis) {
     try {
-      await redis.set(REDIS_KEY, store);
+      await withRedisWriteLock(redis, async () => {
+        await redis.set(REDIS_KEY, store);
+      });
       writeToFile(store);
       return;
     } catch (err) {
@@ -418,28 +551,172 @@ export function ensureMemoryHydrated(): Promise<void> {
 
 let memWriteChain: Promise<void> = Promise.resolve();
 
+async function withRedisWriteLock(redis: RedisClient, fn: () => Promise<void>): Promise<void> {
+  const release = await acquireRedisWriteLock(redis);
+  try {
+    await fn();
+  } finally {
+    await release();
+  }
+}
+
+async function hydrateMemoryStoreFromRedisForWrite(redis: RedisClient): Promise<void> {
+  // Escrita do store inteiro só é segura depois de uma leitura Redis bem-sucedida.
+  // `readMemoryStoreAsync` possui fallback local por design; usá-lo aqui fazia
+  // GET Redis falhar + SET Redis funcionar apagar usuários ausentes no fallback.
+  const raw = await redis.get(REDIS_KEY);
+  const remoteStore = (raw
+    ? (typeof raw === "string" ? JSON.parse(raw) : raw)
+    : {}) as MemoryStore;
+  // The persisted store is authoritative while holding the distributed write
+  // lock. Only the caller's snapshot/patch is re-applied afterwards; merging
+  // every cached user here could resurrect stale data from another instance.
+  replaceGlobalMemoryStore(remoteStore);
+  memHydrated = true;
+}
+
 export function persistUserMemory(userId: string, memory: unknown): Promise<void> {
   const snapshot = cloneStoreValue(memory);
   globalMemoryStore[userId] = mergeProtectedUserMemorySnapshot(globalMemoryStore[userId], snapshot); // cache imediato p/ leituras sync
-  writeToFile(globalMemoryStore);
+  const wroteLocalSnapshot = writeToFile(globalMemoryStore);
   const redis = getRedisClient();
-  if (!redis) return Promise.resolve();
-  memWriteChain = memWriteChain
-    .then(async () => {
-      await readMemoryStoreAsync();           // cache passa a refletir o Redis atual (full)
-      memHydrated = true;
-      if (!memHydrated) return;               // Redis indisponível: não arrisca clobber
-      globalMemoryStore[userId] = mergeProtectedUserMemorySnapshot(globalMemoryStore[userId], snapshot); // re-aplica sobre o store hidratado
-      await redis.set(REDIS_KEY, cloneStoreValue(globalMemoryStore));
-      writeToFile(globalMemoryStore);
-    })
-    .catch((err) => {
-      // Antes era silenciado: uma falha de escrita no Redis sumia sem rastro,
-      // contradizendo "memória é confiança". Alinha com o console.warn já usado
-      // nos caminhos de leitura/escrita acima.
-      console.warn("[GUTO] Redis memory write failed (async write chain):", err);
+  if (!redis) {
+    const localWrite = wroteLocalSnapshot
+      ? Promise.resolve()
+      : Promise.reject(new Error("GUTO memory snapshot could not be persisted to disk."));
+    void localWrite.catch((err) => {
+      console.warn("[GUTO] Local memory write failed:", err);
     });
-  return memWriteChain;
+    return localWrite;
+  }
+
+  // `writeOperation` mantém a falha observável para os poucos caminhos que
+  // precisam confirmar um commit antes de responder (ex.: primeira missão).
+  // `memWriteChain` continua resiliente para que uma falha não envenene todas
+  // as gravações seguintes. Assim, callers legados podem ignorar a Promise sem
+  // gerar unhandled rejection, enquanto callers atômicos podem usar `await`.
+  const writeOperation = memWriteChain.then(() => withRedisWriteLock(redis, async () => {
+    await hydrateMemoryStoreFromRedisForWrite(redis);
+    globalMemoryStore[userId] = mergeProtectedUserMemorySnapshot(globalMemoryStore[userId], snapshot); // re-aplica sobre o store hidratado
+    await redis.set(REDIS_KEY, cloneStoreValue(globalMemoryStore));
+    writeToFile(globalMemoryStore);
+  }));
+  memWriteChain = writeOperation.catch((err) => {
+    // Antes era silenciado: uma falha de escrita no Redis sumia sem rastro,
+    // contradizendo "memória é confiança". Alinha com o console.warn já usado
+    // nos caminhos de leitura/escrita acima.
+    console.warn("[GUTO] Redis memory write failed (async write chain):", err);
+  });
+  return writeOperation;
+}
+
+export type UserMemoryListAppend = {
+  field: string;
+  value: unknown;
+  maxItems?: number;
+};
+
+/**
+ * Persist only selected fields on top of the latest stored user snapshot.
+ * Used by long-running workflows so a terminal status write cannot roll back
+ * profile data that changed while the workflow was running.
+ */
+export function persistUserMemoryPatch(
+  userId: string,
+  patch: Record<string, unknown>,
+  listAppends: UserMemoryListAppend[] = [],
+  options: { requireExisting?: boolean } = {}
+): Promise<void> {
+  const patchSnapshot = cloneStoreValue(patch);
+  const appendSnapshots = cloneStoreValue(listAppends);
+
+  const applyPatch = (store: MemoryStore) => {
+    if (options.requireExisting && !isRecord(store[userId])) {
+      throw new Error(`Cannot patch missing GUTO memory (${userId}).`);
+    }
+    const current = isRecord(store[userId]) ? cloneStoreValue(store[userId]) : {};
+    const next: Record<string, unknown> = { ...current, ...patchSnapshot };
+    for (const append of appendSnapshots) {
+      const existing = Array.isArray(next[append.field]) ? next[append.field] as unknown[] : [];
+      const values = [...existing, cloneStoreValue(append.value)];
+      next[append.field] = typeof append.maxItems === "number" && append.maxItems > 0
+        ? values.slice(-append.maxItems)
+        : values;
+    }
+    store[userId] = next;
+    globalMemoryStore[userId] = cloneStoreValue(next);
+  };
+
+  const redis = getRedisClient();
+  const writeOperation = memWriteChain.then(async () => {
+    if (redis) {
+      await withRedisWriteLock(redis, async () => {
+        await hydrateMemoryStoreFromRedisForWrite(redis);
+        applyPatch(globalMemoryStore);
+        await redis.set(REDIS_KEY, cloneStoreValue(globalMemoryStore));
+        writeToFile(globalMemoryStore);
+      });
+      return;
+    }
+
+    const store = existsSync(config.memoryFile)
+      ? JSON.parse(readFileSync(config.memoryFile, "utf8")) as MemoryStore
+      : cloneStoreValue(globalMemoryStore);
+    applyPatch(store);
+    if (!writeToFile(store)) {
+      throw new Error("GUTO memory patch could not be persisted to disk.");
+    }
+  });
+  memWriteChain = writeOperation.catch((error) => {
+    console.warn("[GUTO] Memory patch write failed:", error);
+  });
+  return writeOperation;
+}
+
+/**
+ * Run a per-user read/modify/write while holding both the local queue and the
+ * Redis-wide store lock. This is the safe replacement for callers that used to
+ * read the whole map and later write that stale snapshot back.
+ */
+export async function updateUserMemoryAtomically<T>(
+  userId: string,
+  updater: (current: unknown) => T | null | Promise<T | null>
+): Promise<T | null> {
+  let result: T | null = null;
+  const redis = getRedisClient();
+  const writeOperation = memWriteChain.then(async () => {
+    const updateStore = async (store: MemoryStore) => {
+      const current = cloneStoreValue(store[userId]);
+      result = await updater(current);
+      if (result === null) delete store[userId];
+      else store[userId] = cloneStoreValue(result);
+      if (result === null) delete globalMemoryStore[userId];
+      else globalMemoryStore[userId] = cloneStoreValue(result);
+    };
+
+    if (redis) {
+      await withRedisWriteLock(redis, async () => {
+        await hydrateMemoryStoreFromRedisForWrite(redis);
+        await updateStore(globalMemoryStore);
+        await redis.set(REDIS_KEY, cloneStoreValue(globalMemoryStore));
+        writeToFile(globalMemoryStore);
+      });
+      return;
+    }
+
+    const store = existsSync(config.memoryFile)
+      ? JSON.parse(readFileSync(config.memoryFile, "utf8")) as MemoryStore
+      : cloneStoreValue(globalMemoryStore);
+    await updateStore(store);
+    if (!writeToFile(store)) {
+      throw new Error("Atomic GUTO user memory update could not be persisted to disk.");
+    }
+  });
+  memWriteChain = writeOperation.catch((error) => {
+    console.warn("[GUTO] Atomic user memory update failed:", error);
+  });
+  await writeOperation;
+  return result;
 }
 
 export function flushMemoryStoreWrites(): Promise<void> {

@@ -1,5 +1,5 @@
 import "./test-env.js";
-import { beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import {
   mergeFetchedMemoryStoreWithCache,
   persistUserMemory,
   readMemoryStoreSync,
+  setMemoryStoreRedisClientForTests,
   writeMemoryStoreSync,
 } from "../src/memory-store.js";
 import { config } from "../src/config.js";
@@ -25,6 +26,10 @@ describe("memory-store — merge anti-clobber por usuário", () => {
     mkdirSync(tmpDir, { recursive: true });
     rmSync(testMemoryFile, { force: true });
     clearMemoryStoreCache();
+  });
+
+  afterEach(() => {
+    setMemoryStoreRedisClientForTests(undefined);
   });
 
   it("write parcial stale não apaga pacto, XP, evento nem consentimento", async () => {
@@ -305,5 +310,86 @@ describe("memory-store — merge anti-clobber por usuário", () => {
     const saved = readMemoryStoreSync()[userId] as Record<string, unknown>;
     assert.equal(saved.trainingLimitations, "estou com dor no joelho direito");
     assert.equal(saved.lastWorkoutPlan, null);
+  });
+
+  it("permite invalidar treino IA quando o peso muda, sem apagar treino travado pelo coach", async () => {
+    const aiUserId = "memory-weight-clears-ai-workout";
+    const coachUserId = "memory-weight-keeps-coach-workout";
+
+    writeMemoryStoreSync({
+      [aiUserId]: {
+        userId: aiUserId,
+        name: "PIETRO",
+        language: "pt-BR",
+        weightKg: 80,
+        lastWorkoutPlan: {
+          title: "Treino IA antigo",
+          source: "guto_generated",
+          lockedByCoach: false,
+          exercises: [{ id: "agachamento_livre" }],
+        },
+      },
+      [coachUserId]: {
+        userId: coachUserId,
+        name: "MARIA",
+        language: "pt-BR",
+        weightKg: 60,
+        lastWorkoutPlan: {
+          title: "Treino oficial do coach",
+          source: "coach_override",
+          lockedByCoach: true,
+          exercises: [{ id: "remada_baixa" }],
+        },
+      },
+    });
+
+    await persistUserMemory(aiUserId, {
+      userId: aiUserId,
+      name: "PIETRO",
+      language: "pt-BR",
+      weightKg: 82,
+      lastWorkoutPlan: null,
+    });
+    await persistUserMemory(coachUserId, {
+      userId: coachUserId,
+      name: "MARIA",
+      language: "pt-BR",
+      weightKg: 62,
+      lastWorkoutPlan: null,
+    });
+    await flushMemoryStoreWrites();
+
+    const store = readMemoryStoreSync() as Record<string, Record<string, unknown>>;
+    assert.equal(store[aiUserId].weightKg, 82);
+    assert.equal(store[aiUserId].lastWorkoutPlan, null);
+    assert.equal(store[coachUserId].weightKg, 62);
+    assert.equal(
+      (store[coachUserId].lastWorkoutPlan as { title?: string }).title,
+      "Treino oficial do coach"
+    );
+  });
+
+  it("falha de Redis GET impede SET do store parcial", async () => {
+    let memoryStoreSets = 0;
+    setMemoryStoreRedisClientForTests({
+      get: async () => {
+        throw new Error("redis get unavailable");
+      },
+      set: async (key: string) => {
+        if (key === "guto:memory") memoryStoreSets += 1;
+        return "OK";
+      },
+      eval: async () => 1,
+    });
+
+    await assert.rejects(
+      persistUserMemory("redis-read-failure-user", {
+        userId: "redis-read-failure-user",
+        name: "PIETRO",
+        weightKg: 82,
+      }),
+      /redis get unavailable/i
+    );
+    assert.equal(memoryStoreSets, 0, "não pode gravar guto:memory sem hidratação Redis bem-sucedida");
   });
 });

@@ -17,6 +17,7 @@ type BackendModule = {
   getMemory: (userId: string) => any;
   saveMemory: (memory: any) => void;
   applyMemoryPatch: (memory: any, patch?: any) => Promise<any>;
+  buildDietProfileFingerprint: (memory: any) => string;
 };
 
 let backend: BackendModule;
@@ -50,6 +51,10 @@ function writeMemory(userId: string, data: Record<string, any>) {
     country: "Italia",
     countryCode: "IT",
     city: "Roma",
+    lastWorkoutPlan: {
+      focusKey: "chest_triceps",
+      exercises: [{ id: "supino_reto" }],
+    },
     dietGenerationStatus: "generated",
     memoryAudit: [],
     ...data,
@@ -76,6 +81,7 @@ function makeDietPlan(userId: string, lockedByCoach = false): DietPlan {
     userId,
     source: "guto_generated",
     lockedByCoach,
+    profileFingerprint: backend.buildDietProfileFingerprint(backend.getMemory(userId)),
     generatedAt: new Date().toISOString(),
     country: "Italia",
     macros: {
@@ -161,6 +167,28 @@ describe("diet invalidation when calibration changes", () => {
     assert.equal(memory.dietGenerationStatus, "needs_clarification");
     assert.equal(hasProfileSyncAudit(memory, "weightKg"), true);
     assert.equal(hasProfileSyncAudit(memory, "dietGenerationStatus"), true);
+  });
+
+  it("invalida a missão IA persistida quando o peso muda via /guto/memory", async () => {
+    const userId = "workout-invalidation-weight";
+    writeMemory(userId, {
+      weightKg: 82,
+      lastWorkoutPlan: {
+        focusKey: "legs_core",
+        source: "guto_generated",
+        lockedByCoach: false,
+        exercises: [{ id: "agachamento_livre" }],
+      },
+    });
+
+    const res = await postMemory(userId, { weightKg: 84 });
+
+    assert.equal(res.status, 200);
+    const memory = readMemory(userId);
+    assert.equal(memory.weightKg, 84);
+    assert.equal(memory.lastWorkoutPlan, null);
+    assert.equal(hasProfileSyncAudit(memory, "lastWorkoutPlan"), true);
+    assert.equal(hasProfileSyncAudit(memory, "weightKg"), true);
   });
 
   it("marca a dieta para revisão quando o NÃO COMO muda via /guto/memory", async () => {

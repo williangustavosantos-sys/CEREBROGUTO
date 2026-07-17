@@ -42,14 +42,14 @@ const BASE = {
   trainingPathology: "sem dor", initialXpGranted: true, totalXp: 100,
 };
 
-async function chat(userId: string, input: string, history: any[] = []) {
+async function chat(userId: string, input: string, history: any[] = [], language = "pt-BR") {
   const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
   const r = await fetch(`${baseUrl}/guto`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ language: "pt-BR", profile: { userId, name: "Will" }, history, input }),
+    body: JSON.stringify({ language, profile: { userId, name: "Will" }, history, input }),
   });
-  return (await r.json()) as { fala?: string; acao?: string };
+  return (await r.json()) as { fala?: string; acao?: string; workoutPlan?: unknown };
 }
 
 before(async () => {
@@ -76,6 +76,50 @@ after(async () => {
 });
 
 describe("Fallback soberano do chat (recusa / luto / dias parados)", () => {
+  it("feedback negativo abre ajuste em PT/IT sem substituir o treino persistido", async () => {
+    const originalPlan = {
+      focus: "Treino original",
+      focusKey: "full_body",
+      dateLabel: "Hoje",
+      scheduledFor: new Date().toISOString(),
+      summary: "Plano que não pode ser apagado.",
+      exercises: [{ id: "sentinel-original" }],
+    };
+    const cases = [
+      { userId: "esc-feedback-pt", language: "pt-BR", input: "não gostei do treino", expected: /não funcionou|exercícios|intensidade|ajusto/i },
+      { userId: "esc-feedback-it", language: "it-IT", input: "non mi è piaciuto l'allenamento", expected: /non ha funzionato|esercizi|intensità|aggiusto/i },
+    ] as const;
+
+    for (const testCase of cases) {
+      seed(testCase.userId, { ...BASE, language: testCase.language, lastWorkoutPlan: originalPlan });
+      const response = await chat(testCase.userId, testCase.input, [], testCase.language);
+      assert.equal(response.acao, "none");
+      assert.equal(response.workoutPlan, undefined);
+      assert.match(response.fala || "", testCase.expected);
+      assert.deepEqual(readMem(testCase.userId)?.lastWorkoutPlan, originalPlan);
+    }
+  });
+
+  it("janela curta com missão ativa permanece em italiano e não troca o plano", async () => {
+    const originalPlan = {
+      focus: "Corpo intero",
+      focusKey: "full_body",
+      dateLabel: "Oggi",
+      scheduledFor: new Date().toISOString(),
+      summary: "Missione originale.",
+      exercises: [{ id: "sentinel-short-window" }],
+    };
+    const userId = "esc-short-window-it";
+    seed(userId, { ...BASE, language: "it-IT", lastWorkoutPlan: originalPlan });
+
+    const response = await chat(userId, "ho solo 10 minuti", [], "it-IT");
+
+    assert.equal(response.acao, "none");
+    assert.match(response.fala || "", /blocco ridotto|minimo sicuro|missione/i);
+    assert.doesNotMatch(response.fala || "", /janela curta|ritmo capito|mandami età/i);
+    assert.deepEqual(readMem(userId)?.lastWorkoutPlan, originalPlan);
+  });
+
   it("recusa por preguiça escala 1=passo mínimo → 2=adapta → 3=aceita sem culpa e PARA", async () => {
     const userId = "esc-lazy";
     seed(userId, { ...BASE, streak: 2, lastWorkoutCompletedAt: new Date(Date.now() - DAY).toISOString() });

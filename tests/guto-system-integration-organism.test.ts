@@ -63,6 +63,11 @@ let addProactiveMemory: (userId: string, data: Record<string, unknown>) => Promi
 let awardArenaXp: (options: Record<string, unknown>) => unknown;
 let filterExercisesBySafety: (ids: string[], options: { userRiskTags?: string[]; userBodyRegion?: string }) => string[];
 let getCatalogById: (id: string) => Record<string, any> | undefined;
+let setMemoryStoreRedisClientForTests: (client: {
+  get: (key: string) => Promise<unknown>;
+  set: (key: string, value: unknown, options?: { nx: true; px: number }) => Promise<unknown>;
+  eval: (script: string, keys: string[], args: string[]) => Promise<unknown>;
+} | null | undefined) => void;
 
 const snapshots = new Map<string, string | null>();
 let originalValidationImages = new Set<string>();
@@ -363,6 +368,7 @@ before(async () => {
 
   app = serverModule.app;
   clearMemoryStoreCache = memoryStore.clearMemoryStoreCache;
+  setMemoryStoreRedisClientForTests = memoryStore.setMemoryStoreRedisClientForTests;
   writeUserAccessStoreRaw = userAccessStore.writeUserAccessStoreRaw;
   writeArenaStore = arenaStore.writeArenaStore;
   createTeam = teamStore.createTeam;
@@ -381,11 +387,13 @@ before(async () => {
 });
 
 beforeEach(() => {
+  setMemoryStoreRedisClientForTests(undefined);
   globalThis.fetch = originalFetch;
   resetFileStores();
 });
 
 after(async () => {
+  setMemoryStoreRedisClientForTests(undefined);
   globalThis.fetch = originalFetch;
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   for (const file of [userAccessFile, arenaFile, auditLogFile, inviteFile, teamsFile]) restoreFile(file);
@@ -478,6 +486,7 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
   it("04 sem lactose: memoria nutricional gera dieta sem alimentos lacteos", async () => {
     const { student } = seedOrg("s04");
     seedMemory(student.userId, {
+      lastWorkoutPlan: workoutPlan("Missão antes da dieta sem lactose"),
       foodRestrictions: "sem lactose",
       resolvedFields: {
         foodRestriction: {
@@ -494,11 +503,72 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
     const text = JSON.stringify(body.diet.meals).toLowerCase();
     assert.doesNotMatch(text, /leite|queijo|iogurte|whey|milk|cheese|yogurt|latte|formaggio/);
     assert.equal(body.diet.foodRestrictions, "sem lactose");
+    assert.equal(body.diet.language, "pt-BR");
+  });
+
+  it("04b geração admin cancela se o idioma muda após o CAS e a leitura não expõe plano stale", async () => {
+    const { student } = seedOrg("s04b");
+    seedMemory(student.userId, {
+      language: "it-IT",
+      lastWorkoutPlan: workoutPlan("Missione prima della dieta"),
+      foodRestrictions: "nessuna",
+    });
+
+    const redisMemory = readStore();
+    let signalStatusCommit!: () => void;
+    let releaseStatusCommit!: () => void;
+    const statusCommitReached = new Promise<void>((resolve) => { signalStatusCommit = resolve; });
+    const statusCommitRelease = new Promise<void>((resolve) => { releaseStatusCommit = resolve; });
+    setMemoryStoreRedisClientForTests({
+      get: async (key) => {
+        if (key !== "guto:memory") return null;
+        return redisMemory;
+      },
+      set: async (key, value, options) => {
+        if (key === "guto:memory:write-lock:v1" && options?.nx) {
+          signalStatusCommit();
+          await statusCommitRelease;
+          return "OK";
+        }
+        if (key === "guto:memory" && value && typeof value === "object" && !Array.isArray(value)) {
+          Object.assign(redisMemory, value as Record<string, unknown>);
+        }
+        return "OK";
+      },
+      eval: async () => 1,
+    });
+
+    try {
+      const generation = requestJson("POST", `/admin/students/${student.userId}/diet/generate`, superToken(), {});
+      await Promise.race([
+        statusCommitReached,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("admin diet post-CAS status commit was not reached")), 2_000)),
+      ]);
+      const planCommittedByCas = JSON.parse(readFileSync(testDietFile, "utf8")) as Record<string, { language?: string }>;
+      assert.equal(planCommittedByCas[student.userId]?.language, "it-IT");
+      redisMemory[student.userId] = {
+        ...(redisMemory[student.userId] as Record<string, unknown>),
+        language: "en-US",
+      };
+      releaseStatusCommit();
+
+      const { res, body } = await generation;
+      assert.equal(res.status, 409, JSON.stringify(body));
+      assert.equal(body.code, "DIET_CONTEXT_CHANGED");
+      assert.equal((redisMemory[student.userId] as Record<string, unknown>).language, "en-US");
+
+      const laterRead = await requestJson("GET", "/guto/diet", tokenFor(student));
+      assert.equal(laterRead.res.status, 404);
+    } finally {
+      releaseStatusCommit();
+      setMemoryStoreRedisClientForTests(undefined);
+    }
   });
 
   it("05 vegetariano: memoria alimentar guia geracao de dieta do app sem carne/peixe", async () => {
     const { student } = seedOrg("s05");
     seedMemory(student.userId, {
+      lastWorkoutPlan: workoutPlan("Missão antes da dieta vegetariana"),
       foodRestrictions: "vegetariano",
       resolvedFields: {
         foodRestriction: {
@@ -779,7 +849,7 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
       history: [],
     });
     assert.equal(generated.res.status, 200);
-    assert.equal(generated.body.acao, "updateWorkout");
+    assert.equal(generated.body.acao, "updateWorkout", JSON.stringify(generated.body));
     assert.equal(generated.body.workoutPlan.proactiveAdaptationMode, "short_light");
     assert.equal(generated.body.workoutPlan.estimatedDurationMinutes, 20);
   });

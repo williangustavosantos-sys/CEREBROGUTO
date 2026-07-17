@@ -58,6 +58,39 @@ function dailyContextLine(worldState: WorldStateV2): string {
   return parts.length ? parts.join("; ") : "sem contexto diário compacto.";
 }
 
+function systemTurnDirective(worldState: WorldStateV2): string {
+  const raw = worldState.contextSignals.systemTrigger;
+  if (!raw || typeof raw !== "object") return "Nenhum. Este turno nasceu de uma mensagem real do usuário.";
+  const trigger = raw as {
+    source?: unknown;
+    slot?: unknown;
+    objective?: unknown;
+    requiredAction?: unknown;
+  };
+  if (trigger.source !== "proactive_scheduler") return "Nenhum. Este turno nasceu de uma mensagem real do usuário.";
+  const slot = typeof trigger.slot === "string" ? trigger.slot : "scheduled_presence";
+  if (trigger.requiredAction === "updateWorkout") {
+    return [
+      `Turno iniciado pelo scheduler, slot=${slot}; NÃO existe mensagem do usuário para interpretar.`,
+      "Objetivo fechado: acolher o usuário que concluiu o onboarding e criar a primeira missão.",
+      "Use acao:\"updateWorkout\". Não invente viagem, compromisso, período bloqueado ou agenda.",
+    ].join("\n");
+  }
+  return [
+    `Turno iniciado pelo scheduler, slot=${slot}; NÃO existe mensagem do usuário para interpretar.`,
+    "Componha presença somente a partir do WORLD_STATE_V2. Não invente evento, compromisso ou pedido do usuário.",
+  ].join("\n");
+}
+
+function visibleTurnInput(input: string, worldState: WorldStateV2): string {
+  if (input.trim()) return input;
+  const trigger = worldState.contextSignals.systemTrigger;
+  if (trigger && typeof trigger === "object") {
+    return "(nenhuma — turno iniciado pelo sistema)";
+  }
+  return "(mensagem vazia do usuário — não inferir evento, pedido ou fato)";
+}
+
 export function buildSovereignBrainPrompt(input: BuildSovereignBrainPromptInput): string {
   const { worldState, safetyOverride } = input;
   return `
@@ -92,6 +125,9 @@ DIRETRIZ SOBERANA — ADAPTAÇÃO, DOR E CONTINUIDADE:
 ${knownLimitation(worldState)}
 - Dor e dificuldade são fatos para adaptar, não fracasso.
 - Adaptação deve ser decisiva e segura; se faltar contexto real, pergunte sem template.
+
+GATILHO ESTRUTURADO DO TURNO:
+${systemTurnDirective(worldState)}
 
 AÇÕES DO CONTRATO:
 - acao:"none": conversa, emoção, identidade, explicação curta, pergunta necessária ou fallback seguro.
@@ -136,6 +172,6 @@ HISTÓRICO RECENTE:
 ${safeJson(compactHistory(input.history))}
 
 MENSAGEM DO USUÁRIO:
-${input.input}
+${visibleTurnInput(input.input, worldState)}
 `.trim();
 }

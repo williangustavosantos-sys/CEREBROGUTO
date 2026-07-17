@@ -2,7 +2,7 @@
 
 import {
   readMemoryStoreAsync,
-  writeMemoryStoreAsync,
+  updateUserMemoryAtomically,
 } from "../memory-store.js";
 
 import type { ContextItem, ContextState, ContextType } from "./types.js";
@@ -72,27 +72,20 @@ export async function getUserContextBank(
   const { bank, changed } = normalizeContextBank(rawBank, nowISO);
 
   if (changed) {
-    userMemory.contextBank = bank;
-    memory[userId] = userMemory;
-    await writeMemoryStoreAsync(memory);
+    let normalizedBank = bank;
+    await updateUserMemoryAtomically(userId, (snapshot) => {
+      const latestUser = asUserMemory(snapshot);
+      const latestRaw = Array.isArray(latestUser.contextBank)
+        ? latestUser.contextBank as ContextItem[]
+        : [];
+      normalizedBank = normalizeContextBank(latestRaw, nowISO).bank;
+      latestUser.contextBank = normalizedBank;
+      return latestUser;
+    });
+    return normalizedBank;
   }
 
   return bank;
-}
-
-// ─── Escrita preservando o resto da memória do usuário ───────────────────────
-
-async function saveUserContextBank(
-  userId: string,
-  bank: ContextItem[]
-): Promise<void> {
-  const memory = await readMemoryStoreAsync();
-  const userMemory = asUserMemory(memory[userId]);
-
-  userMemory.contextBank = bank;
-  memory[userId] = userMemory;
-
-  await writeMemoryStoreAsync(memory);
 }
 
 // ─── ID único por usuário ─────────────────────────────────────────────────────
@@ -137,11 +130,15 @@ export async function addContextItem(
     updatedAt: now,
   };
 
-  let bank = await getUserContextBank(userId);
-  bank.push(fullItem);
-  bank = pruneHypotheses(bank);
-
-  await saveUserContextBank(userId, bank);
+  await updateUserMemoryAtomically(userId, (snapshot) => {
+    const userMemory = asUserMemory(snapshot);
+    const rawBank = Array.isArray(userMemory.contextBank)
+      ? userMemory.contextBank as ContextItem[]
+      : [];
+    const bank = normalizeContextBank(rawBank, now).bank;
+    userMemory.contextBank = pruneHypotheses([...bank, fullItem]);
+    return userMemory;
+  });
   return fullItem;
 }
 
@@ -161,22 +158,26 @@ export async function updateContextItem(
     >
   >
 ): Promise<ContextItem | null> {
-  const bank = await getUserContextBank(userId);
-  const index = bank.findIndex((item) => item.id === itemId);
-
-  if (index === -1) return null;
-
-  const current = bank[index];
-  if (!current) return null;
-
-  bank[index] = {
-    ...current,
-    ...updates,
-    updatedAt: new Date().toISOString(),
-  };
-
-  await saveUserContextBank(userId, bank);
-  return bank[index] ?? null;
+  let updated: ContextItem | null = null;
+  await updateUserMemoryAtomically(userId, (snapshot) => {
+    const userMemory = asUserMemory(snapshot);
+    const rawBank = Array.isArray(userMemory.contextBank)
+      ? userMemory.contextBank as ContextItem[]
+      : [];
+    const bank = normalizeContextBank(rawBank, new Date().toISOString()).bank;
+    const index = bank.findIndex((item) => item.id === itemId);
+    const current = index >= 0 ? bank[index] : null;
+    if (!current) return userMemory;
+    updated = {
+      ...current,
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    };
+    bank[index] = updated;
+    userMemory.contextBank = bank;
+    return userMemory;
+  });
+  return updated;
 }
 
 export async function getContextItems(
