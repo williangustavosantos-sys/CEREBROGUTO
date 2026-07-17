@@ -10,6 +10,7 @@ import { config, isProductionEnv } from "./src/config.js";
 import { createRateLimit } from "./src/http/rate-limit.js";
 import { requestLog } from "./src/http/request-log.js";
 import { readMemoryStoreSync, readMemoryStoreAsync, readPersistedUserMemorySnapshot, persistUserMemory, persistUserMemoryPatch, updateUserMemoryAtomically, acquireDistributedUserLease, ensureMemoryHydrated, flushMemoryStoreWrites } from "./src/memory-store.js";
+import { verifyDurableCommit } from "./src/durable-commit.js";
 import {
   getCatalogById,
   getAggregatedExerciseCatalog,
@@ -13087,11 +13088,16 @@ async function generateAndCommitBrainWorkout(
     language as CatalogLanguage
   );
   let committedPlan: WorkoutPlan | null = null;
-  const committedMemory = await updateUserMemoryAtomically<GutoMemory>(memory.userId, (snapshot) => {
+  const applyGeneratedPlan = (snapshot: unknown): GutoMemory | null => {
     if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
     const persisted = snapshot as GutoMemory;
     const current: GutoMemory = { ...memory, ...persisted };
-    if (buildWorkoutGenerationFingerprint(current) !== generationFingerprint) return persisted;
+    const existingPlan = getTodayMissionPlan(current);
+    if (existingPlan?.exercises?.length) {
+      committedPlan = existingPlan;
+      return current;
+    }
+    if (buildWorkoutGenerationFingerprint(current) !== generationFingerprint) return current;
 
     const lockedOfficialPlan = isCoachLockedWorkout(current.lastWorkoutPlan)
       ? current.lastWorkoutPlan
@@ -13118,14 +13124,40 @@ async function generateAndCommitBrainWorkout(
     );
     committedPlan = officialPlan;
     return current;
-  });
+  };
+  const committedMemory = await updateUserMemoryAtomically<GutoMemory>(memory.userId, applyGeneratedPlan);
   if (!committedPlan || !committedMemory) return null;
-  memory.lastWorkoutPlan = committedPlan;
-  memory.lastSuggestedFocus = committedMemory.lastSuggestedFocus;
-  memory.nextWorkoutFocus = committedMemory.nextWorkoutFocus;
-  memory.dietGenerationStatus = committedMemory.dietGenerationStatus;
-  memory.memoryAudit = committedMemory.memoryAudit;
-  return committedPlan;
+
+  // A Promise do commit local não basta em serverless: outro request/instância
+  // pode gravar um snapshot concorrente logo depois. Só entregamos a missão ao
+  // frontend quando uma leitura nova do store persistido confirma o plano. Se
+  // ele sumiu, reaplicamos sobre o snapshot mais recente com o mesmo guard de
+  // perfil e verificamos novamente (bounded retry).
+  const durable = await verifyDurableCommit<GutoMemory, WorkoutPlan>({
+    readPersisted: async () => {
+      const snapshot = await readPersistedUserMemorySnapshot(memory.userId);
+      return snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+        ? snapshot as GutoMemory
+        : null;
+    },
+    selectValue: (snapshot) => {
+      const plan = getTodayMissionPlan(snapshot);
+      return plan?.exercises?.length ? plan : null;
+    },
+    retryCommit: async () => {
+      committedPlan = null;
+      await updateUserMemoryAtomically<GutoMemory>(memory.userId, applyGeneratedPlan);
+    },
+    maxRetries: 2,
+  });
+  if (!durable) return null;
+
+  memory.lastWorkoutPlan = durable.value;
+  memory.lastSuggestedFocus = durable.snapshot.lastSuggestedFocus;
+  memory.nextWorkoutFocus = durable.snapshot.nextWorkoutFocus;
+  memory.dietGenerationStatus = durable.snapshot.dietGenerationStatus;
+  memory.memoryAudit = durable.snapshot.memoryAudit;
+  return durable.value;
 }
 
 function publicTurnToGutoResponse(response: PublicTurnResponse): GutoModelResponse {
