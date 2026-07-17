@@ -4981,6 +4981,28 @@ function normalizeRecentTrainingHistory(
 
 function chooseNextWorkoutFocus(memory: GutoMemory, preferred?: WorkoutFocus | null): WorkoutFocus {
   const recent = memory.recentTrainingHistory || [];
+  const declaredLocation = memory.preferredTrainingLocation || memory.trainingLocation;
+  const locationMode = getLocationMode(declaredLocation || "home") as CuratorLocationMode;
+  const level = resolveTrainingLevel(memory.trainingLevel, memory.trainingStatus);
+  const minimumMainExercises = MIN_MAIN_EXERCISES_BY_LEVEL[level] ?? 4;
+  const pathology = memory.resolvedFields?.pathology;
+  const riskTags = pathology?.status === "clear" ? pathology.riskTags : [];
+  const bodyRegion =
+    (pathology?.status === "clear" ? pathology.bodyRegion : undefined) ||
+    deriveBodyRegionFromPathology(memory);
+  const hasExecutableVolume = (focus: WorkoutFocus) => {
+    // Durante a calibragem o local ainda pode estar ausente. Nesse estágio a
+    // função escolhe apenas a rotação muscular; o volume só pode ser validado
+    // quando existe um local soberano, sem assumir "casa" prematuramente.
+    if (!declaredLocation) return true;
+    const mainCandidates = getCandidatePool(focus, locationMode)
+      .filter((candidate) => candidate.muscleGroup !== "aquecimento");
+    const safeIds = filterExercisesBySafety(mainCandidates.map((candidate) => candidate.id), {
+      userRiskTags: riskTags,
+      userBodyRegion: bodyRegion,
+    });
+    return new Set(safeIds).size >= minimumMainExercises;
+  };
 
   // Consider recent training as blocked; "recent" is used when the user reports
   // grouped history without exact dates.
@@ -4997,7 +5019,13 @@ function chooseNextWorkoutFocus(memory: GutoMemory, preferred?: WorkoutFocus | n
   // full_body é o fallback da rotação (quando todos os splits estão bloqueados),
   // nunca uma preferência legítima — aceitar full_body como preferred quebraria
   // a rotação de splits toda vez que o modelo sugere full_body por viés.
-  if (preferred && isWorkoutFocus(preferred) && preferred !== "full_body" && !blocked.has(preferred)) {
+  if (
+    preferred &&
+    isWorkoutFocus(preferred) &&
+    preferred !== "full_body" &&
+    !blocked.has(preferred) &&
+    hasExecutableVolume(preferred)
+  ) {
     return preferred;
   }
 
@@ -5009,7 +5037,7 @@ function chooseNextWorkoutFocus(memory: GutoMemory, preferred?: WorkoutFocus | n
   ];
 
   // Find the first one in rotation that is not blocked
-  const next = rotation.find((focus) => !blocked.has(focus));
+  const next = rotation.find((focus) => !blocked.has(focus) && hasExecutableVolume(focus));
   return next || "full_body";
 }
 
@@ -13568,11 +13596,9 @@ export function buildDietProfileFingerprint(memory: GutoMemory): string {
     resolvedFoodRestriction: resolvedFoodRestriction
       ? {
           rawValue: resolvedFoodRestriction.rawValue,
-          rawValueHash: resolvedFoodRestriction.rawValueHash,
           normalizedValue: resolvedFoodRestriction.normalizedValue || null,
           possibleMeaning: resolvedFoodRestriction.possibleMeaning || null,
           riskTags: [...(resolvedFoodRestriction.riskTags || [])].sort(),
-          confidence: resolvedFoodRestriction.confidence,
           status: resolvedFoodRestriction.status,
         }
       : null,
@@ -17666,6 +17692,12 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res, next) => {
 
   const commitResult = await commitGeneratedDietPlanAtomically({ plan, guard: generationGuard });
   if (!commitResult.ok) {
+    console.warn("[GUTO] diet commit cancelled", {
+      userId,
+      reason: commitResult.reason,
+      hasMission: Boolean(commitResult.memory && hasMissionReadyForDiet(commitResult.memory)),
+      status: commitResult.memory?.dietGenerationStatus || null,
+    });
     const coachLocked = commitResult.reason === "coach_locked_plan";
     const missionChanged = commitResult.reason === "mission_changed";
     return res.status(409).json({

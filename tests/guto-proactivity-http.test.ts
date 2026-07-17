@@ -96,6 +96,9 @@ function mockGutoModel(payload: Record<string, unknown>) {
 
 describe("proactivity HTTP cycle", () => {
   before(async () => {
+    // O cérebro só chama o endpoint Gemini quando existe uma chave configurada.
+    // O valor é fictício e toda chamada é interceptada pelo mock deste arquivo.
+    process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || "test-only-gemini-key"
     process.env.GUTO_MEMORY_FILE = testMemoryFile
     process.env.GUTO_DISABLE_LISTEN = "1"
     process.env.GUTO_ALLOW_DEV_ACCESS = "true"

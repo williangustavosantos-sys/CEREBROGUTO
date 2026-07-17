@@ -3,6 +3,20 @@ import { join } from "path";
 /** Modelo Gemini padrão do ecossistema GUTO (chat, dieta, classificadores, proatividade). */
 export const GUTO_DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite";
 
+const LOCAL_FRONTEND_URL = "http://localhost:3000";
+const PRODUCTION_FRONTEND_URL = "https://corpoguto.vercel.app";
+
+export function resolveFrontendPublicUrl(env: Partial<NodeJS.ProcessEnv> = process.env): string {
+  const configuredUrl = env.FRONTEND_PUBLIC_URL?.trim();
+  if (configuredUrl) return configuredUrl.replace(/\/+$/, "");
+
+  const isProduction =
+    env.NODE_ENV === "production" ||
+    env.RENDER === "true" ||
+    env.VERCEL_ENV === "production";
+  return isProduction ? PRODUCTION_FRONTEND_URL : LOCAL_FRONTEND_URL;
+}
+
 export const config = {
   port: Number(process.env.PORT || 3001),
   geminiApiKey: process.env.GEMINI_API_KEY || "",
@@ -30,7 +44,7 @@ export const config = {
   adminEmail: process.env.ADMIN_EMAIL || "",
   adminPasswordHash: process.env.ADMIN_PASSWORD_HASH || "",
   adminKey: process.env.ADMIN_KEY || "",
-  frontendPublicUrl: process.env.FRONTEND_PUBLIC_URL || "http://localhost:3000",
+  frontendPublicUrl: resolveFrontendPublicUrl(),
   // Dev access bypass — never true in production
   allowDevAccess: process.env.GUTO_ALLOW_DEV_ACCESS === "true",
   enableLegacyCoachRoutes: process.env.GUTO_ENABLE_LEGACY_COACH_ROUTES === "true",
