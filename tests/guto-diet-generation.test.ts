@@ -315,6 +315,69 @@ describe("diet generation contract", () => {
     rmSync(testDietFile, { force: true });
   });
 
+  it("pacto de usuário zero persiste missão, treino e dieta antes de abrir abas", async () => {
+    const userId = "post-pact-zero-state-user";
+    writeMemory(userId, {
+      name: "Rafael",
+      language: "pt-BR",
+      initialXpGranted: false,
+      totalXp: 0,
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      trainingLevel: "consistent",
+      trainingStatus: "consistent",
+      trainingGoal: "muscle_gain",
+      trainingLocation: "gym",
+      preferredTrainingLocation: "gym",
+      trainingPathology: "sem dor",
+      trainingLimitations: "sem dor",
+      trainingSchedule: "today",
+      country: "Italia",
+      countryCode: "IT",
+      city: "Roma",
+      foodRestrictions: "none",
+      resolvedFields: {
+        foodRestriction: { rawValue: "none", status: "clear", normalizedValue: "none" },
+        pathology: { rawValue: "sem dor", status: "clear", normalizedValue: "none" },
+      },
+      lastWorkoutPlan: undefined,
+      weeklyWorkoutPlan: undefined,
+      weeklyDietPlan: undefined,
+      dietGenerationStatus: "idle",
+      proactiveMemories: [],
+      proactiveImpacts: [],
+    });
+
+    const pact = await originalFetch(`${baseUrl}/guto/memory`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "pt-BR", xpEvent: "grant_initial_xp" }),
+    });
+    const pactText = await pact.text();
+    assert.equal(pact.status, 200, pactText);
+    const pactBody = JSON.parse(pactText) as {
+      initialXpGranted?: boolean;
+      lastWorkoutPlan?: { exercises?: unknown[] };
+      lastDietPlan?: { meals?: unknown[] };
+      dietGenerationStatus?: string;
+    };
+    assert.equal(pactBody.initialXpGranted, true);
+    assert.ok(pactBody.lastWorkoutPlan?.exercises?.length);
+    assert.ok(pactBody.lastDietPlan?.meals?.length);
+    assert.equal(pactBody.dietGenerationStatus, "generated");
+
+    const persistedMemory = readMemory(userId);
+    assert.ok(persistedMemory.lastWorkoutPlan?.exercises?.length);
+    assert.equal(persistedMemory.dietGenerationStatus, "generated");
+    const diet = await originalFetch(`${baseUrl}/guto/diet`, { headers: authHeaders(userId) });
+    assert.equal(diet.status, 200);
+    const dietBody = await diet.json() as { meals?: unknown[] };
+    assert.ok(dietBody.meals?.length);
+    assert.ok(dietModelCalls >= 1);
+  });
+
   it("gera dieta a partir do intake validado e respeita lattosio", async () => {
     const userId = "diet-lattosio-user";
     writeMemory(userId, {
@@ -721,8 +784,8 @@ describe("diet generation contract", () => {
     assert.match(body.message, /calibragem|montar tua dieta/i);
   });
 
-  it("recusa dieta antes da primeira missão persistida", async () => {
-    const userId = "diet-mission-required-user";
+  it("gera dieta com perfil completo mesmo sem missão persistida", async () => {
+    const userId = "diet-independent-from-mission-user";
     writeMemory(userId, {
       biologicalSex: "male",
       userAge: 35,
@@ -745,12 +808,11 @@ describe("diet generation contract", () => {
       headers: authHeaders(userId),
       body: JSON.stringify({ language: "it-IT" }),
     });
-    assert.equal(res.status, 409);
-    const body = await res.json() as { code?: string; message?: string };
-    assert.equal(body.code, "MISSION_REQUIRED_FOR_DIET");
-    assert.match(body.message || "", /prima missione/i);
-    assert.equal(dietModelCalls, 0);
-    assert.equal(existsSync(testDietFile), false);
+    assert.equal(res.status, 200);
+    const body = await res.json() as { meals?: unknown[] };
+    assert.ok(body.meals?.length);
+    assert.equal(dietModelCalls, 1);
+    assert.equal(existsSync(testDietFile), true);
   });
 
   it("REPARA comida brasileira fora da localidade (tapioca na Itália) e gera 200 em vez de bloquear", async () => {
@@ -1096,6 +1158,12 @@ describe("diet generation contract", () => {
         foodRestriction: { rawValue: "none", status: "clear", normalizedValue: "none" },
       },
     });
+    const normalizeProfile = await originalFetch(`${baseUrl}/guto/memory`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "it-IT" }),
+    });
+    assert.equal(normalizeProfile.status, 200);
     dietModelDelayMs = 180;
 
     const generation = originalFetch(`${baseUrl}/guto/diet/generate`, {
@@ -1179,8 +1247,8 @@ describe("diet generation contract", () => {
     assert.equal(persisted[userId], undefined);
   });
 
-  it("cancela a dieta se a missão é invalidada durante a geração", async () => {
-    const userId = "diet-mission-race-user";
+  it("mantém geração de dieta quando o treino é invalidado em paralelo", async () => {
+    const userId = "diet-workout-independent-race-user";
     writeMemory(userId, {
       biologicalSex: "male",
       userAge: 35,
@@ -1199,6 +1267,12 @@ describe("diet generation contract", () => {
         foodRestriction: { rawValue: "none", status: "clear", normalizedValue: "none" },
       },
     });
+    const normalizeProfile = await originalFetch(`${baseUrl}/guto/memory`, {
+      method: "POST",
+      headers: authHeaders(userId),
+      body: JSON.stringify({ language: "it-IT" }),
+    });
+    assert.equal(normalizeProfile.status, 200);
     dietModelDelayMs = 180;
 
     const generation = originalFetch(`${baseUrl}/guto/diet/generate`, {
@@ -1220,16 +1294,16 @@ describe("diet generation contract", () => {
     assert.equal(profileUpdate.status, 200);
 
     const response = await generation;
-    assert.equal(response.status, 409);
-    const body = await response.json() as { code?: string };
-    assert.equal(body.code, "MISSION_REQUIRED_FOR_DIET");
+    assert.equal(response.status, 200);
+    const body = await response.json() as { meals?: unknown[] };
+    assert.ok(body.meals?.length);
     const memory = readMemory(userId);
     assert.equal(memory.lastWorkoutPlan, null);
-    assert.equal(memory.dietGenerationStatus, "idle");
+    assert.equal(memory.dietGenerationStatus, "generated");
     const getResponse = await originalFetch(`${baseUrl}/guto/diet`, {
       headers: authHeaders(userId),
     });
-    assert.equal(getResponse.status, 404);
+    assert.equal(getResponse.status, 200);
   });
 
   it("preserva plano bloqueado pelo coach se o lock chega durante a geração", async () => {

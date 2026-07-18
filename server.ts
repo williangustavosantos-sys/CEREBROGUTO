@@ -147,6 +147,7 @@ import {
 import {
   buildProactivityContextBlock,
   extractEventsFromConversation,
+  groundExtractedEvents,
   buildPendingMemoryData,
   enrichPendingMemories,
   openWeeklyConversation,
@@ -10575,11 +10576,10 @@ function preserveCoachLockedWorkout(memory: GutoMemory, response: GutoModelRespo
     memory.lastSuggestedFocus = lockedPlan.focusKey;
     memory.nextWorkoutFocus = lockedPlan.focusKey;
   }
-  memory.dietGenerationStatus = "ready_to_generate";
   appendMemoryAudit(
     memory,
     "workout_generated",
-    ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus", "dietGenerationStatus"],
+    ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus"],
     "Treino manual do coach preservado; geração do GUTO bloqueada por lockedByCoach."
   );
   commitMemoryDecision(memory);
@@ -10587,7 +10587,6 @@ function preserveCoachLockedWorkout(memory: GutoMemory, response: GutoModelRespo
   response.expectedResponse = null;
   response.memoryPatch = {
     ...response.memoryPatch,
-    dietGenerationStatus: memory.dietGenerationStatus,
     nextWorkoutFocus: memory.nextWorkoutFocus,
     recentTrainingHistory: memory.recentTrainingHistory,
   };
@@ -10764,18 +10763,16 @@ async function askGutoModel({
         memory.lastWorkoutPlan = officialPlan;
         memory.lastSuggestedFocus = officialPlan.focusKey;
         memory.nextWorkoutFocus = officialPlan.focusKey;
-        memory.dietGenerationStatus = "ready_to_generate";
         appendMemoryAudit(
           memory,
           "workout_generated",
-          ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus", "dietGenerationStatus"],
+          ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus"],
           "Treino oficial gerado por fallback técnico validado."
         );
         commitMemoryDecision(memory);
         fallback.workoutPlan = officialPlan;
         fallback.memoryPatch = {
           ...fallback.memoryPatch,
-          dietGenerationStatus: memory.dietGenerationStatus,
           nextWorkoutFocus: memory.nextWorkoutFocus,
           recentTrainingHistory: memory.recentTrainingHistory,
         };
@@ -11189,11 +11186,10 @@ async function askGutoModel({
         memory.lastSuggestedFocus = officialPlan.focusKey as WorkoutFocus;
         memory.nextWorkoutFocus = officialPlan.focusKey as WorkoutFocus;
       }
-      memory.dietGenerationStatus = "ready_to_generate";
       appendMemoryAudit(
         memory,
         "workout_generated",
-        ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus", "dietGenerationStatus"],
+        ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus"],
         lockedOfficialPlan ? "Treino manual do coach preservado como plano oficial." : "Treino oficial gerado pelo contrato de execução."
       );
       if (parsedResponse.memoryPatch?.lastWorkoutPlan === undefined) {
@@ -11210,7 +11206,6 @@ async function askGutoModel({
       trainedReference: parsedResponse.trainedReference,
       memoryPatch: {
         ...parsedResponse.memoryPatch,
-        dietGenerationStatus: memory.dietGenerationStatus,
         nextWorkoutFocus: memory.nextWorkoutFocus,
         recentTrainingHistory: memory.recentTrainingHistory,
       },
@@ -11317,18 +11312,16 @@ async function askGutoModel({
         memory.lastWorkoutPlan = officialPlan;
         memory.lastSuggestedFocus = officialPlan.focusKey;
         memory.nextWorkoutFocus = officialPlan.focusKey;
-        memory.dietGenerationStatus = "ready_to_generate";
         appendMemoryAudit(
           memory,
           "workout_generated",
-          ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus", "dietGenerationStatus"],
+          ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus"],
           "Treino oficial gerado por fallback técnico validado."
         );
         commitMemoryDecision(memory);
         fallback.workoutPlan = officialPlan;
         fallback.memoryPatch = {
           ...fallback.memoryPatch,
-          dietGenerationStatus: memory.dietGenerationStatus,
           nextWorkoutFocus: memory.nextWorkoutFocus,
           recentTrainingHistory: memory.recentTrainingHistory,
         };
@@ -11739,6 +11732,92 @@ async function runFreeFieldsResolution(userId: string, memorySnapshot: GutoMemor
   });
 }
 
+type PostPactBootstrapResult = {
+  ready: boolean;
+  missionReady: boolean;
+  workoutReady: boolean;
+  dietReady: boolean;
+  failures: string[];
+};
+
+async function ensurePostPactArtifacts(userId: string): Promise<PostPactBootstrapResult> {
+  await readMemoryStoreAsync();
+  const persisted = await readPersistedUserMemorySnapshot(userId);
+  if (!persisted || typeof persisted !== "object" || Array.isArray(persisted)) {
+    return {
+      ready: false,
+      missionReady: false,
+      workoutReady: false,
+      dietReady: false,
+      failures: ["memory_not_persisted"],
+    };
+  }
+
+  const memory: GutoMemory = { ...getMemory(userId), ...persisted as GutoMemory };
+  const language = normalizeLanguage(memory.language);
+  const missingWorkoutFields = getSovereignWorkoutMissingFields(memory);
+  const missingDietProfile = hasCompleteDietProfile(memory) ? [] : ["diet_profile_incomplete"];
+  if (missingWorkoutFields.length > 0 || missingDietProfile.length > 0) {
+    return {
+      ready: false,
+      missionReady: Boolean(getTodayMissionPlan(memory)?.exercises?.length),
+      workoutReady: Boolean(getTodayMissionPlan(memory)?.exercises?.length),
+      dietReady: Boolean(await getStudentDietPlan(memory).catch(() => null)),
+      failures: [
+        ...missingWorkoutFields.map((field) => `workout_profile:${field}`),
+        ...missingDietProfile,
+      ],
+    };
+  }
+
+  const existingWorkout = getTodayMissionPlan(memory);
+  const existingDiet = await getStudentDietPlan(memory).catch(() => null);
+  const workoutMemory = structuredClone(memory);
+  const dietMemory = structuredClone(memory);
+  const workoutWork: Promise<WorkoutPlan | null> = existingWorkout?.exercises?.length
+    ? Promise.resolve(existingWorkout)
+    : generateAndCommitBrainWorkout(workoutMemory, language, undefined);
+  const dietWork: ReturnType<typeof generateAndCommitBrainDiet> = existingDiet?.meals?.length
+    ? Promise.resolve({ plan: existingDiet })
+    : generateAndCommitBrainDiet(dietMemory, language);
+
+  // Workout/mission and diet are sibling consumers of the same persisted
+  // calibration snapshot. Neither promise reads the result of the other.
+  const [workoutResult, dietResult] = await Promise.allSettled([
+    workoutWork,
+    dietWork,
+  ]);
+
+  await flushMemoryStoreWrites();
+  const finalPersisted = await readPersistedUserMemorySnapshot(userId);
+  const finalMemory: GutoMemory = {
+    ...getMemory(userId),
+    ...(finalPersisted && typeof finalPersisted === "object" && !Array.isArray(finalPersisted)
+      ? finalPersisted as GutoMemory
+      : {}),
+  };
+  const durableWorkout = getTodayMissionPlan(finalMemory);
+  const durableDiet = await getStudentDietPlan(finalMemory).catch(() => null);
+  const workoutReady = Boolean(durableWorkout?.exercises?.length);
+  const dietReady = Boolean(durableDiet?.meals?.length);
+  const failures: string[] = [];
+
+  if (workoutResult.status === "rejected") failures.push("workout_generation_rejected");
+  else if (!workoutResult.value?.exercises?.length) failures.push("workout_generation_empty");
+  if (dietResult.status === "rejected") failures.push("diet_generation_rejected");
+  else if (!dietResult.value.plan?.meals?.length) failures.push(`diet_generation:${dietResult.value.failure?.reason || "empty"}`);
+  if (!workoutReady) failures.push("workout_not_durable");
+  if (!dietReady) failures.push("diet_not_durable");
+
+  return {
+    ready: workoutReady && dietReady,
+    missionReady: workoutReady,
+    workoutReady,
+    dietReady,
+    failures: Array.from(new Set(failures)),
+  };
+}
+
 app.post("/guto/memory", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
   await readMemoryStoreAsync();
@@ -11746,6 +11825,7 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
   const changedFields = new Set<string>();
 
   const b = req.body;
+  const shouldBootstrapPostPact = b.xpEvent === "grant_initial_xp";
   if (b.name) {
     const validation = validateName(b.name);
     if (validation.status === "invalid") return res.status(400).json(validation);
@@ -11940,6 +12020,23 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
   }
   if (memory.name) {
     await syncArenaDisplayNameAsync(userId, memory.name, getUserArenaGroup(userId));
+  }
+  if (shouldBootstrapPostPact) {
+    await flushMemoryStoreWrites();
+    const bootstrap = await ensurePostPactArtifacts(userId);
+    if (!bootstrap.ready) {
+      return res.status(503).json({
+        error: "post_pact_bootstrap_incomplete",
+        code: "POST_PACT_BOOTSTRAP_INCOMPLETE",
+        message: "O pacto foi persistido, mas missão, treino e dieta ainda não ficaram todos duráveis. Tente novamente.",
+        artifacts: {
+          mission: bootstrap.missionReady,
+          workout: bootstrap.workoutReady,
+          diet: bootstrap.dietReady,
+        },
+        failures: bootstrap.failures,
+      });
+    }
   }
   await flushMemoryStoreWrites();
   const responseMemory = getMemory(userId);
@@ -12265,10 +12362,6 @@ app.get("/guto/proactive", requireActiveUser, async (req, res, next) => {
           workoutPlan: missionPlanAtOpen,
           memoryPatch: {
             lastWorkoutPlan: missionPlanAtOpen,
-            dietGenerationStatus:
-              memory.dietGenerationStatus && !["idle", "generating"].includes(memory.dietGenerationStatus)
-                ? memory.dietGenerationStatus
-                : "ready_to_generate",
           },
         }, "arrival");
       }
@@ -13120,18 +13213,11 @@ async function generateAndCommitBrainWorkout(
       current.lastSuggestedFocus = officialPlan.focusKey as WorkoutFocus;
       current.nextWorkoutFocus = officialPlan.focusKey as WorkoutFocus;
     }
-    if (
-      !current.dietGenerationStatus ||
-      current.dietGenerationStatus === "idle" ||
-      current.dietGenerationStatus === "generating"
-    ) {
-      current.dietGenerationStatus = "ready_to_generate";
-    }
     current.lastActiveAt = new Date().toISOString();
     appendMemoryAudit(
       current,
       "workout_generated",
-      ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus", "dietGenerationStatus"],
+      ["lastWorkoutPlan", "lastSuggestedFocus", "nextWorkoutFocus"],
       lockedOfficialPlan ? "Treino manual do coach preservado (cérebro 2B)." : "Treino oficial gerado pelo cérebro soberano (2B)."
     );
     committedPlan = officialPlan;
@@ -13167,7 +13253,6 @@ async function generateAndCommitBrainWorkout(
   memory.lastWorkoutPlan = durable.value;
   memory.lastSuggestedFocus = durable.snapshot.lastSuggestedFocus;
   memory.nextWorkoutFocus = durable.snapshot.nextWorkoutFocus;
-  memory.dietGenerationStatus = durable.snapshot.dietGenerationStatus;
   memory.memoryAudit = durable.snapshot.memoryAudit;
   return durable.value;
 }
@@ -13660,7 +13745,6 @@ async function getStudentDietPlan(memory: GutoMemory): Promise<DietPlan | null> 
   const plan = await readPersistedDietPlan(memory.userId);
   if (!plan) return null;
   if (!isAdjustableDietPlan(plan)) return plan;
-  if (!hasMissionReadyForDiet(currentMemory)) return null;
   if (!dietPlanMatchesCurrentProfile(plan, currentMemory)) return null;
   if (plan.language && normalizeLanguage(plan.language) !== normalizeLanguage(currentMemory.language)) return null;
   return plan;
@@ -13674,30 +13758,13 @@ function dietContextChangedMessage(language: GutoLanguage): string {
   });
 }
 
-export function hasMissionReadyForDiet(memory: GutoMemory): boolean {
-  if (getTodayMissionPlan(memory)?.exercises?.length) return true;
-  return Boolean(
-    memory.weeklyWorkoutPlan?.days &&
-    Object.values(memory.weeklyWorkoutPlan.days).some((plan) => Boolean(plan?.exercises?.length))
-  );
-}
-
-function dietMissionRequiredMessage(language: GutoLanguage): string {
-  return pickByLanguage(language, {
-    "pt-BR": "A dieta nasce depois da primeira missão. Primeiro eu preciso fechar teu treino com segurança.",
-    "en-US": "The diet starts after the first mission. First I need to close your workout safely.",
-    "it-IT": "La dieta nasce dopo la prima missione. Prima devo chiudere il tuo allenamento in sicurezza.",
-  });
-}
-
 type DietGenerationGuard = {
   profileFingerprint: string;
   language: GutoLanguage;
   planToken: string;
-  missionToken: string;
 };
 
-type DietGenerationGuardFailureReason = "profile_changed" | "language_changed" | "mission_changed" | "coach_locked_plan" | "plan_changed";
+type DietGenerationGuardFailureReason = "profile_changed" | "language_changed" | "coach_locked_plan" | "plan_changed";
 
 type DietGenerationGuardValidation =
   | { ok: true; memory: GutoMemory; currentPlan: DietPlan | null }
@@ -13716,24 +13783,11 @@ function createDietGenerationGuard(
     profileFingerprint: buildDietProfileFingerprint(memory),
     language,
     planToken: getDietPlanConcurrencyToken(existingDiet),
-    missionToken: buildDietMissionToken(memory),
   };
 }
 
 function dietGenerationLanguageMatches(memory: GutoMemory, guard: DietGenerationGuard): boolean {
   return normalizeLanguage(memory.language) === guard.language;
-}
-
-function buildDietMissionToken(memory: GutoMemory): string {
-  const todayMission = getTodayMissionPlan(memory);
-  if (todayMission?.exercises?.length) return `today:${workoutPlanCommitKey(todayMission)}`;
-  const weekly = memory.weeklyWorkoutPlan?.days
-    ? Object.entries(memory.weeklyWorkoutPlan.days)
-        .filter(([, plan]) => Boolean(plan?.exercises?.length))
-        .map(([day, plan]) => `${day}:${workoutPlanCommitKey(plan)}`)
-        .sort()
-    : [];
-  return weekly.length > 0 ? `weekly:${weekly.join("|")}` : "none";
 }
 
 async function readPersistedDietMemory(userId: string): Promise<GutoMemory> {
@@ -13796,7 +13850,6 @@ function hasCompleteDietProfile(memory: GutoMemory): boolean {
 }
 
 function nextDietStatusAfterContextChange(memory: GutoMemory): NonNullable<GutoMemory["dietGenerationStatus"]> {
-  if (!hasMissionReadyForDiet(memory)) return "idle";
   const needsClarification =
     !hasCompleteDietProfile(memory) ||
     Boolean(getPendingClarification(memory.resolvedFields, "diet")) ||
@@ -13819,9 +13872,6 @@ async function validateDietGenerationGuard(
   if (buildDietProfileFingerprint(memory) !== guard.profileFingerprint) {
     return { ok: false, reason: "profile_changed", memory, currentPlan };
   }
-  if (!hasMissionReadyForDiet(memory) || buildDietMissionToken(memory) !== guard.missionToken) {
-    return { ok: false, reason: "mission_changed", memory, currentPlan };
-  }
   if (getDietPlanConcurrencyToken(currentPlan) !== guard.planToken) {
     return { ok: false, reason: "plan_changed", memory, currentPlan };
   }
@@ -13839,7 +13889,6 @@ async function recoverDietGenerationAfterConflict(
       currentPlan && (
         !isAdjustableDietPlan(currentPlan) ||
         (
-          hasMissionReadyForDiet(freshMemory) &&
           dietPlanMatchesCurrentProfile(currentPlan, freshMemory) &&
           (!currentPlan.language || normalizeLanguage(currentPlan.language) === normalizeLanguage(freshMemory.language))
         )
@@ -13850,7 +13899,6 @@ async function recoverDietGenerationAfterConflict(
       : nextDietStatusAfterContextChange(freshMemory);
     if (
       (currentPlanIsValid && freshMemory.dietGenerationStatus !== "generated") ||
-      (reason === "mission_changed" && freshMemory.dietGenerationStatus !== nextStatus) ||
       freshMemory.dietGenerationStatus === "generating" ||
       (freshMemory.dietGenerationStatus === "generated" && nextStatus !== "generated")
     ) {
@@ -13903,11 +13951,6 @@ async function commitGeneratedDietPlanAtomically(params: {
     const memory = await recoverDietGenerationAfterConflict(plan.userId, "profile_changed");
     return { ok: false, reason: "profile_changed", memory };
   }
-  if (!hasMissionReadyForDiet(freshMemory) || buildDietMissionToken(freshMemory) !== guard.missionToken) {
-    const memory = await recoverDietGenerationAfterConflict(plan.userId, "mission_changed");
-    return { ok: false, reason: "mission_changed", memory };
-  }
-
   freshMemory = await persistDietStatusPatch({
     userId: plan.userId,
     status: "generated",
@@ -13921,10 +13964,6 @@ async function commitGeneratedDietPlanAtomically(params: {
   if (buildDietProfileFingerprint(freshMemory) !== guard.profileFingerprint) {
     const memory = await recoverDietGenerationAfterConflict(plan.userId, "profile_changed");
     return { ok: false, reason: "profile_changed", memory };
-  }
-  if (!hasMissionReadyForDiet(freshMemory) || buildDietMissionToken(freshMemory) !== guard.missionToken) {
-    const memory = await recoverDietGenerationAfterConflict(plan.userId, "mission_changed");
-    return { ok: false, reason: "mission_changed", memory };
   }
   const confirmedPlan = await readPersistedDietPlan(plan.userId);
   if (!confirmedPlan || confirmedPlan.revision !== plan.revision) {
@@ -14327,7 +14366,7 @@ async function acquireDietGenerationLease(userId: string): Promise<DietGeneratio
 async function generateAndCommitBrainDietUnlocked(
   memory: GutoMemory,
   language: GutoLanguage
-): Promise<{ plan: DietPlan | null; failure?: { reason: DietGenerationFailureReason | "missing_profile_fields" | "needs_clarification" | "mission_required" | "coach_locked_plan" | "profile_changed"; missing?: string[]; message: string; expectedResponse?: ExpectedResponse | null } }> {
+): Promise<{ plan: DietPlan | null; failure?: { reason: DietGenerationFailureReason | "missing_profile_fields" | "needs_clarification" | "coach_locked_plan" | "profile_changed"; missing?: string[]; message: string; expectedResponse?: ExpectedResponse | null } }> {
   let existingDiet = await readPersistedDietPlan(memory.userId);
   if (existingDiet?.lockedByCoach) {
     return {
@@ -14403,16 +14442,6 @@ async function generateAndCommitBrainDietUnlocked(
           context: "food_restrictions" as ExpectedResponse["context"],
           instruction: pendingDietClarification?.hint || "Ask one short question to clarify the user's food restriction before generating diet.",
         },
-      },
-    };
-  }
-
-  if (!hasMissionReadyForDiet(memory)) {
-    return {
-      plan: null,
-      failure: {
-        reason: "mission_required",
-        message: dietMissionRequiredMessage(language),
       },
     };
   }
@@ -14578,14 +14607,10 @@ async function generateAndCommitBrainDietUnlocked(
         failure: {
           reason: currentContext.reason === "coach_locked_plan"
             ? "coach_locked_plan"
-            : currentContext.reason === "mission_changed"
-              ? "mission_required"
-              : "profile_changed",
+            : "profile_changed",
           message: currentContext.reason === "coach_locked_plan"
             ? "Plano bloqueado pelo coach. O GUTO não pode sobrescrever sem liberação do supervisor."
-            : currentContext.reason === "mission_changed"
-              ? dietMissionRequiredMessage(language)
-              : dietContextChangedMessage(language),
+            : dietContextChangedMessage(language),
         },
       };
     }
@@ -14629,14 +14654,10 @@ async function generateAndCommitBrainDietUnlocked(
       failure: {
         reason: commitResult.reason === "coach_locked_plan"
           ? "coach_locked_plan"
-          : commitResult.reason === "mission_changed"
-            ? "mission_required"
-            : "profile_changed",
+          : "profile_changed",
         message: commitResult.reason === "coach_locked_plan"
           ? "Plano bloqueado pelo coach. O GUTO não pode sobrescrever sem liberação do supervisor."
-          : commitResult.reason === "mission_changed"
-            ? dietMissionRequiredMessage(language)
-            : dietContextChangedMessage(language),
+          : dietContextChangedMessage(language),
       },
     };
   }
@@ -14646,7 +14667,7 @@ async function generateAndCommitBrainDietUnlocked(
 async function generateAndCommitBrainDiet(
   memory: GutoMemory,
   language: GutoLanguage
-): Promise<{ plan: DietPlan | null; failure?: { reason: DietGenerationFailureReason | "missing_profile_fields" | "needs_clarification" | "mission_required" | "coach_locked_plan" | "profile_changed"; missing?: string[]; message: string; expectedResponse?: ExpectedResponse | null } }> {
+): Promise<{ plan: DietPlan | null; failure?: { reason: DietGenerationFailureReason | "missing_profile_fields" | "needs_clarification" | "coach_locked_plan" | "profile_changed"; missing?: string[]; message: string; expectedResponse?: ExpectedResponse | null } }> {
   const lease = await acquireDietGenerationLease(memory.userId);
   try {
     const persistedMemory = await readPersistedDietMemory(memory.userId);
@@ -14658,7 +14679,6 @@ async function generateAndCommitBrainDiet(
         !completedPlan.lockedByCoach &&
         (!isAdjustableDietPlan(completedPlan) || (
           freshMemory.dietGenerationStatus === "generated" &&
-          hasMissionReadyForDiet(freshMemory) &&
           dietPlanMatchesCurrentProfile(completedPlan, freshMemory) &&
           (!completedPlan.language || normalizeLanguage(completedPlan.language) === language)
         ))
@@ -15191,7 +15211,6 @@ async function dispatchSovereignBrainAction(params: {
           memoryPatch: {
             ...(promoted.memoryPatch || {}),
             lastWorkoutPlan: plan,
-            dietGenerationStatus: memory.dietGenerationStatus,
           },
         };
       }
@@ -15212,7 +15231,6 @@ async function dispatchSovereignBrainAction(params: {
         memoryPatch: {
           ...(response.memoryPatch || {}),
           lastWorkoutPlan: plan,
-          dietGenerationStatus: memory.dietGenerationStatus,
         },
       };
     }
@@ -16634,11 +16652,15 @@ app.post("/guto/proactivity/extract", requireActiveUser, async (req, res) => {
   const todayISO = todayKey(); // Usa GUTO_TIME_ZONE ao invés de UTC
 
   try {
-    const events = await extractEventsFromConversation(
+    const extractedEvents = await extractEventsFromConversation(
       conversationText,
       selectedLanguage,
       todayISO
     );
+    // Defense in depth at the persistence boundary: even if an extractor
+    // implementation changes, no event reaches cards/memory unless its quote
+    // is literally present in a USER utterance from this conversation.
+    const events = groundExtractedEvents(extractedEvents, conversationText, todayISO);
 
     const saved: import("./src/proactivity/types.js").ProactiveMemory[] = [];
     for (const event of events) {
@@ -17290,13 +17312,6 @@ app.get("/guto/diet", requireActiveUser, async (req, res) => {
     // "Idioma é lei": uma dieta gerada noutro idioma não pode ser servida em
     // português para um app italiano. Plano do coach/manual nunca é tocado.
     const planIsAdjustable = isAdjustableDietPlan(plan);
-    if (planIsAdjustable && !hasMissionReadyForDiet(memory)) {
-      return res.status(404).json({
-        error: "diet_mission_missing",
-        code: "MISSION_REQUIRED_FOR_DIET",
-        message: dietMissionRequiredMessage(normalizeLanguage(memory.language)),
-      });
-    }
     if (planIsAdjustable && !dietPlanMatchesCurrentProfile(plan, memory)) {
       return res.status(404).json({
         error: "diet_profile_mismatch",
@@ -17350,7 +17365,6 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res, next) => {
         !completedPlan.lockedByCoach &&
         (!isAdjustableDietPlan(completedPlan) || (
           freshMemory.dietGenerationStatus === "generated" &&
-          hasMissionReadyForDiet(freshMemory) &&
           dietPlanMatchesCurrentProfile(completedPlan, freshMemory) &&
           (!completedPlan.language || normalizeLanguage(completedPlan.language) === requestedLanguage)
         ))
@@ -17472,14 +17486,6 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res, next) => {
         context: "food_restrictions",
         instruction: pendingDietClarification?.hint || "Ask one short question to clarify the user's food restriction before generating diet.",
       },
-    });
-  }
-
-  if (!hasMissionReadyForDiet(memory)) {
-    return res.status(409).json({
-      error: "mission_required",
-      code: "MISSION_REQUIRED_FOR_DIET",
-      message: dietMissionRequiredMessage(language),
     });
   }
 
@@ -17690,15 +17696,12 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res, next) => {
     if (!currentContext.ok) {
       await recoverDietGenerationAfterConflict(userId, currentContext.reason);
       const coachLocked = currentContext.reason === "coach_locked_plan";
-      const missionChanged = currentContext.reason === "mission_changed";
       return res.status(409).json({
-        error: coachLocked ? "coach_locked_plan" : missionChanged ? "mission_required" : "diet_context_changed",
-        code: coachLocked ? "COACH_LOCKED_PLAN" : missionChanged ? "MISSION_REQUIRED_FOR_DIET" : "DIET_CONTEXT_CHANGED",
+        error: coachLocked ? "coach_locked_plan" : "diet_context_changed",
+        code: coachLocked ? "COACH_LOCKED_PLAN" : "DIET_CONTEXT_CHANGED",
         message: coachLocked
           ? "Plano bloqueado pelo coach. O GUTO não pode sobrescrever sem liberação do supervisor."
-          : missionChanged
-            ? dietMissionRequiredMessage(language)
-            : dietContextChangedMessage(language),
+          : dietContextChangedMessage(language),
       });
     }
     await persistDietStatusPatch({
@@ -17739,19 +17742,15 @@ app.post("/guto/diet/generate", requireActiveUser, async (req, res, next) => {
     console.warn("[GUTO] diet commit cancelled", {
       userId,
       reason: commitResult.reason,
-      hasMission: Boolean(commitResult.memory && hasMissionReadyForDiet(commitResult.memory)),
       status: commitResult.memory?.dietGenerationStatus || null,
     });
     const coachLocked = commitResult.reason === "coach_locked_plan";
-    const missionChanged = commitResult.reason === "mission_changed";
     return res.status(409).json({
-      error: coachLocked ? "coach_locked_plan" : missionChanged ? "mission_required" : "diet_context_changed",
-      code: coachLocked ? "COACH_LOCKED_PLAN" : missionChanged ? "MISSION_REQUIRED_FOR_DIET" : "DIET_CONTEXT_CHANGED",
+      error: coachLocked ? "coach_locked_plan" : "diet_context_changed",
+      code: coachLocked ? "COACH_LOCKED_PLAN" : "DIET_CONTEXT_CHANGED",
       message: coachLocked
         ? "Plano bloqueado pelo coach. O GUTO não pode sobrescrever sem liberação do supervisor."
-        : missionChanged
-          ? dietMissionRequiredMessage(language)
-          : dietContextChangedMessage(language),
+        : dietContextChangedMessage(language),
     });
   }
   return res.json(plan);

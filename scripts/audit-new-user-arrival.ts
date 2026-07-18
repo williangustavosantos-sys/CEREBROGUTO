@@ -1,12 +1,13 @@
 /**
- * Auditoria real da primeira chegada ao chat, sem mensagem do usuário.
+ * Auditoria local auxiliar do bootstrap pós-pacto, com Gemini real e stores
+ * temporários. Não é prova de produção porque Redis e frontend não participam.
  *
  * Segurança: o processo só inicia quando as duas variáveis Upstash foram
  * explicitamente definidas como vazias pelo chamador. O restante do estado usa
  * arquivos temporários exclusivos desta execução.
  *
  * Executar:
- *   UPSTASH_REDIS_REST_URL= UPSTASH_REDIS_REST_TOKEN= npm run audit:new-user-arrival
+ *   UPSTASH_REDIS_REST_URL= UPSTASH_REDIS_REST_TOKEN= npm run audit:post-pact-local
  */
 
 import { randomUUID } from "node:crypto";
@@ -128,7 +129,7 @@ function requireExplicitEmptyRedisEnvironment(): boolean {
   if (unsafe.length === 0) return true;
 
   writeError("SKIP — isolamento Redis não foi comprovado.");
-  writeError("Execute com: UPSTASH_REDIS_REST_URL= UPSTASH_REDIS_REST_TOKEN= npm run audit:new-user-arrival");
+  writeError("Execute com: UPSTASH_REDIS_REST_URL= UPSTASH_REDIS_REST_TOKEN= npm run audit:post-pact-local");
   process.exitCode = 2;
   return false;
 }
@@ -172,9 +173,9 @@ function buildNewUserMemory(profile: AuditProfile, userId: string, now: string):
     name: profile.name,
     language: profile.language,
     hasSeenChatOpening: false,
-    initialXpGranted: true,
+    initialXpGranted: false,
     initialXpRewardSeen: true,
-    totalXp: 100,
+    totalXp: 0,
     streak: 0,
     trainedToday: false,
     adaptedMissionToday: false,
@@ -206,15 +207,7 @@ function buildNewUserMemory(profile: AuditProfile, userId: string, now: string):
     completedWorkoutDates: [],
     adaptedMissionDates: [],
     missedMissionDates: [],
-    xpEvents: [
-      {
-        id: `xp-initial-${userId}`,
-        type: "grant_initial_xp",
-        amount: 100,
-        date: now.slice(0, 10),
-        createdAt: now,
-      },
-    ],
+    xpEvents: [],
     lastWorkoutPlan: null,
     weeklyWorkoutPlan: null,
     weeklyDietPlan: null,
@@ -284,6 +277,19 @@ async function getJson(url: string, token: string): Promise<JsonRecord> {
   return parsed;
 }
 
+async function postJson(url: string, token: string, body: JsonRecord): Promise<JsonRecord> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const raw = await response.text();
+  invariant(response.ok, `HTTP ${response.status}: ${oneLine(raw, 400)}`);
+  const parsed = JSON.parse(raw) as unknown;
+  invariant(isRecord(parsed), "A rota pós-pacto não devolveu um objeto JSON.");
+  return parsed;
+}
+
 function assertNoInventedContext(language: SupportedLanguage, speech: string): void {
   const normalized = fold(speech);
   for (const [label, pattern] of FORBIDDEN_ARRIVAL_PATTERNS[language]) {
@@ -298,15 +304,13 @@ function assertNoInventedContext(language: SupportedLanguage, speech: string): v
   invariant(!obviousLanguageLeak[language].test(normalized), `vazamento evidente de idioma: “${oneLine(speech)}”`);
 }
 
-function assertNoDietWasGenerated(dietFile: string, userId: string, persisted: JsonRecord): void {
-  invariant(persisted.weeklyDietPlan == null, "weeklyDietPlan foi gerado automaticamente na chegada.");
-  invariant(
-    persisted.dietGenerationStatus === "ready_to_generate",
-    `dietGenerationStatus deveria ser ready_to_generate e nunca generated, não ${String(persisted.dietGenerationStatus)}.`,
-  );
-  if (!existsSync(dietFile)) return;
+function assertDietWasGenerated(dietFile: string, userId: string, persisted: JsonRecord): void {
+  invariant(persisted.dietGenerationStatus === "generated", `dietGenerationStatus não é generated: ${String(persisted.dietGenerationStatus)}.`);
+  invariant(existsSync(dietFile), "diet-store não foi criado no pacto.");
   const dietStore = readJsonRecord(dietFile);
-  invariant(!Object.prototype.hasOwnProperty.call(dietStore, userId), "O diet-store recebeu um plano sem pedido do usuário.");
+  const diet = dietStore[userId];
+  invariant(isRecord(diet), "O diet-store não recebeu o plano pós-pacto.");
+  invariant(Array.isArray(diet.meals) && diet.meals.length > 0, "A dieta pós-pacto não possui refeições.");
 }
 
 function assertOfficialLocalExercises(plan: unknown, label: string): asserts plan is WorkoutPlanRecord {
@@ -433,9 +437,9 @@ async function main(): Promise<void> {
     invariant(address && typeof address !== "string", "Não foi possível abrir a porta local da auditoria.");
     const baseUrl = `http://127.0.0.1:${(address as AddressInfo).port}`;
 
-    writeLine("GUTO — auditoria real da primeira chegada sem digitação");
+    writeLine("GUTO — auditoria local auxiliar do bootstrap pós-pacto");
     writeLine(`Idiomas: ${profiles.map((profile) => profile.language).join(", ")}`);
-    writeLine("Redis: bloqueado externamente | memória/dieta: arquivos temporários exclusivos | Gemini: real");
+    writeLine("NÃO É PROVA DE PRODUÇÃO | Redis: desligado | stores: temporários | Gemini: real");
     writeLine();
 
     for (const { profile, userId } of users) {
@@ -443,29 +447,19 @@ async function main(): Promise<void> {
       const callOffset = geminiCalls.length;
       try {
         const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET);
-        const payload = await getJson(
-          `${baseUrl}/guto/proactive?force=1&language=${encodeURIComponent(profile.language)}`,
+        const payload = await postJson(
+          `${baseUrl}/guto/memory`,
           token,
+          { language: profile.language, xpEvent: "grant_initial_xp" },
         );
         await flushMemoryStoreWrites();
 
-        invariant(payload.due === true, "due não é true.");
-        invariant(payload.slot === "arrival", `slot inesperado: ${String(payload.slot)}`);
-        invariant(payload.deliveryCommitted === true, "deliveryCommitted não é true.");
-        invariant(payload.acao === "updateWorkout", `ação inesperada: ${String(payload.acao)}`);
-        invariant(payload.expectedResponse == null, "a chegada pediu resposta antes de entregar a missão.");
-        invariant(payload.proactiveMemoryAction == null, "a chegada criou uma ação proativa sem origem no usuário.");
-
-        const speech = typeof payload.fala === "string" ? payload.fala.trim() : "";
-        invariant(speech.length > 0, "fala vazia.");
-        assertNoInventedContext(profile.language, speech);
-
-        const workoutPlan = payload.workoutPlan;
-        assertOfficialLocalExercises(workoutPlan, "workoutPlan da resposta");
-        assertLimitationCareIsVisible(workoutPlan, profile.language, "workoutPlan da resposta");
-        invariant(isRecord(payload.memoryPatch), "memoryPatch ausente na resposta.");
-        assertOfficialLocalExercises(payload.memoryPatch.lastWorkoutPlan, "memoryPatch.lastWorkoutPlan");
-        assertLimitationCareIsVisible(payload.memoryPatch.lastWorkoutPlan, profile.language, "memoryPatch.lastWorkoutPlan");
+        invariant(payload.initialXpGranted === true, "pacto não foi persistido.");
+        const workoutPlan = payload.lastWorkoutPlan;
+        assertOfficialLocalExercises(workoutPlan, "lastWorkoutPlan da resposta pós-pacto");
+        assertLimitationCareIsVisible(workoutPlan, profile.language, "lastWorkoutPlan da resposta pós-pacto");
+        invariant(isRecord(payload.lastDietPlan), "lastDietPlan ausente na resposta pós-pacto.");
+        invariant(Array.isArray(payload.lastDietPlan.meals) && payload.lastDietPlan.meals.length > 0, "lastDietPlan sem refeições.");
 
         const calls = geminiCalls.slice(callOffset);
         invariant(calls.length > 0, "nenhuma chamada Gemini ocorreu neste cenário.");
@@ -474,19 +468,17 @@ async function main(): Promise<void> {
         const store = readJsonRecord(memoryFile);
         const persisted = store[userId];
         invariant(isRecord(persisted), "memória do novo usuário não foi persistida.");
-        invariant(persisted.hasSeenChatOpening === true, "hasSeenChatOpening não foi persistido como true.");
         assertOfficialLocalExercises(persisted.lastWorkoutPlan, "lastWorkoutPlan persistido");
         assertLimitationCareIsVisible(persisted.lastWorkoutPlan, profile.language, "lastWorkoutPlan persistido");
         invariant(Array.isArray(persisted.proactiveMemories) && persisted.proactiveMemories.length === 0, "memória proativa vazou de outro usuário.");
         invariant(Array.isArray(persisted.proactiveImpacts) && persisted.proactiveImpacts.length === 0, "impacto proativo foi inventado.");
         invariant(persisted.proactivePrompt == null, "proactivePrompt foi inventado na chegada.");
         invariant(persisted.activeConversationContext == null, "activeConversationContext foi inventado na chegada.");
-        assertNoDietWasGenerated(dietFile, userId, persisted);
+        assertDietWasGenerated(dietFile, userId, persisted);
 
         const durationMs = Date.now() - startedAt;
-        results.push({ language: profile.language, ok: true, durationMs, detail: speech });
+        results.push({ language: profile.language, ok: true, durationMs, detail: "missão, treino e dieta persistidos" });
         writeLine(`PASS ${profile.language} — ${workoutPlan.exercises.length} exercícios — ${(durationMs / 1000).toFixed(1)}s`);
-        writeLine(`  “${oneLine(speech)}”`);
       } catch (error) {
         const durationMs = Date.now() - startedAt;
         const detail = error instanceof Error ? error.message : String(error);

@@ -524,7 +524,7 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.equal(body.memoryPatch?.lastWorkoutPlan?.summary, body.workoutPlan?.summary);
     assert.equal(body.memoryPatch?.trainingSchedule, undefined);
     assert.equal(body.memoryPatch?.trainingLimitations, undefined);
-    assert.equal(body.memoryPatch?.dietGenerationStatus, "ready_to_generate");
+    assert.equal(body.memoryPatch?.dietGenerationStatus, undefined, "gerar treino não pode alterar o ciclo da dieta");
     assert.match(body.fala, /primeira missão|Bora/i);
     assert.doesNotMatch(body.fala, /período fica bloqueado|prefere de manhã|compromisso/i);
     const persisted = readMem("conv-new-user-arrival");
@@ -532,7 +532,7 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.equal(persisted.lastWorkoutPlan?.summary, body.workoutPlan?.summary, "o plano persistido deve ser o mesmo plano mostrado");
     assert.equal(persisted.trainingSchedule, undefined, "turno de sistema não pode persistir horário inventado pelo modelo");
     assert.equal(persisted.trainingLimitations, "lombar", "turno de sistema não pode sobrescrever calibragem validada");
-    assert.equal(persisted.dietGenerationStatus, "ready_to_generate");
+    assert.equal(persisted.dietGenerationStatus, "idle", "o ciclo da dieta é independente da chegada do treino");
     assert.equal(persisted.hasSeenChatOpening, true);
     assert.equal((persisted.proactiveMemories || []).length, 0);
     assert.equal(callsByKind.risk || 0, 0, "scheduler não deve passar como fala humana pelo classificador de risco");
@@ -925,7 +925,7 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
       assert.equal(body.acao, "updateWorkout");
       assert.ok(body.workoutPlan?.exercises?.length > 0);
       assert.match(body.workoutPlan?.summary || "", testCase.care);
-      assert.equal(body.memoryPatch?.dietGenerationStatus, "ready_to_generate");
+      assert.equal(body.memoryPatch?.dietGenerationStatus, undefined, "gerar treino não pode alterar o ciclo da dieta");
       assert.match(body.fala, testCase.expected);
       assert.doesNotMatch(body.fala, testCase.forbidden);
       assert.equal(readMem(userId).hasSeenChatOpening, true);

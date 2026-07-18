@@ -676,6 +676,116 @@ describe("proactivity HTTP cycle", () => {
     globalThis.fetch = originalFetch
   })
 
+  it("Supino reto máquina ocupado não aceita memória ou card alucinado pelo extrator", async () => {
+    const workout = missionPlan("Peito e tríceps")
+    workout.exercises = [{
+      ...workout.exercises[0]!,
+      id: "supino_reto_maquina",
+      name: "Supino reto máquina",
+      canonicalNamePt: "Supino reto máquina",
+      muscleGroup: "chest_triceps",
+    }]
+    writeUserMemory(USER_ID, {
+      preferredTrainingLocation: "gym",
+      trainingLocation: "gym",
+      trainingLevel: "consistent",
+      trainingStatus: "consistent",
+      trainingPathology: "sem dor",
+      trainingLimitations: "sem dor",
+      trainingGoal: "muscle_gain",
+      biologicalSex: "male",
+      userAge: 35,
+      heightCm: 178,
+      weightKg: 82,
+      country: "Italia",
+      countryCode: "IT",
+      trainingSchedule: "today",
+      lastWorkoutPlan: workout,
+      proactiveMemories: [],
+      proactiveImpacts: [],
+      proactivePrompt: null,
+      activeConversationContext: null,
+    })
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes("generativelanguage.googleapis.com")) {
+        const requestBody = typeof init?.body === "string" ? init.body : ""
+        if (requestBody.includes("semantic event extractor")) {
+          return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify([{
+            type: "other",
+            rawText: "semana corrida",
+            understood: "Confirmar que sua semana está corrida",
+            dateText: "esta semana",
+          }]))), { status: 200, headers: { "Content-Type": "application/json" } })
+        }
+        return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
+          fala: "Máquina ocupada: troca por supino reto com halteres, mantendo séries, repetições e descanso.",
+          acao: "none",
+          expectedResponse: null,
+          proactiveMemoryAction: null,
+          memoryPatch: {},
+        }))), { status: 200, headers: { "Content-Type": "application/json" } })
+      }
+      return originalFetch(input as RequestInfo, init)
+    }) as typeof globalThis.fetch
+
+    const chat = await fetch(`${baseUrl}/guto`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        language: "pt-BR",
+        profile: { userId: USER_ID, name: "Will" },
+        history: [],
+        input: "Supino reto máquina ocupado?",
+        turnId: "turn-supino-grounding-regression",
+      }),
+    })
+    assert.equal(chat.status, 200)
+    const chatBody = await chat.json() as {
+      fala?: string
+      proactiveMemoryAction?: unknown
+      expectedResponse?: unknown
+      turnDecision?: { cards?: unknown[] }
+    }
+    assert.match(chatBody.fala || "", /troca|substitu|halter|crucifixo/i)
+    assert.equal(chatBody.proactiveMemoryAction || null, null)
+    assert.equal(chatBody.expectedResponse || null, null)
+    assert.deepEqual(chatBody.turnDecision?.cards || [], [])
+
+    const extraction = await fetch(`${baseUrl}/guto/proactivity/extract`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        conversationText: `USER: Supino reto máquina ocupado?\nGUTO: ${chatBody.fala || ""}`,
+        language: "pt-BR",
+      }),
+    })
+    assert.equal(extraction.status, 200)
+    const extractionBody = await extraction.json() as { extracted?: number; memories?: unknown[] }
+    assert.equal(extractionBody.extracted, 0)
+    assert.deepEqual(extractionBody.memories || [], [])
+
+    const memories = await fetch(`${baseUrl}/guto/proactivity/memories`, { headers: authHeaders() })
+    const memoriesBody = await memories.json() as { memories?: unknown[] }
+    assert.deepEqual(memoriesBody.memories || [], [])
+
+    const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, {
+      proactiveMemories?: unknown[]
+      proactiveImpacts?: unknown[]
+      proactivePrompt?: unknown
+      activeConversationContext?: unknown
+      trainingSchedule?: string
+    }>
+    assert.deepEqual(store[USER_ID]?.proactiveMemories || [], [])
+    assert.deepEqual(store[USER_ID]?.proactiveImpacts || [], [])
+    assert.equal(store[USER_ID]?.proactivePrompt || null, null)
+    assert.equal(store[USER_ID]?.activeConversationContext || null, null)
+    assert.equal(store[USER_ID]?.trainingSchedule, "today")
+
+    globalThis.fetch = originalFetch
+  })
+
   it("turno atômico cria uma viagem, mantém o memoryId e só abre card no impacto", async () => {
     const { resolveProactiveDate } = await import("../src/proactivity/date-resolver.js")
     const resolved = resolveProactiveDate("viajo na próxima terça-feira", dateKey())

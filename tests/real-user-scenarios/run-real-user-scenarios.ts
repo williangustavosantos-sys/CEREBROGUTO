@@ -6,6 +6,9 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import jwt from "jsonwebtoken";
 
+// Auxiliary deterministic coverage only. This suite deliberately disables
+// Gemini and Redis and therefore MUST NOT be cited as real-user/production
+// evidence for a release gate.
 process.env.GEMINI_API_KEY = "";
 process.env.VOICE_API_KEY = process.env.VOICE_API_KEY || "real-user-scenarios-voice-key";
 process.env.GUTO_GEMINI_MODEL = process.env.GUTO_GEMINI_MODEL || "gemini-3.1-flash-lite";
@@ -753,7 +756,7 @@ function buildReportSummary(profileReport: ProfileReport) {
 }
 
 function markdownReport(reports: ProfileReport[]): string {
-  const lines: string[] = ["# REAL USER SCENARIOS", ""];
+  const lines: string[] = ["# AUXILIARY MOCKED USER SCENARIOS", "", "> NOT PRODUCTION EVIDENCE: Gemini and Redis are disabled.", ""];
   let totalPass = 0;
   let totalFail = 0;
   let totalWarn = 0;
@@ -1284,7 +1287,9 @@ async function main(): Promise<void> {
   );
 
   const jsonReport = {
-    title: "REAL USER SCENARIOS",
+    title: "AUXILIARY MOCKED USER SCENARIOS",
+    productionEvidenceEligible: false,
+    limitations: ["Gemini disabled", "Redis disabled", "local file stores", "mocked model responses"],
     generatedAt: new Date().toISOString(),
     profiles: reports.map((report) => ({ ...report, summary: buildReportSummary(report) })),
     totals,
@@ -1298,7 +1303,8 @@ async function main(): Promise<void> {
   writeFileSync(reportJsonFile, JSON.stringify(jsonReport, null, 2));
   writeFileSync(reportMdFile, markdownReport(reports));
 
-  writeLine("REAL USER SCENARIOS");
+  writeLine("AUXILIARY MOCKED USER SCENARIOS");
+  writeLine("NOT PRODUCTION EVIDENCE — Gemini and Redis are disabled.");
   writeLine("");
   for (const report of reports) {
     const summary = buildReportSummary(report);
@@ -1326,7 +1332,7 @@ async function main(): Promise<void> {
 
 main().catch((error) => {
   restoreConsole();
-  writeLine("REAL USER SCENARIOS");
+  writeLine("AUXILIARY MOCKED USER SCENARIOS");
   writeLine("FAIL:");
   writeLine(`- infraestrutura: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
