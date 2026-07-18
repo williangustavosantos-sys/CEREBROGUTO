@@ -5,6 +5,11 @@ interface Bucket {
   resetAt: number;
 }
 
+export function resolveRateLimitKey(req: Request): string {
+  if (req.gutoUser?.userId) return `user:${req.gutoUser.userId}`;
+  return `ip:${req.ip || req.socket.remoteAddress || "unknown"}`;
+}
+
 export function createRateLimit({
   windowMs,
   maxRequests,
@@ -16,7 +21,7 @@ export function createRateLimit({
 
   return function rateLimit(req: Request, res: Response, next: NextFunction) {
     const now = Date.now();
-    const key = req.ip || req.socket.remoteAddress || "unknown";
+    const key = resolveRateLimitKey(req);
     const bucket = buckets.get(key);
 
     if (!bucket || bucket.resetAt <= now) {

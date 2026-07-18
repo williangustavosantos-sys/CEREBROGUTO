@@ -23,10 +23,10 @@ export interface ArenaProfile {
   validatedWorkoutsMonth: number;
   currentStreak: number;
   lastWorkoutValidatedAt: string | null;
-  // Âncora genérica de "última atividade de XP" (pacto/bônus, treino, missão
-  // adaptada, penalidade). Dirige o reset preguiçoso de weekly/monthly para
-  // QUALQUER XP — não só treino — para que o pacto também resete no fim do
-  // ciclo. Opcional para compat com perfis já gravados (fallback p/ lastWorkoutValidatedAt).
+  // Âncora genérica da última atividade registrada (pacto/bônus, treino,
+  // missão adaptada, penalidade). Dirige o reset preguiçoso de weekly/monthly
+  // mesmo quando a atividade não altera o período, como o buffer do Pacto.
+  // Opcional para compat com perfis antigos (fallback p/ lastWorkoutValidatedAt).
   lastXpAt?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -46,6 +46,49 @@ export interface ArenaXpEvent {
 interface ArenaStore {
   profiles: Record<string, ArenaProfile>;
   events: ArenaXpEvent[];
+  schemaVersion?: number;
+}
+
+const ARENA_STORE_SCHEMA_VERSION = 2;
+
+function sameWeek(dateA: Date, dateB: Date): boolean {
+  const monday = (date: Date) => {
+    const day = date.getDay();
+    const diff = date.getDate() - day + (day === 0 ? -6 : 1);
+    return new Date(date.getFullYear(), date.getMonth(), diff).getTime();
+  };
+  return monday(dateA) === monday(dateB);
+}
+
+function sameMonth(dateA: Date, dateB: Date): boolean {
+  return dateA.getFullYear() === dateB.getFullYear() && dateA.getMonth() === dateB.getMonth();
+}
+
+/**
+ * v2 corrige o período competitivo gravado pela versão que contou o buffer do
+ * Pacto em weekly/monthly. O ledger de eventos permite retirar somente bônus do
+ * período corrente, sem alterar XP total, validações, penalidades ou histórico.
+ */
+export function migrateArenaStoreToCurrentSchema(store: ArenaStore, now: Date = new Date()): ArenaStore {
+  if ((store.schemaVersion ?? 1) >= ARENA_STORE_SCHEMA_VERSION) return store;
+
+  for (const profile of Object.values(store.profiles)) {
+    const bonusEvents = store.events.filter((event) => event.userId === profile.userId && event.type === "bonus");
+    const weeklyBonus = bonusEvents.reduce((sum, event) => {
+      const createdAt = new Date(event.createdAt);
+      return !Number.isNaN(createdAt.getTime()) && sameWeek(createdAt, now) ? sum + event.xp : sum;
+    }, 0);
+    const monthlyBonus = bonusEvents.reduce((sum, event) => {
+      const createdAt = new Date(event.createdAt);
+      return !Number.isNaN(createdAt.getTime()) && sameMonth(createdAt, now) ? sum + event.xp : sum;
+    }, 0);
+
+    profile.weeklyXp = Math.max(0, profile.weeklyXp - weeklyBonus);
+    profile.monthlyXp = Math.max(0, profile.monthlyXp - monthlyBonus);
+  }
+
+  store.schemaVersion = ARENA_STORE_SCHEMA_VERSION;
+  return store;
 }
 
 // ─── In-memory cache ──────────────────────────────────────────────────────────
@@ -89,7 +132,12 @@ export async function readArenaStoreAsync(): Promise<ArenaStore> {
         let parsed = JSON.parse(raw);
         if (typeof parsed === "string") parsed = JSON.parse(parsed);
         if (parsed && typeof parsed === "object" && "profiles" in parsed) {
-          memCache = parsed as ArenaStore;
+          const store = parsed as ArenaStore;
+          const previousVersion = store.schemaVersion ?? 1;
+          memCache = migrateArenaStoreToCurrentSchema(store);
+          if (previousVersion < ARENA_STORE_SCHEMA_VERSION) {
+            await redisSet(REDIS_KEY, JSON.stringify(memCache));
+          }
           return memCache;
         }
       }
@@ -100,7 +148,7 @@ export async function readArenaStoreAsync(): Promise<ArenaStore> {
   try {
     if (fs.existsSync(ARENA_STORE_PATH)) {
       const fromFile = JSON.parse(fs.readFileSync(ARENA_STORE_PATH, "utf-8")) as ArenaStore;
-      memCache = fromFile;
+      memCache = migrateArenaStoreToCurrentSchema(fromFile);
     }
   } catch {
     // ignore — return whatever is in memCache
