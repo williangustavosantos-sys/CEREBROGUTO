@@ -455,6 +455,8 @@ interface GutoVoiceProfile {
 interface GutoMemory {
   userId: string;
   name: string;
+  /** Prova durável de que o aluno confirmou ativamente o Nome Soberano. */
+  sovereignNameConfirmedAt?: string;
   language: string;
   hasSeenChatOpening?: boolean;
   initialXpGranted: boolean;
@@ -765,12 +767,14 @@ if (pushEnabled) {
 app.post("/guto/billing/webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
 
 app.use(express.json({ limit: "1mb" }));
+// Decodifica JWT antes do rate limit para separar usuários autenticados que
+// compartilham IP (academia/escritório). Visitantes continuam limitados por IP.
+app.use(parseAuth);
 app.use(createRateLimit({
   windowMs: config.rateLimitWindowMs,
   maxRequests: config.rateLimitMaxRequests,
 }));
 app.use(requestLog);
-app.use(parseAuth);
 app.use(async (_req, _res, next) => {
   await ensureMemoryHydrated().catch(() => {});
   next();
@@ -1278,6 +1282,9 @@ export function getMemory(userId: string): GutoMemory {
     return sanitizeOperationalMemory({
       userId,
       name: existing.name || "Operador",
+      sovereignNameConfirmedAt: typeof existing.sovereignNameConfirmedAt === "string"
+        ? existing.sovereignNameConfirmedAt
+        : undefined,
       language: normalizeLanguage(existing.language),
       hasSeenChatOpening: Boolean(existing.hasSeenChatOpening),
       initialXpGranted: Boolean(existing.initialXpGranted),
@@ -2049,9 +2056,8 @@ function appendXpEvent(memory: GutoMemory, type: XpEventType, amount: number, da
 
 function grantInitialXp(memory: GutoMemory) {
   if (memory.initialXpGranted) return memory;
-  // Datado com o dia real (não "lifetime"): o Percurso mostra o XP do dia
-  // somando xpEvents por data, e o pacto É XP ganho hoje. A idempotência não
-  // depende do id do evento — initialXpGranted é o guard de re-concessão.
+  // Mantém o evento datado para auditoria do saldo total. O Percurso exclui
+  // `grant_initial_xp`, pois o Pacto é buffer e não presença validada.
   appendXpEvent(memory, "grant_initial_xp", 100);
   memory.initialXpGranted = true;
 
@@ -11752,6 +11758,9 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
     if (validation.status === "invalid") return res.status(400).json(validation);
     if (validation.status === "confirm" && !b.confirmedName) return res.status(409).json(validation);
     memory.name = validation.normalized;
+    if (b.sovereignNameConfirmed === true && !memory.sovereignNameConfirmedAt) {
+      memory.sovereignNameConfirmedAt = new Date().toISOString();
+    }
   }
   memory.language = normalizeLanguage(b.language || memory.language || "pt-BR");
   if (process.env.NODE_ENV === "development") {

@@ -105,6 +105,24 @@ test("setup server", async () => {
   baseUrl = `http://127.0.0.1:${(_server.address() as any).port}`;
 });
 
+test("Nome Soberano — confirmação ativa fica durável na memória", async () => {
+  const uid = "xp-sovereign-name-confirmation";
+  seedMemory(uid, { ...BASE_CALIBRATED, name: "Nome do convite", initialXpGranted: false });
+  const token = jwt.sign({ userId: uid, role: "student" }, secret);
+
+  const response = await fetch(`${baseUrl}/guto/memory`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ name: "Nome Escolhido", sovereignNameConfirmed: true }),
+  });
+
+  assert.equal(response.status, 200);
+  const body = await response.json() as Record<string, unknown>;
+  assert.equal(body.name, "Nome Escolhido");
+  assert.equal(typeof body.sovereignNameConfirmedAt, "string");
+  assert.equal(readMemory(uid).sovereignNameConfirmedAt, body.sovereignNameConfirmedAt);
+});
+
 // ─── BUG 1: applyLevelStructure ausente dos fallback paths ──────────────────
 
 test("BUG 1 — fallback path: difficulty definido para returning", async () => {

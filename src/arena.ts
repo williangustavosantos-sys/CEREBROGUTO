@@ -197,12 +197,14 @@ export function awardArenaXp(options: AwardXpOptions): AwardXpResult {
 
   profile.totalXp = Math.max(0, profile.totalXp + xp);
 
-  // REGRA DE PRODUTO (revisão do fundador — substitui AR-5/X-4): TODO XP ganho
-  // aparece em Semana, Mês e Individual. A ÚNICA diferença entre as superfícies é
-  // o reset (semana zera na virada da semana, mês na virada do mês, individual
-  // nunca). Portanto o pacto (type "bonus") agora conta no período como qualquer XP.
-  profile.weeklyXp = Math.max(0, profile.weeklyXp + xp);
-  profile.monthlyXp = Math.max(0, profile.monthlyXp + xp);
+  // O bônus do Pacto é um buffer de boas-vindas: entra no total geral, mas não
+  // infla os períodos competitivos da Arena (AR-5) nem representa presença real
+  // (X-4). Validações e penalidades continuam refletidas em weekly/monthly.
+  const countsForPeriod = type !== "bonus";
+  if (countsForPeriod) {
+    profile.weeklyXp = Math.max(0, profile.weeklyXp + xp);
+    profile.monthlyXp = Math.max(0, profile.monthlyXp + xp);
+  }
 
   // Contagem de treinos e streak continuam atreladas à PRESENÇA DE TREINO, não ao
   // XP em si: o pacto/bônus não vira treino validado nem sequência; a falta zera.

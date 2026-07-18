@@ -2714,8 +2714,9 @@ adminRouter.get("/logs", asyncHandler(async (req, res) => {
 // ─── Maintenance: backfill arena XP for existing users ──────────────────────
 // Bug fix one-shot: usuários criados antes do fix de grantInitialXp ficaram
 // com arenaProfile.totalXp 100 abaixo de memory.totalXp. Este endpoint
-// adiciona +100 XP em todos os arenaProfiles que estão com totalXp < 100,
-// alinhando-os com os 100 XP que já foram concedidos no memory.
+// adiciona +100 XP total em todos os arenaProfiles que estão com totalXp < 100,
+// alinhando-os com o buffer do Pacto já concedido na memória. Por contrato
+// canônico (AR-5/X-4), esse buffer não entra nos períodos semanal/mensal.
 adminRouter.post("/maintenance/backfill-arena-initial-xp", requireAdmin, asyncHandler(async (_req, res) => {
   const profiles = getAllArenaProfiles();
   const fixed: Array<{ userId: string; before: number; after: number }> = [];
@@ -2723,8 +2724,6 @@ adminRouter.post("/maintenance/backfill-arena-initial-xp", requireAdmin, asyncHa
     if (profile.totalXp < 100) {
       const before = profile.totalXp;
       profile.totalXp = profile.totalXp + 100;
-      profile.weeklyXp = profile.weeklyXp + 100;
-      profile.monthlyXp = profile.monthlyXp + 100;
       profile.updatedAt = new Date().toISOString();
       saveArenaProfile(profile);
       fixed.push({ userId: profile.userId, before, after: profile.totalXp });

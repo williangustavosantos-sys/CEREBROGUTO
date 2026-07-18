@@ -1221,9 +1221,12 @@ async function runProfile(ctx: ScenarioContext, profile: ScenarioProfile): Promi
     const memory = await ctx.getMemory(profile);
     const day = todayKey();
     const dayXp = (memory.xpEvents || [])
-      .filter((event) => event.date === day || String(event.createdAt || "").startsWith(day))
+      .filter((event) =>
+        event.type !== "grant_initial_xp" &&
+        (event.date === day || String(event.createdAt || "").startsWith(day))
+      )
       .reduce((sum, event) => sum + Number(event.xp ?? event.amount ?? 0), 0);
-    expect(dayXp >= 200, `percurso do dia não reflete pacto+treino: dayXp=${dayXp}, eventos=${JSON.stringify(memory.xpEvents)}`);
+    expect(dayXp === 100, `percurso do dia deve refletir só o treino, sem o buffer do pacto: dayXp=${dayXp}, eventos=${JSON.stringify(memory.xpEvents)}`);
     const me = await ctx.getJson<{ totalXp?: number; avatarStage?: string }>(profile, "/guto/arena/me");
     expect(me.status === 200, `arena/me respondeu ${me.status}`);
     const expectedStage = ctx.getExpectedEvolutionStage(Number(me.body.totalXp || 0));
