@@ -54,7 +54,6 @@ import {
   getMemory,
   saveMemory,
   buildDietProfileFingerprint,
-  hasMissionReadyForDiet,
   resolveDietFoodRestrictionAtomically,
   buildWorkoutPlanFromSemanticFocus,
   invalidateDietIfNeeded,
@@ -2208,13 +2207,6 @@ adminRouter.post("/students/:userId/diet/generate", asyncHandler(async (req, res
       ? persistedDietMemory as Record<string, unknown>
       : {}),
   };
-  if (!hasMissionReadyForDiet(memory)) {
-    res.status(409).json({
-      message: "A primeira missão precisa estar persistida antes da dieta.",
-      code: "MISSION_REQUIRED_FOR_DIET",
-    });
-    return;
-  }
   memory = await resolveDietFoodRestrictionAtomically(memory as any) as unknown as typeof memory;
   const profileFingerprint = buildDietProfileFingerprint(memory);
   const generationLanguage = normalizeAdminDietLanguage(memory.language);
@@ -2236,11 +2228,10 @@ adminRouter.post("/students/:userId/diet/generate", asyncHandler(async (req, res
     : null;
   if (
     !memoryBeforeCommit ||
-    !hasMissionReadyForDiet(memoryBeforeCommit) ||
     buildDietProfileFingerprint(memoryBeforeCommit) !== profileFingerprint ||
     normalizeAdminDietLanguage(memoryBeforeCommit.language) !== generationLanguage
   ) {
-    res.status(409).json({ message: "Perfil ou missão mudou durante a geração da dieta.", code: "DIET_CONTEXT_CHANGED" });
+    res.status(409).json({ message: "Perfil mudou durante a geração da dieta.", code: "DIET_CONTEXT_CHANGED" });
     return;
   }
   diet.profileFingerprint = profileFingerprint;
@@ -2251,7 +2242,6 @@ adminRouter.post("/students/:userId/diet/generate", asyncHandler(async (req, res
     if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
     const current = snapshot as ReturnType<typeof getMemory>;
     if (
-      !hasMissionReadyForDiet(current) ||
       buildDietProfileFingerprint(current) !== profileFingerprint ||
       normalizeAdminDietLanguage(current.language) !== generationLanguage
     ) {
@@ -2262,7 +2252,7 @@ adminRouter.post("/students/:userId/diet/generate", asyncHandler(async (req, res
     return current;
   });
   if (!statusCommitted) {
-    res.status(409).json({ message: "Perfil ou missão mudou durante o commit da dieta.", code: "DIET_CONTEXT_CHANGED" });
+    res.status(409).json({ message: "Perfil mudou durante o commit da dieta.", code: "DIET_CONTEXT_CHANGED" });
     return;
   }
   addLog({

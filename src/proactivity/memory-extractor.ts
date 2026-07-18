@@ -28,6 +28,82 @@ function normalize(value: string): string {
     .toLowerCase()
 }
 
+const PROACTIVE_MEMORY_TYPES = new Set<ProactiveMemoryType>([
+  'trip',
+  'commitment',
+  'schedule',
+  'health',
+  'other',
+])
+
+function extractUserUtterances(conversationText: string): string[] {
+  const lines = conversationText
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const explicitlyLabeled = lines.some((line) => /^(USER|USUARIO|USUÁRIO|GUTO):\s*/i.test(line))
+
+  return lines
+    .filter((line) => !/^GUTO:\s*/i.test(line))
+    .filter((line) => !explicitlyLabeled || /^(USER|USUARIO|USUÁRIO):\s*/i.test(line))
+    .map((line) => line.replace(/^(USER|USUARIO|USUÁRIO):\s*/i, '').trim())
+    .filter(Boolean)
+}
+
+function literalUserQuote(rawText: string, userUtterances: string[]): string | null {
+  const quote = rawText.trim()
+  const normalizedQuote = normalize(quote)
+  if (!normalizedQuote) return null
+  const source = userUtterances.find((utterance) => normalize(utterance).includes(normalizedQuote))
+  if (!source) return null
+
+  const normalizedSource = normalize(source)
+  if (normalizedSource === normalizedQuote) return source.slice(0, 500)
+  return quote.slice(0, 500)
+}
+
+function groundedOptionalText(value: unknown, rawText: string): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const candidate = value.trim()
+  if (!candidate || !normalize(rawText).includes(normalize(candidate))) return undefined
+  return candidate
+}
+
+/**
+ * Trust boundary for Gemini extraction. A proactive memory can only be built
+ * from an exact quote present in a USER utterance. Structured date/location
+ * fields are either derived from that quote or discarded; model-authored
+ * paraphrases never become the persisted fact shown in confirmation cards.
+ */
+export function groundExtractedEvents(
+  events: ExtractedEvent[],
+  conversationText: string,
+  todayISO: string
+): ExtractedEvent[] {
+  const userUtterances = extractUserUtterances(conversationText)
+  const grounded: ExtractedEvent[] = []
+
+  for (const event of events) {
+    if (!PROACTIVE_MEMORY_TYPES.has(event.type)) continue
+    const rawText = literalUserQuote(event.rawText, userUtterances)
+    if (!rawText) continue
+    const canonicalDate = resolveProactiveDate(rawText, todayISO)
+    const location = groundedOptionalText(event.location, rawText)
+    grounded.push({
+      type: event.type,
+      rawText,
+      // Keep the confirmation anchored in what the person actually said. The
+      // type may organize the pipeline, but it cannot invent visible content.
+      understood: rawText,
+      dateText: canonicalDate?.dateText,
+      dateParsed: canonicalDate?.dateParsed,
+      location,
+    })
+  }
+
+  return grounded
+}
+
 function numberWordPt(value: string): number | null {
   const map: Record<string, number> = {
     uma: 1,
@@ -207,8 +283,8 @@ export async function extractEventsFromConversation(
     const parsed = JSON.parse(rawText)
     if (!Array.isArray(parsed)) return []
 
-    // Validate and sanitize
-    const semantic: ExtractedEvent[] = parsed
+    // Validate shape first, then cross the grounding boundary below.
+    const semanticCandidates: ExtractedEvent[] = parsed
       .filter((item): item is ExtractedEvent => {
         return (
           typeof item === 'object' &&
@@ -222,23 +298,17 @@ export async function extractEventsFromConversation(
       })
       .map((item) => {
         const rawEventText = String(item.rawText).slice(0, 500)
-        const canonicalDate = resolveProactiveDate(
-          [rawEventText, typeof item.dateText === 'string' ? item.dateText : ''].filter(Boolean).join(' '),
-          todayISO
-        )
         return {
           type: item.type as ProactiveMemoryType,
           rawText: rawEventText,
           understood: String(item.understood).slice(0, 300),
-          dateText: canonicalDate?.dateText || (typeof item.dateText === 'string' ? item.dateText : undefined),
-          dateParsed: canonicalDate?.dateParsed || (
-            typeof item.dateParsed === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.dateParsed)
-              ? item.dateParsed
-              : undefined
-          ),
+          dateText: typeof item.dateText === 'string' ? item.dateText : undefined,
+          dateParsed: typeof item.dateParsed === 'string' ? item.dateParsed : undefined,
           location: typeof item.location === 'string' ? item.location : undefined,
         }
       })
+
+    const semantic = groundExtractedEvents(semanticCandidates, conversationText, todayISO)
 
     const seen = new Set(semantic.map(eventSignature))
     const merged = [...semantic]

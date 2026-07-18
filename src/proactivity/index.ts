@@ -3,7 +3,7 @@
 export { buildProactivityContextBlock } from './proactivity-injector.js'
 export { resolveProactiveMemoryActionFromUserReply } from './memory-action-resolver.js'
 export type { ResolverResult, ResolvedAction } from './memory-action-resolver.js'
-export { extractEventsFromConversation, buildPendingMemoryData } from './memory-extractor.js'
+export { extractEventsFromConversation, groundExtractedEvents, buildPendingMemoryData } from './memory-extractor.js'
 export { resolveProactiveDate, addDaysToDateKey } from './date-resolver.js'
 export { enrichPendingMemories } from './memory-enricher.js'
 export {

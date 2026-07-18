@@ -10,10 +10,10 @@
     "test": "npm run test:guto",
     "test:guto": "node scripts/run-guto-tests.mjs",
     "founder-scenarios": "tsx tests/founder-scenarios/run-founder-scenarios.ts",
-    "real-user-scenarios": "tsx tests/real-user-scenarios/run-real-user-scenarios.ts",
+    "auxiliary-user-scenarios": "tsx tests/real-user-scenarios/run-real-user-scenarios.ts",
     "typecheck": "tsc --noEmit",
     "eval:guto": "tsx scripts/run-guto-evals.ts",
-    "audit:new-user-arrival": "tsx scripts/audit-new-user-arrival.ts",
+    "audit:post-pact-local": "tsx scripts/audit-new-user-arrival.ts",
     "release:gate": "node scripts/guto-release-gate.mjs",
     "eval:promptfoo": "npx promptfoo@0.121.7 eval -c promptfooconfig.yaml -o evals/reports/promptfoo-results.json --no-share"
   },
