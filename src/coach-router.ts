@@ -24,6 +24,7 @@ import {
 import { deleteDietPlan } from "./diet-store.js";
 import { createInvite, findInviteByUserId } from "./invite-store.js";
 import { config } from "./config.js";
+import { parseRequestOriginalUrl } from "./http/request-url.js";
 import bcrypt from "bcrypt";
 import {
   assertCanAccessUserAccess,
@@ -186,7 +187,7 @@ async function deleteUserEverywhere(userId: string): Promise<void> {
 function sendRankings(req: Request, res: Response): void {
   const actor = requireActor(req, res);
   if (!actor) return;
-  const requestedTeamId = typeof req.query["teamId"] === "string" ? req.query["teamId"].trim() : "";
+  const requestedTeamId = parseRequestOriginalUrl(req.originalUrl).searchParams.get("teamId")?.trim() || "";
   const arenaGroupId = actor.role === "super_admin"
     ? normalizeAccessTeamId(requestedTeamId || GUTO_CORE_TEAM_ID)
     : normalizeAccessTeamId(actor.teamId);
@@ -204,7 +205,7 @@ coachRankingsRouter.get("/rankings", sendRankings);
 
 // GET /guto/coach/students
 coachRouter.get("/students", (req: Request, res: Response) => {
-  const includeArchived = req.query.includeArchived === "true";
+  const includeArchived = parseRequestOriginalUrl(req.originalUrl).searchParams.get("includeArchived") === "true";
   const actor = requireActor(req, res);
   if (!actor) return;
   
