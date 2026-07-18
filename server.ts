@@ -26,7 +26,7 @@ import {
 } from "./exercise-catalog.js";
 import { sanitizeDisplayName } from "./server-utils.js";
 import { generateWorkoutPoster } from "./src/poster.js";
-import { initStorage, uploadImage, deleteImage, signImageUrl, verifyImageSignature } from "./src/storage.js";
+import { initStorage, uploadImage, deleteImage, readStoredImage, signImageUrl, verifyImageSignature } from "./src/storage.js";
 import {
   awardArenaXp,
   getWeeklyRanking,
@@ -793,7 +793,7 @@ const uploadsDir = process.env.VERCEL
   ? path.join("/tmp", "guto", "validation-images")
   : path.join(process.cwd(), "tmp", "validation-images");
 if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
-app.get("/uploads/validation-images/:filename", (req, res) => {
+app.get("/uploads/validation-images/:filename", async (req, res) => {
   const filename = String(req.params.filename || "");
   const resolved = path.resolve(uploadsDir, filename);
   // Path-traversal guard (belt-and-suspenders; :filename não cruza '/').
@@ -803,8 +803,15 @@ app.get("/uploads/validation-images/:filename", (req, res) => {
   if (!verifyImageSignature(filename, req.query.exp, req.query.sig)) {
     return res.status(403).end();
   }
-  if (!existsSync(resolved)) return res.status(404).end();
-  return res.sendFile(resolved);
+  if (existsSync(resolved)) return res.sendFile(resolved);
+  try {
+    const stored = await readStoredImage(filename);
+    if (!stored) return res.status(404).end();
+    return res.type("jpg").send(stored);
+  } catch (error) {
+    console.warn("[GUTO] validation image read failed:", error);
+    return res.status(503).end();
+  }
 });
 
 app.get("/health", (_req, res) => {

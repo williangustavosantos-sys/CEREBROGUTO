@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, writeFileSync, unlinkSync } from "fs";
 import path from "path";
 import { createHmac, timingSafeEqual } from "crypto";
 import { v2 as cloudinary } from "cloudinary";
+import { Redis } from "@upstash/redis";
 import { config } from "./config.js";
 
 const UPLOADS_DIR = process.env.VERCEL
@@ -11,11 +12,13 @@ const URL_PREFIX = "/uploads/validation-images";
 
 // As selfies de validação são dado pessoal sensível.
 //
-// Dois backends, mesma interface:
+// Três backends, mesma interface:
 //  • PERSISTENTE (produção) — Cloudinary, quando há credenciais. Os ativos sobem
 //    como `type:"authenticated"` (privados) e são entregues por URL ASSINADA
 //    (infalsificável sem o segredo do Cloudinary), que funciona em <img src> e
 //    NÃO some no redeploy do Render. Este é o caminho de produção (fecha o B02).
+//  • PERSISTENTE (Vercel sem Cloudinary) — Redis já soberano no produto. Os bytes
+//    ficam numa chave separada com TTL e continuam privados pela mesma URL HMAC.
 //  • LOCAL (dev/teste/beta-sem-infra) — disco em tmp/, servido pela rota interna
 //    com URL assinada por HMAC (ver signImageUrl/verifyImageSignature). O disco do
 //    Render é EFÊMERO: este caminho NÃO deve ser usado em produção.
@@ -23,7 +26,40 @@ const URL_PREFIX = "/uploads/validation-images";
 // O driver é decidido por chamada a partir do ambiente — sem credenciais
 // Cloudinary, cai no disco local automaticamente. Falha de upload propaga o erro
 // (a rota de validação faz rollback e NÃO credita XP — nunca finge sucesso).
-const SIGN_TTL_MS = 180 * 24 * 60 * 60 * 1000; // 180d — só vale para o disco local (efêmero)
+const SIGN_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+const REDIS_TTL_SECONDS = Math.floor(SIGN_TTL_MS / 1000);
+const REDIS_KEY_PREFIX = "guto:validation-image:v1:";
+
+type ImageRedisClient = {
+  get: (key: string) => Promise<unknown>;
+  set: (key: string, value: unknown, options?: { ex: number }) => Promise<unknown>;
+  del: (key: string) => Promise<unknown>;
+};
+
+let imageRedisClient: ImageRedisClient | null = null;
+let imageRedisClientOverrideForTests: ImageRedisClient | null | undefined;
+
+function imageRedisKey(filename: string): string {
+  return `${REDIS_KEY_PREFIX}${encodeURIComponent(filename)}`;
+}
+
+function getImageRedisClient(): ImageRedisClient | null {
+  if (imageRedisClientOverrideForTests !== undefined) return imageRedisClientOverrideForTests;
+  if (process.env.NODE_ENV === "test" || !process.env.VERCEL) return null;
+  if (imageRedisClient) return imageRedisClient;
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return null;
+  imageRedisClient = new Redis({ url, token }) as unknown as ImageRedisClient;
+  return imageRedisClient;
+}
+
+export function setImageStorageRedisClientForTests(client: ImageRedisClient | null | undefined): void {
+  if (process.env.NODE_ENV !== "test" && process.env.GUTO_DISABLE_REDIS_FOR_TESTS !== "1") {
+    throw new Error("Image Redis test override is only available in tests.");
+  }
+  imageRedisClientOverrideForTests = client;
+}
 
 const CLOUDINARY_FOLDER = (process.env.CLOUDINARY_FOLDER || "guto/validation").replace(/^\/+|\/+$/g, "");
 
@@ -159,9 +195,24 @@ export async function uploadImage(buffer: Buffer, filename: string): Promise<str
     });
   }
 
+  const redis = getImageRedisClient();
+  if (redis) {
+    await redis.set(imageRedisKey(filename), buffer.toString("base64"), { ex: REDIS_TTL_SECONDS });
+    return `${URL_PREFIX}/${filename}`;
+  }
+
   const filePath = path.join(UPLOADS_DIR, filename);
   writeFileSync(filePath, buffer);
   return `${URL_PREFIX}/${filename}`;
+}
+
+/** Recupera uma imagem privada persistida no Redis serverless. */
+export async function readStoredImage(filename: string): Promise<Buffer | null> {
+  const redis = getImageRedisClient();
+  if (!redis) return null;
+  const encoded = await redis.get(imageRedisKey(filename));
+  if (typeof encoded !== "string" || !encoded) return null;
+  return Buffer.from(encoded, "base64");
 }
 
 export async function deleteImage(url: string): Promise<void> {
@@ -179,6 +230,8 @@ export async function deleteImage(url: string): Promise<void> {
   }
   // Local — remove o arquivo do disco.
   const filename = url.replace(`${URL_PREFIX}/`, "").split("?")[0];
+  const redis = getImageRedisClient();
+  if (redis) await redis.del(imageRedisKey(filename));
   const resolved = path.resolve(UPLOADS_DIR, filename);
   // Guard against path traversal
   if (!resolved.startsWith(UPLOADS_DIR + path.sep)) return;
