@@ -1,6 +1,8 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { randomUUID } from "node:crypto";
+import { Redis } from "@upstash/redis";
 import { config } from "./config.js";
 import type { GutoEvolutionStage } from "./guto-evolution.js";
 
@@ -36,14 +38,14 @@ export interface ArenaXpEvent {
   id: string;
   userId: string;
   arenaGroupId: string;
-  type: "workout_validated" | "reduced_mission_validated" | "bonus" | "miss_penalty";
+  type: "workout_validated" | "reduced_mission_validated" | "workout_completion_delta" | "bonus" | "miss_penalty";
   xp: number;
   workoutFocus?: string;
   sourceValidationId?: string;
   createdAt: string;
 }
 
-interface ArenaStore {
+export interface ArenaStore {
   profiles: Record<string, ArenaProfile>;
   events: ArenaXpEvent[];
   schemaVersion?: number;
@@ -92,31 +94,99 @@ export function migrateArenaStoreToCurrentSchema(store: ArenaStore, now: Date = 
 }
 
 // ─── In-memory cache ──────────────────────────────────────────────────────────
-let memCache: ArenaStore = { profiles: {}, events: [] };
+let memCache: ArenaStore = { profiles: {}, events: [], schemaVersion: ARENA_STORE_SCHEMA_VERSION };
 
 // ─── Redis helpers ────────────────────────────────────────────────────────────
-function useRedis(): boolean {
-  return Boolean(config.upstashRedisUrl && config.upstashRedisToken);
-}
-
-async function redisGet(key: string): Promise<string | null> {
-  const res = await fetch(`${config.upstashRedisUrl}/get/${key}`, {
-    headers: { Authorization: `Bearer ${config.upstashRedisToken}` },
-  });
-  if (!res.ok) return null;
-  const data = (await res.json()) as { result: string | null };
-  return data.result;
-}
-
-async function redisSet(key: string, value: string): Promise<void> {
-  await fetch(`${config.upstashRedisUrl}/set/${key}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${config.upstashRedisToken}` },
-    body: value,
-  });
-}
-
 const REDIS_KEY = "guto:arena";
+const REDIS_WRITE_LOCK_KEY = "guto:arena:write-lock:v1";
+const REDIS_WRITE_LOCK_TTL_MS = 15_000;
+const REDIS_WRITE_LOCK_WAIT_MS = 20_000;
+
+type ArenaRedisClient = {
+  get: (key: string) => Promise<unknown>;
+  set: (key: string, value: unknown, options?: { nx: true; px: number }) => Promise<unknown>;
+  eval: (script: string, keys: string[], args: string[]) => Promise<unknown>;
+};
+
+let redisClient: ArenaRedisClient | null = null;
+let redisClientOverrideForTests: ArenaRedisClient | null | undefined;
+
+function getRedisClient(): ArenaRedisClient | null {
+  if (redisClientOverrideForTests !== undefined) return redisClientOverrideForTests;
+  // Tests must never touch the production database, even when dotenv loaded it.
+  if (process.env.NODE_ENV === "test" || process.env.GUTO_DISABLE_REDIS_FOR_TESTS === "1") return null;
+  if (redisClient) return redisClient;
+  if (!config.upstashRedisUrl || !config.upstashRedisToken) return null;
+  redisClient = new Redis({
+    url: config.upstashRedisUrl,
+    token: config.upstashRedisToken,
+  }) as unknown as ArenaRedisClient;
+  return redisClient;
+}
+
+export function setArenaStoreRedisClientForTests(client: ArenaRedisClient | null | undefined): void {
+  if (process.env.NODE_ENV !== "test" && process.env.GUTO_DISABLE_REDIS_FOR_TESTS !== "1") {
+    throw new Error("Arena Redis test override is only available in tests.");
+  }
+  redisClientOverrideForTests = client;
+}
+
+function useRedis(): boolean {
+  return getRedisClient() !== null;
+}
+
+function cloneStore(store: ArenaStore): ArenaStore {
+  return JSON.parse(JSON.stringify(store)) as ArenaStore;
+}
+
+function parseRedisStore(raw: unknown): ArenaStore | null {
+  if (!raw) return null;
+  let parsed: unknown = raw;
+  if (typeof parsed === "string") parsed = JSON.parse(parsed);
+  if (typeof parsed === "string") parsed = JSON.parse(parsed);
+  if (!parsed || typeof parsed !== "object" || !("profiles" in parsed)) return null;
+  return migrateArenaStoreToCurrentSchema(parsed as ArenaStore);
+}
+
+function writeLocalSnapshot(store: ArenaStore): void {
+  memCache = store;
+  try {
+    fs.mkdirSync(path.dirname(ARENA_STORE_PATH), { recursive: true });
+    fs.writeFileSync(ARENA_STORE_PATH, JSON.stringify(store, null, 2));
+  } catch {
+    // Redis/memCache remain authoritative in serverless production.
+  }
+}
+
+function waitFor(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function acquireRedisWriteLock(redis: ArenaRedisClient): Promise<() => Promise<void>> {
+  const token = randomUUID();
+  const deadline = Date.now() + REDIS_WRITE_LOCK_WAIT_MS;
+  while (Date.now() < deadline) {
+    const acquired = await redis.set(REDIS_WRITE_LOCK_KEY, token, {
+      nx: true,
+      px: REDIS_WRITE_LOCK_TTL_MS,
+    });
+    if (acquired === "OK") {
+      return async () => {
+        try {
+          await redis.eval(
+            'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end',
+            [REDIS_WRITE_LOCK_KEY],
+            [token]
+          );
+        } catch (error) {
+          console.warn("[GUTO] Failed to release Redis arena write lock:", error);
+        }
+      };
+    }
+    await waitFor(50);
+  }
+  throw new Error("Timed out waiting for the Redis arena write lock.");
+}
 
 // ─── Async store (Redis → file) ───────────────────────────────────────────────
 
@@ -125,51 +195,29 @@ const REDIS_KEY = "guto:arena";
  * Warms up memCache so subsequent sync reads work correctly after a cold start.
  */
 export async function readArenaStoreAsync(): Promise<ArenaStore> {
-  if (useRedis()) {
+  await arenaWriteChain;
+  const redis = getRedisClient();
+  if (redis) {
     try {
-      const raw = await redisGet(REDIS_KEY);
-      if (raw) {
-        let parsed = JSON.parse(raw);
-        if (typeof parsed === "string") parsed = JSON.parse(parsed);
-        if (parsed && typeof parsed === "object" && "profiles" in parsed) {
-          const store = parsed as ArenaStore;
-          const previousVersion = store.schemaVersion ?? 1;
-          memCache = migrateArenaStoreToCurrentSchema(store);
-          if (previousVersion < ARENA_STORE_SCHEMA_VERSION) {
-            await redisSet(REDIS_KEY, JSON.stringify(memCache));
-          }
-          return memCache;
-        }
+      const store = parseRedisStore(await redis.get(REDIS_KEY));
+      if (store) {
+        writeLocalSnapshot(store);
+        return memCache;
       }
-    } catch {
+    } catch (error) {
+      console.warn("[GUTO] Redis arena read failed, falling back to local snapshot:", error);
       // fall through to file
     }
   }
   try {
     if (fs.existsSync(ARENA_STORE_PATH)) {
       const fromFile = JSON.parse(fs.readFileSync(ARENA_STORE_PATH, "utf-8")) as ArenaStore;
-      memCache = migrateArenaStoreToCurrentSchema(fromFile);
+      writeLocalSnapshot(migrateArenaStoreToCurrentSchema(fromFile));
     }
   } catch {
     // ignore — return whatever is in memCache
   }
   return memCache;
-}
-
-async function writeArenaStoreAsync(store: ArenaStore): Promise<void> {
-  if (useRedis()) {
-    try {
-      await redisSet(REDIS_KEY, JSON.stringify(store));
-    } catch {
-      // fall through to file
-    }
-  }
-  try {
-    fs.mkdirSync(path.dirname(ARENA_STORE_PATH), { recursive: true });
-    fs.writeFileSync(ARENA_STORE_PATH, JSON.stringify(store, null, 2));
-  } catch {
-    // ignore — at minimum data lives in memCache
-  }
 }
 
 // ─── Sync store (memCache → file fallback) ────────────────────────────────────
@@ -203,55 +251,76 @@ export function readArenaStore(): ArenaStore {
 }
 
 export function writeArenaStore(store: ArenaStore): void {
-  memCache = store;
-  // Write file synchronously so any in-process sync reads see the update instantly
-  ensureStoreFile();
-  try {
-    fs.writeFileSync(ARENA_STORE_PATH, JSON.stringify(store, null, 2));
-  } catch {
-    // ignore — memCache is the source of truth while Redis is configured
+  const next = migrateArenaStoreToCurrentSchema(store);
+  writeLocalSnapshot(next);
+  // Compatibility path for synchronous unit tests and local tooling. Production
+  // request handlers use writeArenaStoreDurably/mutateArenaStoreAsync and await.
+  if (useRedis()) {
+    void writeArenaStoreDurably(next).catch((error) =>
+      console.warn("[GUTO] Redis arena compatibility write failed:", error)
+    );
   }
-  // Fire-and-forget async write to Redis (same pattern as user-access-store)
-  void writeArenaStoreAsync(store).catch((err) =>
-    console.warn("[GUTO] Redis arena write failed:", err)
-  );
 }
 
-// ─── Anti-clobber: hidratação no boot + escrita por-mutação serializada ───────
-// Bug crítico (o arena foi de 61 perfis p/ 1 num cold-start): saveArenaProfile
-// lia o store vazio na janela do bootstrap e gravava 1 perfil por cima de TODOS
-// no Redis (writeArenaStore fire-and-forget). Mesma classe do user-access/memory.
-// Correção: grava SERIALIZADO e só DEPOIS da hidratação, RE-APLICANDO a mutação
-// (idempotente) sobre o store hidratado. Nunca apaga os outros perfis.
-let arenaHydrated = false;
-let arenaHydrationPromise: Promise<void> | null = null;
-function ensureArenaHydrated(): Promise<void> {
-  if (arenaHydrated || !useRedis()) return Promise.resolve();
-  if (!arenaHydrationPromise) {
-    arenaHydrationPromise = readArenaStoreAsync()
-      .then(() => { arenaHydrated = true; })
-      .catch(() => { arenaHydrationPromise = null; });
-  }
-  return arenaHydrationPromise;
-}
-
+// ─── Cross-instance durable mutations ───────────────────────────────────────
+// Every production mutation acquires a Redis lease, re-reads the latest whole
+// store while holding it, applies exactly one mutation, and awaits SET before
+// the HTTP request may complete. This prevents both serverless freeze loss and
+// last-writer-wins clobber between warm instances.
 let arenaWriteChain: Promise<void> = Promise.resolve();
-function persistArenaMutation(mutate: (store: ArenaStore) => void): void {
-  mutate(memCache);
-  ensureStoreFile();
-  try { fs.writeFileSync(ARENA_STORE_PATH, JSON.stringify(memCache, null, 2)); } catch { /* memCache é a fonte */ }
-  if (!useRedis()) return;
-  arenaWriteChain = arenaWriteChain
-    .then(async () => {
-      await ensureArenaHydrated();
-      if (!arenaHydrated) return; // Redis indisponível: não arrisca clobber
-      mutate(memCache);
-      await redisSet(REDIS_KEY, JSON.stringify(memCache));
-      try { fs.writeFileSync(ARENA_STORE_PATH, JSON.stringify(memCache, null, 2)); } catch { /* ok */ }
-    })
-    .catch((err) => {
-      console.warn("[GUTO] Redis arena write failed (async mutation chain):", err);
-    });
+let arenaHydrationPromise: Promise<ArenaStore> | null = null;
+export function mutateArenaStoreAsync<T>(mutate: (store: ArenaStore) => T): Promise<T> {
+  const operation = arenaWriteChain.then(async () => {
+    // A boot read may still be in flight on a cold instance. Waiting prevents
+    // its older snapshot from overwriting memCache after this durable commit.
+    if (arenaHydrationPromise) {
+      await arenaHydrationPromise;
+      arenaHydrationPromise = null;
+    }
+    const redis = getRedisClient();
+    if (!redis) {
+      const next = cloneStore(readArenaStore());
+      const result = mutate(next);
+      next.schemaVersion = ARENA_STORE_SCHEMA_VERSION;
+      writeLocalSnapshot(next);
+      return result;
+    }
+
+    const release = await acquireRedisWriteLock(redis);
+    try {
+      const latest = parseRedisStore(await redis.get(REDIS_KEY)) ?? {
+        profiles: {},
+        events: [],
+        schemaVersion: ARENA_STORE_SCHEMA_VERSION,
+      };
+      const next = cloneStore(latest);
+      const result = mutate(next);
+      next.schemaVersion = ARENA_STORE_SCHEMA_VERSION;
+      const wrote = await redis.set(REDIS_KEY, JSON.stringify(next));
+      if (wrote !== "OK") throw new Error("Redis arena SET did not return OK.");
+      writeLocalSnapshot(next);
+      return result;
+    } finally {
+      await release();
+    }
+  });
+
+  arenaWriteChain = operation.then(
+    () => undefined,
+    (error) => {
+      console.warn("[GUTO] Redis arena durable mutation failed:", error);
+    }
+  );
+  return operation;
+}
+
+export function writeArenaStoreDurably(store: ArenaStore): Promise<void> {
+  const snapshot = cloneStore(store);
+  return mutateArenaStoreAsync((current) => {
+    current.profiles = snapshot.profiles;
+    current.events = snapshot.events;
+    current.schemaVersion = ARENA_STORE_SCHEMA_VERSION;
+  });
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -262,21 +331,16 @@ export function getArenaProfile(userId: string): ArenaProfile | undefined {
 }
 
 export function saveArenaProfile(profile: ArenaProfile): void {
-  persistArenaMutation((store) => {
-    store.profiles[profile.userId] = profile;
-  });
+  const store = readArenaStore();
+  store.profiles[profile.userId] = profile;
+  writeArenaStore(store);
 }
 
 export function appendArenaEvent(event: ArenaXpEvent): void {
-  persistArenaMutation((store) => {
-    // idempotente (a re-aplicação pós-hidratação roda 2x): só empurra 1 vez por id
-    if (!store.events.some((e) => e.id === event.id)) {
-      store.events.push(event);
-      if (store.events.length > 5000) {
-        store.events = store.events.slice(-4000);
-      }
-    }
-  });
+  const store = readArenaStore();
+  if (!store.events.some((e) => e.id === event.id)) store.events.push(event);
+  if (store.events.length > 5000) store.events = store.events.slice(-4000);
+  writeArenaStore(store);
 }
 
 export function getProfilesByGroup(arenaGroupId: string): ArenaProfile[] {
@@ -289,8 +353,6 @@ export function getAllArenaProfiles(): ArenaProfile[] {
   return Object.values(store.profiles);
 }
 
-// ─── Bootstrap: hidrata do Redis no init (e trava writes até completar) ───────
-// Sem isso, após um cold start do Render (file system zerado), readArenaStore()
-// devolveria perfis vazios mesmo com o Redis cheio — e um write nessa janela
-// apagava todos os perfis (clobber). ensureArenaHydrated também serve de gate.
-void ensureArenaHydrated();
+// Warm reads for legacy synchronous consumers. Durable request paths still await
+// a fresh Redis read or mutation, so this optimization is never a correctness gate.
+arenaHydrationPromise = readArenaStoreAsync();

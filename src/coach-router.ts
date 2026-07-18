@@ -11,9 +11,8 @@ import {
 } from "./user-access-store.js";
 import {
   getArenaProfile,
-  saveArenaProfile,
-  readArenaStore,
-  writeArenaStore,
+  readArenaStoreAsync,
+  mutateArenaStoreAsync,
 } from "./arena-store.js";
 import { getAvatarStage, getWeeklyRanking, getMonthlyRanking, getGlobalIndividualRanking, DEFAULT_ARENA_GROUP } from "./arena.js";
 import {
@@ -50,6 +49,9 @@ export const coachRankingsRouter = express.Router();
 // ─── Auth middleware ───────────────────────────────────────────────────────────
 
 coachRouter.use(requireCoachOrAdmin);
+coachRouter.use((_req, _res, next) => {
+  void readArenaStoreAsync().then(() => next(), next);
+});
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -172,10 +174,10 @@ async function deleteUserEverywhere(userId: string): Promise<void> {
   await updateUserMemoryAtomically(userId, () => null);
 
   // 2. Arena store (filesystem)
-  const arenaStore = readArenaStore();
-  delete arenaStore.profiles[userId];
-  arenaStore.events = arenaStore.events.filter((e) => e.userId !== userId);
-  writeArenaStore(arenaStore);
+  await mutateArenaStoreAsync((arenaStore) => {
+    delete arenaStore.profiles[userId];
+    arenaStore.events = arenaStore.events.filter((e) => e.userId !== userId);
+  });
 
   // 3. User access record
   deleteUserAccessHard(userId);
@@ -184,13 +186,14 @@ async function deleteUserEverywhere(userId: string): Promise<void> {
   await deleteDietPlan(userId);
 }
 
-function sendRankings(req: Request, res: Response): void {
+async function sendRankings(req: Request, res: Response): Promise<void> {
   const actor = requireActor(req, res);
   if (!actor) return;
   const requestedTeamId = parseRequestOriginalUrl(req.originalUrl).searchParams.get("teamId")?.trim() || "";
   const arenaGroupId = actor.role === "super_admin"
     ? normalizeAccessTeamId(requestedTeamId || GUTO_CORE_TEAM_ID)
     : normalizeAccessTeamId(actor.teamId);
+  await readArenaStoreAsync();
   const weekly = getWeeklyRanking(arenaGroupId);
   const monthly = getMonthlyRanking(arenaGroupId);
   const individual = getGlobalIndividualRanking();
@@ -269,7 +272,12 @@ coachRouter.patch("/student/:userId", express.json(), async (req: Request, res: 
     const arena = getArenaProfile(userId);
     if (arena) {
       arena.displayName = name.trim();
-      saveArenaProfile(arena);
+      await mutateArenaStoreAsync((arenaStore) => {
+        const current = arenaStore.profiles[userId];
+        if (!current) return;
+        current.displayName = arena.displayName;
+        current.updatedAt = new Date().toISOString();
+      });
     }
   }
 
@@ -354,7 +362,11 @@ coachRouter.post("/student/:userId/reset", requireAdmin, express.json(), async (
       arena.lastWorkoutValidatedAt = null;
     }
     arena.updatedAt = new Date().toISOString();
-    saveArenaProfile(arena);
+    await mutateArenaStoreAsync((arenaStore) => {
+      const current = arenaStore.profiles[userId];
+      if (!current) return;
+      Object.assign(current, arena);
+    });
   }
 
   if (scope === "validationHistory" || scope === "all") {
@@ -509,7 +521,10 @@ coachRouter.get("/rankings", sendRankings);
 coachRouter.post("/nuke-all", requireSuperAdmin, async (_req: Request, res: Response) => {
   try {
     await writeMemoryStoreAsync({});
-    writeArenaStore({ profiles: {}, events: [] });
+    await mutateArenaStoreAsync((arenaStore) => {
+      arenaStore.profiles = {};
+      arenaStore.events = [];
+    });
     writeUserAccessStoreRaw({ users: {} });
     res.json({ ok: true, message: "Todos os dados foram apagados." });
   } catch (err) {

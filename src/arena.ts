@@ -6,6 +6,8 @@ import {
   appendArenaEvent,
   getProfilesByGroup,
   getAllArenaProfiles,
+  mutateArenaStoreAsync,
+  type ArenaStore,
 } from "./arena-store.js";
 import { getEffectiveUserAccess } from "./user-access-store.js";
 import {
@@ -78,15 +80,24 @@ export function projectPeriodCounters(
   return { weeklyXp, monthlyXp, validatedWorkoutsWeek, validatedWorkoutsMonth };
 }
 
-function buildUniquePairName(displayName: string, arenaGroupId: string, ownUserId: string): string {
+function buildUniquePairNameFromProfiles(
+  displayName: string,
+  arenaGroupId: string,
+  ownUserId: string,
+  profiles: ArenaProfile[]
+): string {
   const base = `GUTO & ${displayName.toUpperCase()}`;
-  const existing = getProfilesByGroup(arenaGroupId).filter((p) => p.userId !== ownUserId);
+  const existing = profiles.filter((p) => p.arenaGroupId === arenaGroupId && p.userId !== ownUserId);
   if (!existing.some((p) => p.pairName === base)) return base;
   for (let n = 2; n <= 99; n++) {
     const candidate = `${base} #${n}`;
     if (!existing.some((p) => p.pairName === candidate)) return candidate;
   }
   return base;
+}
+
+function buildUniquePairName(displayName: string, arenaGroupId: string, ownUserId: string): string {
+  return buildUniquePairNameFromProfiles(displayName, arenaGroupId, ownUserId, getAllArenaProfiles());
 }
 
 function normalizeArenaDisplayName(displayName: string, userId: string): string {
@@ -126,6 +137,37 @@ export function createArenaProfileIfNeeded(
   return profile;
 }
 
+function createArenaProfileInStore(
+  store: ArenaStore,
+  userId: string,
+  displayName: string,
+  arenaGroupId: string
+): ArenaProfile {
+  const existing = store.profiles[userId];
+  if (existing) return existing;
+  const now = new Date().toISOString();
+  const safeDisplayName = normalizeArenaDisplayName(displayName, userId);
+  const profile: ArenaProfile = {
+    userId,
+    displayName: safeDisplayName,
+    pairName: buildUniquePairNameFromProfiles(safeDisplayName, arenaGroupId, userId, Object.values(store.profiles)),
+    arenaGroupId,
+    avatarStage: "baby",
+    totalXp: 0,
+    weeklyXp: 0,
+    monthlyXp: 0,
+    validatedWorkoutsTotal: 0,
+    validatedWorkoutsWeek: 0,
+    validatedWorkoutsMonth: 0,
+    currentStreak: 0,
+    lastWorkoutValidatedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  store.profiles[userId] = profile;
+  return profile;
+}
+
 export function syncArenaDisplayName(
   userId: string,
   displayName: string,
@@ -145,11 +187,33 @@ export function syncArenaDisplayName(
   return profile;
 }
 
+export function syncArenaDisplayNameAsync(
+  userId: string,
+  displayName: string,
+  arenaGroupId: string = DEFAULT_ARENA_GROUP
+): Promise<ArenaProfile> {
+  return mutateArenaStoreAsync((store) => {
+    const safeDisplayName = normalizeArenaDisplayName(displayName, userId);
+    const profile = createArenaProfileInStore(store, userId, safeDisplayName, arenaGroupId);
+    if (profile.displayName !== safeDisplayName || !profile.pairName.includes(safeDisplayName.toUpperCase())) {
+      profile.displayName = safeDisplayName;
+      profile.pairName = buildUniquePairNameFromProfiles(
+        safeDisplayName,
+        arenaGroupId,
+        userId,
+        Object.values(store.profiles)
+      );
+      profile.updatedAt = new Date().toISOString();
+    }
+    return { ...profile };
+  });
+}
+
 export interface AwardXpOptions {
   userId: string;
   displayName: string;
   arenaGroupId?: string;
-  type: "workout_validated" | "reduced_mission_validated" | "bonus" | "miss_penalty";
+  type: "workout_validated" | "reduced_mission_validated" | "workout_completion_delta" | "bonus" | "miss_penalty";
   xp: number;
   workoutFocus?: string;
   sourceValidationId?: string;
@@ -162,6 +226,102 @@ export interface AwardXpResult {
   monthlyXp: number;
   avatarStage: AvatarStage;
   leveledUp: boolean;
+}
+
+function applyArenaXpAward(
+  store: ArenaStore,
+  options: AwardXpOptions,
+  now: Date = new Date()
+): AwardXpResult {
+  const {
+    userId,
+    displayName,
+    arenaGroupId = DEFAULT_ARENA_GROUP,
+    type,
+    xp,
+    workoutFocus,
+    sourceValidationId,
+  } = options;
+
+  const existingEvent = sourceValidationId
+    ? store.events.find((event) => event.userId === userId && event.sourceValidationId === sourceValidationId)
+    : undefined;
+  const existingProfile = store.profiles[userId];
+  if (existingEvent && existingProfile) {
+    return {
+      xpAwarded: 0,
+      totalXp: existingProfile.totalXp,
+      weeklyXp: existingProfile.weeklyXp,
+      monthlyXp: existingProfile.monthlyXp,
+      avatarStage: existingProfile.avatarStage,
+      leveledUp: false,
+    };
+  }
+
+  const profile = createArenaProfileInStore(store, userId, displayName, arenaGroupId);
+  const previousStage = profile.avatarStage;
+  const periodAnchor = profile.lastXpAt ?? profile.lastWorkoutValidatedAt;
+  if (periodAnchor) {
+    const lastDate = new Date(periodAnchor);
+    if (!isSameWeek(lastDate, now)) {
+      profile.weeklyXp = 0;
+      profile.validatedWorkoutsWeek = 0;
+    }
+    if (!isSameMonth(lastDate, now)) {
+      profile.monthlyXp = 0;
+      profile.validatedWorkoutsMonth = 0;
+    }
+  }
+
+  profile.totalXp = Math.max(0, profile.totalXp + xp);
+  // Only the Pact's initial bonus is excluded. A completion delta after an
+  // adapted mission belongs to the competitive period but must not count a
+  // second validated presence.
+  if (type !== "bonus") {
+    profile.weeklyXp = Math.max(0, profile.weeklyXp + xp);
+    profile.monthlyXp = Math.max(0, profile.monthlyXp + xp);
+  }
+
+  const isValidatedWorkout = type === "workout_validated" || type === "reduced_mission_validated";
+  if (isValidatedWorkout) {
+    profile.validatedWorkoutsTotal += 1;
+    profile.validatedWorkoutsWeek += 1;
+    profile.validatedWorkoutsMonth += 1;
+    if (profile.lastWorkoutValidatedAt) {
+      const lastDate = new Date(profile.lastWorkoutValidatedAt);
+      const diffDays = Math.floor((now.getTime() - lastDate.getTime()) / (1000 * 60 * 60 * 24));
+      profile.currentStreak = diffDays <= 1 ? profile.currentStreak + 1 : 1;
+    } else {
+      profile.currentStreak = 1;
+    }
+    profile.lastWorkoutValidatedAt = now.toISOString();
+  } else if (type === "miss_penalty") {
+    profile.currentStreak = 0;
+  }
+
+  profile.lastXpAt = now.toISOString();
+  profile.avatarStage = getAvatarStage(profile.totalXp);
+  profile.updatedAt = now.toISOString();
+  store.events.push({
+    id: crypto.randomUUID(),
+    userId,
+    arenaGroupId,
+    type,
+    xp,
+    workoutFocus,
+    sourceValidationId,
+    createdAt: now.toISOString(),
+  });
+  if (store.events.length > 5000) store.events = store.events.slice(-4000);
+
+  return {
+    xpAwarded: xp,
+    totalXp: profile.totalXp,
+    weeklyXp: profile.weeklyXp,
+    monthlyXp: profile.monthlyXp,
+    avatarStage: profile.avatarStage,
+    leveledUp: profile.avatarStage !== previousStage,
+  };
 }
 
 export function awardArenaXp(options: AwardXpOptions): AwardXpResult {
@@ -253,6 +413,10 @@ export function awardArenaXp(options: AwardXpOptions): AwardXpResult {
     avatarStage: profile.avatarStage,
     leveledUp: profile.avatarStage !== previousStage,
   };
+}
+
+export function awardArenaXpAsync(options: AwardXpOptions): Promise<AwardXpResult> {
+  return mutateArenaStoreAsync((store) => applyArenaXpAward(store, options));
 }
 
 // Returns i18n key — frontend translates via arenaStatusLabels map

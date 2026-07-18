@@ -29,13 +29,13 @@ import { sanitizeDisplayName } from "./server-utils.js";
 import { generateWorkoutPoster } from "./src/poster.js";
 import { initStorage, uploadImage, deleteImage, readStoredImage, signImageUrl, verifyImageSignature } from "./src/storage.js";
 import {
-  awardArenaXp,
+  awardArenaXpAsync,
   getWeeklyRanking,
   getMonthlyRanking,
   getIndividualRanking,
   getGlobalIndividualRanking,
   getMyArenaProfile,
-  syncArenaDisplayName,
+  syncArenaDisplayNameAsync,
   DEFAULT_ARENA_GROUP,
 } from "./src/arena.js";
 import { curateWorkout, getCandidatePool, hydrateCuratedExercises, type LocationMode as CuratorLocationMode } from "./src/workout-curator.js";
@@ -2054,27 +2054,21 @@ function appendXpEvent(memory: GutoMemory, type: XpEventType, amount: number, da
   return true;
 }
 
-function grantInitialXp(memory: GutoMemory) {
+async function grantInitialXp(memory: GutoMemory) {
   if (memory.initialXpGranted) return memory;
   // Mantém o evento datado para auditoria do saldo total. O Percurso exclui
   // `grant_initial_xp`, pois o Pacto é buffer e não presença validada.
   appendXpEvent(memory, "grant_initial_xp", 100);
   memory.initialXpGranted = true;
 
-  // Bug fix: os 100 XP iniciais também precisam ir pra Arena, senão o
-  // arenaProfile.totalXp começa em 0 e fica 100 atrás de memory.totalXp.
-  // Esse desync fazia o app mostrar "200 XP" no home mas "100" na Arena.
-  try {
-    awardArenaXp({
-      userId: memory.userId,
-      displayName: (memory as { name?: string }).name || memory.userId,
-      arenaGroupId: getUserArenaGroup(memory.userId),
-      type: "bonus",
-      xp: 100,
-    });
-  } catch {
-    // Não bloqueia o login se Arena falhar
-  }
+  await awardArenaXpAsync({
+    userId: memory.userId,
+    displayName: (memory as { name?: string }).name || memory.userId,
+    arenaGroupId: getUserArenaGroup(memory.userId),
+    type: "bonus",
+    xp: 100,
+    sourceValidationId: `${todayKey()}:grant_initial_xp`,
+  });
 
   return memory;
 }
@@ -2082,23 +2076,22 @@ function grantInitialXp(memory: GutoMemory) {
 // Ponto único de espelhamento memória→Arena: toda concessão de XP do ledger de
 // memória (xpEvents/totalXp) também atualiza o ledger da Arena (totalXp/weekly/
 // monthly), para os dois NUNCA divergirem. Era a causa do "Evoluir mostra X e a
-// Arena mostra Y para o mesmo XP". Nunca bloqueia o fluxo de memória.
-function mirrorXpToArena(
+// Arena mostra Y para o mesmo XP". A confirmação durável faz parte do commit:
+// falhar aqui precisa ser observável, nunca mascarado por um sucesso HTTP.
+async function mirrorXpToArena(
   memory: GutoMemory,
   type: "workout_validated" | "reduced_mission_validated" | "bonus" | "miss_penalty",
-  xp: number
+  xp: number,
+  sourceValidationId: string
 ) {
-  try {
-    awardArenaXp({
-      userId: memory.userId,
-      displayName: (memory as { name?: string }).name || memory.userId,
-      arenaGroupId: getUserArenaGroup(memory.userId),
-      type,
-      xp,
-    });
-  } catch {
-    // Arena nunca bloqueia o fluxo de memória.
-  }
+  await awardArenaXpAsync({
+    userId: memory.userId,
+    displayName: (memory as { name?: string }).name || memory.userId,
+    arenaGroupId: getUserArenaGroup(memory.userId),
+    type,
+    xp,
+    sourceValidationId,
+  });
 }
 
 function completeWorkout(memory: GutoMemory) {
@@ -2123,7 +2116,7 @@ function completeWorkout(memory: GutoMemory) {
   return memory;
 }
 
-function acceptAdaptedMission(memory: GutoMemory) {
+async function acceptAdaptedMission(memory: GutoMemory) {
   const day = todayKey();
   if (memory.trainedToday) return memory;
 
@@ -2134,7 +2127,7 @@ function acceptAdaptedMission(memory: GutoMemory) {
   // Missão adaptada (+50) também conta na Arena como presença reduzida validada,
   // senão Evoluir/Percurso mostram +50 e a Arena Semana/Mês/Individual ficam 0.
   if (appendXpEvent(memory, "accept_adapted_mission", 50, day)) {
-    mirrorXpToArena(memory, "reduced_mission_validated", 50);
+    await mirrorXpToArena(memory, "reduced_mission_validated", 50, `${day}:accept_adapted_mission`);
   }
   return memory;
 }
@@ -2145,7 +2138,7 @@ function addDaysToKey(day: string, amount: number) {
   return date.toISOString().slice(0, 10);
 }
 
-function applyDailyMissPenalty(memory: GutoMemory, day = todayKey()) {
+async function applyDailyMissPenalty(memory: GutoMemory, day = todayKey()) {
   const completedDays = new Set(memory.completedWorkoutDates || []);
   const adaptedDays = new Set(memory.adaptedMissionDates || []);
   if (completedDays.has(day) || adaptedDays.has(day)) return memory;
@@ -2157,20 +2150,20 @@ function applyDailyMissPenalty(memory: GutoMemory, day = todayKey()) {
   // Penalidade por falta (−20) também desce na Arena (Semana/Mês/Individual) e
   // quebra a streak; senão a Arena fica defasada do Evoluir/Percurso.
   if (appendXpEvent(memory, "apply_daily_miss_penalty", -20, day)) {
-    mirrorXpToArena(memory, "miss_penalty", -20);
+    await mirrorXpToArena(memory, "miss_penalty", -20, `${day}:apply_daily_miss_penalty`);
   }
   memory.streak = 0;
   return memory;
 }
 
-function applyPendingMissPenalties(memory: GutoMemory) {
+async function applyPendingMissPenalties(memory: GutoMemory) {
   if (!memory.initialXpGranted || !memory.lastActiveAt) return memory;
 
   const today = todayKey();
   let cursor = addDaysToKey(todayKey(new Date(memory.lastActiveAt)), 1);
 
   while (cursor < today) {
-    applyDailyMissPenalty(memory, cursor);
+    await applyDailyMissPenalty(memory, cursor);
     cursor = addDaysToKey(cursor, 1);
   }
 
@@ -11386,7 +11379,7 @@ app.get("/guto/memory", requireActiveUser, async (req, res) => {
     missedMissionDates: memory.missedMissionDates,
     xpEvents: memory.xpEvents,
   });
-  applyPendingMissPenalties(memory);
+  await applyPendingMissPenalties(memory);
   const penaltyChanged = JSON.stringify({
     totalXp: memory.totalXp,
     streak: memory.streak,
@@ -11395,7 +11388,7 @@ app.get("/guto/memory", requireActiveUser, async (req, res) => {
   }) !== beforePenaltyState;
 
   if (memory.name) {
-    syncArenaDisplayName(userId, memory.name, getUserArenaGroup(userId));
+    await syncArenaDisplayNameAsync(userId, memory.name, getUserArenaGroup(userId));
   }
   if (penaltyChanged || legacyPhoneRemoved) {
     saveMemory(memory);
@@ -11749,7 +11742,7 @@ async function runFreeFieldsResolution(userId: string, memorySnapshot: GutoMemor
 app.post("/guto/memory", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
   await readMemoryStoreAsync();
-  const memory = applyPendingMissPenalties(getMemory(userId));
+  const memory = await applyPendingMissPenalties(getMemory(userId));
   const changedFields = new Set<string>();
 
   const b = req.body;
@@ -11770,7 +11763,7 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
   // trainedToday is backend-derived from validated execution/completed dates.
   // Client booleans must not create or erase validated workout memory.
   if (b.xpEvent === "grant_initial_xp") {
-    grantInitialXp(memory);
+    await grantInitialXp(memory);
   } else if (b.xpEvent === "complete_daily_mission") {
     return res.status(409).json({
       error: "workout_validation_required",
@@ -11778,7 +11771,7 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
       message: "Treino só conta como feito depois da validação do backend.",
     });
   } else if (b.xpEvent === "accept_adapted_mission") {
-    acceptAdaptedMission(memory);
+    await acceptAdaptedMission(memory);
   }
   if (b.energyLast) memory.energyLast = b.energyLast;
   if (b.trainingSchedule === "today" || b.trainingSchedule === "tomorrow") {
@@ -11946,7 +11939,7 @@ app.post("/guto/memory", requireActiveUser, async (req, res) => {
     memory.resolvedFields = resolvedFields;
   }
   if (memory.name) {
-    syncArenaDisplayName(userId, memory.name, getUserArenaGroup(userId));
+    await syncArenaDisplayNameAsync(userId, memory.name, getUserArenaGroup(userId));
   }
   await flushMemoryStoreWrites();
   const responseMemory = getMemory(userId);
@@ -16569,13 +16562,13 @@ app.post("/guto/validate-workout", requireActiveUser, express.json({ limit: "15m
     // Award Arena XP — espelha EXATAMENTE o delta creditado na memória por
     // completeWorkout: se a missão adaptada já deu +50 hoje (e já contou como
     // presença reduzida na Arena), a validação completa o ciclo com +50 como
-    // bônus (sem recontar treino/streak); senão, +100 como treino validado.
+    // delta de conclusão (sem recontar treino/streak); senão, +100 como treino validado.
     // Mantém os dois ledgers idênticos no caso adaptada→treino no mesmo dia.
     const adaptedAlreadyToday = (memory.adaptedMissionDates || []).includes(todayKeyLocal);
     const arenaXpAmount = adaptedAlreadyToday ? 50 : XP_AMOUNT;
-    const arenaType = adaptedAlreadyToday ? ("bonus" as const) : ("workout_validated" as const);
+    const arenaType = adaptedAlreadyToday ? ("workout_completion_delta" as const) : ("workout_validated" as const);
     const arenaResult = hasSelfieEvidence
-      ? awardArenaXp({
+      ? await awardArenaXpAsync({
           userId,
           displayName: (memory as { name?: string }).name || userId,
           arenaGroupId: getUserArenaGroup(userId),
@@ -17212,38 +17205,38 @@ app.post("/guto/active-exercise", requireActiveUser, (req, res) => {
 // arenaGroupId is always derived from the authenticated user's own team.
 // Query-param override is intentionally rejected — prevents cross-team data leak.
 
-app.get("/guto/arena/weekly", requireActiveUser, (req, res) => {
+app.get("/guto/arena/weekly", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
   const arenaGroupId = getUserArenaGroup(userId);
   const memory = getMemory(userId);
-  syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
+  await syncArenaDisplayNameAsync(userId, memory.name || userId, arenaGroupId);
   res.json(getWeeklyRanking(arenaGroupId));
 });
 
-app.get("/guto/arena/monthly", requireActiveUser, (req, res) => {
+app.get("/guto/arena/monthly", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
   const arenaGroupId = getUserArenaGroup(userId);
   const memory = getMemory(userId);
-  syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
+  await syncArenaDisplayNameAsync(userId, memory.name || userId, arenaGroupId);
   res.json(getMonthlyRanking(arenaGroupId));
 });
 
 // Individual ranking é GLOBAL — todos os alunos do GUTO no mundo,
 // independente de Time. Apenas weekly/monthly ficam scoped por Time.
 // Conforme visão do produto: "Ranking individual global com todos os usuários do GUTO".
-app.get("/guto/arena/individual", requireActiveUser, (req, res) => {
+app.get("/guto/arena/individual", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
   const memory = getMemory(userId);
   // Mantém o display name do usuário sincronizado no contexto do próprio Time dele
-  syncArenaDisplayName(userId, memory.name || userId, getUserArenaGroup(userId));
+  await syncArenaDisplayNameAsync(userId, memory.name || userId, getUserArenaGroup(userId));
   res.json(getGlobalIndividualRanking());
 });
 
-app.get("/guto/arena/me", requireActiveUser, (req, res) => {
+app.get("/guto/arena/me", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
   const arenaGroupId = getUserArenaGroup(userId);
   const memory = getMemory(userId);
-  syncArenaDisplayName(userId, memory.name || userId, arenaGroupId);
+  await syncArenaDisplayNameAsync(userId, memory.name || userId, arenaGroupId);
   const profile = getMyArenaProfile(userId, arenaGroupId);
   if (!profile) {
     return res.status(404).json({ error: "Arena profile not found for this group" });

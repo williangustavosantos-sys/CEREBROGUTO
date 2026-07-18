@@ -42,10 +42,8 @@ import {
 import type { GutoTeamPlan } from "./team-plans.js";
 import {
   getArenaProfile,
-  saveArenaProfile,
-  readArenaStore,
-  writeArenaStore,
-  getAllArenaProfiles,
+  readArenaStoreAsync,
+  mutateArenaStoreAsync,
 } from "./arena-store.js";
 import { getAvatarStage, DEFAULT_ARENA_GROUP } from "./arena.js";
 import {
@@ -118,6 +116,9 @@ import {
 export const adminRouter = express.Router();
 
 adminRouter.use(requireCoachOrAdmin);
+adminRouter.use((_req, _res, next) => {
+  void readArenaStoreAsync().then(() => next(), next);
+});
 
 type PlanSource = "guto_generated" | "coach_manual" | "mixed";
 type LooseRecord = Record<string, any>;
@@ -623,10 +624,10 @@ async function updateMemoryFromStudentPatch(userId: string, patch: Partial<UserA
 export async function deleteStudentEverywhere(userId: string): Promise<void> {
   await updateUserMemoryAtomically(userId, () => null);
 
-  const arenaStore = readArenaStore();
-  delete arenaStore.profiles[userId];
-  arenaStore.events = arenaStore.events.filter((event) => event.userId !== userId);
-  writeArenaStore(arenaStore);
+  await mutateArenaStoreAsync((arenaStore) => {
+    delete arenaStore.profiles[userId];
+    arenaStore.events = arenaStore.events.filter((event) => event.userId !== userId);
+  });
 
   await deleteDietPlan(userId);
   await deleteUserAccessHardAsync(userId);
@@ -1192,9 +1193,10 @@ function dietHistory(userId: string) {
   return getLogs({ targetUserId: userId }).filter((log) => log.action.startsWith("diet_"));
 }
 
-function resetArenaAndMemory(userId: string, scope: ResetScope): void {
-  const arena = getArenaProfile(userId);
-  if (arena) {
+async function resetArenaAndMemory(userId: string, scope: ResetScope): Promise<void> {
+  await mutateArenaStoreAsync((arenaStore) => {
+    const arena = arenaStore.profiles[userId];
+    if (!arena) return;
     if (scope === "weekly" || scope === "all") {
       arena.weeklyXp = 0;
       arena.validatedWorkoutsWeek = 0;
@@ -1213,8 +1215,7 @@ function resetArenaAndMemory(userId: string, scope: ResetScope): void {
       arena.lastWorkoutValidatedAt = null;
     }
     arena.updatedAt = new Date().toISOString();
-    saveArenaProfile(arena);
-  }
+  });
 
   if (scope === "validationHistory" || scope === "all") {
     const memory = getMemory(userId);
@@ -1227,7 +1228,7 @@ function resetArenaAndMemory(userId: string, scope: ResetScope): void {
       memory.adaptedMissionDates = [];
       memory.missedMissionDates = [];
     }
-    saveMemory(memory);
+    await saveMemory(memory);
   }
 }
 
@@ -1753,7 +1754,7 @@ adminRouter.post("/students/:userId/reset", requireAdmin, asyncHandler(async (re
     res.status(400).json({ message: `scope deve ser um destes: ${validScopes.join(", ")}` });
     return;
   }
-  resetArenaAndMemory(student.userId, scope);
+  await resetArenaAndMemory(student.userId, scope);
   addLog({ action: "arena_reset", actorUserId: caller.userId, actorRole: caller.role, targetUserId: student.userId, metadata: { scope } });
   const updated = getUserAccess(student.userId)!;
   res.json({ student: buildStudentView(updated), scope });
@@ -2718,16 +2719,16 @@ adminRouter.get("/logs", asyncHandler(async (req, res) => {
 // alinhando-os com o buffer do Pacto já concedido na memória. Por contrato
 // canônico (AR-5/X-4), esse buffer não entra nos períodos semanal/mensal.
 adminRouter.post("/maintenance/backfill-arena-initial-xp", requireAdmin, asyncHandler(async (_req, res) => {
-  const profiles = getAllArenaProfiles();
   const fixed: Array<{ userId: string; before: number; after: number }> = [];
-  for (const profile of profiles) {
-    if (profile.totalXp < 100) {
-      const before = profile.totalXp;
-      profile.totalXp = profile.totalXp + 100;
-      profile.updatedAt = new Date().toISOString();
-      saveArenaProfile(profile);
-      fixed.push({ userId: profile.userId, before, after: profile.totalXp });
+  await mutateArenaStoreAsync((arenaStore) => {
+    for (const profile of Object.values(arenaStore.profiles)) {
+      if (profile.totalXp < 100) {
+        const before = profile.totalXp;
+        profile.totalXp += 100;
+        profile.updatedAt = new Date().toISOString();
+        fixed.push({ userId: profile.userId, before, after: profile.totalXp });
+      }
     }
-  }
+  });
   res.json({ fixedCount: fixed.length, fixed });
 }));
