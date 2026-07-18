@@ -75,6 +75,7 @@ import {
 } from "./diet-store.js";
 import { addLog, getLogs } from "./log-store.js";
 import { config } from "./config.js";
+import { parseRequestOriginalUrl } from "./http/request-url.js";
 import {
   createInvite,
   findInviteByUserId,
@@ -380,14 +381,14 @@ function queryNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function matchesStudentFilters(student: ReturnType<typeof buildStudentView>, req: Request): boolean {
-  const search = queryText(req.query.search).toLowerCase();
-  const coachId = queryText(req.query.coachId);
-  const gender = queryText(req.query.gender).toLowerCase();
-  const status = queryText(req.query.status);
-  const subscriptionStatus = queryText(req.query.subscriptionStatus);
-  const minAge = queryNumber(req.query.minAge);
-  const maxAge = queryNumber(req.query.maxAge);
+function matchesStudentFilters(student: ReturnType<typeof buildStudentView>, searchParams: URLSearchParams): boolean {
+  const search = queryText(searchParams.get("search")).toLowerCase();
+  const coachId = queryText(searchParams.get("coachId"));
+  const gender = queryText(searchParams.get("gender")).toLowerCase();
+  const status = queryText(searchParams.get("status"));
+  const subscriptionStatus = queryText(searchParams.get("subscriptionStatus"));
+  const minAge = queryNumber(searchParams.get("minAge"));
+  const maxAge = queryNumber(searchParams.get("maxAge"));
   const studentAge = typeof student.age === "number" ? student.age : null;
 
   if (search) {
@@ -414,10 +415,11 @@ function matchesStudentFilters(student: ReturnType<typeof buildStudentView>, req
 async function listManagedStudents(req: Request) {
   const actor = getRequestActorAccess(req)!;
   const allUsers = await getAllUserAccessAsync();
+  const searchParams = parseRequestOriginalUrl(req.originalUrl).searchParams;
   return getScopedUserAccessList(actor, allUsers)
     .filter((user) => user.role === "student")
     .map(buildStudentView)
-    .filter((student) => matchesStudentFilters(student, req));
+    .filter((student) => matchesStudentFilters(student, searchParams));
 }
 
 function setDaysFromNow(days: number): string {
@@ -1373,7 +1375,7 @@ adminRouter.post("/exercises/custom/:exerciseId/reject", requireAdmin, asyncHand
 adminRouter.get("/team/summary", asyncHandler(async (req, res) => {
   const actor = requireActor(req, res);
   if (!actor) return;
-  const requestedTeamId = queryText(req.query.teamId);
+  const requestedTeamId = queryText(parseRequestOriginalUrl(req.originalUrl).searchParams.get("teamId"));
   const teamId = actor.role === "super_admin"
     ? requestedTeamId || normalizeAccessTeamId(actor.teamId) || GUTO_CORE_TEAM_ID
     : normalizeAccessTeamId(actor.teamId);
@@ -2680,7 +2682,7 @@ adminRouter.post("/students/:userId/invite/regenerate", asyncHandler(async (req,
 adminRouter.get("/logs", asyncHandler(async (req, res) => {
   const actor = requireActor(req, res);
   if (!actor) return;
-  const targetUserId = req.query.targetUserId ? String(req.query.targetUserId) : undefined;
+  const targetUserId = parseRequestOriginalUrl(req.originalUrl).searchParams.get("targetUserId") || undefined;
   if (targetUserId) {
     const target = getUserAccess(targetUserId);
     if (!target) {

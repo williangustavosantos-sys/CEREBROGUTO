@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { config, isProductionEnv } from "./src/config.js";
 import { createRateLimit } from "./src/http/rate-limit.js";
 import { requestLog } from "./src/http/request-log.js";
+import { parseRequestOriginalUrl } from "./src/http/request-url.js";
 import { readMemoryStoreSync, readMemoryStoreAsync, readPersistedUserMemorySnapshot, persistUserMemory, persistUserMemoryPatch, updateUserMemoryAtomically, acquireDistributedUserLease, ensureMemoryHydrated, flushMemoryStoreWrites } from "./src/memory-store.js";
 import { verifyDurableCommit } from "./src/durable-commit.js";
 import {
@@ -795,12 +796,13 @@ const uploadsDir = process.env.VERCEL
 if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
 app.get("/uploads/validation-images/:filename", async (req, res) => {
   const filename = String(req.params.filename || "");
+  const searchParams = parseRequestOriginalUrl(req.originalUrl).searchParams;
   const resolved = path.resolve(uploadsDir, filename);
   // Path-traversal guard (belt-and-suspenders; :filename não cruza '/').
   if (!resolved.startsWith(uploadsDir + path.sep)) {
     return res.status(400).end();
   }
-  if (!verifyImageSignature(filename, req.query.exp, req.query.sig)) {
+  if (!verifyImageSignature(filename, searchParams.get("exp"), searchParams.get("sig"))) {
     return res.status(403).end();
   }
   if (existsSync(resolved)) return res.sendFile(resolved);
@@ -12084,14 +12086,15 @@ app.get("/guto/proactive", requireActiveUser, async (req, res, next) => {
   const requestLease = res.locals.proactiveRequestLease as ProactiveRequestLease;
   try {
   const userId = req.gutoUser!.userId;
-  const force = req.query.force === "1";
+  const searchParams = parseRequestOriginalUrl(req.originalUrl).searchParams;
+  const force = searchParams.get("force") === "1";
   await readMemoryStoreAsync();
   await markPastActiveMemoriesPendingValidation(userId).catch(() => []);
   let memory = getMemory(userId);
   // Idioma é lei: quando o cliente não envia ?language, o idioma soberano é o da
   // memória do usuário (calibrado no onboarding). Sem isso, a chegada proativa
   // saía sempre em pt-BR para usuários it-IT/en-US (vazamento de idioma).
-  const language = String(req.query.language || memory.language || "pt-BR");
+  const language = String(searchParams.get("language") || memory.language || "pt-BR");
   const operationalContext = getOperationalContext(new Date(), language || memory.language);
   const day = todayKey();
   let dailyPresenceContext = await buildDailyPresenceContext(memory, {

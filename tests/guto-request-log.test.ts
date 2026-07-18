@@ -6,12 +6,14 @@ import { describe, it } from "node:test"
 import { requestLog, resolveRequestLogUserId } from "../src/http/request-log.js"
 
 describe("request log", () => {
-  it("lê userId pela URL WHATWG sem acessar o getter req.query", () => {
+  it("lê path e userId pela URL WHATWG sem acessar getters legados", () => {
     const req = {
       originalUrl: "/guto/proactive?userId=u-runtime-clean",
       body: {},
       method: "GET",
-      path: "/guto/proactive",
+      get path(): never {
+        throw new Error("req.path must not be accessed")
+      },
       get query(): never {
         throw new Error("req.query must not be accessed")
       },
@@ -29,6 +31,7 @@ describe("request log", () => {
       assert.equal(nextCalled, true)
       assert.equal(messages.length, 1)
       assert.equal(JSON.parse(messages[0]).userId, "u-runtime-clean")
+      assert.equal(JSON.parse(messages[0]).path, "/guto/proactive")
     } finally {
       console.log = originalLog
     }
