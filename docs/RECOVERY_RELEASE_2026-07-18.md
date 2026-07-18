@@ -134,6 +134,12 @@ Um primeiro ensaio Playwright em `next dev` encontrou um JSON truncado gerado em
 - merge: `9c6e9db5689d18e962b056ffecf3f3905ed56425` em `main`, 2026-07-18T20:46:44Z;
 - `origin/main` verificado no merge SHA e contendo o commit de correção.
 
+### Relatório versionado
+
+- PR: https://github.com/williangustavosantos-sys/CEREBROGUTO/pull/99;
+- branch: `codex/recovery-release-report`;
+- o merge SHA final permanece registrado na metadata autoritativa do próprio PR.
+
 ## 7. Deployments de produção validados
 
 ### Backend
