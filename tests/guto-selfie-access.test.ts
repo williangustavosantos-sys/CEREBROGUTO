@@ -17,12 +17,14 @@ const TEST_BYTES = Buffer.from("fake-jpeg-bytes-for-test");
 let server: Server;
 let baseUrl = "";
 let signImageUrl: (u: string) => string;
+let storage: any;
 
 before(async () => {
   process.env.GUTO_DISABLE_LISTEN = "1";
   process.env.GUTO_ALLOW_DEV_ACCESS = "true";
   const app = ((await import(pathToFileURL(join(process.cwd(), "server.ts")).href)) as any).app;
-  signImageUrl = ((await import(pathToFileURL(join(process.cwd(), "src/storage.ts")).href)) as any).signImageUrl;
+  storage = await import(pathToFileURL(join(process.cwd(), "src/storage.ts")).href);
+  signImageUrl = storage.signImageUrl;
   mkdirSync(uploadsDir, { recursive: true });
   writeFileSync(join(uploadsDir, TEST_FILE), TEST_BYTES);
   await new Promise<void>((resolve, reject) => {
@@ -71,5 +73,27 @@ describe("Acesso às selfies de validação (VX-1: nunca público)", () => {
     const signed = signImageUrl(`/uploads/validation-images/__nope-${TEST_FILE}`);
     const r = await fetch(`${baseUrl}${signed}`);
     assert.equal(r.status, 404, "arquivo inexistente não pode dar 200");
+  });
+
+  it("URL assinada lê bytes do Redis quando outra instância não tem o /tmp", async () => {
+    const filename = "__test-selfie-redis.jpg";
+    const bytes = Buffer.from("durable-private-selfie");
+    const values = new Map<string, string>();
+    storage.setImageStorageRedisClientForTests({
+      get: async (key: string) => values.get(key) ?? null,
+      set: async (key: string, value: unknown) => {
+        values.set(key, String(value));
+        return "OK";
+      },
+      del: async (key: string) => values.delete(key) ? 1 : 0,
+    });
+    try {
+      const bareRedisUrl = await storage.uploadImage(bytes, filename);
+      const response = await fetch(`${baseUrl}${signImageUrl(bareRedisUrl)}`);
+      assert.equal(response.status, 200);
+      assert.ok(Buffer.from(await response.arrayBuffer()).equals(bytes));
+    } finally {
+      storage.setImageStorageRedisClientForTests(undefined);
+    }
   });
 });

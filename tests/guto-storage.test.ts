@@ -77,6 +77,37 @@ describe("storage LOCAL (fallback sem credenciais Cloudinary)", () => {
   });
 });
 
+describe("storage REDIS (persistente em serverless sem Cloudinary)", () => {
+  const values = new Map<string, string>();
+  const client = {
+    get: async (key: string) => values.get(key) ?? null,
+    set: async (key: string, value: unknown) => {
+      values.set(key, String(value));
+      return "OK";
+    },
+    del: async (key: string) => values.delete(key) ? 1 : 0,
+  };
+
+  before(() => {
+    clearCloudinaryEnv();
+    storage.setImageStorageRedisClientForTests(client);
+  });
+  after(() => {
+    storage.setImageStorageRedisClientForTests(undefined);
+    values.clear();
+  });
+
+  it("faz roundtrip durável sem depender do /tmp da instância", async () => {
+    const filename = "__test-storage-redis.jpg";
+    const bytes = Buffer.from("private-selfie-bytes");
+    const url = await storage.uploadImage(bytes, filename);
+    assert.equal(url, `/uploads/validation-images/${filename}`);
+    assert.deepEqual(await storage.readStoredImage(filename), bytes);
+    await storage.deleteImage(url);
+    assert.equal(await storage.readStoredImage(filename), null);
+  });
+});
+
 describe("storage CLOUDINARY (persistente)", () => {
   let origUpload: any;
   let origUrl: any;
