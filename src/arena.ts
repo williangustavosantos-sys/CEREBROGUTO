@@ -274,13 +274,8 @@ function applyArenaXpAward(
   }
 
   profile.totalXp = Math.max(0, profile.totalXp + xp);
-  // Only the Pact's initial bonus is excluded. A completion delta after an
-  // adapted mission belongs to the competitive period but must not count a
-  // second validated presence.
-  if (type !== "bonus") {
-    profile.weeklyXp = Math.max(0, profile.weeklyXp + xp);
-    profile.monthlyXp = Math.max(0, profile.monthlyXp + xp);
-  }
+  profile.weeklyXp = Math.max(0, profile.weeklyXp + xp);
+  profile.monthlyXp = Math.max(0, profile.monthlyXp + xp);
 
   const isValidatedWorkout = type === "workout_validated" || type === "reduced_mission_validated";
   if (isValidatedWorkout) {
@@ -357,14 +352,10 @@ export function awardArenaXp(options: AwardXpOptions): AwardXpResult {
 
   profile.totalXp = Math.max(0, profile.totalXp + xp);
 
-  // O bônus do Pacto é um buffer de boas-vindas: entra no total geral, mas não
-  // infla os períodos competitivos da Arena (AR-5) nem representa presença real
-  // (X-4). Validações e penalidades continuam refletidas em weekly/monthly.
-  const countsForPeriod = type !== "bonus";
-  if (countsForPeriod) {
-    profile.weeklyXp = Math.max(0, profile.weeklyXp + xp);
-    profile.monthlyXp = Math.max(0, profile.monthlyXp + xp);
-  }
+  // O bônus inicial é XP real nos três placares. Continua sem representar
+  // presença: contadores de treino e streak são tratados separadamente abaixo.
+  profile.weeklyXp = Math.max(0, profile.weeklyXp + xp);
+  profile.monthlyXp = Math.max(0, profile.monthlyXp + xp);
 
   // Contagem de treinos e streak continuam atreladas à PRESENÇA DE TREINO, não ao
   // XP em si: o pacto/bônus não vira treino validado nem sequência; a falta zera.

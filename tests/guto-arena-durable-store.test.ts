@@ -127,7 +127,7 @@ describe("Arena durable serverless persistence", () => {
 
     assert.deepEqual(
       { xpAwarded: retry.xpAwarded, totalXp: retry.totalXp, weeklyXp: retry.weeklyXp, monthlyXp: retry.monthlyXp },
-      { xpAwarded: 0, totalXp: 200, weeklyXp: 100, monthlyXp: 100 }
+      { xpAwarded: 0, totalXp: 200, weeklyXp: 200, monthlyXp: 200 }
     );
   });
 });

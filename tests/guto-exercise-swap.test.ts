@@ -363,7 +363,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     const secondId = suggestedExerciseId(userId);
     assertSafeAbductorSubstitute(secondId);
     assert.notEqual(secondId, firstId, "não pode repetir substituto recusado");
-    assert.deepEqual(rejectedExerciseIds(userId), [firstId]);
+    assert.deepEqual(rejectedExerciseIds(userId), ["cadeira_abdutora", firstId]);
 
     clearMemoryStoreCache();
     const third = await postGuto(userId, "esse também");
@@ -373,14 +373,14 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     const thirdId = suggestedExerciseId(userId);
     assertSafeAbductorSubstitute(thirdId);
     assert.equal(new Set([firstId, secondId, thirdId]).size, 3, "A, B e C precisam ser distintos");
-    assert.deepEqual(rejectedExerciseIds(userId), [firstId, secondId]);
+    assert.deepEqual(rejectedExerciseIds(userId), ["cadeira_abdutora", firstId, secondId]);
 
     clearMemoryStoreCache();
     const fourth = await postGuto(userId, "nao tem");
     assert.equal(fourth.acao, "none");
     assert.match(fourth.fala || "", /o que est[aá] livre|polia|halteres|banco|colchonete/i);
     assert.doesNotMatch(fourth.fala || "", /troca por/i);
-    assert.deepEqual(rejectedExerciseIds(userId), [firstId, secondId, thirdId]);
+    assert.deepEqual(rejectedExerciseIds(userId), ["cadeira_abdutora", firstId, secondId, thirdId]);
   });
 
   it("HTTP activeExercise mantém fallback sem marcador do frontend", async () => {

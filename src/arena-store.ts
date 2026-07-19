@@ -51,7 +51,7 @@ export interface ArenaStore {
   schemaVersion?: number;
 }
 
-const ARENA_STORE_SCHEMA_VERSION = 2;
+const ARENA_STORE_SCHEMA_VERSION = 3;
 
 function sameWeek(dateA: Date, dateB: Date): boolean {
   const monday = (date: Date) => {
@@ -66,27 +66,27 @@ function sameMonth(dateA: Date, dateB: Date): boolean {
   return dateA.getFullYear() === dateB.getFullYear() && dateA.getMonth() === dateB.getMonth();
 }
 
-/**
- * v2 corrige o período competitivo gravado pela versão que contou o buffer do
- * Pacto em weekly/monthly. O ledger de eventos permite retirar somente bônus do
- * período corrente, sem alterar XP total, validações, penalidades ou histórico.
- */
+/** v3 restaura o bônus do Pacto nos períodos sem convertê-lo em treino/streak. */
 export function migrateArenaStoreToCurrentSchema(store: ArenaStore, now: Date = new Date()): ArenaStore {
   if ((store.schemaVersion ?? 1) >= ARENA_STORE_SCHEMA_VERSION) return store;
 
-  for (const profile of Object.values(store.profiles)) {
-    const bonusEvents = store.events.filter((event) => event.userId === profile.userId && event.type === "bonus");
-    const weeklyBonus = bonusEvents.reduce((sum, event) => {
-      const createdAt = new Date(event.createdAt);
-      return !Number.isNaN(createdAt.getTime()) && sameWeek(createdAt, now) ? sum + event.xp : sum;
-    }, 0);
-    const monthlyBonus = bonusEvents.reduce((sum, event) => {
-      const createdAt = new Date(event.createdAt);
-      return !Number.isNaN(createdAt.getTime()) && sameMonth(createdAt, now) ? sum + event.xp : sum;
-    }, 0);
+  // Somente stores v2 tiveram o bônus removido. Stores v1 já o contavam; somar
+  // de novo duplicaria XP. O schema torna a reparação idempotente.
+  if (store.schemaVersion === 2) {
+    for (const profile of Object.values(store.profiles)) {
+      const bonusEvents = store.events.filter((event) => event.userId === profile.userId && event.type === "bonus");
+      const weeklyBonus = bonusEvents.reduce((sum, event) => {
+        const createdAt = new Date(event.createdAt);
+        return !Number.isNaN(createdAt.getTime()) && sameWeek(createdAt, now) ? sum + event.xp : sum;
+      }, 0);
+      const monthlyBonus = bonusEvents.reduce((sum, event) => {
+        const createdAt = new Date(event.createdAt);
+        return !Number.isNaN(createdAt.getTime()) && sameMonth(createdAt, now) ? sum + event.xp : sum;
+      }, 0);
 
-    profile.weeklyXp = Math.max(0, profile.weeklyXp - weeklyBonus);
-    profile.monthlyXp = Math.max(0, profile.monthlyXp - monthlyBonus);
+      profile.weeklyXp = Math.max(0, profile.weeklyXp + weeklyBonus);
+      profile.monthlyXp = Math.max(0, profile.monthlyXp + monthlyBonus);
+    }
   }
 
   store.schemaVersion = ARENA_STORE_SCHEMA_VERSION;
@@ -243,8 +243,8 @@ export function readArenaStore(): ArenaStore {
   ensureStoreFile();
   try {
     const store = JSON.parse(fs.readFileSync(ARENA_STORE_PATH, "utf-8")) as ArenaStore;
-    memCache = store;
-    return store;
+    memCache = migrateArenaStoreToCurrentSchema(store);
+    return memCache;
   } catch {
     return memCache; // empty — better than crashing
   }
