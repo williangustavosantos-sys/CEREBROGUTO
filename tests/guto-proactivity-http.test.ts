@@ -1259,9 +1259,6 @@ describe("proactivity HTTP cycle", () => {
       proactiveMemories: [],
       proactiveImpacts: [],
       weeklyConversation: null,
-      // A abertura semanal só precede a criação da missão. Se já existe uma
-      // missão persistida, o retry soberano deve mostrá-la em vez de escondê-la
-      // atrás de uma nova pergunta contextual.
       lastWorkoutPlan: null,
       trainingGoal: "fat_loss",
       preferredTrainingLocation: "gym",
@@ -1304,6 +1301,55 @@ describe("proactivity HTTP cycle", () => {
     assert.equal(store[USER_ID]?.lastWorkoutPlan, null)
     assert.equal(store[USER_ID]?.proactivePrompt?.status, "active")
     assert.equal(store[USER_ID]?.proactivePrompt?.fala, body.fala)
+  })
+
+  it("GET /guto/proactive abre contexto semanal mesmo com missão já persistida", async () => {
+    mockGutoModel({ fala: "fallback não deve aparecer", acao: "none", expectedResponse: null })
+    const readyMission = missionPlan("Corpo inteiro controlado")
+    writeUserMemory(USER_ID, {
+      name: "Maria",
+      hasSeenChatOpening: true,
+      trainedToday: false,
+      totalXp: 100,
+      proactiveSent: {},
+      proactiveMemories: [],
+      proactiveImpacts: [],
+      weeklyConversation: null,
+      proactivePrompt: null,
+      lastWorkoutPlan: readyMission,
+      trainingGoal: "fat_loss",
+      preferredTrainingLocation: "gym",
+      trainingLevel: "returning",
+      trainingPathology: "sem dor",
+      trainingLimitations: "sem dor",
+    })
+
+    const res = await fetch(`${baseUrl}/guto/proactive?language=pt-BR&force=1`, { headers: authHeaders() })
+    assert.equal(res.status, 200)
+    const body = (await res.json()) as {
+      due: boolean
+      slot: string
+      fala: string
+      acao?: string
+      workoutPlan?: { title?: string; exercises?: unknown[] }
+      expectedResponse?: { type?: string } | null
+    }
+    assert.equal(body.due, true)
+    assert.equal(body.slot, "arrival")
+    assert.match(body.fala, /miss[aã]o/i, "a missão continua apresentada na mesma chegada")
+    assert.match(body.fala, /semana|pr[oó]ximos dias|resto da semana/i)
+    assert.match(body.fala, /viagem|compromisso|dor|hor[aá]rio/i)
+    assert.equal(body.acao, "updateWorkout")
+    assert.ok((body.workoutPlan?.exercises?.length || 0) > 0)
+    assert.equal(body.expectedResponse?.type, "text")
+
+    const store = JSON.parse(readFileSync(testMemoryFile, "utf8")) as Record<string, {
+      proactivePrompt?: { kind?: string; status?: string }
+      weeklyConversation?: { extractionDone?: boolean }
+    }>
+    assert.equal(store[USER_ID]?.proactivePrompt?.kind, "weekly_opening")
+    assert.equal(store[USER_ID]?.proactivePrompt?.status, "active")
+    assert.equal(store[USER_ID]?.weeklyConversation?.extractionDone, false)
   })
 
   it("GET /guto/proactive?force=1 com semana aberta mostra missão pronta", async () => {

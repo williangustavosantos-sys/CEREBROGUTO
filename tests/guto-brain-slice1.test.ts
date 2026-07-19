@@ -95,7 +95,7 @@ async function chat(userId: string, input: string, turnId?: string) {
 // Campos internos que NUNCA podem aparecer no payload público (LEI 11).
 const META_KEYS = ["validation", "meta", "kind", "via", "reasoning", "modelCalled", "persisted"];
 // Campos instáveis a excluir de qualquer snapshot (GT-1).
-const UNSTABLE = ["turnId", "turnDecision", "createdAt", "classifiedAt", "lastActiveAt", "updatedAt"];
+const UNSTABLE = ["turnId", "requestId", "turnDecision", "createdAt", "classifiedAt", "lastActiveAt", "updatedAt"];
 
 function stripUnstable(body: Record<string, unknown>): Record<string, unknown> {
   const clone = JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
