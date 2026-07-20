@@ -6244,8 +6244,14 @@ function isSubstitutionRejectionFollowUp(input?: string) {
     "also don't have it",
     "anche quello",
     "anche questa",
+    "occupato",
+    "occupata",
+    "e occupato",
+    "e occupata",
     "non ho anche quello",
     "non ce l ho neanche",
+    "non ce l'ho neanche",
+    "non ce l’ho neanche",
   ]);
 }
 
@@ -6603,13 +6609,36 @@ function resolveWorkoutExerciseForSubstitution({
   input?: string;
   history?: GutoHistoryItem[];
   memory: GutoMemory;
-}): { id: string; name: string; planExercise?: WorkoutExercise | null; catalogEntry?: CatalogExercise } | null {
+}): {
+  id: string;
+  name: string;
+  planExercise?: WorkoutExercise | Pick<WorkoutExercise, "sets" | "reps" | "rest"> | null;
+  catalogEntry?: CatalogExercise;
+} | null {
   const plan = memory.lastWorkoutPlan;
-  const planExercise =
+  const explicitPlanExercise =
     findLastExerciseDoubt(history || [], plan) ||
     findExerciseFromContextMarker(input, plan) ||
-    findExerciseFromFreeText(input, plan) ||
-    findExerciseFromActiveExercise(memory, plan);
+    findExerciseFromFreeText(input, plan);
+  if (!explicitPlanExercise) {
+    const active = normalizeActiveContext(memory.activeContext);
+    if (active?.type === "workout") {
+      const item = active.currentItem;
+      const exactPlanExercise = plan?.exercises?.find((exercise) => exercise.id === item.id) || null;
+      const contextScheme =
+        typeof item.sets === "number" && typeof item.reps === "string" && typeof item.rest === "string"
+          ? { sets: item.sets, reps: item.reps, rest: item.rest }
+          : null;
+      return {
+        id: item.id,
+        name: item.name,
+        planExercise: exactPlanExercise || contextScheme,
+        catalogEntry: getCatalogById(item.id),
+      };
+    }
+  }
+
+  const planExercise = explicitPlanExercise || findExerciseFromActiveExercise(memory, plan);
   const catalogRef = planExercise
     ? null
     : resolveCatalogExerciseFromContextMarker(input) ||
