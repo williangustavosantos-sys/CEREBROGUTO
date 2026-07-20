@@ -246,6 +246,41 @@ describe("active context correlation", () => {
     assert.match(response.fala || "", /Supino reto máquina ocupado/i);
   });
 
+  it("it-IT preserva duas referências curtas no contexto ativo de treino", async () => {
+    const workoutContext = context(
+      "ctx-italian-short-reference",
+      "workout",
+      "supino_reto_maquina",
+      "Supino reto macchina",
+    );
+    await post("/guto/active-context", { context: workoutContext });
+    const send = (active: Record<string, any>, input: string, suffix: string) => post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "it-IT",
+      history: [],
+      input,
+      turnId: `turn-italian-${suffix}`,
+      requestId: `request-italian-${suffix}`,
+      contextId: active.id,
+      contextVersion: active.version,
+      activeContextType: active.type,
+      activeItemId: active.currentItem.id,
+    });
+
+    const first = await send(workoutContext, "Occupato", "first");
+    assert.equal(first.activeContext.version, 2);
+    assert.deepEqual(first.activeContext.rejectedItems.map((item: any) => item.id), ["supino_reto_maquina"]);
+    assert.equal(first.expectedResponse ?? null, null);
+
+    const second = await send(first.activeContext, "Anche quello", "second");
+    assert.equal(second.activeContext.version, 3);
+    assert.notEqual(second.activeContext.currentItem.id, first.activeContext.currentItem.id);
+    assert.deepEqual(
+      second.activeContext.rejectedItems.map((item: any) => item.id),
+      ["supino_reto_maquina", first.activeContext.currentItem.id],
+    );
+  });
+
   it("Supino rejeitado → Banana → 'Não tenho tbm' fica exclusivamente na dieta", async () => {
     const workoutContext = context("ctx-switch-workout", "workout", "supino_reto_maquina", "Supino reto máquina");
     await post("/guto/active-context", { context: workoutContext });

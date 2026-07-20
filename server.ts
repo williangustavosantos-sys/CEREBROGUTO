@@ -6244,6 +6244,10 @@ function isSubstitutionRejectionFollowUp(input?: string) {
     "also don't have it",
     "anche quello",
     "anche questa",
+    "occupato",
+    "occupata",
+    "e occupato",
+    "e occupata",
     "non ho anche quello",
     "non ce l ho neanche",
   ]);
