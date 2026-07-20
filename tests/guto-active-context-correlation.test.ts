@@ -205,6 +205,47 @@ describe("active context correlation", () => {
     assert.equal(stored.contextHistory.at(-1).currentItem.id, second.activeContext.currentItem.id);
   });
 
+  it("contexto explícito preserva Supino reto máquina quando o plano contém Supino reto", async () => {
+    const store = JSON.parse(readFileSync(memoryFile, "utf8"));
+    store[userId].lastWorkoutPlan = {
+      location: "gym",
+      exercises: [{
+        id: "supino_reto",
+        name: "Supino reto",
+        canonicalNamePt: "Supino reto",
+        sets: 4,
+        reps: "8-12",
+        rest: "90s",
+      }],
+    };
+    writeFileSync(memoryFile, JSON.stringify(store, null, 2));
+    clearMemoryStoreCache();
+
+    const workoutContext = context(
+      "ctx-literal-machine",
+      "workout",
+      "supino_reto_maquina",
+      "Supino reto máquina",
+    );
+    await post("/guto/active-context", { context: workoutContext });
+    const response = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "Ocupado",
+      turnId: "turn-literal-machine",
+      requestId: "request-literal-machine",
+      contextId: workoutContext.id,
+      contextVersion: workoutContext.version,
+      activeContextType: workoutContext.type,
+      activeItemId: workoutContext.currentItem.id,
+    });
+
+    assert.equal(response.activeContext.originalItem.id, "supino_reto_maquina");
+    assert.deepEqual(response.activeContext.rejectedItems.map((item: any) => item.id), ["supino_reto_maquina"]);
+    assert.match(response.fala || "", /Supino reto máquina ocupado/i);
+  });
+
   it("Supino rejeitado → Banana → 'Não tenho tbm' fica exclusivamente na dieta", async () => {
     const workoutContext = context("ctx-switch-workout", "workout", "supino_reto_maquina", "Supino reto máquina");
     await post("/guto/active-context", { context: workoutContext });
