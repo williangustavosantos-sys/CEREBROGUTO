@@ -6250,6 +6250,8 @@ function isSubstitutionRejectionFollowUp(input?: string) {
     "e occupata",
     "non ho anche quello",
     "non ce l ho neanche",
+    "non ce l'ho neanche",
+    "non ce l’ho neanche",
   ]);
 }
 

@@ -281,6 +281,36 @@ describe("active context correlation", () => {
     );
   });
 
+  it("it-IT rejeita a sugestão alimentar após reidratar o contexto", async () => {
+    const dietContext = context("ctx-italian-diet-reload", "diet", "banana", "Banana");
+    await post("/guto/active-context", { context: dietContext });
+    const send = (active: Record<string, any>, input: string, suffix: string) => post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "it-IT",
+      history: [],
+      input,
+      turnId: `turn-italian-diet-${suffix}`,
+      requestId: `request-italian-diet-${suffix}`,
+      contextId: active.id,
+      contextVersion: active.version,
+      activeContextType: active.type,
+      activeItemId: active.currentItem.id,
+    });
+
+    const first = await send(dietContext, "Non ce l'ho", "first");
+    assert.equal(first.activeContext.version, 2);
+    assert.deepEqual(first.activeContext.rejectedItems.map((item: any) => item.id), ["banana"]);
+    clearMemoryStoreCache();
+
+    const second = await send(first.activeContext, "Non ce l'ho neanche", "second");
+    assert.equal(second.activeContext.version, 3);
+    assert.notEqual(second.activeContext.currentItem.id, first.activeContext.currentItem.id);
+    assert.deepEqual(
+      second.activeContext.rejectedItems.map((item: any) => item.id),
+      ["banana", first.activeContext.currentItem.id],
+    );
+  });
+
   it("Supino rejeitado → Banana → 'Não tenho tbm' fica exclusivamente na dieta", async () => {
     const workoutContext = context("ctx-switch-workout", "workout", "supino_reto_maquina", "Supino reto máquina");
     await post("/guto/active-context", { context: workoutContext });
