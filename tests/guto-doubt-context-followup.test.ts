@@ -290,10 +290,17 @@ describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
     assert.ok(firstSubstitute, `primeira resposta deveria nomear substituto: ${turn1.fala}`);
 
     const turn2 = await postGuto(userId, "também está ocupado");
+    const secondSubstitute = captureExerciseSubstitute(turn2.fala || "");
     assert.equal(turn2.acao, "none");
     assert.match(turn2.fala || "", /tr[íi]ceps/i);
     assert.doesNotMatch(turn2.fala || "", INVALID_ARM_SWAP_RE, "não pode trocar tríceps por bíceps/rosca");
-    assert.doesNotMatch(turn2.fala || "", new RegExp(firstSubstitute.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"), "não pode repetir o substituto rejeitado");
+    assert.match(
+      turn2.fala || "",
+      new RegExp(`${firstSubstitute.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} ocupado`, "i"),
+      "deve nomear literalmente o substituto que acabou de ser rejeitado",
+    );
+    assert.ok(secondSubstitute, `segunda resposta deveria nomear outro substituto: ${turn2.fala}`);
+    assert.notEqual(secondSubstitute.toLocaleLowerCase("pt-BR"), firstSubstitute.toLocaleLowerCase("pt-BR"), "não pode sugerir de novo o substituto rejeitado");
     assert.doesNotMatch(turn2.fala || "", RE_ASK_RE, "não pode perder contexto e perguntar qual aparelho");
   });
 
