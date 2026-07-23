@@ -27,7 +27,7 @@ const auditLogFile = join(tmpDir, "audit-logs.json");
 const inviteFile = join(tmpDir, "invites.json");
 const teamsFile = join(tmpDir, "teams.json");
 const validationImagesDir = join(tmpDir, "validation-images");
-const validImageBase64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+const validImageBase64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 process.env.GUTO_MEMORY_FILE = testMemoryFile;
 process.env.GUTO_DIET_FILE = testDietFile;

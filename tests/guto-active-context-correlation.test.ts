@@ -61,13 +61,29 @@ describe("active context correlation", () => {
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       if (String(input).includes("generativelanguage.googleapis.com")) {
         await new Promise((resolve) => setTimeout(resolve, 120));
+        const requestBody = String(init?.body || "").toLocaleLowerCase("pt-BR");
+        const modelResponse = requestBody.includes("também não tenho essa opção")
+          ? {
+              fala: "Troca maçã por frutas vermelhas. Mesma função no prato.",
+              acao: "none",
+              expectedResponse: null,
+              memoryPatch: {},
+            }
+          : requestBody.includes("não tenho banana")
+            ? {
+                fala: "Troca banana por maçã. Mesma função no prato.",
+                acao: "none",
+                expectedResponse: null,
+                memoryPatch: {},
+              }
+            : {
+                fala: "Resposta antiga do treino.",
+                acao: "updateWorkout",
+                expectedResponse: null,
+                memoryPatch: { trainingGoal: "fat_loss" },
+              };
         return new Response(JSON.stringify({
-          candidates: [{ content: { parts: [{ text: JSON.stringify({
-            fala: "Resposta antiga do treino.",
-            acao: "updateWorkout",
-            expectedResponse: null,
-            memoryPatch: { trainingGoal: "fat_loss" },
-          }) }] } }],
+          candidates: [{ content: { parts: [{ text: JSON.stringify(modelResponse) }] } }],
         }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
       return originalFetch(input as RequestInfo, init);
@@ -334,5 +350,49 @@ describe("active context correlation", () => {
     assert.doesNotMatch(diet.fala || "", /supino|crucifixo/i);
     assert.deepEqual(diet.memoryPatch || {}, {});
     assert.equal(diet.workoutPlan ?? null, null);
+  });
+
+  it("menção explícita de alimento troca o contexto workout→diet e mantém o follow-up alimentar", async () => {
+    const workoutContext = context("ctx-natural-switch", "workout", "supino_reto_maquina", "Supino reto máquina");
+    await post("/guto/active-context", { context: workoutContext });
+
+    const first = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "não tenho banana",
+      turnId: "turn-natural-food-first",
+      requestId: "request-natural-food-first",
+      contextId: workoutContext.id,
+      contextVersion: workoutContext.version,
+      activeContextType: workoutContext.type,
+      activeItemId: workoutContext.currentItem.id,
+    });
+    assert.equal(first.discardedReason ?? null, null);
+    assert.equal(first.activeContext.type, "diet");
+    assert.equal(first.activeContext.originalItem.id, "banana");
+    assert.equal(first.activeContext.currentItem.id, "apple");
+    assert.doesNotMatch(first.fala || "", /supino|crucifixo/i);
+
+    const second = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "também não tenho essa opção",
+      turnId: "turn-natural-food-second",
+      requestId: "request-natural-food-second",
+      contextId: first.activeContext.id,
+      contextVersion: first.activeContext.version,
+      activeContextType: first.activeContext.type,
+      activeItemId: first.activeContext.currentItem.id,
+    });
+    assert.equal(second.activeContext.type, "diet");
+    assert.equal(second.activeContext.originalItem.id, "banana");
+    assert.equal(second.activeContext.currentItem.id, "berries");
+    assert.deepEqual(
+      second.activeContext.rejectedItems.map((item: any) => item.id),
+      ["banana", "apple"],
+    );
+    assert.doesNotMatch(second.fala || "", /supino|crucifixo|flexão/i);
   });
 });

@@ -274,8 +274,9 @@ function applyArenaXpAward(
   }
 
   profile.totalXp = Math.max(0, profile.totalXp + xp);
-  profile.weeklyXp = Math.max(0, profile.weeklyXp + xp);
-  profile.monthlyXp = Math.max(0, profile.monthlyXp + xp);
+  const periodXp = type === "bonus" ? 0 : xp;
+  profile.weeklyXp = Math.max(0, profile.weeklyXp + periodXp);
+  profile.monthlyXp = Math.max(0, profile.monthlyXp + periodXp);
 
   const isValidatedWorkout = type === "workout_validated" || type === "reduced_mission_validated";
   if (isValidatedWorkout) {
@@ -352,10 +353,10 @@ export function awardArenaXp(options: AwardXpOptions): AwardXpResult {
 
   profile.totalXp = Math.max(0, profile.totalXp + xp);
 
-  // O bônus inicial é XP real nos três placares. Continua sem representar
-  // presença: contadores de treino e streak são tratados separadamente abaixo.
-  profile.weeklyXp = Math.max(0, profile.weeklyXp + xp);
-  profile.monthlyXp = Math.max(0, profile.monthlyXp + xp);
+  // O bônus inicial é saldo geral e evolução, não presença competitiva.
+  const periodXp = type === "bonus" ? 0 : xp;
+  profile.weeklyXp = Math.max(0, profile.weeklyXp + periodXp);
+  profile.monthlyXp = Math.max(0, profile.monthlyXp + periodXp);
 
   // Contagem de treinos e streak continuam atreladas à PRESENÇA DE TREINO, não ao
   // XP em si: o pacto/bônus não vira treino validado nem sequência; a falta zera.
