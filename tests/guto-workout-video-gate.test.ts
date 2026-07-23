@@ -24,7 +24,7 @@ import {
 const testMemoryFile = join(process.cwd(), "tmp", "guto-memory.video-gate-test.json");
 const userAccessFile = join(process.cwd(), "tmp", "user-access.json");
 const customExerciseFile = join(process.cwd(), "tmp", "custom-exercises.video-gate-test.json");
-const validImageBase64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+const validImageBase64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 let app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
 let server: Server;

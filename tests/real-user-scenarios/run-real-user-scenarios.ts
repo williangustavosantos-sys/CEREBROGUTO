@@ -203,7 +203,7 @@ const dietFile = join(tmpDir, "guto-diet.real-user-scenarios.json");
 const arenaFile = join(process.cwd(), "tmp", "arena-store.json");
 const validationImagesDir = join(process.cwd(), "tmp", "validation-images");
 const ONE_PIXEL_PNG =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 let app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
 let server: Server | null = null;

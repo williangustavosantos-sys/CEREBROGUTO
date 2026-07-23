@@ -63,6 +63,7 @@ import {
   scaleDietToTarget,
   buildDietPrompt,
   type NutritionProfile,
+  type DietFood,
   type DietMeal,
   type DietPlan,
 } from "./src/nutrition.js";
@@ -400,6 +401,8 @@ interface GutoModelResponse {
   activeContextType?: ActiveContextType | null;
   activeItemId?: string | null;
   activeContext?: ActiveContext | null;
+  /** Interno: permite ao executor materializar uma troca explícita de domínio. */
+  contextTransition?: "intentional";
   discardedReason?: "stale_context";
   fala?: string;
   acao?: Acao;
@@ -4003,6 +4006,66 @@ function activateContext(memory: GutoMemory, context: ActiveContext): ActiveCont
   return context;
 }
 
+async function activateFirstWorkoutItem(memory: GutoMemory, plan: WorkoutPlan): Promise<boolean> {
+  const first = plan.exercises?.[0];
+  if (!first) return false;
+  let transitioned = false;
+  const updated = await updateUserMemoryAtomically<GutoMemory>(memory.userId, (snapshot) => {
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
+    const currentMemory: GutoMemory = { ...memory, ...(snapshot as GutoMemory) };
+    if (normalizeActiveContext(currentMemory.activeContext)?.type === "workout") return currentMemory;
+    const now = new Date().toISOString();
+    const item: ActiveContextItem = {
+      id: first.id,
+      name: first.name,
+      position: 0,
+      workoutId: plan.scheduledFor,
+      sets: first.sets,
+      reps: first.reps,
+      rest: first.rest,
+    };
+    activateContext(currentMemory, {
+      id: `ctx-${crypto.randomUUID()}`,
+      version: 1,
+      type: "workout",
+      sourceSurface: "mission",
+      originalItem: item,
+      currentItem: item,
+      lastSuggestedItem: null,
+      rejectedItems: [],
+      acceptedItem: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    currentMemory.activeExercise = {
+      source: "chat",
+      name: item.name,
+      reps: item.reps,
+      rest: item.rest,
+      totalSets: item.sets,
+      updatedAt: now,
+    };
+    currentMemory.lastActiveAt = now;
+    appendMemoryAudit(
+      currentMemory,
+      "chat_patch",
+      ["activeContext"],
+      "Primeiro exercício do treino materializado como contexto operacional."
+    );
+    transitioned = true;
+    return currentMemory;
+  });
+  if (transitioned && updated) {
+    memory.activeContext = updated.activeContext;
+    memory.activeExercise = updated.activeExercise;
+    memory.contextHistory = updated.contextHistory;
+    memory.substitutionContext = updated.substitutionContext;
+    memory.memoryAudit = updated.memoryAudit;
+    memory.lastActiveAt = updated.lastActiveAt;
+  }
+  return transitioned;
+}
+
 function advanceActiveContextSubstitution(
   memory: GutoMemory,
   type: ActiveContextType,
@@ -4574,10 +4637,18 @@ const attachAtomicTurnDecision: express.RequestHandler = (req, res, next) => {
       return originalJson(body);
     }
     const rawPayload = body as GutoModelResponse & { message?: string };
-    const { turnDecision: _discardedDecision, ...responsePayload } = rawPayload;
+    const {
+      turnDecision: _discardedDecision,
+      contextTransition,
+      ...responsePayload
+    } = rawPayload;
     const freshMemory = getMemory(userId);
     const freshActiveContext = normalizeActiveContext(freshMemory.activeContext) || null;
-    const contextBecameStale = Boolean(contextId && freshActiveContext?.id !== contextId);
+    const contextBecameStale = Boolean(
+      contextId &&
+      freshActiveContext?.id !== contextId &&
+      contextTransition !== "intentional"
+    );
     const correlatedPayload: GutoModelResponse & { message?: string } = contextBecameStale
       ? {
           ...responsePayload,
@@ -6322,6 +6393,32 @@ function buildFoodSubstituteResponse(
     ? previous?.originalId
     : resolveFoodIdByName(structuredDietContext?.originalItem.id || "") || resolveFoodIdByName(foodName);
   if (!foodId) return null;
+  const previousActiveContext = normalizeActiveContext(memory.activeContext);
+  const contextTransitioned =
+    previousActiveContext?.type !== "diet" ||
+    previousActiveContext.originalItem.id !== foodId;
+  if (contextTransitioned) {
+    const now = new Date().toISOString();
+    const originalFood = getFoodById(foodId);
+    const originalItem: ActiveContextItem = {
+      id: foodId,
+      name: originalFood?.names[language as FoodLanguage] || originalFood?.names["pt-BR"] || foodName,
+      mealName: dietCtx?.mealName || previous?.mealName,
+    };
+    activateContext(memory, {
+      id: `ctx-${crypto.randomUUID()}`,
+      version: 1,
+      type: "diet",
+      sourceSurface: "diet",
+      originalItem,
+      currentItem: originalItem,
+      lastSuggestedItem: null,
+      rejectedItems: [],
+      acceptedItem: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
   const rejectedIds = isRejectedFollowUp
     ? mergeRejectedIds(previous?.rejectedIds, [foodId, previous?.lastSuggestedId])
     : mergeRejectedIds(previous?.originalId === foodId ? previous?.rejectedIds : undefined, [foodId]);
@@ -6362,7 +6459,13 @@ function buildFoodSubstituteResponse(
       "en-US": `Got it. I won't repeat ${foodLabel}. Tell me what you have available now and I will keep the same meal role.`,
       "it-IT": `Chiaro. Non ripeto ${foodLabel}. Dimmi cosa hai disponibile ora e mantengo la stessa funzione del pasto.`,
     };
-    return { fala: fallback[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
+    return {
+      fala: fallback[language],
+      acao: "none",
+      expectedResponse: null,
+      avatarEmotion: "default",
+      contextTransition: contextTransitioned ? "intentional" : undefined,
+    };
   }
 
   const lang = language as FoodLanguage;
@@ -6396,7 +6499,142 @@ function buildFoodSubstituteResponse(
     "en-US": `Swap ${foodLabel} for ${selectedName}${meal ? `, keeping the energy of ${meal}` : ""}. Same role on the plate, diet intact.`,
     "it-IT": `Cambia ${foodLabel} con ${selectedName}${meal ? `, mantenendo l'energia di ${meal}` : ""}. Stessa funzione nel piatto, dieta intatta.`,
   };
-  return { fala: fala[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
+  return {
+    fala: fala[language],
+    acao: "none",
+    expectedResponse: null,
+    avatarEmotion: "default",
+    contextTransition: contextTransitioned ? "intentional" : undefined,
+  };
+}
+
+function responseMentionsFood(responseText: string | undefined, food: ReturnType<typeof getFoodById>): boolean {
+  if (!responseText || !food) return false;
+  const haystack = normalize(responseText);
+  const labels = [
+    ...Object.values(food.names),
+    ...Object.values(food.aliases || {}).flat(),
+  ];
+  return labels.some((label) => {
+    const candidate = normalize(label);
+    return candidate.length > 1 && haystack.includes(candidate);
+  });
+}
+
+async function materializeBrainFoodSubstitution(params: {
+  memory: GutoMemory;
+  input: string;
+  language: GutoLanguage;
+  response: GutoModelResponse;
+}): Promise<GutoModelResponse | null> {
+  const { memory, input, language, response } = params;
+  if (response.acao !== "none" || !response.fala) return null;
+
+  const previous = getFreshSubstitutionContext(memory, "food");
+  const rejectedFollowUp = Boolean(previous?.lastSuggestedId && isSubstitutionRejectionFollowUp(input));
+  const unavailableName = rejectedFollowUp ? previous?.originalName : resolveUnavailableFoodName(input);
+  const originalId = rejectedFollowUp
+    ? previous?.originalId
+    : unavailableName
+      ? resolveFoodIdByName(unavailableName)
+      : undefined;
+  if (!originalId) return null;
+
+  const rejectedIds = rejectedFollowUp
+    ? mergeRejectedIds(previous?.rejectedIds, [originalId, previous?.lastSuggestedId])
+    : mergeRejectedIds(previous?.originalId === originalId ? previous.rejectedIds : undefined, [originalId]);
+  const candidates = suggestFoodSubstitutes({
+    originalFoodId: originalId,
+    country: resolveFoodCountry(memory),
+    constraints: memoryFoodConstraints(memory),
+    useContext: "meal_substitution",
+  }).filter((food) => !rejectedIds.includes(food.id));
+  const selected = candidates.find((food) => responseMentionsFood(response.fala, food));
+  if (!selected) return null;
+
+  const plan = await readPersistedDietPlan(memory.userId).catch(() => null);
+  let meal: DietMeal | undefined;
+  let planFood: DietFood | undefined;
+  for (const candidateMeal of plan?.meals || []) {
+    const candidateFood = candidateMeal.foods.find((food) => resolveFoodIdByName(food.name) === originalId);
+    if (candidateFood) {
+      meal = candidateMeal;
+      planFood = candidateFood;
+      break;
+    }
+  }
+
+  const lang = language as FoodLanguage;
+  const originalFood = getFoodById(originalId);
+  const originalItem: ActiveContextItem = {
+    id: originalId,
+    name: planFood?.name || originalFood?.names[lang] || originalFood?.names["pt-BR"] || unavailableName || originalId,
+    mealId: meal?.id,
+    mealName: meal?.name || previous?.mealName,
+    quantity: planFood?.quantity,
+    nutritionalRole: planFood?.notes,
+  };
+  const previousActive = normalizeActiveContext(memory.activeContext);
+  const sameDietContext =
+    previousActive?.type === "diet" &&
+    previousActive.originalItem.id === originalId;
+  if (!sameDietContext) {
+    const now = new Date().toISOString();
+    activateContext(memory, {
+      id: `ctx-${crypto.randomUUID()}`,
+      version: 1,
+      type: "diet",
+      sourceSurface: "diet",
+      originalItem,
+      currentItem: originalItem,
+      lastSuggestedItem: null,
+      rejectedItems: [],
+      acceptedItem: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  const rejectedItems = rejectedIds.map((id) => {
+    const food = getFoodById(id);
+    return {
+      id,
+      name: food?.names[lang] || food?.names["pt-BR"] || id,
+      mealId: meal?.id,
+      mealName: meal?.name || previous?.mealName,
+      quantity: planFood?.quantity,
+      nutritionalRole: planFood?.notes,
+    } satisfies ActiveContextItem;
+  });
+  advanceActiveContextSubstitution(memory, "diet", rejectedItems, {
+    id: selected.id,
+    name: selected.names[lang] || selected.names["pt-BR"],
+    mealId: meal?.id,
+    mealName: meal?.name || previous?.mealName,
+    quantity: planFood?.quantity,
+    nutritionalRole: planFood?.notes,
+  });
+  memory.substitutionContext = {
+    kind: "food",
+    originalId,
+    originalName: originalFood?.names["pt-BR"] || unavailableName || originalId,
+    lastSuggestedId: selected.id,
+    rejectedIds,
+    mealName: meal?.name || previous?.mealName,
+    updatedAt: new Date().toISOString(),
+  };
+  appendMemoryAudit(
+    memory,
+    "chat_patch",
+    ["activeContext", "substitutionContext"],
+    "Troca alimentar decidida pelo cérebro e materializada pelo catálogo."
+  );
+  commitMemoryDecision(memory);
+  const transitioned = previousActive?.id !== normalizeActiveContext(memory.activeContext)?.id;
+  return {
+    ...response,
+    contextTransition: transitioned ? "intentional" : response.contextTransition,
+  };
 }
 
 function buildShortContextFallbackResponse(
@@ -15464,6 +15702,14 @@ async function dispatchSovereignBrainAction(params: {
   const { response, memory, language } = params;
   switch (response.acao) {
     case "none": {
+      const foodSubstitution = await materializeBrainFoodSubstitution({
+        memory,
+        input: params.input,
+        language,
+        response,
+      });
+      if (foodSubstitution) return foodSubstitution;
+
       if (
         response.fala &&
         offersExercisePreferenceMenu(response.fala) &&
@@ -15510,8 +15756,10 @@ async function dispatchSovereignBrainAction(params: {
         const focusHint = (promoted.memoryPatch as { nextWorkoutFocus?: string } | undefined)?.nextWorkoutFocus;
         const plan = await generateAndCommitBrainWorkout(memory, language, focusHint);
         if (!plan) return buildSovereignSafeFallback(language, "Não consegui executar o treino com segurança agora.");
+        const contextTransitioned = await activateFirstWorkoutItem(memory, plan);
         return {
           ...promoted,
+          contextTransition: contextTransitioned ? "intentional" : promoted.contextTransition,
           workoutPlan: plan,
           expectedResponse: null,
           memoryPatch: {
@@ -15530,8 +15778,10 @@ async function dispatchSovereignBrainAction(params: {
       const focusHint = (response.memoryPatch as { nextWorkoutFocus?: string } | undefined)?.nextWorkoutFocus;
       const plan = await generateAndCommitBrainWorkout(memory, language, focusHint);
       if (!plan) return buildSovereignSafeFallback(language, "Não consegui executar o treino com segurança agora.");
+      const contextTransitioned = await activateFirstWorkoutItem(memory, plan);
       return {
         ...response,
+        contextTransition: contextTransitioned ? "intentional" : response.contextTransition,
         workoutPlan: plan,
         expectedResponse: null,
         memoryPatch: {

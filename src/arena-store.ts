@@ -51,7 +51,7 @@ export interface ArenaStore {
   schemaVersion?: number;
 }
 
-const ARENA_STORE_SCHEMA_VERSION = 3;
+const ARENA_STORE_SCHEMA_VERSION = 4;
 
 function sameWeek(dateA: Date, dateB: Date): boolean {
   const monday = (date: Date) => {
@@ -66,13 +66,13 @@ function sameMonth(dateA: Date, dateB: Date): boolean {
   return dateA.getFullYear() === dateB.getFullYear() && dateA.getMonth() === dateB.getMonth();
 }
 
-/** v3 restaura o bônus do Pacto nos períodos sem convertê-lo em treino/streak. */
+/** v4 mantém o bônus do Pacto apenas no saldo geral, sem inflar semana/mês. */
 export function migrateArenaStoreToCurrentSchema(store: ArenaStore, now: Date = new Date()): ArenaStore {
   if ((store.schemaVersion ?? 1) >= ARENA_STORE_SCHEMA_VERSION) return store;
 
-  // Somente stores v2 tiveram o bônus removido. Stores v1 já o contavam; somar
-  // de novo duplicaria XP. O schema torna a reparação idempotente.
-  if (store.schemaVersion === 2) {
+  // v2 já excluía o bônus dos períodos. v1 e v3 o contavam; removemos somente
+  // nesses schemas para não subtrair duas vezes. A migração é idempotente.
+  if (store.schemaVersion !== 2) {
     for (const profile of Object.values(store.profiles)) {
       const bonusEvents = store.events.filter((event) => event.userId === profile.userId && event.type === "bonus");
       const weeklyBonus = bonusEvents.reduce((sum, event) => {
@@ -84,8 +84,8 @@ export function migrateArenaStoreToCurrentSchema(store: ArenaStore, now: Date = 
         return !Number.isNaN(createdAt.getTime()) && sameMonth(createdAt, now) ? sum + event.xp : sum;
       }, 0);
 
-      profile.weeklyXp = Math.max(0, profile.weeklyXp + weeklyBonus);
-      profile.monthlyXp = Math.max(0, profile.monthlyXp + monthlyBonus);
+      profile.weeklyXp = Math.max(0, profile.weeklyXp - weeklyBonus);
+      profile.monthlyXp = Math.max(0, profile.monthlyXp - monthlyBonus);
     }
   }
 
