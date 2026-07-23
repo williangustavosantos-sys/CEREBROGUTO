@@ -196,6 +196,8 @@ describe("active context correlation", () => {
       second.activeContext.rejectedItems.map((item: any) => item.id),
       ["supino_reto_maquina", first.activeContext.currentItem.id],
     );
+    assert.match(second.fala || "", new RegExp(first.activeContext.currentItem.name, "i"));
+    assert.doesNotMatch(second.fala || "", /Supino reto máquina ocupado/i);
 
     const dietContext = context("ctx-sequence-diet", "diet", "banana", "Banana prata");
     await post("/guto/active-context", { context: dietContext });
@@ -217,6 +219,9 @@ describe("active context correlation", () => {
     clearMemoryStoreCache();
     const stored = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
     assert.equal(stored.activeContext.id, "ctx-sequence-diet");
+    assert.equal(stored.substitutionContext.kind, "food");
+    assert.equal(stored.activeConversationContext.kind, "diet_substitution");
+    assert.equal(stored.activeConversationContext.originalId, "banana");
     assert.equal(stored.contextHistory.at(-1).id, "ctx-sequence-workout");
     assert.equal(stored.contextHistory.at(-1).currentItem.id, second.activeContext.currentItem.id);
   });

@@ -6451,7 +6451,13 @@ function buildFoodSubstituteResponse(
       updatedAt: new Date().toISOString(),
     };
     advanceActiveContextSubstitution(memory, "diet", rejectedItems, null);
-    appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Alimento sugerido foi rejeitado; aguardando alimentos disponíveis.");
+    syncCanonicalConversationContext(memory);
+    appendMemoryAudit(
+      memory,
+      "chat_patch",
+      ["activeContext", "substitutionContext", "activeConversationContext"],
+      "Alimento sugerido foi rejeitado; aguardando alimentos disponíveis."
+    );
     saveMemory(memory);
     const foodLabel = getFoodById(foodId)?.names[language as FoodLanguage] || foodName;
     const fallback: Record<GutoLanguage, string> = {
@@ -6491,7 +6497,13 @@ function buildFoodSubstituteResponse(
     quantity: memory.activeContext?.originalItem.quantity,
     nutritionalRole: memory.activeContext?.originalItem.nutritionalRole,
   });
-  appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Substituto alimentar sugerido e mantido como contexto operacional.");
+  syncCanonicalConversationContext(memory);
+  appendMemoryAudit(
+    memory,
+    "chat_patch",
+    ["activeContext", "substitutionContext", "activeConversationContext"],
+    "Substituto alimentar sugerido e mantido como contexto operacional."
+  );
   saveMemory(memory);
 
   const fala: Record<GutoLanguage, string> = {
@@ -6623,10 +6635,11 @@ async function materializeBrainFoodSubstitution(params: {
     mealName: meal?.name || previous?.mealName,
     updatedAt: new Date().toISOString(),
   };
+  syncCanonicalConversationContext(memory);
   appendMemoryAudit(
     memory,
     "chat_patch",
-    ["activeContext", "substitutionContext"],
+    ["activeContext", "substitutionContext", "activeConversationContext"],
     "Troca alimentar decidida pelo cérebro e materializada pelo catálogo."
   );
   commitMemoryDecision(memory);
@@ -6962,7 +6975,13 @@ function buildEquipmentAvailabilityQuestion({
     } satisfies ActiveContextItem;
   });
   advanceActiveContextSubstitution(memory, "workout", rejectedItems, null);
-  appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Substitutos de exercício rejeitados; coletando equipamentos disponíveis.");
+  syncCanonicalConversationContext(memory);
+  appendMemoryAudit(
+    memory,
+    "chat_patch",
+    ["activeContext", "substitutionContext", "activeConversationContext"],
+    "Substitutos de exercício rejeitados; coletando equipamentos disponíveis."
+  );
   saveMemory(memory);
 
   const copy: Record<GutoLanguage, string> = {
@@ -6996,6 +7015,15 @@ function buildValidatedEquipmentBusyResponse({
   }
 
   const substituteName = substitute.namesByLanguage[language as CatalogLanguage] || substitute.canonicalNamePt;
+  const latestRejectedSubstituteId = [...normalizedRejectedIds]
+    .reverse()
+    .find((id) => id !== original.id);
+  const latestRejectedSubstitute = latestRejectedSubstituteId
+    ? getCatalogById(latestRejectedSubstituteId)
+    : null;
+  const unavailableName = latestRejectedSubstitute
+    ? latestRejectedSubstitute.namesByLanguage[language as CatalogLanguage] || latestRejectedSubstitute.canonicalNamePt
+    : original.name;
   const scheme: Record<GutoLanguage, string> = original.planExercise
     ? {
         "pt-BR": `mantém ${original.planExercise.sets} séries, ${original.planExercise.reps}, descanso de ${original.planExercise.rest}`,
@@ -7008,9 +7036,9 @@ function buildValidatedEquipmentBusyResponse({
         "it-IT": "tieni lo stesso schema di serie e recupero del tuo allenamento",
       };
   const copy: Record<GutoLanguage, string> = {
-    "pt-BR": `${original.name} ocupado? Troca por ${substituteName}: ${scheme["pt-BR"]}. Mesma missão, sem ficar parado.`,
-    "en-US": `${original.name} is taken? Swap to ${substituteName}: ${scheme["en-US"]}. Same mission, no standing around.`,
-    "it-IT": `${original.name} occupato? Cambia con ${substituteName}: ${scheme["it-IT"]}. Stessa missione, senza fermarti.`,
+    "pt-BR": `${unavailableName} ocupado? Troca por ${substituteName}: ${scheme["pt-BR"]}. Mesma missão, sem ficar parado.`,
+    "en-US": `${unavailableName} is taken? Swap to ${substituteName}: ${scheme["en-US"]}. Same mission, no standing around.`,
+    "it-IT": `${unavailableName} occupato? Cambia con ${substituteName}: ${scheme["it-IT"]}. Stessa missione, senza fermarti.`,
   };
   memory.substitutionContext = {
     kind: "exercise",
@@ -7044,7 +7072,13 @@ function buildValidatedEquipmentBusyResponse({
     reps: original.planExercise?.reps,
     rest: original.planExercise?.rest,
   });
-  appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Substituto de exercício sugerido e mantido como contexto operacional.");
+  syncCanonicalConversationContext(memory);
+  appendMemoryAudit(
+    memory,
+    "chat_patch",
+    ["activeContext", "substitutionContext", "activeConversationContext"],
+    "Substituto de exercício sugerido e mantido como contexto operacional."
+  );
   saveMemory(memory);
   return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
 }

@@ -774,13 +774,14 @@ describe("proactivity HTTP cycle", () => {
       proactiveMemories?: unknown[]
       proactiveImpacts?: unknown[]
       proactivePrompt?: unknown
-      activeConversationContext?: unknown
+      activeConversationContext?: { kind?: string; originalId?: string } | null
       trainingSchedule?: string
     }>
     assert.deepEqual(store[USER_ID]?.proactiveMemories || [], [])
     assert.deepEqual(store[USER_ID]?.proactiveImpacts || [], [])
     assert.equal(store[USER_ID]?.proactivePrompt || null, null)
-    assert.equal(store[USER_ID]?.activeConversationContext || null, null)
+    assert.equal(store[USER_ID]?.activeConversationContext?.kind, "workout_substitution")
+    assert.equal(store[USER_ID]?.activeConversationContext?.originalId, "supino_reto_maquina")
     assert.equal(store[USER_ID]?.trainingSchedule, "today")
 
     globalThis.fetch = originalFetch
