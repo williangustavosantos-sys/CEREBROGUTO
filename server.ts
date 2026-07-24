@@ -99,6 +99,7 @@ import {
   classifyShortContextIntent,
   stripInjectedContext,
   hasExplicitBodyRegion,
+  isUnavailabilityMessage,
   parseDietContext,
   foodUnavailableReply,
   equipmentUnavailableReply,
@@ -639,6 +640,7 @@ type ActiveConversationContextKind =
   | "travel_impact_confirmation"
   | "travel_date_correction"
   | "workout_substitution"
+  | "diet_item"
   | "diet_substitution"
   | "pain_safety"
   | "weekly_checkin"
@@ -646,7 +648,7 @@ type ActiveConversationContextKind =
 
 interface ActiveConversationContext {
   kind: ActiveConversationContextKind;
-  source: "proactive_memory" | "proactive_prompt" | "substitution_context" | "safety" | "weekly_conversation" | "none";
+  source: "proactive_memory" | "proactive_prompt" | "substitution_context" | "active_context" | "safety" | "weekly_conversation" | "none";
   relatedMemoryId?: string;
   originalId?: string;
   dateParsed?: string;
@@ -4098,6 +4100,7 @@ function normalizeActiveConversationContext(value: unknown): ActiveConversationC
     "travel_impact_confirmation",
     "travel_date_correction",
     "workout_substitution",
+    "diet_item",
     "diet_substitution",
     "pain_safety",
     "weekly_checkin",
@@ -4111,6 +4114,7 @@ function normalizeActiveConversationContext(value: unknown): ActiveConversationC
     raw.source === "proactive_memory" ||
     raw.source === "proactive_prompt" ||
     raw.source === "substitution_context" ||
+    raw.source === "active_context" ||
     raw.source === "safety" ||
     raw.source === "weekly_conversation"
       ? raw.source
@@ -4279,6 +4283,16 @@ function deriveCanonicalConversationContext(memory: GutoMemory): ActiveConversat
       kind: "diet_substitution",
       source: "substitution_context",
       originalId: foodContext.originalId,
+      updatedAt: now,
+    };
+  }
+
+  const active = normalizeActiveContext(memory.activeContext);
+  if (active?.type === "diet") {
+    return {
+      kind: "diet_item",
+      source: "active_context",
+      originalId: active.originalItem.id,
       updatedAt: now,
     };
   }
@@ -6378,7 +6392,8 @@ function resolveUnavailableFoodName(rawInput: string): string | undefined {
 function buildFoodSubstituteResponse(
   input: string | undefined,
   memory: GutoMemory,
-  language: GutoLanguage
+  language: GutoLanguage,
+  options: { persist?: boolean } = {},
 ): GutoModelResponse | null {
   const dietCtx = parseDietContext(input || "");
   const activeDietContext = normalizeActiveContext(memory.activeContext);
@@ -6389,14 +6404,18 @@ function buildFoodSubstituteResponse(
     ? previous?.originalName
     : dietCtx?.foodName || structuredDietContext?.originalItem.name || resolveUnavailableFoodName(input || "");
   if (!foodName) return null;
+  const structuredOriginalId = structuredDietContext
+    ? resolveFoodIdByName(structuredDietContext.originalItem.id) ||
+      resolveFoodIdByName(structuredDietContext.originalItem.name)
+    : undefined;
   const foodId = isRejectedFollowUp
     ? previous?.originalId
-    : resolveFoodIdByName(structuredDietContext?.originalItem.id || "") || resolveFoodIdByName(foodName);
+    : structuredOriginalId || resolveFoodIdByName(foodName);
   if (!foodId) return null;
   const previousActiveContext = normalizeActiveContext(memory.activeContext);
   const contextTransitioned =
     previousActiveContext?.type !== "diet" ||
-    previousActiveContext.originalItem.id !== foodId;
+    structuredOriginalId !== foodId;
   if (contextTransitioned) {
     const now = new Date().toISOString();
     const originalFood = getFoodById(foodId);
@@ -6423,6 +6442,9 @@ function buildFoodSubstituteResponse(
     ? mergeRejectedIds(previous?.rejectedIds, [foodId, previous?.lastSuggestedId])
     : mergeRejectedIds(previous?.originalId === foodId ? previous?.rejectedIds : undefined, [foodId]);
   const rejectedItems = rejectedIds.map((id) => {
+    if (id === foodId && structuredDietContext && structuredOriginalId === foodId) {
+      return structuredDietContext.originalItem;
+    }
     const food = getFoodById(id);
     return {
       id,
@@ -6458,7 +6480,7 @@ function buildFoodSubstituteResponse(
       ["activeContext", "substitutionContext", "activeConversationContext"],
       "Alimento sugerido foi rejeitado; aguardando alimentos disponíveis."
     );
-    saveMemory(memory);
+    if (options.persist !== false) saveMemory(memory);
     const foodLabel = getFoodById(foodId)?.names[language as FoodLanguage] || foodName;
     const fallback: Record<GutoLanguage, string> = {
       "pt-BR": `Fechado. Não vou repetir ${foodLabel}. Me diz o que você tem disponível agora e eu encaixo mantendo a função da refeição.`,
@@ -6477,7 +6499,10 @@ function buildFoodSubstituteResponse(
   const lang = language as FoodLanguage;
   const selected = subs[0]!;
   const selectedName = selected.names[lang] || selected.names["pt-BR"];
-  const foodLabel = getFoodById(foodId)?.names[lang] || foodName;
+  const rejectedSuggestion = isRejectedFollowUp && previous?.lastSuggestedId
+    ? getFoodById(previous.lastSuggestedId)
+    : null;
+  const foodLabel = rejectedSuggestion?.names[lang] || getFoodById(foodId)?.names[lang] || foodName;
   const meal = dietCtx?.mealName || previous?.mealName;
 
   memory.substitutionContext = {
@@ -6504,7 +6529,7 @@ function buildFoodSubstituteResponse(
     ["activeContext", "substitutionContext", "activeConversationContext"],
     "Substituto alimentar sugerido e mantido como contexto operacional."
   );
-  saveMemory(memory);
+  if (options.persist !== false) saveMemory(memory);
 
   const fala: Record<GutoLanguage, string> = {
     "pt-BR": `Troca ${foodLabel} por ${selectedName}${meal ? `, mantendo a energia do ${meal}` : ""}. Mesma função no prato, sem furar a dieta.`,
@@ -6518,6 +6543,23 @@ function buildFoodSubstituteResponse(
     avatarEmotion: "default",
     contextTransition: contextTransitioned ? "intentional" : undefined,
   };
+}
+
+async function buildFoodSubstituteResponseAtomically(
+  input: string | undefined,
+  memory: GutoMemory,
+  language: GutoLanguage,
+): Promise<GutoModelResponse | null> {
+  let response: GutoModelResponse | null = null;
+  const updated = await updateUserMemoryAtomically<GutoMemory>(memory.userId, (snapshot) => {
+    const current = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      ? { ...memory, ...(snapshot as GutoMemory) }
+      : { ...memory };
+    response = buildFoodSubstituteResponse(input, current, language, { persist: false });
+    return current;
+  });
+  if (updated) Object.assign(memory, updated);
+  return response;
 }
 
 function responseMentionsFood(responseText: string | undefined, food: ReturnType<typeof getFoodById>): boolean {
@@ -6587,9 +6629,13 @@ async function materializeBrainFoodSubstitution(params: {
     nutritionalRole: planFood?.notes,
   };
   const previousActive = normalizeActiveContext(memory.activeContext);
+  const previousActiveOriginalId = previousActive?.type === "diet"
+    ? resolveFoodIdByName(previousActive.originalItem.id) ||
+      resolveFoodIdByName(previousActive.originalItem.name)
+    : undefined;
   const sameDietContext =
     previousActive?.type === "diet" &&
-    previousActive.originalItem.id === originalId;
+    previousActiveOriginalId === originalId;
   if (!sameDietContext) {
     const now = new Date().toISOString();
     activateContext(memory, {
@@ -6608,6 +6654,9 @@ async function materializeBrainFoodSubstitution(params: {
   }
 
   const rejectedItems = rejectedIds.map((id) => {
+    if (id === originalId && previousActive?.type === "diet" && previousActiveOriginalId === originalId) {
+      return previousActive.originalItem;
+    }
     const food = getFoodById(id);
     return {
       id,
@@ -15631,13 +15680,32 @@ async function buildNoModelOperationalFallback(params: {
   return null;
 }
 
-function buildDeterministicContextResolverResponse(params: {
+async function buildDeterministicContextResolverResponse(params: {
   input: string;
   history: GutoHistoryItem[];
   memory: GutoMemory;
   language: GutoLanguage;
-}): GutoModelResponse | null {
+}): Promise<GutoModelResponse | null> {
   const { input, history, memory, language } = params;
+
+  const shortIntent = classifyShortContextIntent({ rawInput: input });
+  const active = normalizeActiveContext(memory.activeContext);
+  const unavailableInActiveDiet =
+    active?.type === "diet" &&
+    isUnavailabilityMessage(stripInjectedContext(input));
+  const rejectsCurrentFood =
+    active?.type === "diet" &&
+    Boolean(getFreshSubstitutionContext(memory, "food")?.lastSuggestedId) &&
+    isSubstitutionRejectionFollowUp(input);
+  if (
+    shortIntent.intent === "food_unavailable" ||
+    shortIntent.intent === "food_substitute_request" ||
+    unavailableInActiveDiet ||
+    rejectsCurrentFood
+  ) {
+    const foodSubstitution = await buildFoodSubstituteResponseAtomically(input, memory, language);
+    if (foodSubstitution) return foodSubstitution;
+  }
 
   const objection = buildExerciseSubstitutionObjectionResponse({ input, memory, language });
   if (objection) return objection;
@@ -16031,7 +16099,7 @@ async function runSovereignBrainTurn(params: {
   if (!requestContextIsCurrent()) return staleContextResponse();
   if (proactiveStateFallback) return finalizeSovereignBrainResponse(proactiveStateFallback, input, language);
 
-  const deterministicContextResolver = buildDeterministicContextResolverResponse({
+  const deterministicContextResolver = await buildDeterministicContextResolverResponse({
     input,
     history,
     memory,
@@ -17847,15 +17915,19 @@ app.post("/guto/active-context", requireActiveUser, async (req, res) => {
   const userId = req.gutoUser!.userId;
   await readMemoryStoreAsync();
   const raw = req.body?.context;
-  const memory = getMemory(userId);
 
   if (raw === null) {
-    archiveActiveContext(memory);
-    memory.activeContext = null;
-    memory.activeExercise = null;
-    memory.substitutionContext = null;
-    saveMemory(memory);
-    await flushMemoryStoreWrites();
+    await updateUserMemoryAtomically<GutoMemory>(userId, (snapshot) => {
+      const memory = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+        ? snapshot as GutoMemory
+        : getMemory(userId);
+      archiveActiveContext(memory);
+      memory.activeContext = null;
+      memory.activeExercise = null;
+      memory.substitutionContext = null;
+      syncCanonicalConversationContext(memory);
+      return memory;
+    });
     return res.json({ ok: true, activeContext: null });
   }
 
@@ -17868,30 +17940,47 @@ app.post("/guto/active-context", requireActiveUser, async (req, res) => {
     });
   }
 
-  const existing = normalizeActiveContext(memory.activeContext);
-  if (existing?.id === normalized.id && normalized.version < existing.version) {
+  let staleContext: ActiveContext | null = null;
+  let activeContext: ActiveContext | null = null;
+  const updated = await updateUserMemoryAtomically<GutoMemory>(userId, (snapshot) => {
+    const memory = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      ? snapshot as GutoMemory
+      : getMemory(userId);
+    const existing = normalizeActiveContext(memory.activeContext);
+    if (existing?.id === normalized.id && normalized.version < existing.version) {
+      staleContext = existing;
+      return memory;
+    }
+
+    activeContext = activateContext(memory, normalized);
+    if (activeContext.type === "workout") {
+      memory.activeExercise = {
+        source: "chat",
+        name: activeContext.currentItem.name,
+        reps: activeContext.currentItem.reps,
+        rest: activeContext.currentItem.rest,
+        totalSets: activeContext.currentItem.sets,
+        updatedAt: activeContext.updatedAt,
+      };
+    }
+    syncCanonicalConversationContext(memory);
+    appendMemoryAudit(
+      memory,
+      "chat_patch",
+      ["activeContext", "substitutionContext", "activeConversationContext"],
+      `Contexto ${activeContext.type} ativado em ${activeContext.sourceSurface}.`,
+    );
+    return memory;
+  });
+
+  if (staleContext) {
     return res.status(409).json({
       ok: false,
       code: "ACTIVE_CONTEXT_STALE",
-      activeContext: existing,
+      activeContext: staleContext,
     });
   }
-
-  const activeContext = activateContext(memory, normalized);
-  if (activeContext.type === "workout") {
-    memory.activeExercise = {
-      source: "chat",
-      name: activeContext.currentItem.name,
-      reps: activeContext.currentItem.reps,
-      rest: activeContext.currentItem.rest,
-      totalSets: activeContext.currentItem.sets,
-      updatedAt: activeContext.updatedAt,
-    };
-  }
-  appendMemoryAudit(memory, "chat_patch", ["activeContext"], `Contexto ${activeContext.type} ativado em ${activeContext.sourceSurface}.`);
-  saveMemory(memory);
-  await flushMemoryStoreWrites();
-  return res.json({ ok: true, activeContext });
+  return res.json({ ok: true, activeContext: activeContext || normalizeActiveContext(updated?.activeContext) });
 });
 
 // Liga a dúvida do treino (chat) e a execução do GUTO Online ao cérebro: persiste
