@@ -1,11 +1,17 @@
 import fs from "fs";
 import path from "path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "url";
+import { Redis } from "@upstash/redis";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUSH_STORE_PATH = process.env.PUSH_STORE_FILE
   ? process.env.PUSH_STORE_FILE
   : path.join(__dirname, "../tmp/push-subscriptions.json");
+const REDIS_KEY = "guto:push-subscriptions:v1";
+const REDIS_LOCK_KEY = "guto:push-subscriptions:write-lock:v1";
+const REDIS_LOCK_TTL_MS = 15_000;
+const REDIS_LOCK_WAIT_MS = 20_000;
 
 export interface PushSubscriptionRecord {
   userId: string;
@@ -16,9 +22,9 @@ export interface PushSubscriptionRecord {
   };
   /** ISO date — last successful delivery */
   lastSentAt?: string;
-  /** "morning" | "evening" | "critical" — which slot was used today */
+  /** "12" | "18" | "21" — which approved window was used */
   lastSentSlot?: string;
-  /** ISO date — last delivery attempt failed (for cleanup of expired subs) */
+  /** ISO date — last delivery attempt failed */
   lastFailedAt?: string;
   failureCount?: number;
   createdAt: string;
@@ -29,6 +35,56 @@ interface PushStore {
   subscriptions: PushSubscriptionRecord[];
 }
 
+type RedisClient = {
+  get: (key: string) => Promise<unknown>;
+  set: (key: string, value: unknown, options?: { nx: true; px: number }) => Promise<unknown>;
+  eval: (script: string, keys: string[], args: string[]) => Promise<unknown>;
+};
+
+let redisClient: RedisClient | null = null;
+let localWriteChain: Promise<void> = Promise.resolve();
+
+function getRedisClient(): RedisClient | null {
+  if (process.env.GUTO_DISABLE_REDIS_FOR_TESTS === "1") return null;
+  if (redisClient) return redisClient;
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return null;
+  try {
+    redisClient = new Redis({ url, token }) as unknown as RedisClient;
+    return redisClient;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeStore(raw: unknown): PushStore {
+  let parsed = raw;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return { subscriptions: [] };
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { subscriptions: [] };
+  }
+  const subscriptions = (parsed as { subscriptions?: unknown }).subscriptions;
+  return {
+    subscriptions: Array.isArray(subscriptions)
+      ? subscriptions.filter((item): item is PushSubscriptionRecord =>
+          Boolean(
+            item &&
+            typeof item === "object" &&
+            typeof (item as PushSubscriptionRecord).userId === "string" &&
+            typeof (item as PushSubscriptionRecord).endpoint === "string"
+          )
+        )
+      : [],
+  };
+}
+
 function ensureStoreFile(): void {
   if (!fs.existsSync(PUSH_STORE_PATH)) {
     fs.mkdirSync(path.dirname(PUSH_STORE_PATH), { recursive: true });
@@ -36,94 +92,164 @@ function ensureStoreFile(): void {
   }
 }
 
-function readStore(): PushStore {
+function readLocalStore(): PushStore {
   ensureStoreFile();
   try {
-    return JSON.parse(fs.readFileSync(PUSH_STORE_PATH, "utf-8")) as PushStore;
+    return normalizeStore(JSON.parse(fs.readFileSync(PUSH_STORE_PATH, "utf-8")));
   } catch {
     return { subscriptions: [] };
   }
 }
 
-function writeStore(store: PushStore): void {
+function writeLocalStore(store: PushStore): void {
   ensureStoreFile();
   fs.writeFileSync(PUSH_STORE_PATH, JSON.stringify(store, null, 2));
 }
 
-/**
- * Insere ou atualiza uma subscription. Endpoint é a chave única —
- * mesmo dispositivo pode aparecer com user diferente se o app trocou de
- * usuário; a subscription mais recente sobrescreve.
- */
-export function upsertSubscription(record: Omit<PushSubscriptionRecord, "createdAt" | "updatedAt">): PushSubscriptionRecord {
-  const store = readStore();
-  const now = new Date().toISOString();
-  const existing = store.subscriptions.find((s) => s.endpoint === record.endpoint);
+function waitFor(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-  if (existing) {
-    Object.assign(existing, record, { updatedAt: now });
-    writeStore(store);
-    return existing;
+async function acquireRedisLock(redis: RedisClient): Promise<() => Promise<void>> {
+  const token = randomUUID();
+  const deadline = Date.now() + REDIS_LOCK_WAIT_MS;
+  while (Date.now() < deadline) {
+    const acquired = await redis.set(REDIS_LOCK_KEY, token, {
+      nx: true,
+      px: REDIS_LOCK_TTL_MS,
+    });
+    if (acquired === "OK") {
+      return async () => {
+        await redis.eval(
+          'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end',
+          [REDIS_LOCK_KEY],
+          [token]
+        ).catch(() => {});
+      };
+    }
+    await waitFor(50);
+  }
+  throw new Error("Timed out waiting for push subscription store lock.");
+}
+
+async function readStore(): Promise<PushStore> {
+  const redis = getRedisClient();
+  if (!redis) return readLocalStore();
+  const raw = await redis.get(REDIS_KEY);
+  return normalizeStore(raw);
+}
+
+async function mutateStore<T>(mutate: (store: PushStore) => T): Promise<T> {
+  const redis = getRedisClient();
+  if (redis) {
+    const release = await acquireRedisLock(redis);
+    try {
+      const store = normalizeStore(await redis.get(REDIS_KEY));
+      const result = mutate(store);
+      await redis.set(REDIS_KEY, store);
+      return result;
+    } finally {
+      await release();
+    }
   }
 
-  const created: PushSubscriptionRecord = {
-    ...record,
-    createdAt: now,
-    updatedAt: now,
-  };
-  store.subscriptions.push(created);
-  writeStore(store);
-  return created;
+  let result!: T;
+  const operation = localWriteChain.then(() => {
+    const store = readLocalStore();
+    result = mutate(store);
+    writeLocalStore(store);
+  });
+  localWriteChain = operation.catch(() => {});
+  await operation;
+  return result;
 }
 
-export function getSubscriptionsByUser(userId: string): PushSubscriptionRecord[] {
-  return readStore().subscriptions.filter((s) => s.userId === userId);
+/**
+ * Endpoint é a chave única. Se o navegador trocar de usuário, a assinatura
+ * passa a pertencer ao login mais recente sem duplicar o mesmo dispositivo.
+ */
+export async function upsertSubscription(
+  record: Omit<PushSubscriptionRecord, "createdAt" | "updatedAt">
+): Promise<PushSubscriptionRecord> {
+  return mutateStore((store) => {
+    const now = new Date().toISOString();
+    const existing = store.subscriptions.find((item) => item.endpoint === record.endpoint);
+    if (existing) {
+      Object.assign(existing, record, { updatedAt: now });
+      return { ...existing, keys: { ...existing.keys } };
+    }
+    const created: PushSubscriptionRecord = {
+      ...record,
+      keys: { ...record.keys },
+      createdAt: now,
+      updatedAt: now,
+    };
+    store.subscriptions.push(created);
+    return { ...created, keys: { ...created.keys } };
+  });
 }
 
-export function getAllSubscriptions(): PushSubscriptionRecord[] {
-  return readStore().subscriptions;
+export async function getSubscriptionsByUser(userId: string): Promise<PushSubscriptionRecord[]> {
+  return (await readStore()).subscriptions
+    .filter((item) => item.userId === userId)
+    .map((item) => ({ ...item, keys: { ...item.keys } }));
 }
 
-export function deleteSubscriptionByEndpoint(endpoint: string): boolean {
-  const store = readStore();
-  const before = store.subscriptions.length;
-  store.subscriptions = store.subscriptions.filter((s) => s.endpoint !== endpoint);
-  if (store.subscriptions.length === before) return false;
-  writeStore(store);
-  return true;
+export async function getAllSubscriptions(): Promise<PushSubscriptionRecord[]> {
+  return (await readStore()).subscriptions.map((item) => ({ ...item, keys: { ...item.keys } }));
 }
 
-export function deleteSubscriptionsByUser(userId: string): number {
-  const store = readStore();
-  const before = store.subscriptions.length;
-  store.subscriptions = store.subscriptions.filter((s) => s.userId !== userId);
-  const removed = before - store.subscriptions.length;
-  if (removed > 0) writeStore(store);
-  return removed;
+export async function deleteSubscriptionByEndpoint(endpoint: string): Promise<boolean> {
+  return mutateStore((store) => {
+    const before = store.subscriptions.length;
+    store.subscriptions = store.subscriptions.filter((item) => item.endpoint !== endpoint);
+    return store.subscriptions.length !== before;
+  });
 }
 
-export function recordSuccessfulDelivery(endpoint: string, slot: string): void {
-  const store = readStore();
-  const sub = store.subscriptions.find((s) => s.endpoint === endpoint);
-  if (!sub) return;
-  sub.lastSentAt = new Date().toISOString();
-  sub.lastSentSlot = slot;
-  sub.failureCount = 0;
-  sub.lastFailedAt = undefined;
-  sub.updatedAt = sub.lastSentAt;
-  writeStore(store);
+export async function deleteSubscriptionsByUser(userId: string): Promise<number> {
+  return mutateStore((store) => {
+    const before = store.subscriptions.length;
+    store.subscriptions = store.subscriptions.filter((item) => item.userId !== userId);
+    return before - store.subscriptions.length;
+  });
 }
 
-export function recordFailedDelivery(endpoint: string): void {
-  const store = readStore();
-  const sub = store.subscriptions.find((s) => s.endpoint === endpoint);
-  if (!sub) return;
-  sub.lastFailedAt = new Date().toISOString();
-  sub.failureCount = (sub.failureCount ?? 0) + 1;
-  sub.updatedAt = sub.lastFailedAt;
-  writeStore(store);
+export async function recordSuccessfulDelivery(
+  endpoint: string,
+  slot: string,
+  sentAt = new Date()
+): Promise<void> {
+  await mutateStore((store) => {
+    const delivered = store.subscriptions.find((item) => item.endpoint === endpoint);
+    if (!delivered) return;
+    const timestamp = sentAt.toISOString();
+    for (const sub of store.subscriptions) {
+      if (sub.userId !== delivered.userId) continue;
+      sub.lastSentAt = timestamp;
+      sub.lastSentSlot = slot;
+      sub.failureCount = 0;
+      sub.lastFailedAt = undefined;
+      sub.updatedAt = timestamp;
+    }
+  });
 }
 
-export function writePushStoreRaw(store: PushStore): void {
-  writeStore(store);
+export async function recordFailedDelivery(endpoint: string, failedAt = new Date()): Promise<void> {
+  await mutateStore((store) => {
+    const sub = store.subscriptions.find((item) => item.endpoint === endpoint);
+    if (!sub) return;
+    sub.lastFailedAt = failedAt.toISOString();
+    sub.failureCount = (sub.failureCount ?? 0) + 1;
+    sub.updatedAt = sub.lastFailedAt;
+  });
+}
+
+export async function writePushStoreRaw(store: PushStore): Promise<void> {
+  await mutateStore((current) => {
+    current.subscriptions = store.subscriptions.map((item) => ({
+      ...item,
+      keys: { ...item.keys },
+    }));
+  });
 }

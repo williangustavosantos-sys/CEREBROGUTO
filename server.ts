@@ -1,12 +1,15 @@
 import "dotenv/config";
-import express from "express";
+import express, {
+  type Request as ExpressRequest,
+  type Response as ExpressResponse,
+} from "express";
 import cors from "cors";
 import multer from "multer";
 import { existsSync, mkdirSync } from "fs";
 import path from "path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
-import { config, isProductionEnv } from "./src/config.js";
+import { config, hasPushVapidConfiguration, isProductionEnv } from "./src/config.js";
 import { createRateLimit } from "./src/http/rate-limit.js";
 import { requestLog } from "./src/http/request-log.js";
 import { parseRequestOriginalUrl } from "./src/http/request-url.js";
@@ -47,14 +50,21 @@ import { addLog } from "./src/log-store.js";
 import {
   upsertSubscription,
   getAllSubscriptions,
-  getSubscriptionsByUser,
   deleteSubscriptionByEndpoint,
   recordSuccessfulDelivery,
   recordFailedDelivery,
 } from "./src/push-store.js";
+import {
+  dispatchExternalPush,
+  type PushCandidate,
+  type PushPayload,
+} from "./src/push-dispatch.js";
 import webpush from "web-push";
 import { parseAuth, requireActiveUser } from "./src/auth-middleware.js";
-import { getEffectiveUserAccess } from "./src/user-access-store.js";
+import {
+  getEffectiveUserAccess,
+  requireActiveUserAccessAsync,
+} from "./src/user-access-store.js";
 import {
   calculateMacros,
   validateAndCorrectPortions,
@@ -806,7 +816,7 @@ app.use(cors({
   },
 }));
 
-const pushEnabled = Boolean(config.pushVapidPublicKey && config.pushVapidPrivateKey);
+const pushEnabled = hasPushVapidConfiguration(config);
 if (pushEnabled) {
   webpush.setVapidDetails(
     config.pushVapidSubject,
@@ -12332,7 +12342,7 @@ app.get("/guto/push/vapid-public-key", (_req, res) => {
   res.json({ publicKey: config.pushVapidPublicKey });
 });
 
-app.post("/guto/push/subscribe", requireActiveUser, (req, res) => {
+app.post("/guto/push/subscribe", requireActiveUser, async (req, res) => {
   if (!pushEnabled) {
     return res.status(503).json({ message: "Push notifications not configured.", code: "PUSH_DISABLED" });
   }
@@ -12341,23 +12351,46 @@ app.post("/guto/push/subscribe", requireActiveUser, (req, res) => {
   if (!sub || typeof sub.endpoint !== "string" || !sub.keys?.p256dh || !sub.keys?.auth) {
     return res.status(400).json({ message: "Invalid subscription payload.", code: "PUSH_INVALID_SUB" });
   }
-  const saved = upsertSubscription({
+  await upsertSubscription({
     userId,
     endpoint: sub.endpoint,
     keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
   });
-  res.status(201).json({ ok: true, endpoint: saved.endpoint });
+  res.status(201).json({ ok: true });
 });
 
-app.delete("/guto/push/subscribe", requireActiveUser, (req, res) => {
+app.delete("/guto/push/subscribe", requireActiveUser, async (req, res) => {
   const endpoint = typeof req.body?.endpoint === "string" ? req.body.endpoint : "";
   if (!endpoint) return res.status(400).json({ message: "endpoint required.", code: "PUSH_NO_ENDPOINT" });
-  const removed = deleteSubscriptionByEndpoint(endpoint);
+  const removed = await deleteSubscriptionByEndpoint(endpoint);
   res.json({ ok: removed });
 });
 
-// Cron-only: must include the shared secret in Authorization: Bearer <secret>
-app.post("/guto/push/dispatch", async (req, res) => {
+type ExternalPushContext = {
+  dailyPresenceContext: DailyPresenceContext;
+  proactivityContext: string | null;
+  operationalContext: OperationalContext;
+};
+
+function pushSubjectRef(userId: string): string {
+  return createHash("sha256").update(userId).digest("hex").slice(0, 12);
+}
+
+function compactPushBody(text: string): string {
+  const clean = sanitizeUserFacingText(text).replace(/\s+/g, " ").trim();
+  if (clean.length <= 240) return clean;
+  const clipped = clean.slice(0, 237);
+  const boundary = clipped.lastIndexOf(" ");
+  return `${clipped.slice(0, boundary > 180 ? boundary : clipped.length).trim()}…`;
+}
+
+function logPushDispatch(event: object): void {
+  console.log(JSON.stringify({ event: "guto_push_dispatch", ...event }));
+}
+
+// Vercel Cron chama o path por GET e injeta Authorization com CRON_SECRET.
+// POST permanece como compatibilidade operacional, passando pelo mesmo handler.
+async function handlePushDispatch(req: ExpressRequest, res: ExpressResponse) {
   if (!pushEnabled) {
     return res.status(503).json({ message: "Push notifications not configured.", code: "PUSH_DISABLED" });
   }
@@ -12367,133 +12400,150 @@ app.post("/guto/push/dispatch", async (req, res) => {
     return res.status(401).json({ message: "Unauthorized.", code: "PUSH_UNAUTHORIZED" });
   }
 
-  const subs = getAllSubscriptions();
-  const today = todayKey();
-  const memoryStore = await readMemoryStoreAsync();
-
-  let sent = 0;
-  let skipped = 0;
-  let failed = 0;
-
-  for (const sub of subs) {
-    const memory = memoryStore[sub.userId] as Record<string, unknown> | undefined;
-    if (!memory) {
-      skipped++;
-      continue;
-    }
-
-    const completedDates = Array.isArray(memory.completedWorkoutDates) ? (memory.completedWorkoutDates as string[]) : [];
-    const trainedToday = completedDates.includes(today);
-    if (trainedToday) {
-      skipped++;
-      continue;
-    }
-
-    const language = (typeof memory.language === "string" ? memory.language : "pt-BR") as GutoLanguage;
-    const dailyPresenceContext = await buildDailyPresenceContext({ userId: sub.userId, ...memory } as DailyPresenceMemory, {
-      dateKey: today,
-      language,
-      allowExternalFetch: false,
+  const dispatchId = randomUUID();
+  const now = new Date();
+  const day = todayKey(now);
+  let lease: Awaited<ReturnType<typeof acquireDistributedUserLease>> | null = null;
+  try {
+    lease = await acquireDistributedUserLease("push-dispatch", "global", {
+      ttlMs: 300_000,
+      waitMs: 305_000,
     });
-    if (shouldSuppressTrainingCharge(dailyPresenceContext)) {
-      skipped++;
-      continue;
-    }
+    await readMemoryStoreAsync();
+    const subscriptions = await getAllSubscriptions();
+    const result = await dispatchExternalPush<GutoMemory, ExternalPushContext>({
+      dispatchId,
+      now,
+      timeZone: GUTO_TIME_ZONE,
+      subscriptions,
+      loadCandidate: async (userId): Promise<PushCandidate<GutoMemory, ExternalPushContext>> => {
+        const rawMemory = readMemoryStore()[userId];
+        if (!rawMemory) {
+          return {
+            memory: null,
+            activeAccess: false,
+            contextSuppressed: false,
+            context: null as unknown as ExternalPushContext,
+          };
+        }
+        const memory = getMemory(userId);
+        const language = normalizeLanguage(memory.language);
+        const dailyPresenceContext = await buildDailyPresenceContext(memory, {
+          dateKey: day,
+          language,
+          allowExternalFetch: false,
+        });
+        const proactivityContext = await buildProactivityContextBlock(
+          userId,
+          getOperationalContext(now, language).weekday,
+          language
+        ).catch(() => null);
+        return {
+          memory,
+          activeAccess: Boolean(await requireActiveUserAccessAsync(userId)),
+          contextSuppressed: shouldSuppressTrainingCharge(dailyPresenceContext),
+          context: {
+            dailyPresenceContext,
+            proactivityContext,
+            operationalContext: getOperationalContext(now, language),
+          },
+        };
+      },
+      decide: async ({ memory, context, slot }): Promise<PushPayload | null> => {
+        const language = normalizeLanguage(memory.language);
+        const decision = await runSovereignBrainTurn({
+          memory,
+          input: "",
+          history: [],
+          language,
+          expectedResponse: null,
+          proactivityContext: context.proactivityContext,
+          dailyPresenceContext: context.dailyPresenceContext,
+          operationalContext: context.operationalContext,
+          resolverResult: null,
+          systemTrigger: {
+            source: "proactive_scheduler",
+            slot: `external_${slot}`,
+            objective: "scheduled_presence",
+          },
+        });
+        const body = compactPushBody(decision.fala || "");
+        if (!body || isSovereignSafeFallbackText(body)) return null;
+        return {
+          title: "GUTO",
+          body,
+          tag: `guto-${slot}`,
+          url: "/",
+        };
+      },
+      send: async (subscription, payload) => {
+        await webpush.sendNotification(
+          {
+            endpoint: subscription.endpoint,
+            keys: {
+              p256dh: subscription.keys.p256dh,
+              auth: subscription.keys.auth,
+            },
+          },
+          JSON.stringify(payload),
+          { TTL: 3600, urgency: "normal" },
+        );
+      },
+      recordSuccess: recordSuccessfulDelivery,
+      recordFailure: recordFailedDelivery,
+      deleteSubscription: deleteSubscriptionByEndpoint,
+      subjectRef: pushSubjectRef,
+      log: (event) => logPushDispatch(event),
+    });
 
-    const lastSent = sub.lastSentAt ? sub.lastSentAt.slice(0, 10) : "";
-    if (lastSent === today) {
-      skipped++;
-      continue;
-    }
-
-    const totalXp = Math.max(0, typeof memory.totalXp === "number" ? memory.totalXp : 100);
-    const missedDates = Array.isArray(memory.missedMissionDates) ? (memory.missedMissionDates as string[]) : [];
-    const missedCount = missedDates.length;
-    const preferredName = typeof memory.preferredName === "string" ? memory.preferredName : "";
-    const fallbackName = typeof memory.name === "string" ? memory.name : "";
-    const userName = preferredName || fallbackName;
-
-    let title = "GUTO";
-    let body = "";
-    let slot = "morning";
-
-    if (totalXp <= 0) {
-      slot = "critical";
-      body = pickPushCopy(language, "dead", userName);
-    } else if (totalXp <= 19 || missedCount >= 4) {
-      slot = "critical";
-      body = pickPushCopy(language, "dying", userName);
-    } else if (totalXp <= 49 || missedCount >= 2) {
-      slot = "critical";
-      body = pickPushCopy(language, "critical", userName);
-    } else if (totalXp <= 70 || missedCount >= 1) {
-      slot = "morning";
-      body = pickPushCopy(language, "alert", userName);
-    } else {
-      slot = "morning";
-      body = pickPushCopy(language, "healthy", userName);
-    }
-
-    try {
-      await webpush.sendNotification(
-        {
-          endpoint: sub.endpoint,
-          keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
-        },
-        JSON.stringify({ title, body, tag: `guto-${slot}`, url: "/" }),
-        { TTL: 3600 },
-      );
-      recordSuccessfulDelivery(sub.endpoint, slot);
-      sent++;
-    } catch (err: any) {
-      const status = err?.statusCode ?? 0;
-      if (status === 404 || status === 410) {
-        deleteSubscriptionByEndpoint(sub.endpoint);
-      } else {
-        recordFailedDelivery(sub.endpoint);
-      }
-      failed++;
-    }
+    addLog({
+      action: "push_dispatch",
+      actorUserId: "cron",
+      actorRole: "system",
+      targetUserId: "all",
+      metadata: {
+        dispatchId,
+        total: result.total,
+        eligible: result.eligible,
+        sent: result.sent,
+        skipped: result.skipped,
+        failed: result.failed,
+        invalidSubscriptions: result.invalidSubscriptions,
+        suppressions: result.suppressions,
+      },
+    });
+    logPushDispatch({
+      dispatchId,
+      phase: "batch",
+      outcome: "completed",
+      total: result.total,
+      eligible: result.eligible,
+      sent: result.sent,
+      skipped: result.skipped,
+      failed: result.failed,
+      invalidSubscriptions: result.invalidSubscriptions,
+      suppressions: result.suppressions,
+    });
+    return res.json(result);
+  } catch (error) {
+    logPushDispatch({
+      dispatchId,
+      phase: "batch",
+      outcome: "failed",
+      errorClass: error instanceof Error ? error.name : "UnknownError",
+    });
+    return res.status(500).json({
+      ok: false,
+      code: "PUSH_DISPATCH_FAILED",
+      dispatchId,
+    });
+  } finally {
+    await lease?.release();
   }
-
-  addLog({
-    action: "push_dispatch",
-    actorUserId: "cron",
-    actorRole: "system",
-    targetUserId: "all",
-    metadata: { sent, skipped, failed, total: subs.length },
-  });
-
-  res.json({ ok: true, sent, skipped, failed, total: subs.length });
-});
-
-function pickPushCopy(language: GutoLanguage, state: "healthy" | "alert" | "critical" | "dying" | "dead", name: string): string {
-  const who = name ? `, ${name}` : "";
-  const map: Record<GutoLanguage, Record<string, string>> = {
-    "pt-BR": {
-      healthy: `Bom dia${who}. Eu já montei. Bora.`,
-      alert: `${name || "Ei"}, perdeu um dia. Hoje a gente volta.`,
-      critical: `Sumiu de novo${who}. Eu ainda tô aqui — mas tô fraco.`,
-      dying: `Tô apagando${who}. Se você não voltar, eu vou.`,
-      dead: `Eu morri esperando você. Volta se for sério dessa vez.`,
-    },
-    "en-US": {
-      healthy: `Morning${who}. I built today's session. Let's move.`,
-      alert: `${name || "Hey"}, you missed a day. Today we come back.`,
-      critical: `You're slipping${who}. I'm still here — barely.`,
-      dying: `I'm fading${who}. If you don't show up, I'm gone.`,
-      dead: `I died waiting. Come back only if you're serious this time.`,
-    },
-    "it-IT": {
-      healthy: `Buongiorno${who}. Ho già preparato. Andiamo.`,
-      alert: `${name || "Ehi"}, hai perso un giorno. Oggi torniamo.`,
-      critical: `Stai sparendo${who}. Sono ancora qui — a malapena.`,
-      dying: `Mi sto spegnendo${who}. Se non torni, sparisco.`,
-      dead: `Sono morto aspettandoti. Torna solo se è serio stavolta.`,
-    },
-  };
-  return map[language]?.[state] || map["pt-BR"][state];
 }
+
+app.get("/guto/push/dispatch", handlePushDispatch);
+app.post("/guto/push/dispatch", handlePushDispatch);
 
 /**
  * Resolves the 3 free-text fields semantically (country / pathology / food).
