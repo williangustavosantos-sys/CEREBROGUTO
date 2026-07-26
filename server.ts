@@ -15645,9 +15645,9 @@ function commitBrainExerciseSwap(params: {
     const substituteName = substitute.namesByLanguage[language as CatalogLanguage] || substitute.canonicalNamePt;
     const scheme = original.planExercise
       ? pickByLanguage(language, {
-          "pt-BR": `mantém ${original.planExercise.sets} séries, ${original.planExercise.reps}, descanso de ${original.planExercise.rest}`,
-          "en-US": `keep ${original.planExercise.sets} sets, ${original.planExercise.reps}, ${original.planExercise.rest} rest`,
-          "it-IT": `tieni ${original.planExercise.sets} serie, ${original.planExercise.reps}, recupero ${original.planExercise.rest}`,
+          "pt-BR": `mantém ${original.planExercise.sets} ${original.planExercise.sets === 1 ? "série" : "séries"}, ${original.planExercise.reps}, descanso de ${original.planExercise.rest}`,
+          "en-US": `keep ${original.planExercise.sets} ${original.planExercise.sets === 1 ? "set" : "sets"}, ${original.planExercise.reps}, ${original.planExercise.rest} rest`,
+          "it-IT": `tieni ${original.planExercise.sets} ${original.planExercise.sets === 1 ? "serie" : "serie"}, ${original.planExercise.reps}, recupero ${original.planExercise.rest}`,
         })
       : pickByLanguage(language, {
           "pt-BR": "mantém o mesmo esquema da missão",

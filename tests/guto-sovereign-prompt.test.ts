@@ -47,6 +47,8 @@ describe("prompt soberano — foco no assunto atual", () => {
     assert.match(prompt, /O GUTO comanda o treino como personal/i);
     assert.match(prompt, /não escolhe grupo muscular nem substitui a missão prescrita por preferência/i);
     assert.match(prompt, /Não gostar, não curtir ou preferir outro exercício NÃO autoriza troca/i);
+    assert.match(prompt, /o motivo está claro: preferência/i);
+    assert.match(prompt, /NÃO pergunte por quê, NÃO ofereça menu de dor\/equipamento/i);
     assert.match(prompt, /Pedido vago de troca sem motivo usa acao:"none"/i);
   });
 });
