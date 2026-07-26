@@ -7,6 +7,12 @@
       "memory": 1024
     }
   },
+  "crons": [
+    {
+      "path": "/guto/push/dispatch",
+      "schedule": "0 18 * * *"
+    }
+  ],
   "rewrites": [
     {
       "source": "/(.*)",

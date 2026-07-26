@@ -17,6 +17,19 @@ export function resolveFrontendPublicUrl(env: Partial<NodeJS.ProcessEnv> = proce
   return isProduction ? PRODUCTION_FRONTEND_URL : LOCAL_FRONTEND_URL;
 }
 
+export function resolvePushCronSecret(
+  env: Partial<Record<"CRON_SECRET" | "PUSH_CRON_SECRET", string | undefined>>
+): string {
+  return env.CRON_SECRET || env.PUSH_CRON_SECRET || "";
+}
+
+export function hasPushVapidConfiguration(input: {
+  pushVapidPublicKey: string;
+  pushVapidPrivateKey: string;
+}): boolean {
+  return Boolean(input.pushVapidPublicKey && input.pushVapidPrivateKey);
+}
+
 export const config = {
   port: Number(process.env.PORT || 3001),
   geminiApiKey: process.env.GEMINI_API_KEY || "",
@@ -55,8 +68,9 @@ export const config = {
   pushVapidPublicKey: process.env.PUSH_VAPID_PUBLIC_KEY || "",
   pushVapidPrivateKey: process.env.PUSH_VAPID_PRIVATE_KEY || "",
   pushVapidSubject: process.env.PUSH_VAPID_SUBJECT || "mailto:app.guto.life@gmail.com",
-  // Cron secret — required to call POST /guto/push/dispatch
-  pushCronSecret: process.env.PUSH_CRON_SECRET || "",
+  // Vercel Cron envia Authorization: Bearer <CRON_SECRET>. Mantemos o nome
+  // legado apenas como fallback fora da Vercel.
+  pushCronSecret: resolvePushCronSecret(process.env),
   // Stripe (B2C subscriptions). Disabled when secretKey is empty.
   stripeSecretKey: process.env.STRIPE_SECRET_KEY || "",
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || "",
