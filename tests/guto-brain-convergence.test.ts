@@ -516,6 +516,34 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.ok(body.workoutPlan?.exercises?.some((ex: any) => ex.name === sub));
   });
 
+  it("swapExercise sem substituto exato na fala ainda executa uma alternativa segura do catálogo", async () => {
+    const plan = abdutoraPlan();
+    seed("conv-swap-catalog-recovery", {
+      lastWorkoutPlan: plan,
+      activeExercise: {
+        source: "workout",
+        name: plan.exercises[0].name,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Está ocupado? Eu adapto agora sem mudar tua missão.",
+      acao: "swapExercise",
+      expectedResponse: null,
+    };
+
+    const { body } = await chat("conv-swap-catalog-recovery", "Guto, o equipamento está ocupado");
+    const stored = readMem("conv-swap-catalog-recovery").lastWorkoutPlan;
+
+    assert.equal(body.acao, "swapExercise");
+    assert.ok(body.workoutPlan, "executor precisa devolver o plano adaptado");
+    assert.notEqual(stored?.exercises?.[0]?.id, plan.exercises[0].id, "item ocupado precisa ser substituído");
+    assert.equal(stored?.exercises?.length, plan.exercises.length, "a missão não pode mudar de tamanho");
+    assert.match(body.fala, /mesma missão/i);
+  });
+
   it("openProactiveCard preserva fala do cérebro e cria trilho proativo sem template hardcoded", async () => {
     stubPayload = { flag: null, confidence: 0, fala: "Viagem amanhã anotada. Eu adapto o caminho sem compensação maluca.", acao: "openProactiveCard", expectedResponse: null };
     seed("conv-proactive");
