@@ -16557,15 +16557,6 @@ async function runSovereignBrainTurn(params: {
     const directRecovery = buildDirectOperationalRecoveryResponse(memory, input, language);
     if (directRecovery) return finalizeSovereignBrainResponse(directRecovery, input, language);
   }
-  if (
-    response.acao === "none" &&
-    !response.expectedResponse &&
-    classifyExerciseDoubtMessage(input) === "swap_needs_reason" &&
-    !extractSubstituteFromResponseText(response.fala)
-  ) {
-    const exerciseClarity = buildExerciseSwapClarityResponse({ input, language });
-    if (exerciseClarity) return finalizeSovereignBrainResponse(exerciseClarity, input, language);
-  }
   if (response.acao === "none") {
     const continuityFallback = await buildNoModelOperationalFallback({
       userId: memory.userId,

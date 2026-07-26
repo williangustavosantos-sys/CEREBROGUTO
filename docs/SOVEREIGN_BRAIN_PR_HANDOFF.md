@@ -157,7 +157,9 @@ Backend Vercel `/guto` com Gemini real:
 - `oi` -> `none`
 - `estou triste` -> `none`
 - `bora treinar` -> `updateWorkout`
-- `quero treinar braço` -> `updateWorkout`
+- `quero treinar braço` com missão prescrita -> `none`; o GUTO mantém o plano
+- `não gosto desse exercício` -> `none`; preferência não autoriza troca
+- `equipamento está ocupado` com exercício ativo -> `swapExercise`
 - `meu joelho está ruim` -> `none`
 - `quero trocar esse exercício` -> `none` ou `swapExercise` conforme contexto
 - `quero dieta` -> `generateDiet`
@@ -169,7 +171,8 @@ Frontend staging público:
 - `oi`
 - `estou triste`
 - `bora treinar`
-- `quero treinar braço`
+- `quero treinar braço` sem alterar a missão prescrita
+- `não gosto desse exercício`
 - `quero dieta`
 - `viajo amanhã`
 - `voltei depois de duas semanas`
