@@ -64,11 +64,18 @@ describe("active context correlation", () => {
         const requestBody = String(init?.body || "").toLocaleLowerCase("pt-BR");
         const modelResponse = requestBody.includes("também não tenho essa opção")
           ? {
-              fala: "Troca maçã por frutas vermelhas. Mesma função no prato.",
+              fala: "Sem estresse. Vamos simplificar: você tem alguma fruta? Me diz o que tem na despensa.",
               acao: "none",
               expectedResponse: null,
               memoryPatch: {},
             }
+          : requestBody.includes("não tenho aveia em flocos")
+            ? {
+                fala: "Sem problemas. Pode substituir por 30g de farelo de trigo ou 2 fatias de pão integral.",
+                acao: "none",
+                expectedResponse: null,
+                memoryPatch: {},
+              }
           : requestBody.includes("não tenho banana")
             ? {
                 fala: "Troca banana por maçã. Mesma função no prato.",
@@ -399,5 +406,157 @@ describe("active context correlation", () => {
       ["banana", "apple"],
     );
     assert.doesNotMatch(second.fala || "", /supino|crucifixo|flexão/i);
+  });
+
+  it("Elíptico → Aveia → substituto A → rejeição → substituto B → reload permanece na dieta", async () => {
+    const workoutContext = context("ctx-food-domain-workout", "workout", "eliptico", "Elíptico");
+    await post("/guto/active-context", { context: workoutContext });
+    const workoutSwap = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "Ocupado",
+      turnId: "turn-food-domain-workout",
+      requestId: "request-food-domain-workout",
+      contextId: workoutContext.id,
+      contextVersion: workoutContext.version,
+      activeContextType: workoutContext.type,
+      activeItemId: workoutContext.currentItem.id,
+    });
+    assert.equal(workoutSwap.activeContext.type, "workout");
+
+    const openedAt = new Date().toISOString();
+    const oatsItem = {
+      id: "cafe:aveia em flocos",
+      name: "Aveia em flocos",
+      position: 1,
+      mealId: "cafe",
+      mealName: "Café da manhã proteico",
+      quantity: "80g",
+    };
+    const dietContext = {
+      id: "ctx-food-domain-diet",
+      version: 1,
+      type: "diet",
+      sourceSurface: "diet",
+      originalItem: oatsItem,
+      currentItem: oatsItem,
+      lastSuggestedItem: null,
+      rejectedItems: [],
+      acceptedItem: null,
+      createdAt: openedAt,
+      updatedAt: openedAt,
+    };
+    await post("/guto/active-context", { context: dietContext });
+
+    clearMemoryStoreCache();
+    const afterOpen = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    assert.equal(afterOpen.activeContext.type, "diet");
+    assert.equal(afterOpen.activeContext.originalItem.name, "Aveia em flocos");
+    assert.equal(afterOpen.substitutionContext, null);
+    assert.equal(afterOpen.activeConversationContext.kind, "diet_item");
+    assert.doesNotMatch(
+      JSON.stringify({
+        activeContext: afterOpen.activeContext,
+        substitutionContext: afterOpen.substitutionContext,
+        activeConversationContext: afterOpen.activeConversationContext,
+      }),
+      /workout_substitution|eliptico|"kind":"exercise"/i,
+    );
+
+    const send = (active: Record<string, any>, input: string, suffix: string) => post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input,
+      turnId: `turn-food-domain-${suffix}`,
+      requestId: `request-food-domain-${suffix}`,
+      contextId: active.id,
+      contextVersion: active.version,
+      activeContextType: active.type,
+      activeItemId: active.currentItem.id,
+    });
+
+    const first = await send(dietContext, "não tenho aveia em flocos", "first");
+    assert.equal(first.activeContext.type, "diet");
+    assert.equal(first.activeContext.originalItem.name, "Aveia em flocos");
+    assert.notEqual(first.activeContext.currentItem.id, "cafe:aveia em flocos");
+    assert.deepEqual(first.activeContext.currentItem, first.activeContext.lastSuggestedItem);
+    assert.doesNotMatch(first.fala || "", /\bou\b.*p[ãa]o|\bou\b.*biscoito/i);
+
+    clearMemoryStoreCache();
+    const afterFirst = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    assert.equal(afterFirst.substitutionContext.kind, "food");
+    assert.equal(afterFirst.activeConversationContext.kind, "diet_substitution");
+    assert.equal(afterFirst.substitutionContext.lastSuggestedId, first.activeContext.currentItem.id);
+
+    const second = await send(first.activeContext, "também não tenho essa opção", "second");
+    assert.equal(second.activeContext.type, "diet");
+    assert.equal(second.activeContext.originalItem.name, "Aveia em flocos");
+    assert.notEqual(second.activeContext.currentItem.id, first.activeContext.currentItem.id);
+    assert.notEqual(second.activeContext.currentItem.id, "cafe:aveia em flocos");
+    assert.equal(second.activeContext.lastSuggestedItem.id, second.activeContext.currentItem.id);
+    assert.ok(
+      second.activeContext.rejectedItems.some((item: any) => item.id === first.activeContext.currentItem.id),
+      "a primeira sugestão precisa ser registrada como rejeitada",
+    );
+    assert.match(second.fala || "", new RegExp(first.activeContext.currentItem.name, "i"));
+
+    clearMemoryStoreCache();
+    const afterReload = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    assert.equal(afterReload.activeContext.type, "diet");
+    assert.equal(afterReload.activeContext.currentItem.id, second.activeContext.currentItem.id);
+    assert.equal(afterReload.activeContext.lastSuggestedItem.id, second.activeContext.currentItem.id);
+    assert.equal(afterReload.substitutionContext.kind, "food");
+    assert.equal(afterReload.substitutionContext.lastSuggestedId, second.activeContext.currentItem.id);
+    assert.equal(afterReload.activeConversationContext.kind, "diet_substitution");
+    assert.doesNotMatch(
+      JSON.stringify({
+        activeContext: afterReload.activeContext,
+        substitutionContext: afterReload.substitutionContext,
+        activeConversationContext: afterReload.activeConversationContext,
+      }),
+      /workout_substitution|eliptico|"kind":"exercise"/i,
+    );
+  });
+
+  it("resposta concorrente do treino não restaura o domínio após abrir a dieta", async () => {
+    const workoutContext = context("ctx-concurrent-workout", "workout", "eliptico", "Elíptico");
+    await post("/guto/active-context", { context: workoutContext });
+    const workoutSwap = await post("/guto", {
+      profile: { userId, name: "Will" }, language: "pt-BR", history: [], input: "Ocupado",
+      turnId: "turn-concurrent-swap", requestId: "request-concurrent-swap",
+      contextId: workoutContext.id, contextVersion: 1, activeContextType: "workout", activeItemId: "eliptico",
+    });
+
+    const delayedWorkoutTurn = post("/guto", {
+      profile: { userId, name: "Will" }, language: "pt-BR", history: [], input: "Explique melhor.",
+      turnId: "turn-concurrent-late", requestId: "request-concurrent-late",
+      contextId: workoutSwap.activeContext.id,
+      contextVersion: workoutSwap.activeContext.version,
+      activeContextType: "workout",
+      activeItemId: workoutSwap.activeContext.currentItem.id,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const dietContext = context("ctx-concurrent-diet", "diet", "cafe:aveia em flocos", "Aveia em flocos");
+    await post("/guto/active-context", { context: dietContext });
+    const late = await delayedWorkoutTurn;
+    assert.equal(late.discardedReason, "stale_context");
+
+    clearMemoryStoreCache();
+    const stored = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    assert.equal(stored.activeContext.id, dietContext.id);
+    assert.equal(stored.activeContext.type, "diet");
+    assert.equal(stored.substitutionContext, null);
+    assert.equal(stored.activeConversationContext.kind, "diet_item");
+    assert.doesNotMatch(
+      JSON.stringify({
+        activeContext: stored.activeContext,
+        substitutionContext: stored.substitutionContext,
+        activeConversationContext: stored.activeConversationContext,
+      }),
+      /workout_substitution|eliptico|"kind":"exercise"/i,
+    );
   });
 });

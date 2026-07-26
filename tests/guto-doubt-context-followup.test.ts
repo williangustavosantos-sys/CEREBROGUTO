@@ -390,7 +390,14 @@ describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
     const turn2 = await postGuto(userId, ctxLines("não tenho também"));
     assert.equal(turn2.acao, "none");
     assert.doesNotMatch(turn2.fala || "", GENERIC_BREAKFAST_RE, "não pode cair no texto genérico do modelo");
-    assert.doesNotMatch(turn2.fala || "", new RegExp(firstSubstitute.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"), "não pode repetir alimento rejeitado");
+    assert.match(
+      turn2.fala || "",
+      new RegExp(firstSubstitute.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"),
+      "a segunda resposta precisa referenciar a opção que acabou de ser rejeitada",
+    );
+    const secondSubstitute = captureFoodSubstitute(turn2.fala || "");
+    assert.ok(secondSubstitute, `segunda resposta deveria nomear outro substituto: ${turn2.fala}`);
+    assert.notEqual(secondSubstitute.toLocaleLowerCase("pt-BR"), firstSubstitute.toLocaleLowerCase("pt-BR"));
     assert.match(turn2.fala || "", /troca|dispon[ií]vel|tem em casa|available/i);
   });
 
