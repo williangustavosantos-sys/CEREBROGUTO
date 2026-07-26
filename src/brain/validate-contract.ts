@@ -44,9 +44,9 @@ function isPlainSerializable(value: unknown): boolean {
  * Regras:
  *  - fala: string não-vazia
  *  - acao: pertence ao enum TurnAcao
- *  - Fatia 1 só decide acao="none"; qualquer outra retorna validation:"defer"
  *  - expectedResponse: null ou objeto plano; options ≤ 4; instruction ≤ 160 chars
  *  - memoryPatch: null, ausente, ou objeto plano JSON-serializável
+ *  - foodSubstitution: null/ausente ou decisão estruturada com porção e base válidas
  *  - Nenhuma chave interna de meta pode aparecer em response (LEI 11)
  *
  * Função PURA — sem chamada ao modelo, sem store, sem server.ts.
@@ -107,6 +107,29 @@ export function validateContract(raw: unknown): ContractValidationResult {
   if (r.memoryPatch !== null && r.memoryPatch !== undefined) {
     if (!isPlainSerializable(r.memoryPatch)) {
       errors.push("memoryPatch: must be a plain JSON-serializable object or null");
+    }
+  }
+
+  if (r.foodSubstitution !== null && r.foodSubstitution !== undefined) {
+    if (typeof r.foodSubstitution !== "object" || Array.isArray(r.foodSubstitution)) {
+      errors.push("foodSubstitution: must be null or a plain object");
+    } else {
+      const substitution = r.foodSubstitution as Record<string, unknown>;
+      if (typeof substitution.foodId !== "string" || !substitution.foodId.trim()) {
+        errors.push("foodSubstitution.foodId: required non-empty string");
+      }
+      if (typeof substitution.quantity !== "string" || !substitution.quantity.trim()) {
+        errors.push("foodSubstitution.quantity: required non-empty string");
+      }
+      const validBases = new Set([
+        "approximate_carbs",
+        "approximate_protein",
+        "approximate_energy",
+        "same_nutritional_role",
+      ]);
+      if (typeof substitution.basis !== "string" || !validBases.has(substitution.basis)) {
+        errors.push("foodSubstitution.basis: invalid equivalence basis");
+      }
     }
   }
 

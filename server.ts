@@ -422,6 +422,11 @@ interface GutoModelResponse {
     outcome?: "happened" | "postponed" | "discarded";
     patch?: Partial<Pick<ProactiveMemory, "rawText" | "understood" | "dateText" | "dateParsed" | "location" | "stage" | "confirmationStage" | "proposedTrainingAdapted" | "trainingAdapted">>;
   } | null;
+  foodSubstitution?: {
+    foodId: string;
+    quantity: string;
+    basis: "approximate_carbs" | "approximate_protein" | "approximate_energy" | "same_nutritional_role";
+  } | null;
   turnDecision?: AtomicTurnDecision;
 }
 
@@ -3584,6 +3589,29 @@ function parseSovereignBrainResponse(raw: string | undefined, language = "pt-BR"
     if (proactiveAction) {
       response.proactiveMemoryAction = proactiveAction as unknown as Record<string, unknown>;
     }
+    if (parsed.foodSubstitution && typeof parsed.foodSubstitution === "object" && !Array.isArray(parsed.foodSubstitution)) {
+      const candidate = parsed.foodSubstitution as Record<string, unknown>;
+      const basis =
+        candidate.basis === "approximate_carbs" ||
+        candidate.basis === "approximate_protein" ||
+        candidate.basis === "approximate_energy" ||
+        candidate.basis === "same_nutritional_role"
+          ? candidate.basis
+          : null;
+      if (
+        typeof candidate.foodId === "string" &&
+        candidate.foodId.trim() &&
+        typeof candidate.quantity === "string" &&
+        candidate.quantity.trim() &&
+        basis
+      ) {
+        response.foodSubstitution = {
+          foodId: candidate.foodId.trim().slice(0, 120),
+          quantity: candidate.quantity.replace(/\s+/g, " ").trim().slice(0, 80),
+          basis,
+        };
+      }
+    }
     return response;
   } catch {
     const cleaned = raw.replace(/^```json|```$/g, "").trim();
@@ -6340,6 +6368,15 @@ function isSubstitutionRejectionFollowUp(input?: string) {
   ]);
 }
 
+function isFoodSubstitutionRejectionFollowUp(
+  input: string | undefined,
+  previous: SubstitutionContext | null | undefined,
+): boolean {
+  if (!previous?.lastSuggestedId || !isSubstitutionRejectionFollowUp(input)) return false;
+  const explicitlyNamedFoodId = resolveFoodIdByName(stripInjectedContext(input || ""));
+  return !explicitlyNamedFoodId || explicitlyNamedFoodId === previous.lastSuggestedId;
+}
+
 // Mapeia país do usuário (countryCode ou nome livre) para o FoodCountry do
 // catálogo. Sem match → undefined (suggestFoodSubstitutes cai nos substitutes
 // explícitos do alimento, modo conservador).
@@ -6368,6 +6405,44 @@ function memoryFoodConstraints(memory: GutoMemory): UserFoodConstraints {
     restrictions = raw.split(/[,;/]+/).map((r) => r.trim()).filter(Boolean);
   }
   return { restrictions };
+}
+
+function foodSubstitutionQuantityHint(params: {
+  originalFoodId: string;
+  substituteFoodId: string;
+  originalQuantity?: string;
+  language: GutoLanguage;
+}): string | undefined {
+  const { originalFoodId, substituteFoodId, originalQuantity, language } = params;
+  if (originalFoodId === "oats" && substituteFoodId === "wholegrain_bread") {
+    const grams = Number(String(originalQuantity || "").match(/(\d+(?:[.,]\d+)?)/)?.[1]?.replace(",", "."));
+    const slices = Number.isFinite(grams) && grams > 0 ? Math.max(1, Math.round(grams / 40)) : 2;
+    return pickByLanguage(language, {
+      "pt-BR": `${slices} ${slices === 1 ? "fatia" : "fatias"}`,
+      "en-US": `${slices} ${slices === 1 ? "slice" : "slices"}`,
+      "it-IT": `${slices} ${slices === 1 ? "fetta" : "fette"}`,
+    });
+  }
+  if (originalFoodId === "oats" && substituteFoodId === "rice_cakes") {
+    const grams = Number(String(originalQuantity || "").match(/(\d+(?:[.,]\d+)?)/)?.[1]?.replace(",", "."));
+    const units = Number.isFinite(grams) && grams > 0 ? Math.max(1, Math.round(grams / 20)) : 4;
+    return pickByLanguage(language, {
+      "pt-BR": `${units} ${units === 1 ? "unidade" : "unidades"}`,
+      "en-US": `${units} ${units === 1 ? "piece" : "pieces"}`,
+      "it-IT": `${units} ${units === 1 ? "galletta" : "gallette"}`,
+    });
+  }
+  if (
+    (originalFoodId === "banana" && substituteFoodId === "apple") ||
+    (originalFoodId === "apple" && substituteFoodId === "banana")
+  ) {
+    return pickByLanguage(language, {
+      "pt-BR": "1 unidade",
+      "en-US": "1 piece",
+      "it-IT": "1 frutto",
+    });
+  }
+  return undefined;
 }
 
 function resolveUnavailableFoodName(rawInput: string): string | undefined {
@@ -6399,10 +6474,11 @@ function buildFoodSubstituteResponse(
   const activeDietContext = normalizeActiveContext(memory.activeContext);
   const structuredDietContext = activeDietContext?.type === "diet" ? activeDietContext : null;
   const previous = getFreshSubstitutionContext(memory, "food");
-  const isRejectedFollowUp = Boolean(previous?.lastSuggestedId && isSubstitutionRejectionFollowUp(input));
+  const isRejectedFollowUp = isFoodSubstitutionRejectionFollowUp(input, previous);
+  const explicitlyUnavailableFoodName = resolveUnavailableFoodName(input || "");
   const foodName = isRejectedFollowUp
     ? previous?.originalName
-    : dietCtx?.foodName || structuredDietContext?.originalItem.name || resolveUnavailableFoodName(input || "");
+    : explicitlyUnavailableFoodName || dietCtx?.foodName || structuredDietContext?.originalItem.name;
   if (!foodName) return null;
   const structuredOriginalId = structuredDietContext
     ? resolveFoodIdByName(structuredDietContext.originalItem.id) ||
@@ -6410,7 +6486,9 @@ function buildFoodSubstituteResponse(
     : undefined;
   const foodId = isRejectedFollowUp
     ? previous?.originalId
-    : structuredOriginalId || resolveFoodIdByName(foodName);
+    : resolveFoodIdByName(explicitlyUnavailableFoodName || "") ||
+      structuredOriginalId ||
+      resolveFoodIdByName(foodName);
   if (!foodId) return null;
   const previousActiveContext = normalizeActiveContext(memory.activeContext);
   const contextTransitioned =
@@ -6497,7 +6575,50 @@ function buildFoodSubstituteResponse(
   }
 
   const lang = language as FoodLanguage;
-  const selected = subs[0]!;
+  const originalQuantity = structuredDietContext?.originalItem.quantity;
+  const selectedWithQuantity = subs
+    .map((food) => ({
+      food,
+      quantity: foodSubstitutionQuantityHint({
+        originalFoodId: foodId,
+        substituteFoodId: food.id,
+        originalQuantity,
+        language,
+      }),
+    }))
+    .find((candidate) => Boolean(candidate.quantity));
+  if (!selectedWithQuantity) {
+    memory.substitutionContext = {
+      kind: "food",
+      originalId: foodId,
+      originalName: getFoodById(foodId)?.names["pt-BR"] || foodName,
+      rejectedIds,
+      mealName: dietCtx?.mealName || previous?.mealName,
+      updatedAt: new Date().toISOString(),
+    };
+    advanceActiveContextSubstitution(memory, "diet", rejectedItems, null);
+    syncCanonicalConversationContext(memory);
+    appendMemoryAudit(
+      memory,
+      "chat_patch",
+      ["activeContext", "substitutionContext", "activeConversationContext"],
+      "Fallback sem equivalência de porção validada; aguardando o cérebro ou alimentos disponíveis."
+    );
+    if (options.persist !== false) saveMemory(memory);
+    return {
+      fala: pickByLanguage(language, {
+        "pt-BR": "Não vou copiar a quantidade do alimento anterior nem chutar uma porção. Me diz o que você tem disponível e eu ajusto com a medida certa.",
+        "en-US": "I will not copy the previous food quantity or guess a portion. Tell me what you have available and I will adjust it with the right measure.",
+        "it-IT": "Non copio la quantità dell'alimento precedente e non invento una porzione. Dimmi cosa hai disponibile e la adatto con la misura giusta.",
+      }),
+      acao: "none",
+      expectedResponse: null,
+      avatarEmotion: "default",
+      contextTransition: contextTransitioned ? "intentional" : undefined,
+    };
+  }
+  const selected = selectedWithQuantity.food;
+  const selectedQuantity = selectedWithQuantity.quantity!;
   const selectedName = selected.names[lang] || selected.names["pt-BR"];
   const rejectedSuggestion = isRejectedFollowUp && previous?.lastSuggestedId
     ? getFoodById(previous.lastSuggestedId)
@@ -6519,7 +6640,7 @@ function buildFoodSubstituteResponse(
     name: selectedName,
     mealId: memory.activeContext?.originalItem.mealId,
     mealName: meal || memory.activeContext?.originalItem.mealName,
-    quantity: memory.activeContext?.originalItem.quantity,
+    quantity: selectedQuantity,
     nutritionalRole: memory.activeContext?.originalItem.nutritionalRole,
   });
   syncCanonicalConversationContext(memory);
@@ -6532,9 +6653,9 @@ function buildFoodSubstituteResponse(
   if (options.persist !== false) saveMemory(memory);
 
   const fala: Record<GutoLanguage, string> = {
-    "pt-BR": `Troca ${foodLabel} por ${selectedName}${meal ? `, mantendo a energia do ${meal}` : ""}. Mesma função no prato, sem furar a dieta.`,
-    "en-US": `Swap ${foodLabel} for ${selectedName}${meal ? `, keeping the energy of ${meal}` : ""}. Same role on the plate, diet intact.`,
-    "it-IT": `Cambia ${foodLabel} con ${selectedName}${meal ? `, mantenendo l'energia di ${meal}` : ""}. Stessa funzione nel piatto, dieta intatta.`,
+    "pt-BR": `Troca ${foodLabel} por ${selectedQuantity} de ${selectedName}${meal ? `, mantendo aproximadamente a energia do ${meal}` : ""}. Mesma função no prato, sem furar a dieta.`,
+    "en-US": `Swap ${foodLabel} for ${selectedQuantity} of ${selectedName}${meal ? `, keeping approximately the energy of ${meal}` : ""}. Same role on the plate, diet intact.`,
+    "it-IT": `Cambia ${foodLabel} con ${selectedQuantity} di ${selectedName}${meal ? `, mantenendo circa l'energia di ${meal}` : ""}. Stessa funzione nel piatto, dieta intatta.`,
   };
   return {
     fala: fala[language],
@@ -6583,15 +6704,19 @@ async function materializeBrainFoodSubstitution(params: {
 }): Promise<GutoModelResponse | null> {
   const { memory, input, language, response } = params;
   if (response.acao !== "none" || !response.fala) return null;
+  const structuredDecision = response.foodSubstitution || null;
 
   const previous = getFreshSubstitutionContext(memory, "food");
-  const rejectedFollowUp = Boolean(previous?.lastSuggestedId && isSubstitutionRejectionFollowUp(input));
+  const rejectedFollowUp = isFoodSubstitutionRejectionFollowUp(input, previous);
   const unavailableName = rejectedFollowUp ? previous?.originalName : resolveUnavailableFoodName(input);
+  const activeDietContext = normalizeActiveContext(memory.activeContext);
+  const activeOriginalId = activeDietContext?.type === "diet"
+    ? resolveFoodIdByName(activeDietContext.originalItem.id) ||
+      resolveFoodIdByName(activeDietContext.originalItem.name)
+    : undefined;
   const originalId = rejectedFollowUp
     ? previous?.originalId
-    : unavailableName
-      ? resolveFoodIdByName(unavailableName)
-      : undefined;
+    : (unavailableName ? resolveFoodIdByName(unavailableName) : undefined) || activeOriginalId;
   if (!originalId) return null;
 
   const rejectedIds = rejectedFollowUp
@@ -6603,8 +6728,47 @@ async function materializeBrainFoodSubstitution(params: {
     constraints: memoryFoodConstraints(memory),
     useContext: "meal_substitution",
   }).filter((food) => !rejectedIds.includes(food.id));
-  const selected = candidates.find((food) => responseMentionsFood(response.fala, food));
-  if (!selected) return null;
+  const selected = structuredDecision
+    ? candidates.find((food) => food.id === structuredDecision.foodId)
+    : candidates.find((food) => responseMentionsFood(response.fala, food));
+  if (!selected) {
+    return structuredDecision
+      ? buildSovereignSafeFallback(language, "O substituto alimentar escolhido não pertence às opções validadas.")
+      : null;
+  }
+  if (!structuredDecision) {
+    return buildSovereignSafeFallback(
+      language,
+      "A troca alimentar precisa declarar alimento, porção real e base de equivalência no contrato estruturado."
+    );
+  }
+  const selectedQuantity = structuredDecision?.quantity;
+  const requiredQuantityHint = foodSubstitutionQuantityHint({
+    originalFoodId: originalId,
+    substituteFoodId: selected.id,
+    originalQuantity: activeDietContext?.type === "diet"
+      ? activeDietContext.originalItem.quantity
+      : undefined,
+    language,
+  });
+  if (
+    requiredQuantityHint &&
+    normalize(selectedQuantity || "") !== normalize(requiredQuantityHint)
+  ) {
+    return buildSovereignSafeFallback(
+      language,
+      `A porção validada para esta troca é ${requiredQuantityHint}; não posso copiar a medida do alimento anterior.`
+    );
+  }
+  if (
+    structuredDecision &&
+    (
+      !responseMentionsFood(response.fala, selected) ||
+      !normalize(response.fala).includes(normalize(selectedQuantity || ""))
+    )
+  ) {
+    return buildSovereignSafeFallback(language, "A fala precisa mostrar o alimento e a porção real que serão persistidos.");
+  }
 
   const plan = await readPersistedDietPlan(memory.userId).catch(() => null);
   let meal: DietMeal | undefined;
@@ -6672,7 +6836,7 @@ async function materializeBrainFoodSubstitution(params: {
     name: selected.names[lang] || selected.names["pt-BR"],
     mealId: meal?.id,
     mealName: meal?.name || previous?.mealName,
-    quantity: planFood?.quantity,
+    quantity: selectedQuantity || planFood?.quantity,
     nutritionalRole: planFood?.notes,
   });
   memory.substitutionContext = {
@@ -6695,6 +6859,7 @@ async function materializeBrainFoodSubstitution(params: {
   const transitioned = previousActive?.id !== normalizeActiveContext(memory.activeContext)?.id;
   return {
     ...response,
+    foodSubstitution: null,
     contextTransition: transitioned ? "intentional" : response.contextTransition,
   };
 }
@@ -6960,6 +7125,38 @@ function resolveWorkoutExerciseForSubstitution({
     name: exerciseName,
     planExercise,
     catalogEntry,
+  };
+}
+
+function resolveEffectiveWorkoutExerciseForSubstitution(params: {
+  input?: string;
+  history?: GutoHistoryItem[];
+  memory: GutoMemory;
+}) {
+  const resolved = resolveWorkoutExerciseForSubstitution(params);
+  const previous = getFreshSubstitutionContext(params.memory, "exercise");
+  const explicitlyNamedExercise = resolveCatalogExerciseFromFreeText(params.input);
+  if (
+    explicitlyNamedExercise &&
+    (!previous?.lastSuggestedId || explicitlyNamedExercise.id !== previous.lastSuggestedId)
+  ) {
+    const planExercise = params.memory.lastWorkoutPlan?.exercises?.find(
+      (exercise) => exercise.id === explicitlyNamedExercise.id
+    ) || null;
+    return {
+      id: explicitlyNamedExercise.id,
+      name: planExercise?.name || explicitlyNamedExercise.name,
+      planExercise,
+      catalogEntry: getCatalogById(explicitlyNamedExercise.id),
+    };
+  }
+  if (!previous?.lastSuggestedId || !isSubstitutionRejectionFollowUp(params.input)) return resolved;
+
+  return {
+    id: previous.originalId,
+    name: previous.originalName,
+    planExercise: previous.planExercise || null,
+    catalogEntry: getCatalogById(previous.originalId),
   };
 }
 
@@ -13902,6 +14099,9 @@ function publicTurnToGutoResponse(response: PublicTurnResponse): GutoModelRespon
   if (response.proactiveMemoryAction) {
     result.proactiveMemoryAction = validateProactiveMemoryAction(response.proactiveMemoryAction);
   }
+  if (response.foodSubstitution) {
+    result.foodSubstitution = response.foodSubstitution;
+  }
   return result;
 }
 
@@ -14327,10 +14527,12 @@ function finalizeSovereignBrainResponse(response: GutoModelResponse, input: stri
     const physicalRecovery = buildGenericPhysicalLimitationResponse(input, language);
     if (physicalRecovery) return assertAndRepairVisibleLanguage(physicalRecovery, language);
   }
-  return assertAndRepairVisibleLanguage(
+  const finalized = assertAndRepairVisibleLanguage(
     sanitizeSovereignIdentityResponse(sanitizeWorkoutCompletionResponse(response, input, language), input),
     language
   );
+  const { foodSubstitution: _internalFoodDecision, ...publicResponse } = finalized;
+  return publicResponse;
 }
 
 export function buildDietProfileFingerprint(memory: GutoMemory): string {
@@ -14819,13 +15021,20 @@ async function buildWorldStateV2ForTurn(params: {
   const { memory, input, history, language, risk, operationalContext } = params;
   const activeExercise = normalizeActiveExerciseContext(memory.activeExercise) || null;
   const dietPlan = await getStudentDietPlan(memory).catch(() => null);
-  const originalForSwap = resolveWorkoutExerciseForSubstitution({ input, history, memory });
+  const originalForSwap = resolveEffectiveWorkoutExerciseForSubstitution({ input, history, memory });
+  const exerciseSubstitution = getFreshSubstitutionContext(memory, "exercise");
+  const rejectedExerciseIds = new Set<string>(exerciseSubstitution?.rejectedIds || []);
+  if (originalForSwap?.id) rejectedExerciseIds.add(originalForSwap.id);
+  if (isSubstitutionRejectionFollowUp(input) && exerciseSubstitution?.lastSuggestedId) {
+    rejectedExerciseIds.add(exerciseSubstitution.lastSuggestedId);
+  }
   const workoutSubstitutes = originalForSwap
     ? suggestExerciseSubstitutes(originalForSwap.id, {
         location: getLocationMode(memory.lastWorkoutPlan?.location || memory.preferredTrainingLocation || memory.trainingLocation) as CatalogLocation,
         userRiskTags: memory.resolvedFields?.pathology?.status === "clear" ? memory.resolvedFields.pathology.riskTags : [],
         userBodyRegion: memory.resolvedFields?.pathology?.status === "clear" ? memory.resolvedFields.pathology.bodyRegion : undefined,
       })
+        .filter((id) => !rejectedExerciseIds.has(id))
         .map((id) => getCatalogById(id))
         .filter((entry): entry is CatalogExercise => Boolean(entry))
         .slice(0, 6)
@@ -14841,6 +15050,55 @@ async function buildWorldStateV2ForTurn(params: {
     ),
     ...(memory.proactiveImpacts || []).filter((item) => item.status === "active"),
   ].slice(0, 8);
+  const activeContext = normalizeActiveContext(memory.activeContext);
+  const foodSubstitution = getFreshSubstitutionContext(memory, "food");
+  const rejectsPreviousFood = isFoodSubstitutionRejectionFollowUp(input, foodSubstitution);
+  const activeFoodOriginalId = activeContext?.type === "diet"
+    ? resolveFoodIdByName(activeContext.originalItem.id) ||
+      resolveFoodIdByName(activeContext.originalItem.name)
+    : undefined;
+  const explicitlyUnavailableFoodId = resolveFoodIdByName(resolveUnavailableFoodName(input) || "");
+  const explicitlyUnavailableExercise =
+    isEquipmentBusyMessage(input)
+      ? resolveCatalogExerciseFromFreeText(input)
+      : null;
+  const foodOriginalId =
+    (rejectsPreviousFood ? foodSubstitution?.originalId : undefined) ||
+    explicitlyUnavailableFoodId ||
+    activeFoodOriginalId ||
+    resolveFoodIdByName(parseDietContext(input)?.foodName || "") ||
+    foodSubstitution?.originalId;
+  const rejectedFoodIds = new Set<string>([
+    ...(foodSubstitution?.rejectedIds || []),
+    ...(activeContext?.type === "diet" ? activeContext.rejectedItems.map((item) => item.id) : []),
+  ]);
+  if (foodOriginalId) rejectedFoodIds.add(foodOriginalId);
+  if (rejectsPreviousFood && foodSubstitution?.lastSuggestedId) {
+    rejectedFoodIds.add(foodSubstitution.lastSuggestedId);
+  }
+  const foodSubstitutes = foodOriginalId
+    ? suggestFoodSubstitutes({
+        originalFoodId: foodOriginalId,
+        country: resolveFoodCountry(memory),
+        constraints: memoryFoodConstraints(memory),
+        useContext: "meal_substitution",
+      })
+        .filter((food) => !rejectedFoodIds.has(food.id))
+        .slice(0, 6)
+        .map((food) => ({
+          id: food.id,
+          name: food.names[language as FoodLanguage] || food.names["pt-BR"],
+          nutritionalRole: food.category,
+          quantityHint: foodSubstitutionQuantityHint({
+            originalFoodId: foodOriginalId,
+            substituteFoodId: food.id,
+            originalQuantity: activeContext?.type === "diet"
+              ? activeContext.originalItem.quantity
+              : undefined,
+            language,
+          }),
+        }))
+    : [];
 
   return assembleWorldStateV2({
     userId: memory.userId,
@@ -14902,6 +15160,19 @@ async function buildWorldStateV2ForTurn(params: {
       lockedByCoach: Boolean(dietPlan?.lockedByCoach),
     },
     activeExercise,
+    activeContext,
+    substitutionContext: memory.substitutionContext
+      ? {
+          kind: memory.substitutionContext.kind,
+          originalId: memory.substitutionContext.originalId,
+          originalName: memory.substitutionContext.originalName,
+          lastSuggestedId: memory.substitutionContext.lastSuggestedId,
+          rejectedIds: memory.substitutionContext.rejectedIds,
+          mealName: memory.substitutionContext.mealName,
+          updatedAt: memory.substitutionContext.updatedAt,
+        }
+      : null,
+    activeConversationContext: memory.activeConversationContext || null,
     proactivity: {
       context: params.proactivityContext ?? null,
       activePrompt: activeProactivePrompt(memory),
@@ -14924,6 +15195,7 @@ async function buildWorldStateV2ForTurn(params: {
           }
         : activeExercise,
       workoutSubstitutes,
+      foodSubstitutes,
       foodConstraints: {
         restrictions: memory.foodRestrictions || null,
         unresolvedRestriction: getUnresolvedFoodRestriction(memory),
@@ -14933,6 +15205,15 @@ async function buildWorldStateV2ForTurn(params: {
     contextSignals: {
       shortContextIntent: classifyShortContextIntent({ rawInput: input }),
       dietContext: parseDietContext(input),
+      explicitlyUnavailableFood: explicitlyUnavailableFoodId
+        ? {
+            id: explicitlyUnavailableFoodId,
+            name: getFoodById(explicitlyUnavailableFoodId)?.names[language as FoodLanguage] ||
+              getFoodById(explicitlyUnavailableFoodId)?.names["pt-BR"] ||
+              explicitlyUnavailableFoodId,
+          }
+        : null,
+      explicitlyUnavailableExercise,
       workoutExecutionRequest: isWorkoutExecutionRequest(input),
       proactiveContinuity: classifyProactiveContinuitySignal(input),
       expectedTrainingPrep: detectTrainingPrep(input),
@@ -15329,7 +15610,7 @@ function commitBrainExerciseSwap(params: {
   const { memory, input, history, language, response } = params;
   const previous = getFreshSubstitutionContext(memory, "exercise");
   const rejectedFollowUp = isSubstitutionRejectionFollowUp(input);
-  const resolvedOriginal = resolveWorkoutExerciseForSubstitution({ input, history, memory });
+  const resolvedOriginal = resolveEffectiveWorkoutExerciseForSubstitution({ input, history, memory });
   const original: {
     id: string;
     name: string;
@@ -15352,15 +15633,116 @@ function commitBrainExerciseSwap(params: {
   if (!validation.valid) {
     return buildSovereignSafeFallback(language, "A troca proposta não passou na validação do catálogo.");
   }
+  const recoveredSuggestedId = !previous?.lastSuggestedId && rejectedFollowUp
+    ? recoverLastSuggestedSubstituteIdFromHistory(history)
+    : null;
+  const rejectedIds = rejectedFollowUp
+    ? mergeRejectedIds(
+        previous?.rejectedIds,
+        [original.id, previous?.lastSuggestedId, recoveredSuggestedId].filter(
+          (id): id is string => typeof id === "string" && id.length > 0
+        )
+      )
+    : mergeRejectedIds(
+        previous?.originalId === original.id ? previous?.rejectedIds : undefined,
+        [original.id]
+      );
+  const currentActive = normalizeActiveContext(memory.activeContext);
+  if (
+    currentActive?.type !== "workout" ||
+    currentActive.originalItem.id !== original.id
+  ) {
+    const now = new Date().toISOString();
+    const originalItem: ActiveContextItem = {
+      id: original.id,
+      name: original.name,
+      sets: original.planExercise?.sets,
+      reps: original.planExercise?.reps,
+      rest: original.planExercise?.rest,
+    };
+    activateContext(memory, {
+      id: `ctx-${crypto.randomUUID()}`,
+      version: 1,
+      type: "workout",
+      sourceSurface: "mission",
+      originalItem,
+      currentItem: originalItem,
+      lastSuggestedItem: null,
+      rejectedItems: [],
+      acceptedItem: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+  const activeBeforeAdvance = normalizeActiveContext(memory.activeContext);
+  const rejectedItems = rejectedIds.map((id) => {
+    const known = activeBeforeAdvance?.type === "workout"
+      ? [
+          activeBeforeAdvance.originalItem,
+          activeBeforeAdvance.currentItem,
+          activeBeforeAdvance.lastSuggestedItem,
+          ...activeBeforeAdvance.rejectedItems,
+        ].find((item) => item?.id === id)
+      : null;
+    const catalog = getCatalogById(id);
+    return known || {
+      id,
+      name: catalog?.namesByLanguage[language as CatalogLanguage] || catalog?.canonicalNamePt || id,
+      sets: original.planExercise?.sets,
+      reps: original.planExercise?.reps,
+      rest: original.planExercise?.rest,
+    };
+  });
+  const substitutedItem: ActiveContextItem = {
+    id: substitute.id,
+    name: substitute.namesByLanguage[language as CatalogLanguage] || substitute.canonicalNamePt,
+    sets: original.planExercise?.sets,
+    reps: original.planExercise?.reps,
+    rest: original.planExercise?.rest,
+  };
+  advanceActiveContextSubstitution(memory, "workout", rejectedItems, substitutedItem);
+  memory.substitutionContext = {
+    kind: "exercise",
+    originalId: original.id,
+    originalName: original.name,
+    lastSuggestedId: substitute.id,
+    rejectedIds,
+    planExercise: original.planExercise
+      ? {
+          sets: original.planExercise.sets,
+          reps: original.planExercise.reps,
+          rest: original.planExercise.rest,
+        }
+      : undefined,
+    updatedAt: new Date().toISOString(),
+  };
+  syncCanonicalConversationContext(memory);
   const plan = memory.lastWorkoutPlan;
   if (!plan?.exercises?.length) {
-    return buildSovereignSafeFallback(language, "Não encontrei treino ativo para aplicar a troca.");
+    appendMemoryAudit(
+      memory,
+      "chat_patch",
+      ["activeContext", "substitutionContext", "activeConversationContext"],
+      "Troca de exercício decidida pelo cérebro e mantida no contexto; plano não estava carregado."
+    );
+    commitMemoryDecision(memory);
+    return response;
   }
   let index = plan.exercises.findIndex((exercise) => exercise.id === original.id || normalize(exercise.name) === normalize(original.name));
   if (index < 0 && rejectedFollowUp && previous?.lastSuggestedId) {
     index = plan.exercises.findIndex((exercise) => exercise.id === previous.lastSuggestedId);
   }
   if (index < 0) {
+    if (normalizeActiveContext(memory.activeContext)?.type === "workout") {
+      appendMemoryAudit(
+        memory,
+        "chat_patch",
+        ["activeContext", "substitutionContext", "activeConversationContext"],
+        "Troca de exercício decidida pelo cérebro e mantida no contexto; item não estava no snapshot do plano."
+      );
+      commitMemoryDecision(memory);
+      return response;
+    }
     return buildSovereignSafeFallback(language, "Não encontrei o exercício original no treino atual.");
   }
   const updatedExercise = catalogEntryToWorkoutExercise(substitute, plan.exercises[index], language);
@@ -15368,15 +15750,6 @@ function commitBrainExerciseSwap(params: {
     ...plan,
     exercises: plan.exercises.map((exercise, i) => i === index ? updatedExercise : exercise),
   };
-  const recoveredSuggestedId = !previous?.lastSuggestedId && rejectedFollowUp
-    ? recoverLastSuggestedSubstituteIdFromHistory(history)
-    : null;
-  const rejectedIds = rejectedFollowUp
-    ? mergeRejectedIds(
-        previous?.rejectedIds,
-        [previous?.lastSuggestedId, recoveredSuggestedId].filter((id): id is string => typeof id === "string" && id.length > 0)
-      )
-    : mergeRejectedIds(previous?.originalId === original.id ? previous?.rejectedIds : undefined);
   memory.lastWorkoutPlan = nextPlan;
   memory.substitutionContext = {
     kind: "exercise",
@@ -15391,7 +15764,13 @@ function commitBrainExerciseSwap(params: {
     },
     updatedAt: new Date().toISOString(),
   };
-  appendMemoryAudit(memory, "chat_patch", ["lastWorkoutPlan", "substitutionContext"], "Troca de exercício executada pelo dispatcher soberano.");
+  syncCanonicalConversationContext(memory);
+  appendMemoryAudit(
+    memory,
+    "chat_patch",
+    ["lastWorkoutPlan", "activeContext", "substitutionContext", "activeConversationContext"],
+    "Troca de exercício executada pelo dispatcher soberano."
+  );
   commitMemoryDecision(memory);
   return {
     ...response,
@@ -15693,10 +16072,10 @@ async function buildDeterministicContextResolverResponse(params: {
   const unavailableInActiveDiet =
     active?.type === "diet" &&
     isUnavailabilityMessage(stripInjectedContext(input));
+  const previousFoodSubstitution = getFreshSubstitutionContext(memory, "food");
   const rejectsCurrentFood =
     active?.type === "diet" &&
-    Boolean(getFreshSubstitutionContext(memory, "food")?.lastSuggestedId) &&
-    isSubstitutionRejectionFollowUp(input);
+    isFoodSubstitutionRejectionFollowUp(input, previousFoodSubstitution);
   if (
     shortIntent.intent === "food_unavailable" ||
     shortIntent.intent === "food_substitute_request" ||
@@ -15812,6 +16191,24 @@ async function dispatchSovereignBrainAction(params: {
       });
       if (foodSubstitution) return foodSubstitution;
 
+      const explicitExerciseSubstitute = extractSubstituteFromResponseText(response.fala);
+      if (
+        explicitExerciseSubstitute &&
+        isExplicitExerciseSwapIntent(params.input) &&
+        !detectArmTargetMismatchObjection(params.input)
+      ) {
+        return commitBrainExerciseSwap({
+          memory,
+          input: params.input,
+          history: params.history,
+          language,
+          response: {
+            ...response,
+            acao: "swapExercise",
+          },
+        });
+      }
+
       if (
         response.fala &&
         offersExercisePreferenceMenu(response.fala) &&
@@ -15825,18 +16222,6 @@ async function dispatchSovereignBrainAction(params: {
         });
         if (original) {
           return buildValidatedEquipmentBusyResponse({ original, memory, language });
-        }
-      }
-      const substitute = extractSubstituteFromResponseText(response.fala);
-      if (substitute) {
-        const original = resolveWorkoutExerciseForSubstitution({
-          input: params.input,
-          history: params.history,
-          memory,
-        });
-        const originalEntry = original ? getCatalogById(original.id) || original.catalogEntry : null;
-        if (original && originalEntry && !validateExerciseSubstitute(originalEntry, substitute).valid) {
-          return buildSovereignSafeFallback(language, "A troca proposta não passou na validação do catálogo.");
         }
       }
       const previous = getFreshSubstitutionContext(memory, "exercise");
@@ -16099,16 +16484,6 @@ async function runSovereignBrainTurn(params: {
   if (!requestContextIsCurrent()) return staleContextResponse();
   if (proactiveStateFallback) return finalizeSovereignBrainResponse(proactiveStateFallback, input, language);
 
-  const deterministicContextResolver = await buildDeterministicContextResolverResponse({
-    input,
-    history,
-    memory,
-    language,
-  });
-  if (deterministicContextResolver) {
-    return finalizeSovereignBrainResponse(deterministicContextResolver, input, language);
-  }
-
   const immediateOperationalResponse = await buildImmediateSovereignOperationalResponse({
     input,
     memory,
@@ -16303,28 +16678,6 @@ async function runSovereignBrainTurn(params: {
   ) {
     const exerciseClarity = buildExerciseSwapClarityResponse({ input, language });
     if (exerciseClarity) return finalizeSovereignBrainResponse(exerciseClarity, input, language);
-  }
-  if (response.acao === "none" && !response.expectedResponse && isExplicitExerciseSwapIntent(input)) {
-    if (!requestContextIsCurrent()) return staleContextResponse();
-    const swapped = await dispatchSovereignBrainAction({
-      userId: memory.userId,
-      memory,
-      input,
-      history,
-      language,
-      response: {
-        ...response,
-        fala: response.fala && !/não vou inventar|nao vou inventar/i.test(response.fala)
-          ? response.fala
-          : "Fechado. Vou trocar mantendo o mesmo foco muscular e sem inventar movimento fora do catálogo.",
-        acao: "swapExercise",
-        expectedResponse: null,
-      },
-      worldState,
-      resolverResult: params.resolverResult ?? null,
-      turnId: params.turnId,
-    });
-    return finalizeSovereignBrainResponse(swapped, input, language);
   }
   if (response.acao === "none") {
     const continuityFallback = await buildNoModelOperationalFallback({

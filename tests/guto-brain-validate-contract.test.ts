@@ -52,6 +52,54 @@ test("instruction com 160 chars → válido (no limite)", () => {
   assert.equal(r.ok, true);
 });
 
+test("foodSubstitution completo → válido", () => {
+  const r = validateContract({
+    ...valid,
+    fala: "Troca 80 g de aveia por 2 fatias de pão integral.",
+    foodSubstitution: {
+      foodId: "wholegrain_bread",
+      quantity: "2 fatias",
+      basis: "approximate_carbs",
+    },
+  });
+  assert.equal(r.ok, true);
+});
+
+test("foodSubstitution com quantidade vazia → inválido", () => {
+  const r = validateContract({
+    ...valid,
+    foodSubstitution: {
+      foodId: "wholegrain_bread",
+      quantity: "   ",
+      basis: "approximate_carbs",
+    },
+  });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => e.includes("foodSubstitution.quantity")));
+});
+
+test("foodSubstitution com base inventada → inválido", () => {
+  const r = validateContract({
+    ...valid,
+    foodSubstitution: {
+      foodId: "wholegrain_bread",
+      quantity: "2 fatias",
+      basis: "same_weight",
+    },
+  });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => e.includes("foodSubstitution.basis")));
+});
+
+test("foodSubstitution em texto livre → inválido", () => {
+  const r = validateContract({
+    ...valid,
+    foodSubstitution: "2 fatias de pão integral",
+  });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => e.includes("foodSubstitution")));
+});
+
 // ─── fala ───────────────────────────────────────────────────────────────────
 
 test("fala vazia → ok:false + defer", () => {

@@ -87,6 +87,12 @@ export interface TurnExpectedResponse {
   [key: string]: unknown;
 }
 
+export interface TurnFoodSubstitution {
+  foodId: string;
+  quantity: string;
+  basis: "approximate_carbs" | "approximate_protein" | "approximate_energy" | "same_nutritional_role";
+}
+
 /**
  * Payload PÚBLICO devolvido ao cliente (res.json). Shape-compatível com GutoModelResponse.
  * INVARIANTE: nunca contém meta interno do cérebro (LEI 11). É o ÚNICO que vai ao cliente.
@@ -99,6 +105,7 @@ export interface PublicTurnResponse {
   workoutPlan?: unknown | null;
   memoryPatch?: Record<string, unknown> | null;
   proactiveMemoryAction?: Record<string, unknown> | null;
+  foodSubstitution?: TurnFoodSubstitution | null;
 }
 
 /** Resultado da decisão: 'ok' => usar response; 'defer' => fallback seguro estruturado. */

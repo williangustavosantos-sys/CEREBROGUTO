@@ -721,7 +721,7 @@ describe("proactivity HTTP cycle", () => {
         }
         return new Response(JSON.stringify(buildGeminiResponse(JSON.stringify({
           fala: "Máquina ocupada: troca por supino reto com halteres, mantendo séries, repetições e descanso.",
-          acao: "none",
+          acao: "swapExercise",
           expectedResponse: null,
           proactiveMemoryAction: null,
           memoryPatch: {},

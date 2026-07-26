@@ -141,7 +141,7 @@ describe("BUG 2/3 — contexto de dúvida persiste no 2º turno (puro)", () => {
   });
 });
 
-describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
+describe("BUG 2/3 — fluxo HTTP decidido pelo cérebro soberano", () => {
   before(async () => {
     process.env.GUTO_MEMORY_FILE = testMemoryFile;
     process.env.GUTO_DISABLE_LISTEN = "1";
@@ -157,48 +157,67 @@ describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
       const body = JSON.parse(String(init?.body || "{}")) as { contents?: Array<{ parts?: Array<{ text?: string }> }> };
       const prompt = body.contents?.[0]?.parts?.[0]?.text || "";
       const message = prompt.split("MENSAGEM DO USUÁRIO:").pop() || prompt;
-      let payload = { fala: "O café da manhã é a primeira refeição do dia, sagrada.", acao: "none", expectedResponse: null };
+      let payload: Record<string, unknown> = {
+        fala: "O café da manhã é a primeira refeição do dia, sagrada.",
+        acao: "none",
+        expectedResponse: null,
+      };
       if (/tr[ií]ceps[\s\S]*b[ií]ceps/i.test(message)) {
         payload = {
-          fala: "Boa observação. Você tem razão. Não faz sentido trocar tríceps por bíceps. Troca por Tríceps barra V cabo.",
+          fala: "Boa observação. Você tem razão. Não faz sentido trocar tríceps por bíceps; a alternativa precisa continuar trabalhando tríceps.",
           acao: "none",
           expectedResponse: null,
         };
       } else if (/tamb[eé]m est[aá] ocupado/i.test(message)) {
         payload = {
-          fala: "Tríceps ainda ocupado? Troca por Tríceps francês cabo: mantém séries e descanso.",
-          acao: "none",
+          fala: "Tríceps barra V cabo ocupado? Troca por Tríceps francês cabo: mantém séries e descanso.",
+          acao: "swapExercise",
           expectedResponse: null,
         };
       } else if (/tr[ií]ceps polia alta ocupado/i.test(message)) {
         payload = {
           fala: "Tríceps polia alta ocupado? Troca por Tríceps barra V cabo: mantém 4 séries de 12.",
-          acao: "none",
+          acao: "swapExercise",
           expectedResponse: null,
         };
       } else if (/supino reto m[aá]quina[\s\S]*est[aá] ocupado/i.test(message)) {
         payload = {
           fala: "Supino reto máquina ocupado? Troca por Supino reto com halteres: mesma missão de peito.",
-          acao: "none",
+          acao: "swapExercise",
           expectedResponse: null,
         };
       } else if (/n[aã]o tenho tamb[eé]m/i.test(message)) {
         payload = {
-          fala: "Troca aveia em flocos por biscoito de arroz, mantendo a energia do Café da manhã.",
+          fala: "Pão integral também não tem? Troca por 4 unidades de biscoito de arroz, mantendo a energia do Café da manhã.",
           acao: "none",
           expectedResponse: null,
+          foodSubstitution: {
+            foodId: "rice_cakes",
+            quantity: "4 unidades",
+            basis: "approximate_carbs",
+          },
         };
       } else if (/aveia[\s\S]*(n[aã]o tem|n[aã]o tenho|qual\?)/i.test(message)) {
         payload = {
-          fala: "Troca aveia em flocos por pão integral, mantendo a energia do Café da manhã.",
+          fala: "Troca aveia em flocos por 1 fatia de pão integral, mantendo a energia do Café da manhã.",
           acao: "none",
           expectedResponse: null,
+          foodSubstitution: {
+            foodId: "wholegrain_bread",
+            quantity: "1 fatia",
+            basis: "approximate_carbs",
+          },
         };
       } else if (/n[aã]o tenho banana/i.test(message)) {
         payload = {
-          fala: "Troca banana por maçã. Mesma função no lanche, sem furar a dieta.",
+          fala: "Troca banana por 1 unidade de maçã. Mesma função no lanche, sem furar a dieta.",
           acao: "none",
           expectedResponse: null,
+          foodSubstitution: {
+            foodId: "apple",
+            quantity: "1 unidade",
+            basis: "approximate_carbs",
+          },
         };
       }
       return new Response(
@@ -248,7 +267,7 @@ describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
     const ctx = '[WORKOUT EXERCISE CONTEXT — language: pt-BR] Exercise: "Supino reto máquina" (canonical PT: Supino reto máquina). Muscle group: peito.';
     const res = await postGuto(userId, `${ctx} User message: está ocupado`);
 
-    assert.equal(res.acao, "none");
+    assert.equal(res.acao, "swapExercise");
     assert.doesNotMatch(res.fala || "", RE_ASK_RE, "não pode reperguntar qual aparelho com o card ativo");
     // Nomeia o exercício do contexto (não responde genérico/vazio).
     assert.match(res.fala || "", /supino|troca por|pula ele|swap/i);
@@ -267,7 +286,7 @@ describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
 
     const res = await postGuto(userId, "Tríceps polia alta ocupado");
 
-    assert.equal(res.acao, "none");
+    assert.equal(res.acao, "swapExercise");
     assert.match(res.fala || "", /tr[íi]ceps/i);
     assert.match(res.fala || "", /troca por|pula ele/i);
     assert.doesNotMatch(res.fala || "", INVALID_ARM_SWAP_RE, "não pode trocar tríceps por bíceps/rosca");
@@ -291,7 +310,7 @@ describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
 
     const turn2 = await postGuto(userId, "também está ocupado");
     const secondSubstitute = captureExerciseSubstitute(turn2.fala || "");
-    assert.equal(turn2.acao, "none");
+    assert.equal(turn2.acao, "swapExercise");
     assert.match(turn2.fala || "", /tr[íi]ceps/i);
     assert.doesNotMatch(turn2.fala || "", INVALID_ARM_SWAP_RE, "não pode trocar tríceps por bíceps/rosca");
     assert.match(
@@ -390,9 +409,10 @@ describe("BUG 2/3 — fluxo HTTP determinístico (pré-modelo)", () => {
     const turn2 = await postGuto(userId, ctxLines("não tenho também"));
     assert.equal(turn2.acao, "none");
     assert.doesNotMatch(turn2.fala || "", GENERIC_BREAKFAST_RE, "não pode cair no texto genérico do modelo");
+    const firstFoodName = firstSubstitute.replace(/^\d+\s+\S+\s+de\s+/i, "");
     assert.match(
       turn2.fala || "",
-      new RegExp(firstSubstitute.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"),
+      new RegExp(firstFoodName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"),
       "a segunda resposta precisa referenciar a opção que acabou de ser rejeitada",
     );
     const secondSubstitute = captureFoodSubstitute(turn2.fala || "");

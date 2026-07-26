@@ -14,6 +14,9 @@ let server: Server;
 let baseUrl = "";
 let originalFetch: typeof globalThis.fetch;
 let clearMemoryStoreCache: () => void = () => {};
+let brainCalls = 0;
+let brainPrompts: string[] = [];
+let forcedFoodQuantity: string | null = null;
 
 function authHeaders() {
   const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
@@ -61,25 +64,71 @@ describe("active context correlation", () => {
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       if (String(input).includes("generativelanguage.googleapis.com")) {
         await new Promise((resolve) => setTimeout(resolve, 120));
-        const requestBody = String(init?.body || "").toLocaleLowerCase("pt-BR");
-        const modelResponse = requestBody.includes("também não tenho essa opção")
+        const requestBody = JSON.parse(String(init?.body || "{}")) as {
+          contents?: Array<{ parts?: Array<{ text?: string }> }>;
+        };
+        const prompt = requestBody.contents?.[0]?.parts?.[0]?.text || "";
+        if (prompt.includes("CÉREBRO SOBERANO V2")) {
+          brainCalls += 1;
+          brainPrompts.push(prompt);
+        }
+        const message = prompt.split("MENSAGEM DO USUÁRIO:").pop()?.trim() || "";
+        const worldStateText = prompt
+          .split("WORLD_STATE_V2:\n").pop()
+          ?.split("\n\nHISTÓRICO RECENTE:")[0];
+        const worldState = worldStateText ? JSON.parse(worldStateText) as {
+          language?: string;
+          activeContext?: {
+            type?: string;
+            currentItem?: { name?: string };
+            lastSuggestedItem?: { name?: string } | null;
+          } | null;
+          catalog?: {
+            activeExercise?: { id?: string; name?: string } | null;
+            foodSubstitutes?: Array<{ id: string; name: string; quantityHint?: string }>;
+            workoutSubstitutes?: Array<{ id: string; name: string }>;
+          };
+          contextSignals?: {
+            explicitlyUnavailableFood?: { id?: string; name?: string } | null;
+            explicitlyUnavailableExercise?: { id?: string; name?: string } | null;
+          };
+        } : {};
+        const foodCandidate = worldState.catalog?.foodSubstitutes?.[0];
+        const workoutCandidate = worldState.catalog?.workoutSubstitutes?.[0];
+        const language = worldState.language || "pt-BR";
+        const isFoodTurn = Boolean(foodCandidate) && /n[aã]o (?:tenho|tem)|non ce l|non ho|don'?t have/i.test(message);
+        const activeFoodLabel =
+          worldState.contextSignals?.explicitlyUnavailableFood?.name ||
+          (worldState.activeContext?.type === "diet"
+            ? worldState.activeContext.lastSuggestedItem?.name || worldState.activeContext.currentItem?.name
+            : null);
+        const foodQuantity = foodCandidate
+          ? forcedFoodQuantity ||
+            foodCandidate.quantityHint ||
+            (foodCandidate.id === "rice_cakes"
+              ? language === "it-IT" ? "4 gallette" : "4 unidades"
+              : language === "it-IT" ? "1 porzione" : "1 porção")
+          : "";
+        const modelResponse = isFoodTurn && foodCandidate
           ? {
-              fala: "Sem estresse. Vamos simplificar: você tem alguma fruta? Me diz o que tem na despensa.",
+              fala: language === "it-IT"
+                ? `Cambia ${activeFoodLabel || "questo alimento"} con ${foodQuantity} di ${foodCandidate.name}.`
+                : `Troca ${activeFoodLabel || "esse alimento"} por ${foodQuantity} de ${foodCandidate.name}.`,
               acao: "none",
               expectedResponse: null,
               memoryPatch: {},
+              foodSubstitution: {
+                foodId: foodCandidate.id,
+                quantity: foodQuantity,
+                basis: "approximate_carbs",
+              },
             }
-          : requestBody.includes("não tenho aveia em flocos")
+          : worldState.activeContext?.type === "workout" && workoutCandidate && /ocupad|occupat|busy|anche/i.test(message)
             ? {
-                fala: "Sem problemas. Pode substituir por 30g de farelo de trigo ou 2 fatias de pão integral.",
-                acao: "none",
-                expectedResponse: null,
-                memoryPatch: {},
-              }
-          : requestBody.includes("não tenho banana")
-            ? {
-                fala: "Troca banana por maçã. Mesma função no prato.",
-                acao: "none",
+                fala: language === "it-IT"
+                  ? `${worldState.contextSignals?.explicitlyUnavailableExercise?.name || worldState.activeContext.lastSuggestedItem?.name || worldState.catalog?.activeExercise?.name || worldState.activeContext.currentItem?.name} occupato? Cambia con ${workoutCandidate.name}.`
+                  : `${worldState.contextSignals?.explicitlyUnavailableExercise?.name || worldState.activeContext.lastSuggestedItem?.name || worldState.catalog?.activeExercise?.name || worldState.activeContext.currentItem?.name} ocupado? Troca por ${workoutCandidate.name}.`,
+                acao: "swapExercise",
                 expectedResponse: null,
                 memoryPatch: {},
               }
@@ -113,6 +162,9 @@ describe("active context correlation", () => {
   });
 
   beforeEach(() => {
+    brainCalls = 0;
+    brainPrompts = [];
+    forcedFoodQuantity = null;
     clearMemoryStoreCache();
     writeFileSync(memoryFile, JSON.stringify({
       [userId]: {
@@ -205,6 +257,10 @@ describe("active context correlation", () => {
     );
     assert.match(second.fala || "", new RegExp(first.activeContext.currentItem.name, "i"));
     assert.doesNotMatch(second.fala || "", /Supino reto máquina ocupado/i);
+    clearMemoryStoreCache();
+    const afterSecondWorkoutSwap = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    assert.equal(afterSecondWorkoutSwap.substitutionContext.originalId, "supino_reto_maquina");
+    assert.equal(afterSecondWorkoutSwap.activeContext.originalItem.id, "supino_reto_maquina");
 
     const dietContext = context("ctx-sequence-diet", "diet", "banana", "Banana prata");
     await post("/guto/active-context", { context: dietContext });
@@ -272,6 +328,30 @@ describe("active context correlation", () => {
     assert.equal(response.activeContext.originalItem.id, "supino_reto_maquina");
     assert.deepEqual(response.activeContext.rejectedItems.map((item: any) => item.id), ["supino_reto_maquina"]);
     assert.match(response.fala || "", /Supino reto máquina ocupado/i);
+  });
+
+  it("exercício novo explícito substitui o contexto de treino anterior", async () => {
+    const oldContext = context("ctx-explicit-exercise-change", "workout", "supino_reto_maquina", "Supino reto máquina");
+    await post("/guto/active-context", { context: oldContext });
+
+    const response = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "Tríceps polia alta ocupado",
+      turnId: "turn-explicit-exercise-change",
+      requestId: "request-explicit-exercise-change",
+      contextId: oldContext.id,
+      contextVersion: oldContext.version,
+      activeContextType: oldContext.type,
+      activeItemId: oldContext.currentItem.id,
+    });
+
+    assert.equal(response.activeContext.type, "workout");
+    assert.equal(response.activeContext.originalItem.id, "triceps_polia_alta");
+    assert.notEqual(response.activeContext.currentItem.id, "triceps_polia_alta");
+    assert.doesNotMatch(JSON.stringify(response.activeContext), /supino_reto_maquina/i);
+    assert.match(brainPrompts[0] || "", /"activeExercise": \{\s*"id": "triceps_polia_alta"/);
   });
 
   it("it-IT preserva duas referências curtas no contexto ativo de treino", async () => {
@@ -482,7 +562,10 @@ describe("active context correlation", () => {
     assert.equal(first.activeContext.originalItem.name, "Aveia em flocos");
     assert.notEqual(first.activeContext.currentItem.id, "cafe:aveia em flocos");
     assert.deepEqual(first.activeContext.currentItem, first.activeContext.lastSuggestedItem);
+    assert.equal(first.activeContext.currentItem.quantity, "2 fatias");
+    assert.ok(!("foodSubstitution" in first), "a decisão estruturada interna não pode vazar para o frontend");
     assert.doesNotMatch(first.fala || "", /\bou\b.*p[ãa]o|\bou\b.*biscoito/i);
+    assert.doesNotMatch(first.fala || "", /\?|semana|viagem|agenda|treino/i);
 
     clearMemoryStoreCache();
     const afterFirst = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
@@ -496,6 +579,8 @@ describe("active context correlation", () => {
     assert.notEqual(second.activeContext.currentItem.id, first.activeContext.currentItem.id);
     assert.notEqual(second.activeContext.currentItem.id, "cafe:aveia em flocos");
     assert.equal(second.activeContext.lastSuggestedItem.id, second.activeContext.currentItem.id);
+    assert.notEqual(second.activeContext.currentItem.quantity, "80g");
+    assert.doesNotMatch(second.fala || "", /\?|semana|viagem|agenda|treino/i);
     assert.ok(
       second.activeContext.rejectedItems.some((item: any) => item.id === first.activeContext.currentItem.id),
       "a primeira sugestão precisa ser registrada como rejeitada",
@@ -510,6 +595,10 @@ describe("active context correlation", () => {
     assert.equal(afterReload.substitutionContext.kind, "food");
     assert.equal(afterReload.substitutionContext.lastSuggestedId, second.activeContext.currentItem.id);
     assert.equal(afterReload.activeConversationContext.kind, "diet_substitution");
+    assert.equal(brainCalls, 3, "ocupação + as duas trocas alimentares devem passar pelo cérebro soberano");
+    assert.match(brainPrompts[1] || "", /"activeContext": \{/);
+    assert.match(brainPrompts[1] || "", /"type": "diet"/);
+    assert.match(brainPrompts[2] || "", /"lastSuggestedId":/);
     assert.doesNotMatch(
       JSON.stringify({
         activeContext: afterReload.activeContext,
@@ -518,6 +607,107 @@ describe("active context correlation", () => {
       }),
       /workout_substitution|eliptico|"kind":"exercise"/i,
     );
+  });
+
+  it("alimento novo explícito encerra a referência anterior e vira o contexto ativo", async () => {
+    const openedAt = new Date().toISOString();
+    const oatsItem = {
+      id: "cafe:aveia em flocos",
+      name: "Aveia em flocos",
+      mealId: "cafe",
+      mealName: "Café da manhã",
+      quantity: "80g",
+    };
+    const dietContext = {
+      id: "ctx-explicit-food-change",
+      version: 1,
+      type: "diet",
+      sourceSurface: "diet",
+      originalItem: oatsItem,
+      currentItem: oatsItem,
+      lastSuggestedItem: null,
+      rejectedItems: [],
+      acceptedItem: null,
+      createdAt: openedAt,
+      updatedAt: openedAt,
+    };
+    await post("/guto/active-context", { context: dietContext });
+
+    const send = (active: Record<string, any>, input: string, suffix: string) => post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input,
+      turnId: `turn-explicit-food-${suffix}`,
+      requestId: `request-explicit-food-${suffix}`,
+      contextId: active.id,
+      contextVersion: active.version,
+      activeContextType: active.type,
+      activeItemId: active.currentItem.id,
+    });
+
+    const oatsSwap = await send(dietContext, "não tenho aveia", "oats");
+    assert.equal(oatsSwap.activeContext.originalItem.name, "Aveia em flocos");
+    assert.equal(oatsSwap.activeContext.currentItem.id, "wholegrain_bread");
+
+    const bananaSwap = await send(oatsSwap.activeContext, "não tem banana", "banana");
+    assert.equal(bananaSwap.activeContext.type, "diet");
+    assert.equal(bananaSwap.activeContext.originalItem.id, "banana");
+    assert.equal(bananaSwap.activeContext.currentItem.id, "apple");
+    assert.deepEqual(
+      bananaSwap.activeContext.rejectedItems.map((item: any) => item.id),
+      ["banana"],
+    );
+    assert.doesNotMatch(
+      JSON.stringify(bananaSwap.activeContext),
+      /wholegrain_bread|rice_cakes|aveia em flocos/i,
+    );
+    assert.match(brainPrompts[1] || "", /"explicitlyUnavailableFood": \{\s*"id": "banana"/);
+  });
+
+  it("rejeita 80g de pão quando a porção validada é 2 fatias", async () => {
+    const openedAt = new Date().toISOString();
+    const oatsItem = {
+      id: "cafe:aveia",
+      name: "Aveia",
+      mealId: "cafe",
+      mealName: "Café da manhã",
+      quantity: "80g",
+    };
+    const dietContext = {
+      id: "ctx-invalid-food-quantity",
+      version: 1,
+      type: "diet",
+      sourceSurface: "diet",
+      originalItem: oatsItem,
+      currentItem: oatsItem,
+      lastSuggestedItem: null,
+      rejectedItems: [],
+      acceptedItem: null,
+      createdAt: openedAt,
+      updatedAt: openedAt,
+    };
+    await post("/guto/active-context", { context: dietContext });
+    forcedFoodQuantity = "80g";
+
+    const response = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "não tenho aveia",
+      turnId: "turn-invalid-food-quantity",
+      requestId: "request-invalid-food-quantity",
+      contextId: dietContext.id,
+      contextVersion: dietContext.version,
+      activeContextType: dietContext.type,
+      activeItemId: dietContext.currentItem.id,
+    });
+
+    assert.equal(response.acao, "none");
+    assert.match(response.fala || "", /não vou inventar/i);
+    assert.equal(response.activeContext.currentItem.id, oatsItem.id);
+    assert.equal(response.activeContext.currentItem.quantity, "80g");
+    assert.equal(response.activeContext.lastSuggestedItem, null);
   });
 
   it("resposta concorrente do treino não restaura o domínio após abrir a dieta", async () => {

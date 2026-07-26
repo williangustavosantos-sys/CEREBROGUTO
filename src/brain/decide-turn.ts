@@ -197,6 +197,13 @@ export async function decideTurn(
   if (memoryPatch) response.memoryPatch = memoryPatch;
   const proactiveMemoryAction = readMemoryPatch(candidate.proactiveMemoryAction);
   if (proactiveMemoryAction) response.proactiveMemoryAction = proactiveMemoryAction;
+  if (
+    candidate.foodSubstitution &&
+    typeof candidate.foodSubstitution === "object" &&
+    !Array.isArray(candidate.foodSubstitution)
+  ) {
+    response.foodSubstitution = candidate.foodSubstitution as PublicTurnResponse["foodSubstitution"];
+  }
 
   // ─── Persistência HONESTA: depois da validação, no máximo 1 vez ───────────
   let persisted = false;
