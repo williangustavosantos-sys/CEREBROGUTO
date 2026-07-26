@@ -14280,17 +14280,6 @@ function isExplicitDietIntent(input: string): boolean {
   return /\b(dieta|refeicao|refeição|alimentacao|alimentação|cardapio|cardápio|macros?|caloria|meal|diet)\b/.test(text);
 }
 
-function shouldPromoteNoneToDietAction(input: string, response: GutoModelResponse): boolean {
-  if (response.acao !== "none" || !isExplicitDietIntent(input)) return false;
-  const fala = normalize(response.fala || "");
-  if (response.expectedResponse && !isSovereignSafeFallbackText(response.fala)) return false;
-  return (
-    /\b(vou|posso|consigo|fechado|bora|vamos)\b[\s\S]{0,80}\b(montar|gerar|criar|fazer|ajustar)\b[\s\S]{0,80}\b(dieta|cardapio|cardápio|plano alimentar|alimentacao|alimentação|meal|diet)\b/.test(fala) ||
-    /\b(dieta|cardapio|cardápio|plano alimentar|alimentacao|alimentação)\b[\s\S]{0,80}\b(montar|gerar|criar|ajustar)\b/.test(fala) ||
-    /\b(nao vou inventar|não vou inventar|nao consegui|não consegui|falha tecnica|falha técnica)\b/.test(fala)
-  );
-}
-
 function isSovereignSafeFallbackText(text?: string): boolean {
   const normalized = normalize(text || "");
   return (
@@ -16098,49 +16087,6 @@ async function buildDeterministicContextResolverResponse(params: {
   return null;
 }
 
-function shouldPromoteExplicitWorkoutExecution(input: string, memory: GutoMemory, language: GutoLanguage, response: GutoModelResponse): boolean {
-  if (response.acao !== "none") return false;
-  const userText = stripInjectedContext(input);
-  if (!isWorkoutExecutionRequest(userText)) return false;
-  if (getSovereignWorkoutMissingFields(memory).length > 0) return false;
-  if (mentionsPainInjuryOrIllness(userText, language)) return false;
-  if (isExplicitDietIntent(userText) || isExplicitExerciseSwapIntent(userText) || isWorkoutCompletionReport(userText)) return false;
-  if (isCoachLockedWorkout(memory.lastWorkoutPlan)) return false;
-  return true;
-}
-
-function buildPromotedWorkoutExecutionResponse(memory: GutoMemory, language: GutoLanguage, response: GutoModelResponse): GutoModelResponse {
-  const name = getGutoCallName(memory);
-  const callName = name ? `${name}, ` : "";
-  const hasCurrentWorkout = Array.isArray(memory.lastWorkoutPlan?.exercises) && memory.lastWorkoutPlan.exercises.length > 0;
-  const limitation = memory.trainingLimitations || memory.trainingPathology;
-  const limitationLine = limitation
-    ? {
-        "pt-BR": `respeitando ${limitation}`,
-        "en-US": `respecting ${limitation}`,
-        "it-IT": `rispettando ${limitation}`,
-      }[language]
-    : "";
-  const fala = hasCurrentWorkout
-    ? {
-        "pt-BR": `${callName}fechado. Vou ajustar o treino de hoje com esse foco${limitationLine ? `, ${limitationLine}` : ""}.`,
-        "en-US": `${callName}done. I will adjust today's workout with that focus${limitationLine ? `, ${limitationLine}` : ""}.`,
-        "it-IT": `${callName}fatto. Adatto l'allenamento di oggi con questo focus${limitationLine ? `, ${limitationLine}` : ""}.`,
-      }[language]
-    : {
-        "pt-BR": `${callName}fechado. Vou montar o treino de hoje com o que já sei de você${limitationLine ? `, ${limitationLine}` : ""}.`,
-        "en-US": `${callName}done. I will build today's workout with what I already know about you${limitationLine ? `, ${limitationLine}` : ""}.`,
-        "it-IT": `${callName}fatto. Creo l'allenamento di oggi con quello che so già di te${limitationLine ? `, ${limitationLine}` : ""}.`,
-      }[language];
-  return {
-    ...response,
-    fala,
-    acao: "updateWorkout",
-    expectedResponse: null,
-    avatarEmotion: response.avatarEmotion || "reward",
-  };
-}
-
 function buildDirectOperationalRecoveryResponse(memory: GutoMemory, input: string, language: GutoLanguage): GutoModelResponse | null {
   const physicalLimitation = buildPhysicalLimitationOperationalResponse(memory, input, language);
   if (physicalLimitation) return physicalLimitation;
@@ -16218,27 +16164,6 @@ async function dispatchSovereignBrainAction(params: {
         };
         appendMemoryAudit(memory, "chat_patch", ["substitutionContext"], "Rejeição de substituto registrada pelo dispatcher soberano.");
         commitMemoryDecision(memory);
-      }
-      if (shouldPromoteExplicitWorkoutExecution(params.input, memory, language, response)) {
-        const missingTrainingFields = getSovereignWorkoutMissingFields(memory);
-        if (missingTrainingFields.length > 0) {
-          return buildMissingTrainingFieldsResponse(language, missingTrainingFields);
-        }
-        const promoted = buildPromotedWorkoutExecutionResponse(memory, language, response);
-        const focusHint = (promoted.memoryPatch as { nextWorkoutFocus?: string } | undefined)?.nextWorkoutFocus;
-        const plan = await generateAndCommitBrainWorkout(memory, language, focusHint);
-        if (!plan) return buildSovereignSafeFallback(language, "Não consegui executar o treino com segurança agora.");
-        const contextTransitioned = await activateFirstWorkoutItem(memory, plan);
-        return {
-          ...promoted,
-          contextTransition: contextTransitioned ? "intentional" : promoted.contextTransition,
-          workoutPlan: plan,
-          expectedResponse: null,
-          memoryPatch: {
-            ...(promoted.memoryPatch || {}),
-            lastWorkoutPlan: plan,
-          },
-        };
       }
       return response;
     }
@@ -16631,19 +16556,6 @@ async function runSovereignBrainTurn(params: {
     }
     const directRecovery = buildDirectOperationalRecoveryResponse(memory, input, language);
     if (directRecovery) return finalizeSovereignBrainResponse(directRecovery, input, language);
-  }
-  if (shouldPromoteNoneToDietAction(input, response)) {
-    const dietFallback = await buildDietIntentFallbackResponse({
-      userId: memory.userId,
-      memory,
-      input,
-      history,
-      language,
-      worldState,
-      resolverResult: params.resolverResult ?? null,
-      turnId: params.turnId,
-    });
-    if (dietFallback) return finalizeSovereignBrainResponse(dietFallback, input, language);
   }
   if (
     response.acao === "none" &&

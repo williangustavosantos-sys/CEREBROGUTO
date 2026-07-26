@@ -42,5 +42,7 @@ describe("prompt soberano — foco no assunto atual", () => {
     assert.match(prompt, /resolva o assunto que o usuário trouxe AGORA e encerre/i);
     assert.match(prompt, /contexto de outros domínios informa a decisão, mas não vira um novo assunto na fala/i);
     assert.match(prompt, /pendência proativa que exija resposta agora/i);
+    assert.match(prompt, /Pedido explícito e executável já é autorização/i);
+    assert.match(prompt, /não prometa executar com acao:"none"/i);
   });
 });

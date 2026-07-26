@@ -404,8 +404,8 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     stubPayload = {
       flag: null,
       confidence: 0,
-      fala: "Não consegui gerar a dieta.",
-      acao: "none",
+      fala: "Vou regenerar tua dieta agora.",
+      acao: "generateDiet",
       expectedResponse: null,
     };
 
@@ -420,17 +420,13 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.equal(readMem(userId).dietGenerationStatus, "generated");
   });
 
-  it("pedido explícito de treino não fica preso em acao none quando perfil está executável", async () => {
+  it("pedido explícito de treino executa a ação escolhida pelo cérebro", async () => {
     stubPayload = {
       flag: null,
       confidence: 0,
-      fala: "O treino atual já trabalha braços. Vamos manter?",
-      acao: "none",
-      expectedResponse: {
-        type: "text",
-        instruction: "Confirmar se quer manter o treino atual.",
-        options: ["Manter", "Ajustar"],
-      },
+      fala: "Fechado. Vou ajustar o treino de hoje para braços.",
+      acao: "updateWorkout",
+      expectedResponse: null,
     };
     seed("conv-workout-focus-promote", {
       lastWorkoutPlan: abdutoraPlan(),
@@ -442,7 +438,38 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.equal(body.acao, "updateWorkout");
     assert.equal(body.expectedResponse, null);
     assert.ok(body.workoutPlan?.exercises?.length > 0, "Missão foi atualizada pelo executor oficial");
-    assert.doesNotMatch(JSON.stringify(body), /Confirmar se quer manter|Vamos manter/i);
+    assert.equal(body.fala, "Fechado. Vou ajustar o treino de hoje para braços.");
+  });
+
+  it("backend não promove acao none para treino ou dieta depois do cérebro", async () => {
+    seed("conv-no-postbrain-promotion", {
+      lastWorkoutPlan: abdutoraPlan(),
+      nextWorkoutFocus: "back_biceps",
+    });
+
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Quero confirmar o foco antes de mexer.",
+      acao: "none",
+      expectedResponse: null,
+    };
+    const workout = await chat("conv-no-postbrain-promotion", "quero treinar braço");
+    assert.equal(workout.body.acao, "none");
+    assert.equal(workout.body.fala, "Quero confirmar o foco antes de mexer.");
+    assert.ok(!workout.body.workoutPlan, "backend não pode promover treino por regex");
+
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Vou montar tua dieta agora.",
+      acao: "none",
+      expectedResponse: null,
+    };
+    const diet = await chat("conv-no-postbrain-promotion", "monta minha dieta");
+    assert.equal(diet.body.acao, "none");
+    assert.equal(diet.body.fala, "Vou montar tua dieta agora.");
+    assert.equal(callsByKind.diet || 0, 0, "backend não pode promover dieta por regex");
   });
 
   it("swapExercise não vira resolver L1 e preserva a fala em troca válida", async () => {
