@@ -49,6 +49,9 @@ describe("prompt soberano — foco no assunto atual", () => {
     assert.match(prompt, /Não gostar, não curtir ou preferir outro exercício NÃO autoriza troca/i);
     assert.match(prompt, /o motivo está claro: preferência/i);
     assert.match(prompt, /NÃO pergunte por quê, NÃO ofereça menu de dor\/equipamento/i);
+    assert.match(prompt, /Acolha sem negociar a missão/i);
+    assert.match(prompt, /condução afirmativa ou imperativa/i);
+    assert.match(prompt, /nunca com "beleza\?", "pode ser\?", "vamos\?"/i);
     assert.match(prompt, /Pedido vago de troca sem motivo usa acao:"none"/i);
   });
 });
