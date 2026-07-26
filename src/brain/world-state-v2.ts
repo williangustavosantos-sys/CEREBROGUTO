@@ -45,7 +45,60 @@ export interface WorldStateV2Proactivity {
 export interface WorldStateV2Catalog {
   activeExercise?: unknown | null;
   workoutSubstitutes?: unknown[];
+  foodSubstitutes?: Array<{
+    id: string;
+    name: string;
+    nutritionalRole?: string;
+    quantityHint?: string;
+  }>;
   foodConstraints?: unknown | null;
+}
+
+export interface WorldStateV2ActiveContextItem {
+  id: string;
+  name: string;
+  position?: number;
+  workoutId?: string;
+  mealId?: string;
+  mealName?: string;
+  quantity?: string;
+  nutritionalRole?: string;
+  sets?: number;
+  reps?: string;
+  rest?: string;
+}
+
+export interface WorldStateV2ActiveContext {
+  id: string;
+  version: number;
+  type: "workout" | "diet";
+  sourceSurface: "mission" | "diet";
+  originalItem: WorldStateV2ActiveContextItem;
+  currentItem: WorldStateV2ActiveContextItem;
+  lastSuggestedItem: WorldStateV2ActiveContextItem | null;
+  rejectedItems: WorldStateV2ActiveContextItem[];
+  acceptedItem: WorldStateV2ActiveContextItem | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorldStateV2SubstitutionContext {
+  kind: "exercise" | "food";
+  originalId: string;
+  originalName: string;
+  lastSuggestedId?: string;
+  rejectedIds: string[];
+  mealName?: string;
+  updatedAt: string;
+}
+
+export interface WorldStateV2ConversationContext {
+  kind: string;
+  source: string;
+  relatedMemoryId?: string;
+  originalId?: string;
+  dateParsed?: string;
+  updatedAt: string;
 }
 
 export interface WorldStateV2DailyContext {
@@ -83,6 +136,9 @@ export interface WorldStateV2 {
   workout: WorldStateV2Workout;
   diet: WorldStateV2Diet;
   activeExercise: unknown | null;
+  activeContext: WorldStateV2ActiveContext | null;
+  substitutionContext: WorldStateV2SubstitutionContext | null;
+  activeConversationContext: WorldStateV2ConversationContext | null;
   proactivity: WorldStateV2Proactivity;
   pendingCards: unknown[];
   dailyContext: WorldStateV2DailyContext;
@@ -100,6 +156,9 @@ export interface AssembleWorldStateV2Input {
   workout?: WorldStateV2Workout;
   diet?: WorldStateV2Diet;
   activeExercise?: unknown | null;
+  activeContext?: WorldStateV2ActiveContext | null;
+  substitutionContext?: WorldStateV2SubstitutionContext | null;
+  activeConversationContext?: WorldStateV2ConversationContext | null;
   proactivity?: WorldStateV2Proactivity;
   pendingCards?: unknown[];
   dailyContext?: WorldStateV2DailyContext;
@@ -147,6 +206,9 @@ export function assembleWorldStateV2(input: AssembleWorldStateV2Input): WorldSta
     workout: input.workout ?? {},
     diet: input.diet ?? { hasPlan: false },
     activeExercise: input.activeExercise ?? null,
+    activeContext: input.activeContext ?? null,
+    substitutionContext: input.substitutionContext ?? null,
+    activeConversationContext: input.activeConversationContext ?? null,
     proactivity: input.proactivity ?? {},
     pendingCards: input.pendingCards ?? [],
     dailyContext: input.dailyContext ?? {},
