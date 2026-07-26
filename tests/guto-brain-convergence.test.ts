@@ -420,11 +420,11 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.equal(readMem(userId).dietGenerationStatus, "generated");
   });
 
-  it("pedido explícito de treino executa a ação escolhida pelo cérebro", async () => {
+  it("pedido para iniciar executa a missão prescrita escolhida pelo cérebro", async () => {
     stubPayload = {
       flag: null,
       confidence: 0,
-      fala: "Fechado. Vou ajustar o treino de hoje para braços.",
+      fala: "Fechado. A missão de hoje já está comigo. Vamos começar.",
       acao: "updateWorkout",
       expectedResponse: null,
     };
@@ -432,16 +432,16 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
       lastWorkoutPlan: abdutoraPlan(),
       nextWorkoutFocus: "back_biceps",
     });
-    const { body } = await chat("conv-workout-focus-promote", "quero treinar braço");
+    const { body } = await chat("conv-workout-focus-promote", "bora treinar");
 
     assert.equal(callsByKind.contractIntent || 0, 0);
     assert.equal(body.acao, "updateWorkout");
     assert.equal(body.expectedResponse, null);
     assert.ok(body.workoutPlan?.exercises?.length > 0, "Missão foi atualizada pelo executor oficial");
-    assert.equal(body.fala, "Fechado. Vou ajustar o treino de hoje para braços.");
+    assert.equal(body.fala, "Fechado. A missão de hoje já está comigo. Vamos começar.");
   });
 
-  it("backend não promove acao none para treino ou dieta depois do cérebro", async () => {
+  it("preferência muscular do usuário não substitui a missão prescrita", async () => {
     seed("conv-no-postbrain-promotion", {
       lastWorkoutPlan: abdutoraPlan(),
       nextWorkoutFocus: "back_biceps",
@@ -450,15 +450,44 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     stubPayload = {
       flag: null,
       confidence: 0,
-      fala: "Quero confirmar o foco antes de mexer.",
+      fala: "Hoje não é você que escolhe o músculo, Will. A missão já está montada e eu vou contigo até o fim.",
       acao: "none",
       expectedResponse: null,
     };
     const workout = await chat("conv-no-postbrain-promotion", "quero treinar braço");
     assert.equal(workout.body.acao, "none");
-    assert.equal(workout.body.fala, "Quero confirmar o foco antes de mexer.");
+    assert.equal(workout.body.fala, "Hoje não é você que escolhe o músculo, Will. A missão já está montada e eu vou contigo até o fim.");
     assert.ok(!workout.body.workoutPlan, "backend não pode promover treino por regex");
+  });
 
+  it("não gostar do exercício preserva missão e fala soberana do GUTO", async () => {
+    const plan = abdutoraPlan();
+    seed("conv-exercise-dislike", {
+      lastWorkoutPlan: plan,
+      activeExercise: {
+        source: "workout",
+        name: plan.exercises[0].name,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Will, eu também não gosto de muita coisa e continuo aqui firme contigo. Esse fica na missão de hoje.",
+      acao: "none",
+      expectedResponse: null,
+    };
+    const response = await chat("conv-exercise-dislike", "Guto, não gosto desse exercício");
+    assert.equal(response.body.acao, "none");
+    assert.equal(response.body.fala, "Will, eu também não gosto de muita coisa e continuo aqui firme contigo. Esse fica na missão de hoje.");
+    assert.ok(!response.body.workoutPlan, "preferência não pode gerar plano substituto");
+    assert.deepEqual(readMem("conv-exercise-dislike").lastWorkoutPlan, plan, "missão prescrita precisa permanecer intacta");
+    assert.equal(callsByKind.brain, 1, "a personalidade e a decisão pertencem ao Cérebro Soberano");
+  });
+
+  it("backend não promove acao none para dieta depois do cérebro", async () => {
+    seed("conv-no-postbrain-diet");
     stubPayload = {
       flag: null,
       confidence: 0,
@@ -466,7 +495,7 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
       acao: "none",
       expectedResponse: null,
     };
-    const diet = await chat("conv-no-postbrain-promotion", "monta minha dieta");
+    const diet = await chat("conv-no-postbrain-diet", "monta minha dieta");
     assert.equal(diet.body.acao, "none");
     assert.equal(diet.body.fala, "Vou montar tua dieta agora.");
     assert.equal(callsByKind.diet || 0, 0, "backend não pode promover dieta por regex");
@@ -485,6 +514,34 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.equal(body.fala, fala);
     assert.equal(body.acao, "swapExercise");
     assert.ok(body.workoutPlan?.exercises?.some((ex: any) => ex.name === sub));
+  });
+
+  it("swapExercise sem substituto exato na fala ainda executa uma alternativa segura do catálogo", async () => {
+    const plan = abdutoraPlan();
+    seed("conv-swap-catalog-recovery", {
+      lastWorkoutPlan: plan,
+      activeExercise: {
+        source: "workout",
+        name: plan.exercises[0].name,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Está ocupado? Eu adapto agora sem mudar tua missão.",
+      acao: "swapExercise",
+      expectedResponse: null,
+    };
+
+    const { body } = await chat("conv-swap-catalog-recovery", "Guto, o equipamento está ocupado");
+    const stored = readMem("conv-swap-catalog-recovery").lastWorkoutPlan;
+
+    assert.equal(body.acao, "swapExercise");
+    assert.ok(body.workoutPlan, "executor precisa devolver o plano adaptado");
+    assert.notEqual(stored?.exercises?.[0]?.id, plan.exercises[0].id, "item ocupado precisa ser substituído");
+    assert.equal(stored?.exercises?.length, plan.exercises.length, "a missão não pode mudar de tamanho");
+    assert.match(body.fala, /mesma missão/i);
   });
 
   it("openProactiveCard preserva fala do cérebro e cria trilho proativo sem template hardcoded", async () => {

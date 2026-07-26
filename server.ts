@@ -15613,14 +15613,10 @@ function commitBrainExerciseSwap(params: {
         catalogEntry: getCatalogById(previous.originalId),
       }
     : null);
-  const substitute = extractSubstituteFromResponseText(response.fala);
+  let substitute = extractSubstituteFromResponseText(response.fala);
   const originalEntry = original ? getCatalogById(original.id) || original.catalogEntry : null;
-  if (!original || !originalEntry || !substitute) {
+  if (!original || !originalEntry) {
     return buildSovereignSafeFallback(language, "Preciso saber qual exercício deve ser trocado e por qual substituto seguro.");
-  }
-  const validation = validateExerciseSubstitute(originalEntry, substitute);
-  if (!validation.valid) {
-    return buildSovereignSafeFallback(language, "A troca proposta não passou na validação do catálogo.");
   }
   const recoveredSuggestedId = !previous?.lastSuggestedId && rejectedFollowUp
     ? recoverLastSuggestedSubstituteIdFromHistory(history)
@@ -15633,9 +15629,41 @@ function commitBrainExerciseSwap(params: {
         )
       )
     : mergeRejectedIds(
-        previous?.originalId === original.id ? previous?.rejectedIds : undefined,
-        [original.id]
-      );
+      previous?.originalId === original.id ? previous?.rejectedIds : undefined,
+      [original.id]
+    );
+  let committedResponse = response;
+  if (!substitute || !validateExerciseSubstitute(originalEntry, substitute).valid) {
+    substitute = pickValidatedExerciseSubstitute({
+      originalId: original.id,
+      memory,
+      rejectedIds,
+    });
+    if (!substitute) {
+      return buildSovereignSafeFallback(language, "Não encontrei uma alternativa segura no catálogo para este exercício.");
+    }
+    const substituteName = substitute.namesByLanguage[language as CatalogLanguage] || substitute.canonicalNamePt;
+    const scheme = original.planExercise
+      ? pickByLanguage(language, {
+          "pt-BR": `mantém ${original.planExercise.sets} ${original.planExercise.sets === 1 ? "série" : "séries"}, ${original.planExercise.reps}, descanso de ${original.planExercise.rest}`,
+          "en-US": `keep ${original.planExercise.sets} ${original.planExercise.sets === 1 ? "set" : "sets"}, ${original.planExercise.reps}, ${original.planExercise.rest} rest`,
+          "it-IT": `tieni ${original.planExercise.sets} ${original.planExercise.sets === 1 ? "serie" : "serie"}, ${original.planExercise.reps}, recupero ${original.planExercise.rest}`,
+        })
+      : pickByLanguage(language, {
+          "pt-BR": "mantém o mesmo esquema da missão",
+          "en-US": "keep the same mission scheme",
+          "it-IT": "mantieni lo stesso schema della missione",
+        });
+    committedResponse = {
+      ...response,
+      fala: pickByLanguage(language, {
+        "pt-BR": `${original.name} ocupado? Vai de ${substituteName}: ${scheme}. Mesma missão, sem ficar parado.`,
+        "en-US": `${original.name} is taken? Go with ${substituteName}: ${scheme}. Same mission, no standing around.`,
+        "it-IT": `${original.name} occupato? Vai con ${substituteName}: ${scheme}. Stessa missione, senza fermarti.`,
+      }),
+      expectedResponse: null,
+    };
+  }
   const currentActive = normalizeActiveContext(memory.activeContext);
   if (
     currentActive?.type !== "workout" ||
@@ -15715,7 +15743,7 @@ function commitBrainExerciseSwap(params: {
       "Troca de exercício decidida pelo cérebro e mantida no contexto; plano não estava carregado."
     );
     commitMemoryDecision(memory);
-    return response;
+    return committedResponse;
   }
   let index = plan.exercises.findIndex((exercise) => exercise.id === original.id || normalize(exercise.name) === normalize(original.name));
   if (index < 0 && rejectedFollowUp && previous?.lastSuggestedId) {
@@ -15730,7 +15758,7 @@ function commitBrainExerciseSwap(params: {
         "Troca de exercício decidida pelo cérebro e mantida no contexto; item não estava no snapshot do plano."
       );
       commitMemoryDecision(memory);
-      return response;
+      return committedResponse;
     }
     return buildSovereignSafeFallback(language, "Não encontrei o exercício original no treino atual.");
   }
@@ -15762,10 +15790,10 @@ function commitBrainExerciseSwap(params: {
   );
   commitMemoryDecision(memory);
   return {
-    ...response,
+    ...committedResponse,
     workoutPlan: nextPlan,
     memoryPatch: {
-      ...(response.memoryPatch || {}),
+      ...(committedResponse.memoryPatch || {}),
       lastWorkoutPlan: nextPlan,
     },
   };
@@ -16556,15 +16584,6 @@ async function runSovereignBrainTurn(params: {
     }
     const directRecovery = buildDirectOperationalRecoveryResponse(memory, input, language);
     if (directRecovery) return finalizeSovereignBrainResponse(directRecovery, input, language);
-  }
-  if (
-    response.acao === "none" &&
-    !response.expectedResponse &&
-    classifyExerciseDoubtMessage(input) === "swap_needs_reason" &&
-    !extractSubstituteFromResponseText(response.fala)
-  ) {
-    const exerciseClarity = buildExerciseSwapClarityResponse({ input, language });
-    if (exerciseClarity) return finalizeSovereignBrainResponse(exerciseClarity, input, language);
   }
   if (response.acao === "none") {
     const continuityFallback = await buildNoModelOperationalFallback({

@@ -203,8 +203,8 @@ describe("Fatia 2C — cérebro possui adaptação/dor/continuidade (L3 não dec
     assert.equal(body.acao, "none");
   });
 
-  // 6. Substituição inválida → validação protege catálogo sem template legado.
-  it("substituição INVÁLIDA → dispatcher bloqueia com fallback seguro, sem resolver L1", async () => {
+  // 6. Substituição inválida → catálogo corrige a execução sem deixar o treino quebrar.
+  it("substituição INVÁLIDA → dispatcher executa alternativa segura do catálogo, sem resolver L1", async () => {
     setBrainSlice1(true);
     const invalidFala = `Troca por ${invalidSubstituteName()}, vai ser melhor. Bora.`; // chest p/ glúteo
     stubPayload = { flag: null, confidence: 0, fala: invalidFala, acao: "none", expectedResponse: null };
@@ -213,7 +213,9 @@ describe("Fatia 2C — cérebro possui adaptação/dor/continuidade (L3 não dec
     assert.equal(status, 200);
     assert.notEqual(body.fala, invalidFala, "a substituição inválida do cérebro NÃO pode vazar ao usuário");
     assert.equal(callsByKind.contractIntent || 0, 0, "troca inválida não cai no resolver L1/askGutoModel");
-    assert.ok(/catálogo|catalogo|seguro|direta/i.test(String(body.fala)), "fallback seguro estruturado");
+    assert.equal(body.acao, "swapExercise");
+    assert.ok(body.workoutPlan?.exercises?.length, "catálogo precisa fechar a adaptação");
+    assert.match(String(body.fala), /mesma missão/i, "fala recuperada mantém a condução do GUTO");
     assert.equal(headerErr, false, "sem resposta dupla");
   });
 
