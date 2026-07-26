@@ -30,3 +30,17 @@ describe("prompt soberano — proveniência do turno vazio", () => {
     assert.match(message, /turno iniciado pelo sistema/i);
   });
 });
+
+describe("prompt soberano — foco no assunto atual", () => {
+  it("ordena que a mensagem atual domine sem abrir agenda ou outro domínio", () => {
+    const prompt = buildSovereignBrainPrompt({
+      worldState: worldState(),
+      input: "não consumo lactose",
+    });
+
+    assert.match(prompt, /A mensagem atual manda no turno/i);
+    assert.match(prompt, /resolva o assunto que o usuário trouxe AGORA e encerre/i);
+    assert.match(prompt, /contexto de outros domínios informa a decisão, mas não vira um novo assunto na fala/i);
+    assert.match(prompt, /pendência proativa que exija resposta agora/i);
+  });
+});
