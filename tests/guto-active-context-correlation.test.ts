@@ -112,8 +112,8 @@ describe("active context correlation", () => {
         const modelResponse = isFoodTurn && foodCandidate
           ? {
               fala: language === "it-IT"
-                ? `${activeFoodLabel || "Questo alimento"} non c'è? Cambia con ${foodQuantity} di ${foodCandidate.name}.`
-                : `${activeFoodLabel || "Esse alimento"} também não tem? Troca por ${foodQuantity} de ${foodCandidate.name}.`,
+                ? `Cambia ${activeFoodLabel || "questo alimento"} con ${foodQuantity} di ${foodCandidate.name}.`
+                : `Troca ${activeFoodLabel || "esse alimento"} por ${foodQuantity} de ${foodCandidate.name}.`,
               acao: "none",
               expectedResponse: null,
               memoryPatch: {},
@@ -565,6 +565,7 @@ describe("active context correlation", () => {
     assert.equal(first.activeContext.currentItem.quantity, "2 fatias");
     assert.ok(!("foodSubstitution" in first), "a decisão estruturada interna não pode vazar para o frontend");
     assert.doesNotMatch(first.fala || "", /\bou\b.*p[ãa]o|\bou\b.*biscoito/i);
+    assert.doesNotMatch(first.fala || "", /\?|semana|viagem|agenda|treino/i);
 
     clearMemoryStoreCache();
     const afterFirst = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
@@ -579,6 +580,7 @@ describe("active context correlation", () => {
     assert.notEqual(second.activeContext.currentItem.id, "cafe:aveia em flocos");
     assert.equal(second.activeContext.lastSuggestedItem.id, second.activeContext.currentItem.id);
     assert.notEqual(second.activeContext.currentItem.quantity, "80g");
+    assert.doesNotMatch(second.fala || "", /\?|semana|viagem|agenda|treino/i);
     assert.ok(
       second.activeContext.rejectedItems.some((item: any) => item.id === first.activeContext.currentItem.id),
       "a primeira sugestão precisa ser registrada como rejeitada",
