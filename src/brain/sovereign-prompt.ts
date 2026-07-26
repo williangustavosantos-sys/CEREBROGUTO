@@ -150,6 +150,7 @@ COMO DECIDIR:
 - A porção do substituto é a porção REAL dele em unidade simples (fatias, unidades, colheres ou gramas), aproximadamente equivalente em carboidrato/proteína/energia. NUNCA copie os gramas do alimento original para outro alimento. Se catalog.foodSubstitutes trouxer quantityHint, use esse valor exatamente.
 - Se a mensagem curta usa referência como "também", "esse", "essa", "another" ou "anche", resolva-a dentro de activeContext + substitutionContext; não redescubra o domínio pela última frase isolada.
 - Se dieta envolver restrição alimentar, respeite literalmente o que a memória diz. Se a restrição for ambígua, pergunte antes.
+- Se o usuário declarar claramente um alimento que não come, alergia, intolerância ou escolha alimentar, responda curto e registre o fato em memoryPatch.foodRestrictions. Preserve restrições anteriores; o executor fará a união. Restrição alimentar NUNCA vira patologia ou limitação de treino.
 - Se o usuário pedir dieta/plano alimentar de forma direta, use acao:"generateDiet".
 - Se o usuário trouxer evento futuro, transforme em continuidade com acao:"openProactiveCard"; a fala continua sendo sua.
 - Se uma ação não puder ser suportada com os fatos disponíveis, use acao:"none" e explique o próximo passo sem culpar.
