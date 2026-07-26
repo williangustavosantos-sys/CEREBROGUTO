@@ -16098,21 +16098,6 @@ async function buildDeterministicContextResolverResponse(params: {
   return null;
 }
 
-async function buildImmediateSovereignOperationalResponse(params: {
-  input: string;
-  memory: GutoMemory;
-  language: GutoLanguage;
-}): Promise<GutoModelResponse | null> {
-  const { input, memory, language } = params;
-
-  if (!isExplicitDietIntent(input)) {
-    const foodRestrictionFact = await buildFoodRestrictionFactResponse(memory, input, language);
-    if (foodRestrictionFact) return foodRestrictionFact;
-  }
-
-  return null;
-}
-
 function shouldPromoteExplicitWorkoutExecution(input: string, memory: GutoMemory, language: GutoLanguage, response: GutoModelResponse): boolean {
   if (response.acao !== "none") return false;
   const userText = stripInjectedContext(input);
@@ -16483,16 +16468,6 @@ async function runSovereignBrainTurn(params: {
       });
   if (!requestContextIsCurrent()) return staleContextResponse();
   if (proactiveStateFallback) return finalizeSovereignBrainResponse(proactiveStateFallback, input, language);
-
-  const immediateOperationalResponse = await buildImmediateSovereignOperationalResponse({
-    input,
-    memory,
-    language,
-  });
-  if (!requestContextIsCurrent()) return staleContextResponse();
-  if (immediateOperationalResponse) {
-    return finalizeSovereignBrainResponse(immediateOperationalResponse, input, language);
-  }
 
   if (!GEMINI_API_KEY) {
     const requiredSystemFallback = await runRequiredSystemFallback();

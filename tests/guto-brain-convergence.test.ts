@@ -340,6 +340,14 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
   });
 
   it("restrição alimentar incremental não apaga restrições calibradas nem invalida dieta", async () => {
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Fechado. Continuo respeitando que você não come lactose.",
+      acao: "none",
+      expectedResponse: null,
+      memoryPatch: { foodRestrictions: "sem lactose" },
+    };
     seed("conv-food-restriction-merge", {
       foodRestrictions: "vegetariano, sem lactose",
       dietGenerationStatus: "generated",
@@ -358,6 +366,8 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     const mem = readMem("conv-food-restriction-merge");
 
     assert.equal(body.acao, "none");
+    assert.equal(body.fala, "Fechado. Continuo respeitando que você não come lactose.");
+    assert.equal(callsByKind.brain, 1, "restrição alimentar precisa passar pelo Cérebro Soberano");
     assert.equal(mem.foodRestrictions, "vegetariano, sem lactose");
     assert.equal(mem.dietGenerationStatus, "generated");
     assert.ok(mem.weeklyDietPlan?.meals?.length > 0, "dieta gerada continua disponível");
