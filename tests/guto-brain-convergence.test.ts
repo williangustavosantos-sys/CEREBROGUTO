@@ -486,6 +486,37 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     assert.equal(callsByKind.brain, 1, "a personalidade e a decisão pertencem ao Cérebro Soberano");
   });
 
+  it("preferência explícita não ganha autoridade de swap mesmo se o modelo pedir troca", async () => {
+    const plan = abdutoraPlan();
+    seed("conv-exercise-dislike-invalid-action", {
+      name: "Will",
+      lastWorkoutPlan: plan,
+      activeExercise: {
+        source: "workout",
+        name: plan.exercises[0].name,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    stubPayload = {
+      flag: null,
+      confidence: 0,
+      fala: "Vou trocar agora.",
+      acao: "swapExercise",
+      expectedResponse: null,
+    };
+
+    const response = await chat("conv-exercise-dislike-invalid-action", "Guto, não gosto desse exercício");
+    assert.equal(response.body.acao, "none");
+    assert.ok(!response.body.workoutPlan, "preferência não pode executar o catálogo");
+    assert.deepEqual(
+      readMem("conv-exercise-dislike-invalid-action").lastWorkoutPlan,
+      plan,
+      "o executor deve preservar a missão mesmo quando o modelo erra a ação",
+    );
+    assert.match(response.body.fala, /gostar não é o critério/i);
+    assert.doesNotMatch(response.body.fala, /vou trocar/i);
+  });
+
   it("backend não promove acao none para dieta depois do cérebro", async () => {
     seed("conv-no-postbrain-diet");
     stubPayload = {
@@ -509,7 +540,7 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
       lastWorkoutPlan: abdutoraPlan(),
       activeExercise: { source: "chat", name: "Cadeira abdutora", updatedAt: new Date().toISOString() },
     });
-    const { body } = await chat("conv-swap", "quero trocar esse exercício");
+    const { body } = await chat("conv-swap", "esse exercício está ocupado");
     assert.equal(callsByKind.contractIntent || 0, 0);
     assert.equal(body.fala, fala);
     assert.equal(body.acao, "swapExercise");

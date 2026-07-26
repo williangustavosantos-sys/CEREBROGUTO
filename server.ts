@@ -15799,6 +15799,68 @@ function commitBrainExerciseSwap(params: {
   };
 }
 
+function hasOperationalExerciseSwapEvidence(
+  memory: GutoMemory,
+  input: string,
+  language: GutoLanguage,
+): boolean {
+  if (isEquipmentBusyMessage(input) || mentionsPainInjuryOrIllness(input, language)) return true;
+  const text = normalize(stripInjectedContext(input || ""));
+  const hasUnavailableCue =
+    /\b(ocupado|ocupada|indisponivel|indisponível|lotado|lotada|nao tem|não tem|nao tenho|não tenho|tambem ocupado|também ocupado|also busy|also taken|still busy|ancora occupato|ancora occupata)\b/.test(text);
+  if (hasUnavailableCue && resolveWorkoutExerciseForSubstitution({ input, memory })) return true;
+  const previous = getFreshSubstitutionContext(memory, "exercise");
+  return Boolean(
+    isSubstitutionRejectionFollowUp(input) &&
+    (previous?.lastSuggestedId || resolveWorkoutExerciseForSubstitution({ input, memory }))
+  );
+}
+
+function isExplicitExerciseDislike(input: string): boolean {
+  const text = normalize(stripInjectedContext(input || ""));
+  return /\b(nao gosto|não gosto|nao curto|não curto|odiei|detestei|dont like|don t like|do not like|hate this|non mi piace|non mi e piaciuto|non mi è piaciuto|odio questo)\b/.test(text);
+}
+
+function enforceExerciseSwapAuthority(
+  response: GutoModelResponse,
+  memory: GutoMemory,
+  input: string,
+  language: GutoLanguage,
+): GutoModelResponse {
+  if (response.acao !== "swapExercise" || hasOperationalExerciseSwapEvidence(memory, input, language)) {
+    return response;
+  }
+
+  if (!isExplicitExerciseDislike(input)) {
+    return buildActiveExerciseSwapClarityResponse(memory, input, language) ||
+      buildGenericExerciseSwapClarificationResponse(input, language) ||
+      buildSovereignSafeFallback(language, "Explique o motivo operacional da troca antes de alterar a missão.");
+  }
+
+  const active = normalizeActiveContext(memory.activeContext);
+  const original = resolveWorkoutExerciseForSubstitution({ input, memory });
+  const exerciseName =
+    (active?.type === "workout" ? active.currentItem.name : "") ||
+    original?.name ||
+    pickByLanguage(language, {
+      "pt-BR": "Esse exercício",
+      "en-US": "That exercise",
+      "it-IT": "Quell'esercizio",
+    });
+  const callName = getGutoCallName(memory);
+  const prefix = callName ? `${callName}, ` : "";
+  return {
+    fala: pickByLanguage(language, {
+      "pt-BR": `${prefix}gostar não é o critério hoje. ${exerciseName} continua na missão; faz o bloco e eu sigo firme contigo.`,
+      "en-US": `${prefix}liking it is not today's criterion. ${exerciseName} stays in the mission; do the block and I stay with you.`,
+      "it-IT": `${prefix}oggi il criterio non è se piace. ${exerciseName} resta nella missione; fai il blocco e io resto con te.`,
+    }),
+    acao: "none",
+    expectedResponse: null,
+    avatarEmotion: "default",
+  };
+}
+
 async function commitBrainProactiveCard(params: {
   userId: string;
   memory: GutoMemory;
@@ -16568,6 +16630,7 @@ async function runSovereignBrainTurn(params: {
     memory,
     language,
   );
+  response = enforceExerciseSwapAuthority(response, memory, input, language);
   if (isSovereignSafeFallbackText(response.fala)) {
     const operationalFallback = await buildNoModelOperationalFallback({
       userId: memory.userId,

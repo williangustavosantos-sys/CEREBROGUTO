@@ -556,14 +556,16 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     }) as typeof globalThis.fetch;
 
     try {
-      // Input neutro: passa pelos gates determinísticos e chega ao modelo.
+      // Input neutro: mesmo que o modelo tente inventar uma troca, o executor
+      // não dá autoridade sem equipamento ocupado, dor ou limitação real.
       const res = await postGuto(userId, "valeu, gostei da conversa de hoje");
       assert.doesNotMatch(
         res.fala || "",
         /qual prefere|prefere\?|qual deles|qual dos dois|escolhe entre/i,
         "blindagem precisa eliminar a votação de preferência",
       );
-      assert.match(res.fala || "", /troca por/i, "blindagem precisa entregar uma decisão");
+      assert.equal(res.acao, "none");
+      assert.doesNotMatch(res.fala || "", /troca por/i, "conversa neutra não pode alterar a missão");
     } finally {
       globalThis.fetch = savedFetch;
     }
