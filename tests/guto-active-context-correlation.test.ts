@@ -766,6 +766,7 @@ describe("active context correlation", () => {
       activeItemId: active.currentItem.id,
     });
 
+    forceInvalidFoodDecision = true;
     const first = await send(dietContext, "não tenho aveia em flocos", "first");
     assert.equal(first.activeContext.type, "diet");
     assert.equal(first.activeContext.originalItem.name, "Aveia em flocos");
@@ -878,7 +879,7 @@ describe("active context correlation", () => {
     assert.match(brainPrompts[1] || "", /"explicitlyUnavailableFood": \{\s*"id": "banana"/);
   });
 
-  it("rejeita 80g de pão quando a porção validada é 2 fatias", async () => {
+  it("rejeita 80g do modelo e materializa a porção validada de 2 fatias", async () => {
     const openedAt = new Date().toISOString();
     const oatsItem = {
       id: "cafe:aveia",
@@ -917,10 +918,11 @@ describe("active context correlation", () => {
     });
 
     assert.equal(response.acao, "none");
-    assert.match(response.fala || "", /não vou inventar/i);
-    assert.equal(response.activeContext.currentItem.id, oatsItem.id);
-    assert.equal(response.activeContext.currentItem.quantity, "80g");
-    assert.equal(response.activeContext.lastSuggestedItem, null);
+    assert.match(response.fala || "", /2 fatias/i);
+    assert.doesNotMatch(response.fala || "", /80g/i);
+    assert.equal(response.activeContext.currentItem.id, "wholegrain_bread");
+    assert.equal(response.activeContext.currentItem.quantity, "2 fatias");
+    assert.equal(response.activeContext.lastSuggestedItem.id, "wholegrain_bread");
   });
 
   it("resposta concorrente do treino não restaura o domínio após abrir a dieta", async () => {

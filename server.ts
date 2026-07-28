@@ -16539,7 +16539,10 @@ async function dispatchSovereignBrainAction(params: {
         language,
         response,
       });
-      if (foodSubstitution && !isSovereignSafeFallbackText(foodSubstitution.fala)) {
+      const foodSubstitutionIsSafeFallback = Boolean(
+        foodSubstitution && isSovereignSafeFallbackText(foodSubstitution.fala)
+      );
+      if (foodSubstitution && !foodSubstitutionIsSafeFallback) {
         return foodSubstitution;
       }
       const rejectedFoodFollowUp =
@@ -16550,7 +16553,7 @@ async function dispatchSovereignBrainAction(params: {
         );
       if (
         activeContext?.type === "diet" &&
-        (rejectedFoodFollowUp || !foodSubstitution) &&
+        (rejectedFoodFollowUp || !foodSubstitution || foodSubstitutionIsSafeFallback) &&
         (
           hasDietOperationalAction ||
           isUnavailabilityMessage(stripInjectedContext(params.input))
