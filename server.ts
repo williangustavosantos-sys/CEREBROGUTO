@@ -6716,7 +6716,23 @@ async function buildFoodSubstituteResponseAtomically(
     const current = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
       ? { ...memory, ...(snapshot as GutoMemory) }
       : { ...memory };
+    const before = structuredClone(current);
     response = buildFoodSubstituteResponse(input, current, language, { persist: false });
+    if (response && normalizeActiveContext(current.activeContext)?.type === "diet") {
+      return persistDietSubstitutionBeforeContextCommit({
+        userId: memory.userId,
+        before,
+        after: current,
+        language,
+      }).then((persisted) => {
+        if (persisted) return current;
+        response = buildSovereignSafeFallback(
+          language,
+          "O plano alimentar mudou antes da troca; não anunciei nem persisti uma substituição parcial."
+        );
+        return before;
+      });
+    }
     return current;
   });
   if (updated) Object.assign(memory, updated);
@@ -6734,6 +6750,81 @@ function responseMentionsFood(responseText: string | undefined, food: ReturnType
     const candidate = normalize(label);
     return candidate.length > 1 && haystack.includes(candidate);
   });
+}
+
+function isDietCardContext(context: ActiveContext | null): boolean {
+  if (context?.type !== "diet") return false;
+  const original = context.originalItem;
+  return (
+    typeof original.position === "number" ||
+    Boolean(original.mealId && original.id.startsWith(`${original.mealId}:`))
+  );
+}
+
+async function persistDietSubstitutionBeforeContextCommit(params: {
+  userId: string;
+  before: GutoMemory;
+  after: GutoMemory;
+  language: GutoLanguage;
+}): Promise<boolean> {
+  const beforeContext = normalizeActiveContext(params.before.activeContext);
+  const afterContext = normalizeActiveContext(params.after.activeContext);
+  if (
+    beforeContext?.type !== "diet" ||
+    afterContext?.type !== "diet" ||
+    beforeContext.currentItem.id === afterContext.currentItem.id ||
+    !isDietCardContext(beforeContext)
+  ) {
+    return true;
+  }
+
+  const plan = await readPersistedDietPlan(params.userId).catch(() => null);
+  if (!plan) return true;
+
+  const mealIndex = plan.meals.findIndex((meal) =>
+    (beforeContext.currentItem.mealId && meal.id === beforeContext.currentItem.mealId) ||
+    (beforeContext.currentItem.mealName && normalize(meal.name) === normalize(beforeContext.currentItem.mealName))
+  );
+  if (mealIndex < 0) return false;
+
+  const meal = plan.meals[mealIndex];
+  const currentFoodId =
+    resolveFoodIdByName(beforeContext.currentItem.id) ||
+    resolveFoodIdByName(beforeContext.currentItem.name);
+  const originalFoodId =
+    resolveFoodIdByName(beforeContext.originalItem.id) ||
+    resolveFoodIdByName(beforeContext.originalItem.name);
+  const expectedIds = new Set([currentFoodId, originalFoodId].filter(Boolean));
+  let foodIndex = meal.foods.findIndex((food) => {
+    const id = resolveFoodIdByName(food.name);
+    return Boolean(id && expectedIds.has(id));
+  });
+  if (
+    foodIndex < 0 &&
+    typeof beforeContext.originalItem.position === "number" &&
+    beforeContext.originalItem.position >= 0 &&
+    beforeContext.originalItem.position < meal.foods.length
+  ) {
+    foodIndex = beforeContext.originalItem.position;
+  }
+  if (foodIndex < 0) return false;
+
+  const replacement = afterContext.currentItem;
+  const nextPlan: DietPlan = structuredClone(plan);
+  nextPlan.meals[mealIndex].foods[foodIndex] = {
+    ...nextPlan.meals[mealIndex].foods[foodIndex],
+    name: replacement.name,
+    quantity: replacement.quantity || nextPlan.meals[mealIndex].foods[foodIndex].quantity,
+  };
+  nextPlan.updatedAt = new Date().toISOString();
+
+  try {
+    await saveDietPlanIfUnchanged(nextPlan, getDietPlanConcurrencyToken(plan));
+    return true;
+  } catch (error) {
+    if (error instanceof DietPlanWriteConflictError) return false;
+    throw error;
+  }
 }
 
 async function materializeBrainFoodSubstitution(params: {
@@ -6917,11 +7008,27 @@ async function materializeBrainFoodSubstitutionAtomically(params: {
     const current = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
       ? { ...memory, ...(snapshot as GutoMemory) }
       : { ...memory };
+    const before = structuredClone(current);
     response = await materializeBrainFoodSubstitution({
       ...params,
       memory: current,
       persist: false,
     });
+    if (
+      response &&
+      !await persistDietSubstitutionBeforeContextCommit({
+        userId: memory.userId,
+        before,
+        after: current,
+        language: params.language,
+      })
+    ) {
+      response = buildSovereignSafeFallback(
+        params.language,
+        "O plano alimentar mudou antes da troca; não anunciei nem persisti uma substituição parcial."
+      );
+      return before;
+    }
     return current;
   });
   if (updated) Object.assign(memory, updated);

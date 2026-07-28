@@ -9,6 +9,7 @@ import jwt from "jsonwebtoken";
 
 const tmpDir = join(process.cwd(), "tmp");
 const memoryFile = join(tmpDir, "guto-memory.active-context-test.json");
+const dietFile = join(tmpDir, "guto-diet.active-context-test.json");
 const userId = "active-context-user";
 let server: Server;
 let baseUrl = "";
@@ -58,6 +59,7 @@ async function post(path: string, body: unknown) {
 describe("active context correlation", () => {
   before(async () => {
     process.env.GUTO_MEMORY_FILE = memoryFile;
+    process.env.GUTO_DIET_FILE = dietFile;
     process.env.GUTO_DISABLE_LISTEN = "1";
     process.env.GUTO_ALLOW_DEV_ACCESS = "true";
     process.env.GEMINI_API_KEY = "active-context-test-key";
@@ -208,6 +210,7 @@ describe("active context correlation", () => {
     forceInvalidFoodDecision = false;
     forceEmptyBrainResponse = false;
     clearMemoryStoreCache();
+    writeFileSync(dietFile, JSON.stringify({}));
     writeFileSync(memoryFile, JSON.stringify({
       [userId]: {
         userId,
@@ -226,6 +229,7 @@ describe("active context correlation", () => {
     globalThis.fetch = originalFetch;
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     rmSync(memoryFile, { force: true });
+    rmSync(dietFile, { force: true });
   });
 
   it("troca treino→dieta enquanto o modelo responde descarta o turno antigo sem mutação", async () => {
@@ -675,6 +679,25 @@ describe("active context correlation", () => {
   });
 
   it("Elíptico → Aveia → substituto A → rejeição → substituto B → reload permanece na dieta", async () => {
+    writeFileSync(dietFile, JSON.stringify({
+      [userId]: {
+        userId,
+        generatedAt: new Date().toISOString(),
+        country: "italy",
+        macros: { calories: 2000, proteinG: 140, carbsG: 220, fatG: 60 },
+        meals: [{
+          id: "cafe",
+          name: "Café da manhã proteico",
+          time: "08:00",
+          foods: [
+            { name: "café", quantity: "1 xícara", kcal: 2 },
+            { name: "Aveia em flocos", quantity: "80g", kcal: 300 },
+          ],
+          totalKcal: 302,
+          gutoNote: "Plano real de teste",
+        }],
+      },
+    }, null, 2));
     const workoutContext = context("ctx-food-domain-workout", "workout", "eliptico", "Elíptico");
     await post("/guto/active-context", { context: workoutContext });
     const workoutSwap = await post("/guto", {
@@ -781,6 +804,10 @@ describe("active context correlation", () => {
     assert.equal(afterReload.substitutionContext.kind, "food");
     assert.equal(afterReload.substitutionContext.lastSuggestedId, second.activeContext.currentItem.id);
     assert.equal(afterReload.activeConversationContext.kind, "diet_substitution");
+    const persistedDiet = JSON.parse(readFileSync(dietFile, "utf8"))[userId];
+    assert.equal(persistedDiet.meals[0].foods[0].name, "café", "o restante da refeição deve ficar intacto");
+    assert.equal(persistedDiet.meals[0].foods[1].name, second.activeContext.currentItem.name);
+    assert.equal(persistedDiet.meals[0].foods[1].quantity, second.activeContext.currentItem.quantity);
     assert.equal(brainCalls, 3, "ocupação + as duas trocas alimentares devem passar pelo cérebro soberano");
     assert.match(brainPrompts[1] || "", /"activeContext": \{/);
     assert.match(brainPrompts[1] || "", /"type": "diet"/);
