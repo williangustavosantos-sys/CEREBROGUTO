@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Server } from "node:http";
 import jwt from "jsonwebtoken";
+import { getCatalogById, suggestExerciseSubstitutes } from "../exercise-catalog.js";
 
 const tmpDir = join(process.cwd(), "tmp");
 const memoryFile = join(tmpDir, "guto-memory.active-context-test.json");
@@ -46,11 +47,73 @@ function context(id: string, type: "workout" | "diet", itemId: string, name: str
   };
 }
 
+function seedWorkoutPlan(
+  exercises: Array<{ id: string; name: string; sets?: number; reps?: string; rest?: string }>,
+) {
+  const store = JSON.parse(readFileSync(memoryFile, "utf8"));
+  store[userId].lastWorkoutPlan = {
+    scheduledFor: "today",
+    focus: "Teste de contrato",
+    location: "gym",
+    exercises: exercises.map((exercise) => ({
+      ...exercise,
+      canonicalNamePt: exercise.name,
+      sets: exercise.sets ?? 3,
+      reps: exercise.reps ?? "10-12",
+      rest: exercise.rest ?? "90s",
+    })),
+  };
+  writeFileSync(memoryFile, JSON.stringify(store, null, 2));
+  clearMemoryStoreCache();
+}
+
+function seedDietPlan(
+  meals: Array<{
+    id: string;
+    name: string;
+    foods: Array<{ name: string; quantity?: string; kcal?: number }>;
+  }>,
+  options: { lockedByCoach?: boolean } = {},
+) {
+  writeFileSync(dietFile, JSON.stringify({
+    [userId]: {
+      userId,
+      generatedAt: new Date().toISOString(),
+      country: "italy",
+      lockedByCoach: options.lockedByCoach ?? false,
+      macros: { calories: 2000, proteinG: 140, carbsG: 220, fatG: 60 },
+      meals: meals.map((meal) => ({
+        ...meal,
+        time: "08:00",
+        foods: meal.foods.map((food) => ({
+          quantity: "1 porção",
+          kcal: 100,
+          ...food,
+        })),
+        totalKcal: meal.foods.reduce((total, food) => total + (food.kcal ?? 100), 0),
+        gutoNote: "Plano oficial de teste",
+      })),
+    },
+  }, null, 2));
+}
+
 async function post(path: string, body: unknown) {
   const response = await originalFetch(`${baseUrl}${path}`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify(body),
+  });
+  assert.equal(response.status, 200, `${path} returned ${response.status}`);
+  return response.json() as Promise<Record<string, any>>;
+}
+
+async function getAsFreshSession(path: string) {
+  const freshToken = jwt.sign(
+    { userId, role: "student", sessionNonce: crypto.randomUUID() },
+    process.env.JWT_SECRET!,
+  );
+  const response = await originalFetch(`${baseUrl}${path}`, {
+    headers: { Authorization: `Bearer ${freshToken}` },
   });
   assert.equal(response.status, 200, `${path} returned ${response.status}`);
   return response.json() as Promise<Record<string, any>>;
@@ -349,6 +412,11 @@ describe("active context correlation", () => {
   });
 
   it("segunda indisponibilidade alimentar materializa alternativa mesmo se o modelo propõe item inválido", async () => {
+    seedDietPlan([{
+      id: "cafe",
+      name: "Café da manhã proteico",
+      foods: [{ name: "Iogurte de soja sem lactose", quantity: "250g" }],
+    }]);
     const dietContext = context(
       "ctx-real-diet-chain",
       "diet",
@@ -415,6 +483,15 @@ describe("active context correlation", () => {
   });
 
   it("sequência fundadora: Supino e Banana avançam alternativas sem repetir item", async () => {
+    seedWorkoutPlan([{
+      id: "supino_reto_maquina",
+      name: "Supino reto máquina",
+    }]);
+    seedDietPlan([{
+      id: "lunch",
+      name: "Almoço",
+      foods: [{ name: "Banana prata", quantity: "1 unidade" }],
+    }]);
     const workoutContext = context("ctx-sequence-workout", "workout", "supino_reto_maquina", "Supino reto máquina");
     await post("/guto/active-context", { context: workoutContext });
     const sendInContext = (active: Record<string, any>, input: string, suffix: string) => post("/guto", {
@@ -479,7 +556,7 @@ describe("active context correlation", () => {
     assert.equal(stored.contextHistory.at(-1).currentItem.id, second.activeContext.currentItem.id);
   });
 
-  it("contexto explícito preserva Supino reto máquina quando o plano contém Supino reto", async () => {
+  it("não publica troca quando o item literal não existe no plano oficial", async () => {
     const store = JSON.parse(readFileSync(memoryFile, "utf8"));
     store[userId].lastWorkoutPlan = {
       location: "gym",
@@ -515,12 +592,22 @@ describe("active context correlation", () => {
       activeItemId: workoutContext.currentItem.id,
     });
 
-    assert.equal(response.activeContext.originalItem.id, "supino_reto_maquina");
-    assert.deepEqual(response.activeContext.rejectedItems.map((item: any) => item.id), ["supino_reto_maquina"]);
-    assert.match(response.fala || "", /Supino reto máquina ocupado/i);
+    assert.deepEqual(response.activeContext, workoutContext);
+    assert.equal(response.workoutPlan ?? null, null);
+    assert.match(response.fala || "", /mantive|não consegui|não vou inventar/i);
+    assert.doesNotMatch(response.fala || "", /troca por|vai de/i);
+    clearMemoryStoreCache();
+    const stored = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    assert.equal(stored.lastWorkoutPlan.exercises[0].id, "supino_reto");
+    assert.deepEqual(stored.activeContext, workoutContext);
+    assert.equal(stored.substitutionContext, null);
   });
 
   it("exercício novo explícito substitui o contexto de treino anterior", async () => {
+    seedWorkoutPlan([{
+      id: "triceps_polia_alta",
+      name: "Tríceps polia alta",
+    }]);
     const oldContext = context("ctx-explicit-exercise-change", "workout", "supino_reto_maquina", "Supino reto máquina");
     await post("/guto/active-context", { context: oldContext });
 
@@ -545,6 +632,10 @@ describe("active context correlation", () => {
   });
 
   it("it-IT preserva duas referências curtas no contexto ativo de treino", async () => {
+    seedWorkoutPlan([{
+      id: "supino_reto_maquina",
+      name: "Supino reto macchina",
+    }]);
     const workoutContext = context(
       "ctx-italian-short-reference",
       "workout",
@@ -580,6 +671,11 @@ describe("active context correlation", () => {
   });
 
   it("it-IT rejeita a sugestão alimentar após reidratar o contexto", async () => {
+    seedDietPlan([{
+      id: "lunch",
+      name: "Pranzo",
+      foods: [{ name: "Banana", quantity: "1 unità" }],
+    }]);
     const dietContext = context("ctx-italian-diet-reload", "diet", "banana", "Banana");
     await post("/guto/active-context", { context: dietContext });
     const send = (active: Record<string, any>, input: string, suffix: string) => post("/guto", {
@@ -610,6 +706,15 @@ describe("active context correlation", () => {
   });
 
   it("Supino rejeitado → Banana → 'Não tenho tbm' fica exclusivamente na dieta", async () => {
+    seedWorkoutPlan([{
+      id: "supino_reto_maquina",
+      name: "Supino reto máquina",
+    }]);
+    seedDietPlan([{
+      id: "lunch",
+      name: "Almoço",
+      foods: [{ name: "Banana prata", quantity: "1 unidade" }],
+    }]);
     const workoutContext = context("ctx-switch-workout", "workout", "supino_reto_maquina", "Supino reto máquina");
     await post("/guto/active-context", { context: workoutContext });
     const workout = await post("/guto", {
@@ -635,6 +740,11 @@ describe("active context correlation", () => {
   });
 
   it("menção explícita de alimento troca o contexto workout→diet e mantém o follow-up alimentar", async () => {
+    seedDietPlan([{
+      id: "lunch",
+      name: "Almoço",
+      foods: [{ name: "Banana", quantity: "1 unidade" }],
+    }]);
     const workoutContext = context("ctx-natural-switch", "workout", "supino_reto_maquina", "Supino reto máquina");
     await post("/guto/active-context", { context: workoutContext });
 
@@ -824,6 +934,14 @@ describe("active context correlation", () => {
   });
 
   it("alimento novo explícito encerra a referência anterior e vira o contexto ativo", async () => {
+    seedDietPlan([{
+      id: "cafe",
+      name: "Café da manhã",
+      foods: [
+        { name: "Aveia em flocos", quantity: "80g" },
+        { name: "Banana", quantity: "1 unidade" },
+      ],
+    }]);
     const openedAt = new Date().toISOString();
     const oatsItem = {
       id: "cafe:aveia em flocos",
@@ -880,6 +998,11 @@ describe("active context correlation", () => {
   });
 
   it("rejeita 80g do modelo e materializa a porção validada de 2 fatias", async () => {
+    seedDietPlan([{
+      id: "cafe",
+      name: "Café da manhã",
+      foods: [{ name: "Aveia", quantity: "80g" }],
+    }]);
     const openedAt = new Date().toISOString();
     const oatsItem = {
       id: "cafe:aveia",
@@ -925,7 +1048,292 @@ describe("active context correlation", () => {
     assert.equal(response.activeContext.lastSuggestedItem.id, "wholegrain_bread");
   });
 
+  it("mantém treino e contexto quando o plano oficial não existe", async () => {
+    const workoutContext = context(
+      "ctx-workout-plan-missing",
+      "workout",
+      "supino_reto_maquina",
+      "Supino reto máquina",
+    );
+    await post("/guto/active-context", { context: workoutContext });
+    const before = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+
+    const response = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "O equipamento está ocupado",
+      turnId: "turn-workout-plan-missing",
+      requestId: "request-workout-plan-missing",
+      contextId: workoutContext.id,
+      contextVersion: workoutContext.version,
+      activeContextType: workoutContext.type,
+      activeItemId: workoutContext.currentItem.id,
+    });
+
+    assert.ok(response.fala?.trim());
+    assert.doesNotMatch(response.fala, /troca por|vai de/i);
+    assert.deepEqual(response.activeContext, workoutContext);
+    assert.equal(response.workoutPlan ?? null, null);
+    clearMemoryStoreCache();
+    const after = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    assert.deepEqual(after.activeContext, before.activeContext);
+    assert.equal(after.lastWorkoutPlan ?? null, null);
+    assert.equal(after.substitutionContext, null);
+  });
+
+  it("mantém dieta e contexto quando o plano oficial não existe", async () => {
+    const dietContext = context(
+      "ctx-diet-plan-missing",
+      "diet",
+      "cafe:aveia em flocos",
+      "Aveia em flocos",
+    );
+    dietContext.currentItem.mealId = "cafe";
+    dietContext.currentItem.mealName = "Café da manhã";
+    dietContext.currentItem.quantity = "80g";
+    dietContext.originalItem = { ...dietContext.currentItem };
+    await post("/guto/active-context", { context: dietContext });
+    const before = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+
+    const response = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "não tenho aveia em flocos",
+      turnId: "turn-diet-plan-missing",
+      requestId: "request-diet-plan-missing",
+      contextId: dietContext.id,
+      contextVersion: dietContext.version,
+      activeContextType: dietContext.type,
+      activeItemId: dietContext.currentItem.id,
+    });
+
+    assert.ok(response.fala?.trim());
+    assert.doesNotMatch(response.fala, /troca .* por|vai de/i);
+    assert.deepEqual(response.activeContext, dietContext);
+    clearMemoryStoreCache();
+    const after = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    assert.deepEqual(after.activeContext, before.activeContext);
+    assert.equal(after.substitutionContext, null);
+    assert.deepEqual(JSON.parse(readFileSync(dietFile, "utf8")), {});
+  });
+
+  it("mantém dieta e contexto quando o alimento não existe no plano oficial", async () => {
+    seedDietPlan([{
+      id: "cafe",
+      name: "Café da manhã",
+      foods: [{ name: "Banana", quantity: "1 unidade" }],
+    }]);
+    const dietContext = context(
+      "ctx-diet-item-missing",
+      "diet",
+      "cafe:aveia em flocos",
+      "Aveia em flocos",
+    );
+    dietContext.currentItem.mealId = "cafe";
+    dietContext.currentItem.mealName = "Café da manhã";
+    dietContext.currentItem.quantity = "80g";
+    dietContext.originalItem = { ...dietContext.currentItem };
+    await post("/guto/active-context", { context: dietContext });
+    const planBefore = JSON.parse(readFileSync(dietFile, "utf8"))[userId];
+
+    const response = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "não tenho aveia em flocos",
+      turnId: "turn-diet-item-missing",
+      requestId: "request-diet-item-missing",
+      contextId: dietContext.id,
+      contextVersion: dietContext.version,
+      activeContextType: dietContext.type,
+      activeItemId: dietContext.currentItem.id,
+    });
+
+    assert.ok(response.fala?.trim());
+    assert.doesNotMatch(response.fala, /troca .* por|vai de/i);
+    assert.deepEqual(response.activeContext, dietContext);
+    assert.deepEqual(JSON.parse(readFileSync(dietFile, "utf8"))[userId], planBefore);
+    clearMemoryStoreCache();
+    const stored = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    assert.equal(stored.substitutionContext, null);
+  });
+
+  it("não duplica alternativa que já existe no treino oficial", async () => {
+    const candidateIds = suggestExerciseSubstitutes("supino_reto_maquina", { location: "gym" });
+    assert.ok(candidateIds.length >= 2);
+    const duplicate = getCatalogById(candidateIds[0])!;
+    seedWorkoutPlan([
+      { id: "supino_reto_maquina", name: "Supino reto máquina" },
+      { id: duplicate.id, name: duplicate.canonicalNamePt },
+    ]);
+    const workoutContext = context(
+      "ctx-workout-duplicate",
+      "workout",
+      "supino_reto_maquina",
+      "Supino reto máquina",
+    );
+    await post("/guto/active-context", { context: workoutContext });
+
+    const response = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "O equipamento está ocupado",
+      turnId: "turn-workout-duplicate",
+      requestId: "request-workout-duplicate",
+      contextId: workoutContext.id,
+      contextVersion: workoutContext.version,
+      activeContextType: workoutContext.type,
+      activeItemId: workoutContext.currentItem.id,
+    });
+
+    assert.notEqual(response.activeContext.currentItem.id, duplicate.id);
+    assert.equal(
+      response.workoutPlan.exercises.filter((exercise: any) => exercise.id === duplicate.id).length,
+      1,
+    );
+    const canonicalIds = response.workoutPlan.exercises.map((exercise: any) =>
+      getCatalogById(exercise.id)?.id || exercise.id
+    );
+    assert.equal(new Set(canonicalIds).size, canonicalIds.length);
+  });
+
+  it("não altera plano ou contexto quando todas as alternativas já estão na missão", async () => {
+    const candidateIds = suggestExerciseSubstitutes("supino_reto_maquina", { location: "gym" });
+    seedWorkoutPlan([
+      { id: "supino_reto_maquina", name: "Supino reto máquina" },
+      ...candidateIds.map((id) => {
+        const exercise = getCatalogById(id)!;
+        return { id: exercise.id, name: exercise.canonicalNamePt };
+      }),
+    ]);
+    const workoutContext = context(
+      "ctx-workout-exhausted",
+      "workout",
+      "supino_reto_maquina",
+      "Supino reto máquina",
+    );
+    await post("/guto/active-context", { context: workoutContext });
+    const before = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+
+    const response = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "O equipamento está ocupado",
+      turnId: "turn-workout-exhausted",
+      requestId: "request-workout-exhausted",
+      contextId: workoutContext.id,
+      contextVersion: workoutContext.version,
+      activeContextType: workoutContext.type,
+      activeItemId: workoutContext.currentItem.id,
+    });
+
+    assert.ok(response.fala?.trim());
+    assert.doesNotMatch(response.fala, /troca por|vai de/i);
+    assert.deepEqual(response.activeContext, workoutContext);
+    assert.equal(response.workoutPlan ?? null, null);
+    clearMemoryStoreCache();
+    const after = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    assert.deepEqual(after.lastWorkoutPlan, before.lastWorkoutPlan);
+    assert.deepEqual(after.activeContext, before.activeContext);
+    assert.equal(after.substitutionContext, null);
+  });
+
+  it("falha de commit da dieta não publica fala de sucesso nem contexto parcial", async () => {
+    seedDietPlan([{
+      id: "cafe",
+      name: "Café da manhã",
+      foods: [{ name: "Aveia", quantity: "80g" }],
+    }], { lockedByCoach: true });
+    const dietContext = context("ctx-diet-commit-failure", "diet", "cafe:aveia", "Aveia");
+    dietContext.currentItem.mealId = "cafe";
+    dietContext.currentItem.mealName = "Café da manhã";
+    dietContext.currentItem.quantity = "80g";
+    dietContext.originalItem = { ...dietContext.currentItem };
+    await post("/guto/active-context", { context: dietContext });
+    const memoryBefore = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    const planBefore = JSON.parse(readFileSync(dietFile, "utf8"))[userId];
+
+    const response = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "não tenho aveia",
+      turnId: "turn-diet-commit-failure",
+      requestId: "request-diet-commit-failure",
+      contextId: dietContext.id,
+      contextVersion: dietContext.version,
+      activeContextType: dietContext.type,
+      activeItemId: dietContext.currentItem.id,
+    });
+
+    assert.ok(response.fala?.trim());
+    assert.doesNotMatch(response.fala, /troca .* por|vai de/i);
+    assert.deepEqual(response.activeContext, dietContext);
+    assert.deepEqual(JSON.parse(readFileSync(dietFile, "utf8"))[userId], planBefore);
+    clearMemoryStoreCache();
+    const memoryAfter = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    assert.deepEqual(memoryAfter.activeContext, memoryBefore.activeContext);
+    assert.equal(memoryAfter.substitutionContext, null);
+  });
+
+  it("nova autenticação reidrata o substituto B e os planos oficiais confirmados", async () => {
+    seedDietPlan([{
+      id: "cafe",
+      name: "Café da manhã",
+      foods: [{ name: "Aveia em flocos", quantity: "80g" }],
+    }]);
+    const dietContext = context(
+      "ctx-fresh-auth-diet",
+      "diet",
+      "cafe:aveia em flocos",
+      "Aveia em flocos",
+    );
+    dietContext.currentItem.mealId = "cafe";
+    dietContext.currentItem.mealName = "Café da manhã";
+    dietContext.currentItem.quantity = "80g";
+    dietContext.originalItem = { ...dietContext.currentItem };
+    await post("/guto/active-context", { context: dietContext });
+    const send = (active: Record<string, any>, input: string, suffix: string) => post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input,
+      turnId: `turn-fresh-auth-${suffix}`,
+      requestId: `request-fresh-auth-${suffix}`,
+      contextId: active.id,
+      contextVersion: active.version,
+      activeContextType: active.type,
+      activeItemId: active.currentItem.id,
+    });
+    const first = await send(dietContext, "não tenho aveia em flocos", "first");
+    const second = await send(first.activeContext, "também não tenho essa opção", "second");
+    assert.match(second.fala || "", new RegExp(first.activeContext.currentItem.name, "i"));
+
+    clearMemoryStoreCache();
+    const memory = await getAsFreshSession("/guto/memory");
+    assert.equal(memory.activeContext.type, "diet");
+    assert.equal(memory.activeContext.currentItem.id, second.activeContext.currentItem.id);
+    assert.equal(memory.activeContext.lastSuggestedItem.id, second.activeContext.currentItem.id);
+    assert.equal(memory.substitutionContext.kind, "food");
+    assert.equal(memory.substitutionContext.lastSuggestedId, second.activeContext.currentItem.id);
+    assert.equal(memory.activeConversationContext.kind, "diet_substitution");
+    const diet = JSON.parse(readFileSync(dietFile, "utf8"))[userId];
+    assert.equal(diet.meals[0].foods[0].name, second.activeContext.currentItem.name);
+    assert.equal(diet.meals[0].foods[0].quantity, second.activeContext.currentItem.quantity);
+
+    const after = await getAsFreshSession("/guto/memory");
+    assert.equal(after.activeContext.currentItem.id, second.activeContext.currentItem.id);
+  });
+
   it("resposta concorrente do treino não restaura o domínio após abrir a dieta", async () => {
+    seedWorkoutPlan([{
+      id: "eliptico",
+      name: "Elíptico",
+    }]);
     const workoutContext = context("ctx-concurrent-workout", "workout", "eliptico", "Elíptico");
     await post("/guto/active-context", { context: workoutContext });
     const workoutSwap = await post("/guto", {

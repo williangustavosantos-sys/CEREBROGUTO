@@ -358,7 +358,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     clearMemoryStoreCache();
     const second = await postGuto(userId, "tbm esta ocupado");
     assert.ok(["none", "swapExercise"].includes(second.acao || ""));
-    assert.match(second.fala || "", /troca por/i);
+    assert.match(second.fala || "", /troca por|vai de/i);
     assert.doesNotMatch(second.fala || "", EXECUTION_CUE_RE);
     const secondId = suggestedExerciseId(userId);
     assertSafeAbductorSubstitute(secondId);
@@ -368,7 +368,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     clearMemoryStoreCache();
     const third = await postGuto(userId, "esse também");
     assert.ok(["none", "swapExercise"].includes(third.acao || ""));
-    assert.match(third.fala || "", /troca por/i);
+    assert.match(third.fala || "", /troca por|vai de/i);
     assert.doesNotMatch(third.fala || "", EXECUTION_CUE_RE);
     const thirdId = suggestedExerciseId(userId);
     assertSafeAbductorSubstitute(thirdId);
@@ -380,7 +380,11 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     assert.equal(fourth.acao, "none");
     assert.match(fourth.fala || "", /o que est[aá] livre|polia|halteres|banco|colchonete/i);
     assert.doesNotMatch(fourth.fala || "", /troca por/i);
-    assert.deepEqual(rejectedExerciseIds(userId), ["cadeira_abdutora", firstId, secondId, thirdId]);
+    assert.deepEqual(
+      rejectedExerciseIds(userId),
+      ["cadeira_abdutora", firstId, secondId],
+      "sem quarta alternativa confirmada, plano e contexto permanecem no último commit íntegro",
+    );
   });
 
   it("HTTP activeExercise mantém fallback sem marcador do frontend", async () => {
@@ -511,7 +515,7 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
     const res = (await resp.json()) as { fala?: string; acao?: string };
 
     assert.ok(["none", "swapExercise"].includes(res.acao || ""));
-    assert.match(res.fala || "", /troca por/i, "tem que decidir a próxima troca");
+    assert.match(res.fala || "", /troca por|vai de/i, "tem que decidir a próxima troca");
     const suggested = suggestedExerciseId(userId);
     assert.notEqual(suggested, modelSuggestedId, "não pode repetir o substituto que o modelo já deu");
     assert.ok(
