@@ -4621,6 +4621,21 @@ function buildAtomicTurnDecision({
 
 const gutoTurnQueues = new Map<string, Promise<void>>();
 
+function buildConversationalTurnFallback(language: GutoLanguage, reason: "stale_context" | "empty_response"): string {
+  if (reason === "stale_context") {
+    return pickByLanguage(language, {
+      "pt-BR": "O contexto mudou enquanto eu processava. Abre o item atual e me manda de novo para eu agir sem trocar o item errado.",
+      "en-US": "The context changed while I was processing. Open the current item and send it again so I do not change the wrong one.",
+      "it-IT": "Il contesto è cambiato mentre elaboravo. Apri l'elemento attuale e rimandamelo, così non cambio quello sbagliato.",
+    });
+  }
+  return pickByLanguage(language, {
+    "pt-BR": "Meu processamento terminou sem uma resposta segura. Me manda de novo em uma frase e eu continuo sem alterar teu plano.",
+    "en-US": "My processing ended without a safe response. Send it again in one sentence and I will continue without changing your plan.",
+    "it-IT": "L'elaborazione è terminata senza una risposta sicura. Rimandamelo in una frase e continuo senza cambiare il tuo piano.",
+  });
+}
+
 const serializeGutoTurn: express.RequestHandler = async (req, res, next) => {
   const userId = req.gutoUser?.userId;
   if (!userId) return next();
@@ -4667,6 +4682,7 @@ const attachAtomicTurnDecision: express.RequestHandler = (req, res, next) => {
     : activeContextAtStart?.type || null;
   const requestedActiveItemId = typeof req.body?.activeItemId === "string" ? req.body.activeItemId.trim().slice(0, 128) : "";
   const activeItemId = requestedActiveItemId || activeContextAtStart?.currentItem.id || null;
+  const turnLanguage = normalizeLanguage(req.body?.language);
   const previousState = atomicTurnState(memoryAtStart);
   const originalJson = res.json.bind(res);
   const replay = (memoryAtStart.turnJournal || []).find((item) => item.decision.turnId === turnId);
@@ -4701,17 +4717,24 @@ const attachAtomicTurnDecision: express.RequestHandler = (req, res, next) => {
       freshActiveContext?.id !== contextId &&
       contextTransition !== "intentional"
     );
+    const nonEmptyPayload: GutoModelResponse & { message?: string } =
+      typeof responsePayload.fala === "string" && responsePayload.fala.trim()
+        ? responsePayload
+        : {
+            ...responsePayload,
+            fala: buildConversationalTurnFallback(turnLanguage, "empty_response"),
+          };
     const correlatedPayload: GutoModelResponse & { message?: string } = contextBecameStale
       ? {
-          ...responsePayload,
-          fala: "",
+          ...nonEmptyPayload,
+          fala: buildConversationalTurnFallback(turnLanguage, "stale_context"),
           acao: "none",
           expectedResponse: null,
           memoryPatch: {},
           workoutPlan: null,
           discardedReason: "stale_context",
         }
-      : responsePayload;
+      : nonEmptyPayload;
     const decision = buildAtomicTurnDecision({
       turnId,
       userMessage,
@@ -6452,6 +6475,13 @@ function foodSubstitutionQuantityHint(params: {
       "it-IT": "1 frutto",
     });
   }
+  if (originalFoodId === "soy_yogurt" && substituteFoodId === "eggs") {
+    return pickByLanguage(language, {
+      "pt-BR": "2 unidades",
+      "en-US": "2 eggs",
+      "it-IT": "2 uova",
+    });
+  }
   return undefined;
 }
 
@@ -6711,8 +6741,9 @@ async function materializeBrainFoodSubstitution(params: {
   input: string;
   language: GutoLanguage;
   response: GutoModelResponse;
+  persist?: boolean;
 }): Promise<GutoModelResponse | null> {
-  const { memory, input, language, response } = params;
+  const { memory, input, language, response, persist = true } = params;
   if (response.acao !== "none" || !response.fala) return null;
   const structuredDecision = response.foodSubstitution || null;
 
@@ -6865,13 +6896,36 @@ async function materializeBrainFoodSubstitution(params: {
     ["activeContext", "substitutionContext", "activeConversationContext"],
     "Troca alimentar decidida pelo cérebro e materializada pelo catálogo."
   );
-  commitMemoryDecision(memory);
+  if (persist) commitMemoryDecision(memory);
   const transitioned = previousActive?.id !== normalizeActiveContext(memory.activeContext)?.id;
   return {
     ...response,
     foodSubstitution: null,
     contextTransition: transitioned ? "intentional" : response.contextTransition,
   };
+}
+
+async function materializeBrainFoodSubstitutionAtomically(params: {
+  memory: GutoMemory;
+  input: string;
+  language: GutoLanguage;
+  response: GutoModelResponse;
+}): Promise<GutoModelResponse | null> {
+  const { memory } = params;
+  let response: GutoModelResponse | null = null;
+  const updated = await updateUserMemoryAtomically<GutoMemory>(memory.userId, async (snapshot) => {
+    const current = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      ? { ...memory, ...(snapshot as GutoMemory) }
+      : { ...memory };
+    response = await materializeBrainFoodSubstitution({
+      ...params,
+      memory: current,
+      persist: false,
+    });
+    return current;
+  });
+  if (updated) Object.assign(memory, updated);
+  return response;
 }
 
 function buildShortContextFallbackResponse(
@@ -7202,11 +7256,13 @@ function buildEquipmentAvailabilityQuestion({
   memory,
   language,
   rejectedIds,
+  persist = true,
 }: {
   original: { id: string; name: string; planExercise?: Pick<WorkoutExercise, "sets" | "reps" | "rest"> | null };
   memory: GutoMemory;
   language: GutoLanguage;
   rejectedIds: string[];
+  persist?: boolean;
 }): GutoModelResponse {
   memory.substitutionContext = {
     kind: "exercise",
@@ -7238,7 +7294,7 @@ function buildEquipmentAvailabilityQuestion({
     ["activeContext", "substitutionContext", "activeConversationContext"],
     "Substitutos de exercício rejeitados; coletando equipamentos disponíveis."
   );
-  saveMemory(memory);
+  if (persist) saveMemory(memory);
 
   const copy: Record<GutoLanguage, string> = {
     "pt-BR": `Já descartei algumas opções para ${original.name}. Me diz o que está livre agora: polia, halteres, banco, elástico, colchonete ou nenhum desses.`,
@@ -7253,21 +7309,23 @@ function buildValidatedEquipmentBusyResponse({
   memory,
   language,
   rejectedIds = [],
+  persist = true,
 }: {
   original: { id: string; name: string; planExercise?: Pick<WorkoutExercise, "sets" | "reps" | "rest"> | null };
   memory: GutoMemory;
   language: GutoLanguage;
   rejectedIds?: string[];
+  persist?: boolean;
 }): GutoModelResponse {
   const normalizedRejectedIds = mergeRejectedIds(rejectedIds, [original.id]);
   if (normalizedRejectedIds.filter((id) => id !== original.id).length >= 3) {
-    return buildEquipmentAvailabilityQuestion({ original, memory, language, rejectedIds: normalizedRejectedIds });
+    return buildEquipmentAvailabilityQuestion({ original, memory, language, rejectedIds: normalizedRejectedIds, persist });
   }
 
   const substitute = pickValidatedExerciseSubstitute({ originalId: original.id, memory, rejectedIds: normalizedRejectedIds });
 
   if (!substitute) {
-    return buildEquipmentAvailabilityQuestion({ original, memory, language, rejectedIds: normalizedRejectedIds });
+    return buildEquipmentAvailabilityQuestion({ original, memory, language, rejectedIds: normalizedRejectedIds, persist });
   }
 
   const substituteName = substitute.namesByLanguage[language as CatalogLanguage] || substitute.canonicalNamePt;
@@ -7335,7 +7393,7 @@ function buildValidatedEquipmentBusyResponse({
     ["activeContext", "substitutionContext", "activeConversationContext"],
     "Substituto de exercício sugerido e mantido como contexto operacional."
   );
-  saveMemory(memory);
+  if (persist) saveMemory(memory);
   return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
 }
 
@@ -7356,11 +7414,13 @@ function buildEquipmentBusyFallbackResponse({
   history,
   memory,
   language,
+  persist = true,
 }: {
   input?: string;
   history?: GutoHistoryItem[];
   memory: GutoMemory;
   language: GutoLanguage;
+  persist?: boolean;
 }): GutoModelResponse | null {
   const previous = getFreshSubstitutionContext(memory, "exercise");
   const isRejectedFollowUp = Boolean(previous?.lastSuggestedId && isSubstitutionRejectionFollowUp(input));
@@ -7407,7 +7467,36 @@ function buildEquipmentBusyFallbackResponse({
         [original.id],
         recoveredSuggestedId ? [recoveredSuggestedId] : undefined,
       );
-  return buildValidatedEquipmentBusyResponse({ original, memory, language, rejectedIds });
+  return buildValidatedEquipmentBusyResponse({ original, memory, language, rejectedIds, persist });
+}
+
+async function buildEquipmentBusyFallbackResponseAtomically({
+  input,
+  history,
+  memory,
+  language,
+}: {
+  input?: string;
+  history?: GutoHistoryItem[];
+  memory: GutoMemory;
+  language: GutoLanguage;
+}): Promise<GutoModelResponse | null> {
+  let response: GutoModelResponse | null = null;
+  const updated = await updateUserMemoryAtomically<GutoMemory>(memory.userId, (snapshot) => {
+    const current = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      ? { ...memory, ...(snapshot as GutoMemory) }
+      : { ...memory };
+    response = buildEquipmentBusyFallbackResponse({
+      input,
+      history,
+      memory: current,
+      language,
+      persist: false,
+    });
+    return current;
+  });
+  if (updated) Object.assign(memory, updated);
+  return response;
 }
 
 function detectArmTargetMismatchObjection(input?: string): "triceps" | "biceps" | null {
@@ -15645,8 +15734,9 @@ function commitBrainExerciseSwap(params: {
   history: GutoHistoryItem[];
   language: GutoLanguage;
   response: GutoModelResponse;
+  persist?: boolean;
 }): GutoModelResponse {
-  const { memory, input, history, language, response } = params;
+  const { memory, input, history, language, response, persist = true } = params;
   const previous = getFreshSubstitutionContext(memory, "exercise");
   const rejectedFollowUp = isSubstitutionRejectionFollowUp(input);
   const resolvedOriginal = resolveEffectiveWorkoutExerciseForSubstitution({ input, history, memory });
@@ -15792,7 +15882,7 @@ function commitBrainExerciseSwap(params: {
       ["activeContext", "substitutionContext", "activeConversationContext"],
       "Troca de exercício decidida pelo cérebro e mantida no contexto; plano não estava carregado."
     );
-    commitMemoryDecision(memory);
+    if (persist) commitMemoryDecision(memory);
     return committedResponse;
   }
   let index = plan.exercises.findIndex((exercise) => exercise.id === original.id || normalize(exercise.name) === normalize(original.name));
@@ -15807,7 +15897,7 @@ function commitBrainExerciseSwap(params: {
         ["activeContext", "substitutionContext", "activeConversationContext"],
         "Troca de exercício decidida pelo cérebro e mantida no contexto; item não estava no snapshot do plano."
       );
-      commitMemoryDecision(memory);
+      if (persist) commitMemoryDecision(memory);
       return committedResponse;
     }
     return buildSovereignSafeFallback(language, "Não encontrei o exercício original no treino atual.");
@@ -15838,7 +15928,7 @@ function commitBrainExerciseSwap(params: {
     ["lastWorkoutPlan", "activeContext", "substitutionContext", "activeConversationContext"],
     "Troca de exercício executada pelo dispatcher soberano."
   );
-  commitMemoryDecision(memory);
+  if (persist) commitMemoryDecision(memory);
   return {
     ...committedResponse,
     workoutPlan: nextPlan,
@@ -15847,6 +15937,33 @@ function commitBrainExerciseSwap(params: {
       lastWorkoutPlan: nextPlan,
     },
   };
+}
+
+async function commitBrainExerciseSwapAtomically(params: {
+  memory: GutoMemory;
+  input: string;
+  history: GutoHistoryItem[];
+  language: GutoLanguage;
+  response: GutoModelResponse;
+}): Promise<GutoModelResponse> {
+  const { memory } = params;
+  let response: GutoModelResponse | null = null;
+  const updated = await updateUserMemoryAtomically<GutoMemory>(memory.userId, (snapshot) => {
+    const current = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      ? { ...memory, ...(snapshot as GutoMemory) }
+      : { ...memory };
+    response = commitBrainExerciseSwap({
+      ...params,
+      memory: current,
+      persist: false,
+    });
+    return current;
+  });
+  if (updated) Object.assign(memory, updated);
+  return response || buildSovereignSafeFallback(
+    params.language,
+    "Não consegui confirmar a troca do exercício no estado persistido.",
+  );
 }
 
 function hasOperationalExerciseSwapEvidence(
@@ -16218,7 +16335,7 @@ async function buildDeterministicContextResolverResponse(params: {
   const objection = buildExerciseSubstitutionObjectionResponse({ input, memory, language });
   if (objection) return objection;
 
-  const exerciseSwap = buildEquipmentBusyFallbackResponse({ input, history, memory, language });
+  const exerciseSwap = await buildEquipmentBusyFallbackResponseAtomically({ input, history, memory, language });
   if (exerciseSwap) return exerciseSwap;
 
   const shortContext = buildShortContextFallbackResponse(input, memory, language);
@@ -16252,14 +16369,93 @@ async function dispatchSovereignBrainAction(params: {
   turnId?: string;
 }): Promise<GutoModelResponse> {
   const { response, memory, language } = params;
+  const activeContext = normalizeActiveContext(memory.activeContext);
+  const hasDietOperationalAction =
+    activeContext?.type === "diet" &&
+    (
+      Boolean(response.foodSubstitution) ||
+      isUnavailabilityMessage(stripInjectedContext(params.input)) ||
+      isFoodSubstitutionRejectionFollowUp(
+        params.input,
+        getFreshSubstitutionContext(memory, "food"),
+      )
+    );
+  if (hasDietOperationalAction && response.acao !== "none") {
+    const materialized = await buildDeterministicContextResolverResponse({
+      input: params.input,
+      history: params.history,
+      memory,
+      language,
+    });
+    if (materialized) return materialized;
+  }
+  const hasWorkoutOperationalAction =
+    activeContext?.type === "workout" &&
+    (
+      response.acao === "swapExercise" ||
+      isEquipmentBusyMessage(params.input) ||
+      isSubstitutionRejectionFollowUp(params.input)
+    );
+  if (hasWorkoutOperationalAction) {
+    const previousExerciseSubstitution = getFreshSubstitutionContext(memory, "exercise");
+    const isRejectedExerciseFollowUp =
+      Boolean(previousExerciseSubstitution?.lastSuggestedId) &&
+      isSubstitutionRejectionFollowUp(params.input);
+    const exhaustedSuggestedExercises = isRejectedExerciseFollowUp
+      ? mergeRejectedIds(
+          previousExerciseSubstitution?.rejectedIds,
+          [previousExerciseSubstitution?.originalId, previousExerciseSubstitution?.lastSuggestedId],
+        ).filter((id) => id !== previousExerciseSubstitution?.originalId).length >= 3
+      : false;
+    if (exhaustedSuggestedExercises) {
+      const availabilityQuestion = await buildEquipmentBusyFallbackResponseAtomically({
+        input: params.input,
+        history: params.history,
+        memory,
+        language,
+      });
+      if (availabilityQuestion) return availabilityQuestion;
+    }
+    return commitBrainExerciseSwapAtomically({
+      memory,
+      input: params.input,
+      history: params.history,
+      language,
+      response,
+    });
+  }
   switch (response.acao) {
     case "none": {
-      const foodSubstitution = await materializeBrainFoodSubstitution({
+      const foodSubstitution = await materializeBrainFoodSubstitutionAtomically({
         memory,
         input: params.input,
         language,
         response,
       });
+      if (foodSubstitution && !isSovereignSafeFallbackText(foodSubstitution.fala)) {
+        return foodSubstitution;
+      }
+      const rejectedFoodFollowUp =
+        activeContext?.type === "diet" &&
+        isFoodSubstitutionRejectionFollowUp(
+          params.input,
+          getFreshSubstitutionContext(memory, "food"),
+        );
+      if (
+        activeContext?.type === "diet" &&
+        (rejectedFoodFollowUp || !foodSubstitution) &&
+        (
+          hasDietOperationalAction ||
+          isUnavailabilityMessage(stripInjectedContext(params.input))
+        )
+      ) {
+        const validatedFoodSubstitution = await buildFoodSubstituteResponseAtomically(
+          params.input,
+          memory,
+          language,
+        );
+        if (validatedFoodSubstitution) return validatedFoodSubstitution;
+      }
       if (foodSubstitution) return foodSubstitution;
 
       const explicitExerciseSubstitute = extractSubstituteFromResponseText(response.fala);
@@ -16268,7 +16464,7 @@ async function dispatchSovereignBrainAction(params: {
         isExplicitExerciseSwapIntent(params.input) &&
         !detectArmTargetMismatchObjection(params.input)
       ) {
-        return commitBrainExerciseSwap({
+        return commitBrainExerciseSwapAtomically({
           memory,
           input: params.input,
           history: params.history,
@@ -16346,7 +16542,7 @@ async function dispatchSovereignBrainAction(params: {
       };
     }
     case "swapExercise":
-      return commitBrainExerciseSwap({
+      return commitBrainExerciseSwapAtomically({
         memory,
         input: params.input,
         history: params.history,
@@ -16465,7 +16661,7 @@ async function runSovereignBrainTurn(params: {
     );
   };
   const staleContextResponse = (): GutoModelResponse => ({
-    fala: "",
+    fala: buildConversationalTurnFallback(language, "stale_context"),
     acao: "none",
     expectedResponse: null,
     avatarEmotion: "default",

@@ -17,6 +17,8 @@ let clearMemoryStoreCache: () => void = () => {};
 let brainCalls = 0;
 let brainPrompts: string[] = [];
 let forcedFoodQuantity: string | null = null;
+let forceInvalidFoodDecision = false;
+let forceEmptyBrainResponse = false;
 
 function authHeaders() {
   const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
@@ -93,7 +95,12 @@ describe("active context correlation", () => {
             explicitlyUnavailableExercise?: { id?: string; name?: string } | null;
           };
         } : {};
-        const foodCandidate = worldState.catalog?.foodSubstitutes?.[0];
+        const foodCandidate = worldState.catalog?.foodSubstitutes?.[0] ||
+          (
+            /iogurte de soja sem lactose/i.test(worldState.activeContext?.currentItem?.name || "")
+              ? { id: "greek_yogurt", name: "iogurte grego", quantityHint: "200g" }
+              : undefined
+          );
         const workoutCandidate = worldState.catalog?.workoutSubstitutes?.[0];
         const language = worldState.language || "pt-BR";
         const isFoodTurn = Boolean(foodCandidate) && /n[aã]o (?:tenho|tem)|non ce l|non ho|don'?t have/i.test(message);
@@ -109,7 +116,26 @@ describe("active context correlation", () => {
               ? language === "it-IT" ? "4 gallette" : "4 unidades"
               : language === "it-IT" ? "1 porzione" : "1 porção")
           : "";
-        const modelResponse = isFoodTurn && foodCandidate
+        const modelResponse = forceEmptyBrainResponse
+          ? {
+              fala: "",
+              acao: "none",
+              expectedResponse: null,
+              memoryPatch: {},
+            }
+          : isFoodTurn && foodCandidate && forceInvalidFoodDecision
+            ? {
+                fala: "Troca por uma opção que não está no catálogo.",
+                acao: "none",
+                expectedResponse: null,
+                memoryPatch: {},
+                foodSubstitution: {
+                  foodId: "invalid_food",
+                  quantity: "1 porção",
+                  basis: "unknown",
+                },
+              }
+          : isFoodTurn && foodCandidate
           ? {
               fala: language === "it-IT"
                 ? `Cambia ${activeFoodLabel || "questo alimento"} con ${foodQuantity} di ${foodCandidate.name}.`
@@ -123,6 +149,20 @@ describe("active context correlation", () => {
                 basis: "approximate_carbs",
               },
             }
+          : /não gosto desse exercício/i.test(message)
+            ? {
+                fala: `Troca por ${workoutCandidate?.name || "Flexão"}.`,
+                acao: "swapExercise",
+                expectedResponse: null,
+                memoryPatch: {},
+              }
+          : /quero treinar braço hoje/i.test(message)
+            ? {
+                fala: "Entendi a preferência. A missão de hoje continua como foi montada.",
+                acao: "none",
+                expectedResponse: null,
+                memoryPatch: {},
+              }
           : worldState.activeContext?.type === "workout" && workoutCandidate && /ocupad|occupat|busy|anche/i.test(message)
             ? {
                 fala: language === "it-IT"
@@ -165,6 +205,8 @@ describe("active context correlation", () => {
     brainCalls = 0;
     brainPrompts = [];
     forcedFoodQuantity = null;
+    forceInvalidFoodDecision = false;
+    forceEmptyBrainResponse = false;
     clearMemoryStoreCache();
     writeFileSync(memoryFile, JSON.stringify({
       [userId]: {
@@ -211,6 +253,7 @@ describe("active context correlation", () => {
     assert.equal(response.requestId, "request-workout");
     assert.equal(response.contextId, "ctx-workout");
     assert.equal(response.discardedReason, "stale_context");
+    assert.match(response.fala || "", /contexto mudou/i);
     assert.equal(response.acao, "none");
     assert.deepEqual(response.memoryPatch, {});
     assert.equal(response.workoutPlan, null);
@@ -222,6 +265,149 @@ describe("active context correlation", () => {
     assert.equal(stored.trainingGoal, "muscle_gain", "stale model patch must not reach durable memory");
     assert.equal(stored.lastWorkoutPlan ?? null, null);
     assert.equal(stored.lastDietPlan ?? null, null);
+  });
+
+  it("cadeia real de treino sempre responde e só publica trocas persistidas", async () => {
+    const store = JSON.parse(readFileSync(memoryFile, "utf8"));
+    store[userId].lastWorkoutPlan = {
+      scheduledFor: "today",
+      focus: "Peito e tríceps",
+      location: "gym",
+      exercises: [{
+        id: "supino_reto_maquina",
+        name: "Supino reto máquina",
+        canonicalNamePt: "Supino reto máquina",
+        sets: 3,
+        reps: "10-12",
+        rest: "90s",
+      }],
+    };
+    writeFileSync(memoryFile, JSON.stringify(store, null, 2));
+    clearMemoryStoreCache();
+
+    const workoutContext = context(
+      "ctx-real-workout-chain",
+      "workout",
+      "supino_reto_maquina",
+      "Supino reto máquina",
+    );
+    await post("/guto/active-context", { context: workoutContext });
+    const send = (active: Record<string, any>, userMessage: string, suffix: string) => post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: `[ACTIVE WORKOUT CONTEXT id=${active.id} version=${active.version}] Exercise: "${active.currentItem.name}". Prescription: ${active.currentItem.sets} sets x ${active.currentItem.reps}, rest ${active.currentItem.rest}. User message: ${userMessage}`,
+      turnId: `turn-real-workout-${suffix}`,
+      requestId: `request-real-workout-${suffix}`,
+      contextId: active.id,
+      contextVersion: active.version,
+      activeContextType: active.type,
+      activeItemId: active.currentItem.id,
+    });
+
+    const dislike = await send(workoutContext, "Não gosto desse exercício.", "dislike");
+    assert.ok(dislike.fala?.trim());
+    assert.equal(dislike.acao, "none");
+    assert.equal(dislike.activeContext.currentItem.id, "supino_reto_maquina");
+    assert.equal(dislike.workoutPlan ?? null, null);
+
+    const preference = await send(dislike.activeContext, "Quero treinar braço hoje.", "preference");
+    assert.ok(preference.fala?.trim());
+    assert.equal(preference.acao, "none");
+    assert.equal(preference.activeContext.currentItem.id, "supino_reto_maquina");
+    assert.equal(preference.workoutPlan ?? null, null);
+
+    const firstSwap = await send(preference.activeContext, "O equipamento está ocupado.", "busy-first");
+    assert.ok(firstSwap.fala?.trim());
+    assert.notEqual(firstSwap.activeContext.currentItem.id, "supino_reto_maquina");
+    assert.equal(firstSwap.activeContext.lastSuggestedItem.id, firstSwap.activeContext.currentItem.id);
+    assert.equal(firstSwap.workoutPlan.exercises[0].id, firstSwap.activeContext.currentItem.id);
+
+    const secondSwap = await send(firstSwap.activeContext, "Esse também está ocupado.", "busy-second");
+    assert.ok(secondSwap.fala?.trim());
+    assert.notEqual(secondSwap.activeContext.currentItem.id, firstSwap.activeContext.currentItem.id);
+    assert.notEqual(secondSwap.activeContext.currentItem.id, "supino_reto_maquina");
+    assert.equal(secondSwap.activeContext.lastSuggestedItem.id, secondSwap.activeContext.currentItem.id);
+    assert.equal(secondSwap.workoutPlan.exercises[0].id, secondSwap.activeContext.currentItem.id);
+    assert.ok(
+      secondSwap.activeContext.rejectedItems.some(
+        (item: Record<string, any>) => item.id === firstSwap.activeContext.currentItem.id,
+      ),
+    );
+
+    clearMemoryStoreCache();
+    const stored = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    assert.equal(stored.activeContext.currentItem.id, secondSwap.activeContext.currentItem.id);
+    assert.equal(stored.lastWorkoutPlan.exercises[0].id, secondSwap.activeContext.currentItem.id);
+    assert.equal(stored.substitutionContext.kind, "exercise");
+    assert.equal(stored.substitutionContext.lastSuggestedId, secondSwap.activeContext.currentItem.id);
+    assert.equal(stored.activeConversationContext.kind, "workout_substitution");
+  });
+
+  it("segunda indisponibilidade alimentar materializa alternativa mesmo se o modelo propõe item inválido", async () => {
+    const dietContext = context(
+      "ctx-real-diet-chain",
+      "diet",
+      "cafe:iogurte de soja sem lactose",
+      "Iogurte de soja sem lactose",
+    );
+    dietContext.originalItem.mealId = "cafe";
+    dietContext.originalItem.mealName = "Café da manhã proteico";
+    dietContext.originalItem.quantity = "250g";
+    dietContext.currentItem = { ...dietContext.originalItem };
+    await post("/guto/active-context", { context: dietContext });
+    const send = (active: Record<string, any>, userMessage: string, suffix: string) => post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: `[ACTIVE DIET CONTEXT id=${active.id} version=${active.version}] Food: "${active.currentItem.name}" (${active.currentItem.quantity}) in meal "${active.currentItem.mealName}". User question: ${userMessage}`,
+      turnId: `turn-real-diet-${suffix}`,
+      requestId: `request-real-diet-${suffix}`,
+      contextId: active.id,
+      contextVersion: active.version,
+      activeContextType: active.type,
+      activeItemId: active.currentItem.id,
+    });
+
+    const first = await send(dietContext, "Não tenho esse alimento.", "first");
+    assert.ok(first.fala?.trim());
+    assert.equal(first.activeContext.type, "diet");
+    assert.notEqual(first.activeContext.currentItem.id, dietContext.currentItem.id);
+    assert.equal(first.activeContext.lastSuggestedItem.id, first.activeContext.currentItem.id);
+
+    forceInvalidFoodDecision = true;
+    const second = await send(first.activeContext, "Também não tenho essa opção.", "second");
+    assert.ok(second.fala?.trim());
+    assert.equal(second.activeContext.type, "diet");
+    assert.notEqual(second.activeContext.currentItem.id, first.activeContext.currentItem.id);
+    assert.notEqual(second.activeContext.currentItem.id, dietContext.currentItem.id);
+    assert.equal(second.activeContext.lastSuggestedItem.id, second.activeContext.currentItem.id);
+    assert.ok(
+      second.activeContext.rejectedItems.some(
+        (item: Record<string, any>) => item.id === first.activeContext.currentItem.id,
+      ),
+    );
+    assert.doesNotMatch(second.fala, /treino|exercício|supino/i);
+
+    clearMemoryStoreCache();
+    const stored = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    assert.equal(stored.activeContext.currentItem.id, second.activeContext.currentItem.id);
+    assert.equal(stored.substitutionContext.kind, "food");
+    assert.equal(stored.substitutionContext.lastSuggestedId, second.activeContext.currentItem.id);
+    assert.equal(stored.activeConversationContext.kind, "diet_substitution");
+  });
+
+  it("payload HTTP 200 de turno conversacional nunca sai sem fala", async () => {
+    forceEmptyBrainResponse = true;
+    const response = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "Quero conversar.",
+      turnId: "turn-empty-response",
+      requestId: "request-empty-response",
+    });
+    assert.ok(response.fala?.trim());
   });
 
   it("sequência fundadora: Supino e Banana avançam alternativas sem repetir item", async () => {
