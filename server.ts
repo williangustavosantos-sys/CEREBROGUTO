@@ -76,6 +76,7 @@ import {
   type DietFood,
   type DietMeal,
   type DietPlan,
+  type DietSubstitutionPendingOperation,
 } from "./src/nutrition.js";
 import {
   DietPlanWriteConflictError,
@@ -479,6 +480,13 @@ interface GutoVoiceProfile {
   languageCode: GutoLanguage;
   primaryName: string;
 }
+interface DietSubstitutionMemoryOperation {
+  operationId: string;
+  planRevision: string;
+  contextId: string;
+  contextVersion: number;
+  committedAt: string;
+}
 interface GutoMemory {
   userId: string;
   name: string;
@@ -560,13 +568,23 @@ interface GutoMemory {
   activeContext?: ActiveContext | null;
   contextHistory?: ActiveContext[];
   activeConversationContext?: ActiveConversationContext | null;
+  lastDietSubstitutionOperation?: DietSubstitutionMemoryOperation;
   turnJournal?: AtomicTurnRecord[];
 }
 
-type PublicGutoMemoryPayload = Omit<GutoMemory, "turnJournal"> & { lastDietPlan?: DietPlan | null };
+type PublicGutoMemoryPayload = Omit<GutoMemory, "turnJournal" | "lastDietSubstitutionOperation"> & {
+  lastDietPlan?: DietPlan | null;
+  dietConsistencyStatus?: "consistent" | "reconciliation_pending";
+};
 
-function toPublicGutoMemoryPayload(memory: GutoMemory): Omit<GutoMemory, "turnJournal"> {
-  const { turnJournal: _turnJournal, ...publicMemory } = memory;
+function toPublicGutoMemoryPayload(
+  memory: GutoMemory,
+): Omit<GutoMemory, "turnJournal" | "lastDietSubstitutionOperation"> {
+  const {
+    turnJournal: _turnJournal,
+    lastDietSubstitutionOperation: _lastDietSubstitutionOperation,
+    ...publicMemory
+  } = memory;
   return publicMemory;
 }
 
@@ -582,16 +600,22 @@ function isAdjustableDietPlan(plan: DietPlan): boolean {
 }
 
 async function buildPublicGutoMemoryPayload(memory: GutoMemory): Promise<PublicGutoMemoryPayload> {
+  const reconciliation = await reconcilePendingDietSubstitution(memory.userId, memory);
   const publicMemory: PublicGutoMemoryPayload = toPublicGutoMemoryPayload(memory);
   const lastDietPlan = await getStudentDietPlan(memory).catch(() => null);
   if (lastDietPlan) {
-    publicMemory.lastDietPlan = lastDietPlan;
+    const publicDietPlan = structuredClone(lastDietPlan);
+    delete publicDietPlan.pendingSubstitutionOperation;
+    publicMemory.lastDietPlan = publicDietPlan;
   } else if (publicMemory.dietGenerationStatus === "generated") {
     // Do not leak a stale adjustable plan through the memory bootstrap. The
     // persisted status is repaired by the next generation/profile write; this
     // response already tells the client it must regenerate.
     publicMemory.dietGenerationStatus = "ready_to_generate";
   }
+  publicMemory.dietConsistencyStatus = reconciliation.status === "pending"
+    ? "reconciliation_pending"
+    : "consistent";
   return publicMemory;
 }
 
@@ -648,6 +672,17 @@ interface ActiveContext {
   acceptedItem: ActiveContextItem | null;
   createdAt: string;
   updatedAt: string;
+}
+
+interface GutoLastSuggestedItem {
+  id: string;
+  name: string;
+  kind: "exercise" | "food";
+}
+
+interface ConfirmedLastSuggestedItem extends GutoLastSuggestedItem {
+  availabilityKind?: "equipment" | "movement";
+  equipment?: string;
 }
 
 type ActiveConversationContextKind =
@@ -4028,6 +4063,86 @@ function normalizeActiveContext(value: unknown): ActiveContext | null | undefine
   };
 }
 
+function normalizeRequestLastSuggestedItem(value: unknown): GutoLastSuggestedItem | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Partial<GutoLastSuggestedItem>;
+  if (raw.kind !== "exercise" && raw.kind !== "food") return null;
+  if (typeof raw.id !== "string" || !raw.id.trim()) return null;
+  if (typeof raw.name !== "string" || !raw.name.trim()) return null;
+  return {
+    id: raw.id.trim().slice(0, 160),
+    name: raw.name.trim().slice(0, 160),
+    kind: raw.kind,
+  };
+}
+
+function exerciseAvailabilityKind(exercise: CatalogExercise | null | undefined): "equipment" | "movement" {
+  const equipment = normalize(exercise?.equipment || "");
+  const equipmentDriven = new Set([
+    "maquina",
+    "polia",
+    "smith",
+    "gravitron",
+    "bike",
+    "esteira",
+    "eliptico",
+    "escada",
+    "remador",
+  ]);
+  return equipmentDriven.has(equipment) ? "equipment" : "movement";
+}
+
+function confirmRequestLastSuggestedItem(
+  value: unknown,
+  memory: GutoMemory,
+): ConfirmedLastSuggestedItem | null {
+  const received = normalizeRequestLastSuggestedItem(value);
+  if (!received) {
+    if (value !== undefined && value !== null) {
+      const active = normalizeActiveContext(memory.activeContext);
+      console.warn("[GUTO][structured_last_suggested_rejected]", {
+        contextId: active?.id || null,
+        contextVersion: active?.version || null,
+        reason: "invalid_shape",
+      });
+    }
+    return null;
+  }
+  const active = normalizeActiveContext(memory.activeContext);
+  const durable = active?.lastSuggestedItem;
+  const expectedKind = active?.type === "workout" ? "exercise" : active?.type === "diet" ? "food" : null;
+  const durableCanonicalId = expectedKind === "exercise"
+    ? getCatalogById(durable?.id || "")?.id
+    : resolveFoodIdByName(durable?.id || "") || resolveFoodIdByName(durable?.name || "");
+  const receivedCanonicalId = received.kind === "exercise"
+    ? getCatalogById(received.id)?.id
+    : resolveFoodIdByName(received.id) || resolveFoodIdByName(received.name);
+  const matches = Boolean(
+    active &&
+    durable &&
+    expectedKind === received.kind &&
+    durableCanonicalId &&
+    receivedCanonicalId === durableCanonicalId &&
+    normalize(received.name) === normalize(durable.name)
+  );
+  if (!matches) {
+    console.warn("[GUTO][structured_last_suggested_rejected]", {
+      contextId: active?.id || null,
+      contextVersion: active?.version || null,
+      reason: expectedKind !== received.kind ? "domain_mismatch" : "durable_context_mismatch",
+    });
+    return null;
+  }
+  const exercise = received.kind === "exercise" ? getCatalogById(durableCanonicalId!) : null;
+  return {
+    id: durableCanonicalId!,
+    name: durable!.name,
+    kind: received.kind,
+    availabilityKind: exercise ? exerciseAvailabilityKind(exercise) : undefined,
+    equipment: exercise?.equipment,
+  };
+}
+
 function archiveActiveContext(memory: GutoMemory): void {
   const active = normalizeActiveContext(memory.activeContext);
   if (!active) return;
@@ -6711,6 +6826,10 @@ async function buildFoodSubstituteResponseAtomically(
   memory: GutoMemory,
   language: GutoLanguage,
 ): Promise<GutoModelResponse | null> {
+  const pending = await reconcilePendingDietSubstitution(memory.userId, memory);
+  if (pending.status === "pending") {
+    return buildDietMutationFallback(language, "reconciliation_pending");
+  }
   let response: GutoModelResponse | null = null;
   let planCommit: DietSubstitutionPlanCommit | null = null;
   try {
@@ -6726,23 +6845,48 @@ async function buildFoodSubstituteResponseAtomically(
           before,
           after: current,
         });
-        if (planCommit.ok) return current;
-        response = buildSovereignSafeFallback(
-          language,
-          "Não consegui confirmar a troca no plano alimentar oficial. Mantive a dieta e o contexto anteriores."
-        );
+        if (planCommit.ok && planCommit.operationId && planCommit.committedPlan?.revision) {
+          current.lastDietSubstitutionOperation = {
+            operationId: planCommit.operationId!,
+            planRevision: planCommit.committedPlan!.revision!,
+            contextId: normalizeActiveContext(current.activeContext)!.id,
+            contextVersion: normalizeActiveContext(current.activeContext)!.version,
+            committedAt: new Date().toISOString(),
+          };
+          if (consumeDietSubstitutionFault("memoryCommit")) {
+            throw new Error("simulated_memory_commit_failure");
+          }
+          return current;
+        }
+        response = buildDietMutationFallback(language, planCommit.reason || "storage_failure");
         return before;
       }
       return current;
     });
-    if (updated) Object.assign(memory, updated);
+    if (updated) {
+      const confirmedPlanCommit = planCommit as DietSubstitutionPlanCommit | null;
+      const durable = await readPersistedUserMemorySnapshot(memory.userId) as GutoMemory | undefined;
+      if (
+        confirmedPlanCommit?.ok &&
+        confirmedPlanCommit.operationId &&
+        durable?.lastDietSubstitutionOperation?.operationId !== confirmedPlanCommit.operationId
+      ) {
+        throw new Error("memory_commit_not_confirmed");
+      }
+      Object.assign(memory, updated);
+      if (confirmedPlanCommit?.ok && confirmedPlanCommit.operationId) {
+        await finalizeDietSubstitutionPlan(confirmedPlanCommit);
+      }
+    }
   } catch (error) {
-    await rollbackDietSubstitutionPlan(planCommit);
     logContextCommitFailure("diet", memory.activeContext, error);
-    response = buildSovereignSafeFallback(
-      language,
-      "Não consegui confirmar a troca no plano alimentar oficial. Mantive a dieta e o contexto anteriores."
-    );
+    const reconciled = await reconcilePendingDietSubstitution(memory.userId, memory);
+    if (reconciled.resolution !== "committed") {
+      response = buildDietMutationFallback(
+        language,
+        reconciled.status === "pending" ? "compensation_failed" : "memory_commit_failed",
+      );
+    }
   }
   return response;
 }
@@ -6760,11 +6904,126 @@ function responseMentionsFood(responseText: string | undefined, food: ReturnType
   });
 }
 
+type DietMutationFailureReason =
+  | "official_plan_missing"
+  | "official_item_missing"
+  | "version_conflict"
+  | "storage_failure"
+  | "plan_not_confirmed"
+  | "memory_commit_failed"
+  | "compensation_failed"
+  | "reconciliation_pending";
+
 type DietSubstitutionPlanCommit = {
   ok: boolean;
+  reason?: DietMutationFailureReason;
+  operationId?: string;
   previousPlan?: DietPlan;
   committedPlan?: DietPlan;
 };
+
+type DietSubstitutionFaults = {
+  planCommit: number;
+  memoryCommit: number;
+  compensation: number;
+  finalization: number;
+};
+
+const dietSubstitutionFaults: DietSubstitutionFaults = {
+  planCommit: 0,
+  memoryCommit: 0,
+  compensation: 0,
+  finalization: 0,
+};
+
+export function setDietSubstitutionFaultsForTest(
+  faults: Partial<Record<keyof DietSubstitutionFaults, number | boolean>> = {},
+): void {
+  for (const key of Object.keys(dietSubstitutionFaults) as Array<keyof DietSubstitutionFaults>) {
+    const value = faults[key];
+    dietSubstitutionFaults[key] = value === true ? 1 : value === false || value === undefined
+      ? 0
+      : Math.max(0, Math.floor(value));
+  }
+}
+
+function consumeDietSubstitutionFault(key: keyof DietSubstitutionFaults): boolean {
+  if (dietSubstitutionFaults[key] <= 0) return false;
+  dietSubstitutionFaults[key] -= 1;
+  return true;
+}
+
+function buildDietMutationFallback(
+  language: GutoLanguage,
+  reason: DietMutationFailureReason,
+): GutoModelResponse {
+  const itemMissing = reason === "official_item_missing";
+  const pending = reason === "compensation_failed" || reason === "reconciliation_pending";
+  const planMissing = reason === "official_plan_missing";
+  const versionConflict = reason === "version_conflict";
+  return {
+    fala: pickByLanguage(language, {
+      "pt-BR": itemMissing
+        ? "Esse item não está mais no seu plano atual. Não alterei nada. Abra o item atual e seguimos por ele."
+        : pending
+          ? "Não consegui confirmar essa alteração nem restaurar o estado anterior agora. Bloqueei novas trocas neste item enquanto reconcilio o plano com segurança."
+          : planMissing
+            ? "Não encontrei seu plano oficial agora. Não alterei nada. Abra o item atual e eu continuo por ele."
+            : versionConflict
+              ? "Seu plano mudou enquanto eu processava. Não alterei nada. Abra o item atual para eu usar a versão mais recente."
+              : "Não consegui confirmar essa alteração agora. Mantive seu plano como estava para não salvar algo errado.",
+      "en-US": itemMissing
+        ? "That item is no longer in your current plan. I changed nothing. Open the current item and we will continue from it."
+        : pending
+          ? "I could not confirm this change or restore the previous state right now. I blocked new swaps for this item while I safely reconcile the plan."
+          : planMissing
+            ? "I could not find your official plan right now. I changed nothing. Open the current item and I will continue from it."
+            : versionConflict
+              ? "Your plan changed while I was processing. I changed nothing. Open the current item so I can use the latest version."
+              : "I could not confirm this change right now. I kept your plan as it was so I would not save something wrong.",
+      "it-IT": itemMissing
+        ? "Questo elemento non è più nel piano attuale. Non ho modificato nulla. Apri l'elemento attuale e continuiamo da lì."
+        : pending
+          ? "Non sono riuscito a confermare la modifica né a ripristinare lo stato precedente. Ho bloccato nuove sostituzioni su questo elemento mentre riconcilio il piano in sicurezza."
+          : planMissing
+            ? "Non trovo il piano ufficiale in questo momento. Non ho modificato nulla. Apri l'elemento attuale e continuo da lì."
+            : versionConflict
+              ? "Il piano è cambiato mentre elaboravo. Non ho modificato nulla. Apri l'elemento attuale per usare la versione più recente."
+              : "Non sono riuscito a confermare la modifica. Ho mantenuto il piano com'era per non salvare qualcosa di sbagliato.",
+    }),
+    acao: "none",
+    expectedResponse: null,
+    avatarEmotion: pending ? "alert" : "default",
+  };
+}
+
+function buildWorkoutMutationFallback(
+  language: GutoLanguage,
+  reason: "official_plan_missing" | "official_item_missing" | "storage_failure",
+): GutoModelResponse {
+  return {
+    fala: pickByLanguage(language, {
+      "pt-BR": reason === "official_item_missing"
+        ? "Esse exercício não está mais no seu treino atual. Não alterei nada. Abra o exercício atual e seguimos por ele."
+        : reason === "official_plan_missing"
+          ? "Não encontrei seu treino oficial agora. Não alterei nada. Abra o exercício atual e eu continuo por ele."
+          : "Não consegui confirmar essa alteração agora. Mantive seu treino como estava para não salvar algo errado.",
+      "en-US": reason === "official_item_missing"
+        ? "That exercise is no longer in your current workout. I changed nothing. Open the current exercise and we will continue from it."
+        : reason === "official_plan_missing"
+          ? "I could not find your official workout right now. I changed nothing. Open the current exercise and I will continue from it."
+          : "I could not confirm this change right now. I kept your workout as it was so I would not save something wrong.",
+      "it-IT": reason === "official_item_missing"
+        ? "Questo esercizio non è più nell'allenamento attuale. Non ho modificato nulla. Apri l'esercizio attuale e continuiamo da lì."
+        : reason === "official_plan_missing"
+          ? "Non trovo l'allenamento ufficiale in questo momento. Non ho modificato nulla. Apri l'esercizio attuale e continuo da lì."
+          : "Non sono riuscito a confermare la modifica. Ho mantenuto l'allenamento com'era per non salvare qualcosa di sbagliato.",
+    }),
+    acao: "none",
+    expectedResponse: null,
+    avatarEmotion: "default",
+  };
+}
 
 async function persistDietSubstitutionBeforeContextCommit(params: {
   userId: string;
@@ -6786,7 +7045,11 @@ async function persistDietSubstitutionBeforeContextCommit(params: {
   const plan = await readPersistedDietPlan(params.userId).catch(() => null);
   if (!plan?.meals?.length) {
     logContextCommitFailure("diet", afterContext, new Error("official_plan_missing"));
-    return { ok: false };
+    return { ok: false, reason: "official_plan_missing" };
+  }
+  if (plan.pendingSubstitutionOperation) {
+    logContextCommitFailure("diet", afterContext, new Error("reconciliation_pending"));
+    return { ok: false, reason: "reconciliation_pending" };
   }
 
   const targetContext = beforeContext?.type === "diet" ? beforeContext : afterContext;
@@ -6825,62 +7088,252 @@ async function persistDietSubstitutionBeforeContextCommit(params: {
   }
   if (mealIndex < 0 || foodIndex < 0) {
     logContextCommitFailure("diet", afterContext, new Error("official_item_missing"));
-    return { ok: false };
+    return { ok: false, reason: "official_item_missing" };
   }
 
   const replacement = afterContext.currentItem;
   const nextPlan: DietPlan = structuredClone(plan);
-  nextPlan.meals[mealIndex].foods[foodIndex] = {
+  const previousFood = structuredClone(nextPlan.meals[mealIndex].foods[foodIndex]);
+  const replacementFood = {
     ...nextPlan.meals[mealIndex].foods[foodIndex],
     name: replacement.name,
     quantity: replacement.quantity || nextPlan.meals[mealIndex].foods[foodIndex].quantity,
   };
+  nextPlan.meals[mealIndex].foods[foodIndex] = replacementFood;
   nextPlan.updatedAt = new Date().toISOString();
+  const operationId = createHash("sha256")
+    .update([
+      params.userId,
+      afterContext.id,
+      String(beforeContext?.version || afterContext.version - 1),
+      replacement.id,
+    ].join("|"))
+    .digest("hex")
+    .slice(0, 32);
+  nextPlan.pendingSubstitutionOperation = {
+    operationId,
+    status: "pending",
+    contextId: afterContext.id,
+    expectedContextVersion: beforeContext?.version || Math.max(1, afterContext.version - 1),
+    nextContextVersion: afterContext.version,
+    basePlanRevision: plan.revision || null,
+    mealId: nextPlan.meals[mealIndex].id,
+    foodIndex,
+    previousFood,
+    replacementFood: structuredClone(replacementFood),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
 
   try {
+    if (consumeDietSubstitutionFault("planCommit")) {
+      throw new Error("simulated_plan_storage_failure");
+    }
     await saveDietPlanIfUnchanged(nextPlan, getDietPlanConcurrencyToken(plan));
     const confirmed = await readPersistedDietPlan(params.userId).catch(() => null);
     if (
       !confirmed ||
       confirmed.revision !== nextPlan.revision ||
-      confirmed.meals[mealIndex]?.foods[foodIndex]?.name !== replacement.name
+      confirmed.meals[mealIndex]?.foods[foodIndex]?.name !== replacement.name ||
+      confirmed.pendingSubstitutionOperation?.operationId !== operationId
     ) {
       logContextCommitFailure("diet", afterContext, new Error("official_plan_not_confirmed"));
-      await rollbackDietSubstitutionPlan({
-        ok: false,
+      const commit = {
+        ok: false as const,
+        reason: "plan_not_confirmed" as const,
+        operationId,
         previousPlan: plan,
         committedPlan: nextPlan,
-      });
-      return { ok: false };
+      };
+      const rolledBack = await rollbackDietSubstitutionPlan(commit);
+      return {
+        ...commit,
+        reason: rolledBack ? "plan_not_confirmed" : "compensation_failed",
+      };
     }
     return {
       ok: true,
+      operationId,
       previousPlan: plan,
       committedPlan: nextPlan,
     };
   } catch (error) {
     logContextCommitFailure("diet", afterContext, error);
-    return { ok: false };
+    return {
+      ok: false,
+      reason: error instanceof DietPlanWriteConflictError ? "version_conflict" : "storage_failure",
+    };
   }
 }
 
 async function rollbackDietSubstitutionPlan(
   commit: DietSubstitutionPlanCommit | null,
-): Promise<void> {
-  if (!commit?.previousPlan || !commit.committedPlan) return;
+): Promise<boolean> {
+  if (!commit?.operationId || !commit.previousPlan || !commit.committedPlan) return true;
   try {
+    if (consumeDietSubstitutionFault("compensation")) {
+      throw new Error("simulated_compensation_failure");
+    }
+    const current = await readPersistedDietPlan(commit.previousPlan.userId);
+    if (!current?.pendingSubstitutionOperation) {
+      return Boolean(
+        current &&
+        getDietPlanConcurrencyToken(current) === getDietPlanConcurrencyToken(commit.previousPlan)
+      );
+    }
+    if (current.pendingSubstitutionOperation.operationId !== commit.operationId) return false;
+    const operation = current.pendingSubstitutionOperation;
+    const mealIndex = current.meals.findIndex((meal) => meal.id === operation.mealId);
+    if (mealIndex < 0 || !current.meals[mealIndex].foods[operation.foodIndex]) return false;
+    const restored = structuredClone(current);
+    restored.meals[mealIndex].foods[operation.foodIndex] = structuredClone(operation.previousFood);
+    delete restored.pendingSubstitutionOperation;
+    restored.updatedAt = new Date().toISOString();
     await saveDietPlanIfUnchanged(
-      structuredClone(commit.previousPlan),
-      getDietPlanConcurrencyToken(commit.committedPlan),
+      restored,
+      getDietPlanConcurrencyToken(current),
       { allowLockedCurrent: true },
+    );
+    const confirmed = await readPersistedDietPlan(commit.previousPlan.userId);
+    return Boolean(
+      confirmed &&
+      !confirmed.pendingSubstitutionOperation &&
+      normalize(confirmed.meals[mealIndex]?.foods[operation.foodIndex]?.name || "") ===
+        normalize(operation.previousFood.name)
     );
   } catch (error) {
     logContextCommitFailure("diet_rollback", null, error);
+    await markDietSubstitutionReconciliationPending(commit.operationId, commit.previousPlan.userId, "compensation_failed");
+    return false;
   }
 }
 
+async function markDietSubstitutionReconciliationPending(
+  operationId: string,
+  userId: string,
+  failureReason: DietSubstitutionPendingOperation["failureReason"],
+): Promise<void> {
+  try {
+    const current = await readPersistedDietPlan(userId);
+    if (current?.pendingSubstitutionOperation?.operationId !== operationId) return;
+    const pending = structuredClone(current);
+    pending.pendingSubstitutionOperation = {
+      ...pending.pendingSubstitutionOperation!,
+      status: "reconciliation_pending",
+      failureReason,
+      updatedAt: new Date().toISOString(),
+    };
+    await saveDietPlanIfUnchanged(
+      pending,
+      getDietPlanConcurrencyToken(current),
+      { allowLockedCurrent: true },
+    );
+  } catch (error) {
+    logContextCommitFailure("diet_reconciliation", null, error);
+  }
+}
+
+async function finalizeDietSubstitutionPlan(
+  commit: DietSubstitutionPlanCommit,
+): Promise<boolean> {
+  if (!commit.ok || !commit.operationId || !commit.committedPlan) return false;
+  try {
+    if (consumeDietSubstitutionFault("finalization")) {
+      throw new Error("simulated_finalization_failure");
+    }
+    const current = await readPersistedDietPlan(commit.committedPlan.userId);
+    if (!current?.pendingSubstitutionOperation) return true;
+    if (current.pendingSubstitutionOperation.operationId !== commit.operationId) return false;
+    const finalized = structuredClone(current);
+    delete finalized.pendingSubstitutionOperation;
+    finalized.updatedAt = new Date().toISOString();
+    await saveDietPlanIfUnchanged(
+      finalized,
+      getDietPlanConcurrencyToken(current),
+      { allowLockedCurrent: true },
+    );
+    const confirmed = await readPersistedDietPlan(commit.committedPlan.userId);
+    return Boolean(confirmed && !confirmed.pendingSubstitutionOperation);
+  } catch (error) {
+    logContextCommitFailure("diet_reconciliation", null, error);
+    await markDietSubstitutionReconciliationPending(
+      commit.operationId,
+      commit.committedPlan.userId,
+      "finalization_failed",
+    );
+    return false;
+  }
+}
+
+type DietReconciliationResult = {
+  status: "consistent" | "pending";
+  resolution: "none" | "committed" | "rolled_back" | "blocked";
+  operationId?: string;
+};
+
+async function reconcilePendingDietSubstitution(
+  userId: string,
+  memory?: GutoMemory,
+): Promise<DietReconciliationResult> {
+  const plan = await readPersistedDietPlan(userId).catch(() => null);
+  const operation = plan?.pendingSubstitutionOperation;
+  if (!plan || !operation) return { status: "consistent", resolution: "none" };
+  const persistedMemory = await readPersistedUserMemorySnapshot(userId).catch(() => null) as GutoMemory | null;
+  const memoryOperation = persistedMemory?.lastDietSubstitutionOperation;
+  const active = normalizeActiveContext(persistedMemory?.activeContext);
+  const memoryCommitted = Boolean(
+    memoryOperation?.operationId === operation.operationId &&
+    active?.type === "diet" &&
+    active.id === operation.contextId &&
+    active.version === operation.nextContextVersion
+  );
+  if (memoryCommitted) {
+    const finalized = await finalizeDietSubstitutionPlan({
+      ok: true,
+      operationId: operation.operationId,
+      committedPlan: plan,
+    });
+    if (finalized) {
+      if (memory && persistedMemory) Object.assign(memory, persistedMemory);
+      console.info("[GUTO][diet_substitution_reconciled]", {
+        operationId: operation.operationId,
+        resolution: "committed",
+        contextId: operation.contextId,
+        contextVersion: operation.nextContextVersion,
+      });
+      return {
+        status: "consistent",
+        resolution: "committed",
+        operationId: operation.operationId,
+      };
+    }
+    return { status: "pending", resolution: "blocked", operationId: operation.operationId };
+  }
+
+  const rolledBack = await rollbackDietSubstitutionPlan({
+    ok: false,
+    operationId: operation.operationId,
+    previousPlan: plan,
+    committedPlan: plan,
+  });
+  if (rolledBack) {
+    console.info("[GUTO][diet_substitution_reconciled]", {
+      operationId: operation.operationId,
+      resolution: "rolled_back",
+      contextId: operation.contextId,
+      contextVersion: operation.expectedContextVersion,
+    });
+    return {
+      status: "consistent",
+      resolution: "rolled_back",
+      operationId: operation.operationId,
+    };
+  }
+  return { status: "pending", resolution: "blocked", operationId: operation.operationId };
+}
+
 function logContextCommitFailure(
-  store: "workout" | "diet" | "diet_rollback",
+  store: "workout" | "diet" | "diet_rollback" | "diet_reconciliation",
   context: unknown,
   error: unknown,
 ): void {
@@ -7083,6 +7536,10 @@ async function materializeBrainFoodSubstitutionAtomically(params: {
   response: GutoModelResponse;
 }): Promise<GutoModelResponse | null> {
   const { memory } = params;
+  const pending = await reconcilePendingDietSubstitution(memory.userId, memory);
+  if (pending.status === "pending") {
+    return buildDietMutationFallback(params.language, "reconciliation_pending");
+  }
   let response: GutoModelResponse | null = null;
   let planCommit: DietSubstitutionPlanCommit | null = null;
   try {
@@ -7103,23 +7560,51 @@ async function materializeBrainFoodSubstitutionAtomically(params: {
           after: current,
         });
         if (!planCommit.ok) {
-          response = buildSovereignSafeFallback(
+          response = buildDietMutationFallback(
             params.language,
-            "Não consegui confirmar a troca no plano alimentar oficial. Mantive a dieta e o contexto anteriores."
+            planCommit.reason || "storage_failure",
           );
           return before;
+        }
+        if (planCommit.operationId && planCommit.committedPlan?.revision) {
+          current.lastDietSubstitutionOperation = {
+            operationId: planCommit.operationId,
+            planRevision: planCommit.committedPlan.revision,
+            contextId: normalizeActiveContext(current.activeContext)!.id,
+            contextVersion: normalizeActiveContext(current.activeContext)!.version,
+            committedAt: new Date().toISOString(),
+          };
+          if (consumeDietSubstitutionFault("memoryCommit")) {
+            throw new Error("simulated_memory_commit_failure");
+          }
         }
       }
       return current;
     });
-    if (updated) Object.assign(memory, updated);
+    if (updated) {
+      const confirmedPlanCommit = planCommit as DietSubstitutionPlanCommit | null;
+      const durable = await readPersistedUserMemorySnapshot(memory.userId) as GutoMemory | undefined;
+      if (
+        confirmedPlanCommit?.ok &&
+        confirmedPlanCommit.operationId &&
+        durable?.lastDietSubstitutionOperation?.operationId !== confirmedPlanCommit.operationId
+      ) {
+        throw new Error("memory_commit_not_confirmed");
+      }
+      Object.assign(memory, updated);
+      if (confirmedPlanCommit?.ok && confirmedPlanCommit.operationId) {
+        await finalizeDietSubstitutionPlan(confirmedPlanCommit);
+      }
+    }
   } catch (error) {
-    await rollbackDietSubstitutionPlan(planCommit);
     logContextCommitFailure("diet", memory.activeContext, error);
-    response = buildSovereignSafeFallback(
-      params.language,
-      "Não consegui confirmar a troca no plano alimentar oficial. Mantive a dieta e o contexto anteriores."
-    );
+    const reconciled = await reconcilePendingDietSubstitution(memory.userId, memory);
+    if (reconciled.resolution !== "committed") {
+      response = buildDietMutationFallback(
+        params.language,
+        reconciled.status === "pending" ? "compensation_failed" : "memory_commit_failed",
+      );
+    }
   }
   return response;
 }
@@ -15422,6 +15907,7 @@ async function buildWorldStateV2ForTurn(params: {
   dailyPresenceContext?: DailyPresenceContext | null;
   operationalContext: OperationalContext;
   resolverResult?: ResolverResult | null;
+  confirmedLastSuggestedItem?: ConfirmedLastSuggestedItem | null;
 }): Promise<WorldStateV2> {
   const { memory, input, history, language, risk, operationalContext } = params;
   const activeExercise = normalizeActiveExerciseContext(memory.activeExercise) || null;
@@ -15458,6 +15944,12 @@ async function buildWorldStateV2ForTurn(params: {
   ].slice(0, 8);
   const activeContext = normalizeActiveContext(memory.activeContext);
   const foodSubstitution = getFreshSubstitutionContext(memory, "food");
+  const confirmedExerciseId = params.confirmedLastSuggestedItem?.kind === "exercise"
+    ? params.confirmedLastSuggestedItem.id
+    : undefined;
+  const confirmedFoodId = params.confirmedLastSuggestedItem?.kind === "food"
+    ? params.confirmedLastSuggestedItem.id
+    : undefined;
   const rejectsPreviousFood = isFoodSubstitutionRejectionFollowUp(input, foodSubstitution);
   const activeFoodOriginalId = activeContext?.type === "diet"
     ? resolveFoodIdByName(activeContext.originalItem.id) ||
@@ -15465,8 +15957,8 @@ async function buildWorldStateV2ForTurn(params: {
     : undefined;
   const explicitlyUnavailableFoodId = resolveFoodIdByName(resolveUnavailableFoodName(input) || "");
   const rejectedExerciseSignal =
-    isSubstitutionRejectionFollowUp(input) && exerciseSubstitution?.lastSuggestedId
-      ? getCatalogById(exerciseSubstitution.lastSuggestedId)
+    isSubstitutionRejectionFollowUp(input) && (confirmedExerciseId || exerciseSubstitution?.lastSuggestedId)
+      ? getCatalogById(confirmedExerciseId || exerciseSubstitution!.lastSuggestedId!)
       : null;
   const explicitlyUnavailableExercise =
     rejectedExerciseSignal
@@ -15489,8 +15981,8 @@ async function buildWorldStateV2ForTurn(params: {
     ...(activeContext?.type === "diet" ? activeContext.rejectedItems.map((item) => item.id) : []),
   ]);
   if (foodOriginalId) rejectedFoodIds.add(foodOriginalId);
-  if (rejectsPreviousFood && foodSubstitution?.lastSuggestedId) {
-    rejectedFoodIds.add(foodSubstitution.lastSuggestedId);
+  if (rejectsPreviousFood && (confirmedFoodId || foodSubstitution?.lastSuggestedId)) {
+    rejectedFoodIds.add(confirmedFoodId || foodSubstitution!.lastSuggestedId!);
   }
   const foodSubstitutes = foodOriginalId
     ? suggestFoodSubstitutes({
@@ -15619,16 +16111,18 @@ async function buildWorldStateV2ForTurn(params: {
     },
     recentHistory: mapHistoryForBrain(history),
     contextSignals: {
+      confirmedLastSuggestedItem: params.confirmedLastSuggestedItem ?? null,
       shortContextIntent: classifyShortContextIntent({ rawInput: input }),
       dietContext: parseDietContext(input),
       explicitlyUnavailableFood: (explicitlyUnavailableFoodId || (
-        rejectsPreviousFood ? foodSubstitution?.lastSuggestedId : undefined
+        rejectsPreviousFood ? confirmedFoodId || foodSubstitution?.lastSuggestedId : undefined
       ))
         ? {
-            id: explicitlyUnavailableFoodId || foodSubstitution?.lastSuggestedId,
-            name: getFoodById(explicitlyUnavailableFoodId || foodSubstitution?.lastSuggestedId || "")?.names[language as FoodLanguage] ||
-              getFoodById(explicitlyUnavailableFoodId || foodSubstitution?.lastSuggestedId || "")?.names["pt-BR"] ||
+            id: explicitlyUnavailableFoodId || confirmedFoodId || foodSubstitution?.lastSuggestedId,
+            name: getFoodById(explicitlyUnavailableFoodId || confirmedFoodId || foodSubstitution?.lastSuggestedId || "")?.names[language as FoodLanguage] ||
+              getFoodById(explicitlyUnavailableFoodId || confirmedFoodId || foodSubstitution?.lastSuggestedId || "")?.names["pt-BR"] ||
               explicitlyUnavailableFoodId ||
+              confirmedFoodId ||
               foodSubstitution?.lastSuggestedId,
           }
         : null,
@@ -16055,16 +16549,13 @@ function commitBrainExerciseSwap(params: {
   const originalEntry = original ? getCatalogById(original.id) || original.catalogEntry : null;
   if (!original || !originalEntry) {
     logContextCommitFailure("workout", activeBeforeCommit, new Error("official_item_unresolved"));
-    return buildSovereignSafeFallback(language, "Preciso saber qual exercício deve ser trocado e por qual substituto seguro.");
+    return buildWorkoutMutationFallback(language, "official_item_missing");
   }
 
   const plan = memory.lastWorkoutPlan;
   if (!plan?.exercises?.length) {
     logContextCommitFailure("workout", activeBeforeCommit, new Error("official_plan_missing"));
-    return buildSovereignSafeFallback(
-      language,
-      "Não encontrei o treino oficial para confirmar a troca. Mantive tudo como estava; me diz o que está livre e eu tento novamente."
-    );
+    return buildWorkoutMutationFallback(language, "official_plan_missing");
   }
   const lastSuggestedId = previous?.lastSuggestedId || recoveredSuggestedId;
   const lastSuggestedReference = lastSuggestedId
@@ -16082,10 +16573,7 @@ function commitBrainExerciseSwap(params: {
   ]);
   if (planExerciseIndex < 0) {
     logContextCommitFailure("workout", activeBeforeCommit, new Error("official_item_missing"));
-    return buildSovereignSafeFallback(
-      language,
-      "Não encontrei esse exercício no treino oficial. Não alterei a missão nem o contexto."
-    );
+    return buildWorkoutMutationFallback(language, "official_item_missing");
   }
   const officialExercise = plan.exercises[planExerciseIndex];
 
@@ -16143,6 +16631,8 @@ function commitBrainExerciseSwap(params: {
       )
     : original;
   const unavailableName = unavailableItem?.name || original.name;
+  const unavailableCatalog = getCatalogById(unavailableItem?.id || "");
+  const unavailableAvailabilityKind = exerciseAvailabilityKind(unavailableCatalog);
   const scheme = pickByLanguage(language, {
     "pt-BR": `mantém ${officialExercise.sets} ${officialExercise.sets === 1 ? "série" : "séries"}, ${officialExercise.reps}, descanso de ${officialExercise.rest}`,
     "en-US": `keep ${officialExercise.sets} ${officialExercise.sets === 1 ? "set" : "sets"}, ${officialExercise.reps}, ${officialExercise.rest} rest`,
@@ -16152,18 +16642,30 @@ function commitBrainExerciseSwap(params: {
     !rejectedFollowUp ||
     normalize(response.fala || "").includes(normalize(unavailableName));
   const responseNamesCommittedSubstitute = responseMentionsCatalogExercise(response.fala, substitute);
+  const responseMisclassifiesMovementAsOccupied =
+    rejectedFollowUp &&
+    unavailableAvailabilityKind === "movement" &&
+    normalize(response.fala || "").includes(normalize(unavailableName)) &&
+    /\b(ocupad|occupat|taken|busy)/.test(normalize(response.fala || ""));
   const committedResponse: GutoModelResponse =
     proposedIsValid &&
     proposedSubstitute?.id === substitute.id &&
     responseNamesRejectedItem &&
-    responseNamesCommittedSubstitute
+    responseNamesCommittedSubstitute &&
+    !responseMisclassifiesMovementAsOccupied
       ? response
       : {
           ...response,
           fala: pickByLanguage(language, {
-            "pt-BR": `${unavailableName}${rejectedFollowUp ? " também" : ""} está ocupado? Vai de ${substituteName}: ${scheme}. Mesma missão, sem ficar parado.`,
-            "en-US": `${unavailableName} is${rejectedFollowUp ? " also" : ""} taken? Go with ${substituteName}: ${scheme}. Same mission, no standing around.`,
-            "it-IT": `${rejectedFollowUp ? "Anche " : ""}${unavailableName} è occupato? Vai con ${substituteName}: ${scheme}. Stessa missione, senza fermarti.`,
+            "pt-BR": unavailableAvailabilityKind === "equipment"
+              ? `${unavailableName}${rejectedFollowUp ? " também" : ""} está ocupado? Vai de ${substituteName}: ${scheme}. Mesma missão, sem ficar parado.`
+              : `${rejectedFollowUp ? "Também não dá para fazer" : "Não dá para fazer"} ${unavailableName} agora? Vai de ${substituteName}: ${scheme}. Mesma missão, sem ficar parado.`,
+            "en-US": unavailableAvailabilityKind === "equipment"
+              ? `${unavailableName} is${rejectedFollowUp ? " also" : ""} taken? Go with ${substituteName}: ${scheme}. Same mission, no standing around.`
+              : `${rejectedFollowUp ? "You also cannot do" : "You cannot do"} ${unavailableName} right now? Go with ${substituteName}: ${scheme}. Same mission, no standing around.`,
+            "it-IT": unavailableAvailabilityKind === "equipment"
+              ? `${rejectedFollowUp ? "Anche " : ""}${unavailableName} è occupato? Vai con ${substituteName}: ${scheme}. Stessa missione, senza fermarti.`
+              : `${rejectedFollowUp ? "Non riesci a fare neanche" : "Non riesci a fare"} ${unavailableName} adesso? Vai con ${substituteName}: ${scheme}. Stessa missione, senza fermarti.`,
           }),
           expectedResponse: null,
         };
@@ -16180,10 +16682,7 @@ function commitBrainExerciseSwap(params: {
   ).length;
   if (committedEntryCount !== 1) {
     logContextCommitFailure("workout", activeBeforeCommit, new Error("official_plan_not_confirmed"));
-    return buildSovereignSafeFallback(
-      language,
-      "Não consegui construir a missão sem duplicar o exercício. Mantive o plano anterior."
-    );
+    return buildWorkoutMutationFallback(language, "storage_failure");
   }
 
   if (
@@ -16295,15 +16794,9 @@ async function commitBrainExerciseSwapAtomically(params: {
     if (updated) Object.assign(memory, updated);
   } catch (error) {
     logContextCommitFailure("workout", memory.activeContext, error);
-    return buildSovereignSafeFallback(
-      params.language,
-      "Não consegui confirmar a troca no treino oficial. Mantive a missão e o contexto anteriores."
-    );
+    return buildWorkoutMutationFallback(params.language, "storage_failure");
   }
-  return response || buildSovereignSafeFallback(
-    params.language,
-    "Não consegui confirmar a troca do exercício no estado persistido.",
-  );
+  return response || buildWorkoutMutationFallback(params.language, "storage_failure");
 }
 
 function hasOperationalExerciseSwapEvidence(
@@ -16996,11 +17489,16 @@ async function runSovereignBrainTurn(params: {
     activeContextType: ActiveContextType;
     activeItemId: string;
   } | null;
+  lastSuggestedItem?: unknown;
   systemTrigger?: SovereignSystemTurnTrigger | null;
   decide?: typeof decideTurn;
   classifyRiskFn?: typeof classifyRisk;
 }): Promise<GutoModelResponse> {
   const { memory, input, history, language, operationalContext } = params;
+  const confirmedLastSuggestedItem = confirmRequestLastSuggestedItem(
+    params.lastSuggestedItem,
+    memory,
+  );
   const requestContextIsCurrent = (): boolean => {
     if (!params.requestContext) return true;
     const active = normalizeActiveContext(getMemory(memory.userId).activeContext);
@@ -17042,6 +17540,7 @@ async function runSovereignBrainTurn(params: {
     dailyPresenceContext: params.dailyPresenceContext ?? null,
     operationalContext,
     resolverResult: params.resolverResult ?? null,
+    confirmedLastSuggestedItem,
   });
   if (params.systemTrigger) {
     worldState.contextSignals = {
@@ -17435,6 +17934,7 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
     contextVersion,
     activeContextType,
     activeItemId,
+    lastSuggestedItem,
     profile: requestProfile,
   } = req.body as {
     input?: string;
@@ -17447,6 +17947,7 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
     contextVersion?: number | null;
     activeContextType?: ActiveContextType | null;
     activeItemId?: string | null;
+    lastSuggestedItem?: unknown;
     profile?: Profile;
   };
 
@@ -17465,6 +17966,28 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
   const selectedLanguage = normalizeLanguage(language || memory.language || "pt-BR");
   if (requestProfile && requestProfile.userId === userId) {
     memory = mergeMemory({ ...requestProfile, userId }, selectedLanguage);
+  }
+  const dietReconciliation = await reconcilePendingDietSubstitution(userId, memory);
+  const activeAtTurnStart = normalizeActiveContext(memory.activeContext);
+  const blockedDietSubstitution = Boolean(
+    dietReconciliation.status === "pending" &&
+    activeAtTurnStart?.type === "diet" &&
+    (
+      isUnavailabilityMessage(stripInjectedContext(input || "")) ||
+      isFoodSubstitutionRejectionFollowUp(
+        input || "",
+        getFreshSubstitutionContext(memory, "food"),
+      )
+    )
+  );
+  if (blockedDietSubstitution) {
+    const context = getOperationalContext(new Date(), selectedLanguage);
+    return res.json(attachAvatarEmotion({
+      response: buildDietMutationFallback(selectedLanguage, "reconciliation_pending"),
+      memory,
+      context,
+      input: input || "",
+    }));
   }
   const requestContext =
     typeof contextId === "string" && contextId.trim() &&
@@ -17551,6 +18074,7 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
       resolverResult,
       turnId,
       requestContext,
+      lastSuggestedItem,
     });
     await flushMemoryStoreWrites();
     return res.json(attachAvatarEmotion({

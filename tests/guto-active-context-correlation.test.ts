@@ -21,6 +21,9 @@ let brainPrompts: string[] = [];
 let forcedFoodQuantity: string | null = null;
 let forceInvalidFoodDecision = false;
 let forceEmptyBrainResponse = false;
+let setDietSubstitutionFaultsForTest: (
+  faults?: Partial<Record<"planCommit" | "memoryCommit" | "compensation" | "finalization", number | boolean>>,
+) => void = () => {};
 
 function authHeaders() {
   const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
@@ -45,6 +48,23 @@ function context(id: string, type: "workout" | "diet", itemId: string, name: str
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function lastSuggestedPayload(active: Record<string, any>) {
+  const item = active?.lastSuggestedItem;
+  if (!item?.id || !item?.name) return null;
+  return {
+    id: item.id,
+    name: item.name,
+    kind: active.type === "workout" ? "exercise" : "food",
+  };
+}
+
+function worldStateFromPrompt(prompt = brainPrompts.at(-1) || "") {
+  const worldStateText = prompt
+    .split("WORLD_STATE_V2:\n").pop()
+    ?.split("\n\nHISTÓRICO RECENTE:")[0];
+  return worldStateText ? JSON.parse(worldStateText) as Record<string, any> : {};
 }
 
 function seedWorkoutPlan(
@@ -156,6 +176,13 @@ describe("active context correlation", () => {
             workoutSubstitutes?: Array<{ id: string; name: string }>;
           };
           contextSignals?: {
+            confirmedLastSuggestedItem?: {
+              id?: string;
+              name?: string;
+              kind?: string;
+              availabilityKind?: string;
+              equipment?: string;
+            } | null;
             explicitlyUnavailableFood?: { id?: string; name?: string } | null;
             explicitlyUnavailableExercise?: { id?: string; name?: string } | null;
           };
@@ -252,7 +279,9 @@ describe("active context correlation", () => {
 
     const module = await import(pathToFileURL(join(process.cwd(), "server.ts")).href) as {
       app: { listen: (port: number, hostname: string, callback?: () => void) => Server };
+      setDietSubstitutionFaultsForTest: typeof setDietSubstitutionFaultsForTest;
     };
+    setDietSubstitutionFaultsForTest = module.setDietSubstitutionFaultsForTest;
     const memoryStore = await import(pathToFileURL(join(process.cwd(), "src/memory-store.ts")).href) as {
       clearMemoryStoreCache: () => void;
     };
@@ -272,6 +301,7 @@ describe("active context correlation", () => {
     forcedFoodQuantity = null;
     forceInvalidFoodDecision = false;
     forceEmptyBrainResponse = false;
+    setDietSubstitutionFaultsForTest();
     clearMemoryStoreCache();
     writeFileSync(dietFile, JSON.stringify({}));
     writeFileSync(memoryFile, JSON.stringify({
@@ -370,6 +400,7 @@ describe("active context correlation", () => {
       contextVersion: active.version,
       activeContextType: active.type,
       activeItemId: active.currentItem.id,
+      lastSuggestedItem: lastSuggestedPayload(active),
     });
 
     const dislike = await send(workoutContext, "Não gosto desse exercício.", "dislike");
@@ -439,6 +470,7 @@ describe("active context correlation", () => {
       contextVersion: active.version,
       activeContextType: active.type,
       activeItemId: active.currentItem.id,
+      lastSuggestedItem: lastSuggestedPayload(active),
     });
 
     const first = await send(dietContext, "Não tenho esse alimento.", "first");
@@ -505,6 +537,7 @@ describe("active context correlation", () => {
       contextVersion: active.version,
       activeContextType: active.type,
       activeItemId: active.currentItem.id,
+      lastSuggestedItem: lastSuggestedPayload(active),
     });
 
     const first = await sendInContext(workoutContext, "Ocupado", "first");
@@ -594,7 +627,7 @@ describe("active context correlation", () => {
 
     assert.deepEqual(response.activeContext, workoutContext);
     assert.equal(response.workoutPlan ?? null, null);
-    assert.match(response.fala || "", /mantive|não consegui|não vou inventar/i);
+    assert.match(response.fala || "", /não alterei|mantive|não consegui/i);
     assert.doesNotMatch(response.fala || "", /troca por|vai de/i);
     clearMemoryStoreCache();
     const stored = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
@@ -1110,6 +1143,8 @@ describe("active context correlation", () => {
     });
 
     assert.ok(response.fala?.trim());
+    assert.match(response.fala, /não encontrei seu plano oficial.*não alterei nada/i);
+    assert.doesNotMatch(response.fala, /frase direta|manda.*frase|você escreveu/i);
     assert.doesNotMatch(response.fala, /troca .* por|vai de/i);
     assert.deepEqual(response.activeContext, dietContext);
     clearMemoryStoreCache();
@@ -1152,6 +1187,8 @@ describe("active context correlation", () => {
     });
 
     assert.ok(response.fala?.trim());
+    assert.match(response.fala, /item não está mais.*não alterei nada/i);
+    assert.doesNotMatch(response.fala, /frase direta|manda.*frase|você escreveu/i);
     assert.doesNotMatch(response.fala, /troca .* por|vai de/i);
     assert.deepEqual(response.activeContext, dietContext);
     assert.deepEqual(JSON.parse(readFileSync(dietFile, "utf8"))[userId], planBefore);
@@ -1271,6 +1308,8 @@ describe("active context correlation", () => {
     });
 
     assert.ok(response.fala?.trim());
+    assert.match(response.fala, /plano mudou.*não alterei nada/i);
+    assert.doesNotMatch(response.fala, /frase direta|manda.*frase|você escreveu/i);
     assert.doesNotMatch(response.fala, /troca .* por|vai de/i);
     assert.deepEqual(response.activeContext, dietContext);
     assert.deepEqual(JSON.parse(readFileSync(dietFile, "utf8"))[userId], planBefore);
@@ -1308,10 +1347,16 @@ describe("active context correlation", () => {
       contextVersion: active.version,
       activeContextType: active.type,
       activeItemId: active.currentItem.id,
+      lastSuggestedItem: lastSuggestedPayload(active),
     });
     const first = await send(dietContext, "não tenho aveia em flocos", "first");
     const second = await send(first.activeContext, "também não tenho essa opção", "second");
     assert.match(second.fala || "", new RegExp(first.activeContext.currentItem.name, "i"));
+    assert.deepEqual(worldStateFromPrompt().contextSignals.confirmedLastSuggestedItem, {
+      id: first.activeContext.currentItem.id,
+      name: first.activeContext.currentItem.name,
+      kind: "food",
+    });
 
     clearMemoryStoreCache();
     const memory = await getAsFreshSession("/guto/memory");
@@ -1327,6 +1372,265 @@ describe("active context correlation", () => {
 
     const after = await getAsFreshSession("/guto/memory");
     assert.equal(after.activeContext.currentItem.id, second.activeContext.currentItem.id);
+  });
+
+  it("campo estruturado confirmado guia o segundo turno e Flexão não vira equipamento ocupado", async () => {
+    seedWorkoutPlan([
+      { id: "supino_reto_maquina", name: "Supino reto máquina" },
+      { id: "crucifixo_maquina", name: "Crucifixo máquina" },
+    ]);
+    const workoutContext = context(
+      "ctx-structured-workout",
+      "workout",
+      "supino_reto_maquina",
+      "Supino reto máquina",
+    );
+    await post("/guto/active-context", { context: workoutContext });
+    const send = (active: Record<string, any>, input: string, suffix: string) => post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input,
+      turnId: `turn-structured-workout-${suffix}`,
+      requestId: `request-structured-workout-${suffix}`,
+      contextId: active.id,
+      contextVersion: active.version,
+      activeContextType: active.type,
+      activeItemId: active.currentItem.id,
+      lastSuggestedItem: lastSuggestedPayload(active),
+    });
+
+    const first = await send(workoutContext, "O equipamento está ocupado.", "first");
+    assert.equal(first.activeContext.currentItem.id, "flexao");
+    assert.match(first.fala || "", /Supino reto máquina.*ocupad/i);
+
+    const second = await send(first.activeContext, "Esse também está ocupado.", "second");
+    assert.match(second.fala || "", /Flexão/i);
+    assert.doesNotMatch(second.fala || "", /Flexão.{0,30}ocupad/i);
+    assert.match(second.fala || "", /não dá para fazer Flexão|Flexão.*não está disponível/i);
+    assert.deepEqual(worldStateFromPrompt().contextSignals.confirmedLastSuggestedItem, {
+      id: "flexao",
+      name: "Flexão",
+      kind: "exercise",
+      availabilityKind: "movement",
+      equipment: "bodyweight",
+    });
+  });
+
+  it("campo estruturado divergente ou de outro domínio não supera o contexto durável", async () => {
+    seedWorkoutPlan([{ id: "supino_reto_maquina", name: "Supino reto máquina" }]);
+    const workoutContext = context(
+      "ctx-structured-authority",
+      "workout",
+      "supino_reto_maquina",
+      "Supino reto máquina",
+    );
+    await post("/guto/active-context", { context: workoutContext });
+    const first = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "O equipamento está ocupado.",
+      turnId: "turn-structured-authority-first",
+      requestId: "request-structured-authority-first",
+      contextId: workoutContext.id,
+      contextVersion: workoutContext.version,
+      activeContextType: workoutContext.type,
+      activeItemId: workoutContext.currentItem.id,
+      lastSuggestedItem: null,
+    });
+    const second = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "Esse também está ocupado.",
+      turnId: "turn-structured-authority-second",
+      requestId: "request-structured-authority-second",
+      contextId: first.activeContext.id,
+      contextVersion: first.activeContext.version,
+      activeContextType: first.activeContext.type,
+      activeItemId: first.activeContext.currentItem.id,
+      lastSuggestedItem: {
+        id: "wholegrain_bread",
+        name: "Pão integral",
+        kind: "food",
+      },
+    });
+
+    assert.equal(second.activeContext.type, "workout");
+    assert.notEqual(second.activeContext.currentItem.id, "wholegrain_bread");
+    assert.match(second.fala || "", new RegExp(first.activeContext.currentItem.name, "i"));
+    assert.equal(worldStateFromPrompt().contextSignals.confirmedLastSuggestedItem, null);
+  });
+
+  it("falha do plano antes da memória usa fallback factual e não altera estado", async () => {
+    seedDietPlan([{
+      id: "cafe",
+      name: "Café da manhã",
+      foods: [{ name: "Aveia em flocos", quantity: "80g" }],
+    }]);
+    const dietContext = context("ctx-plan-write-failure", "diet", "cafe:aveia em flocos", "Aveia em flocos");
+    dietContext.currentItem.mealId = "cafe";
+    dietContext.currentItem.mealName = "Café da manhã";
+    dietContext.currentItem.quantity = "80g";
+    dietContext.originalItem = { ...dietContext.currentItem };
+    await post("/guto/active-context", { context: dietContext });
+    const planBefore = JSON.parse(readFileSync(dietFile, "utf8"))[userId];
+    setDietSubstitutionFaultsForTest({ planCommit: true });
+
+    const response = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "Não tenho esse alimento.",
+      turnId: "turn-plan-write-failure",
+      requestId: "request-plan-write-failure",
+      contextId: dietContext.id,
+      contextVersion: dietContext.version,
+      activeContextType: dietContext.type,
+      activeItemId: dietContext.currentItem.id,
+      lastSuggestedItem: null,
+    });
+
+    assert.match(response.fala || "", /não consegui confirmar.*mantive seu plano/i);
+    assert.doesNotMatch(response.fala || "", /frase direta|manda.*frase|você escreveu/i);
+    assert.deepEqual(response.activeContext, dietContext);
+    assert.deepEqual(JSON.parse(readFileSync(dietFile, "utf8"))[userId], planBefore);
+  });
+
+  it("plano salvo e memória falha: compensação verificada restaura plano e contexto", async () => {
+    seedDietPlan([{
+      id: "cafe",
+      name: "Café da manhã",
+      foods: [{ name: "Aveia em flocos", quantity: "80g" }],
+    }]);
+    const dietContext = context("ctx-memory-write-failure", "diet", "cafe:aveia em flocos", "Aveia em flocos");
+    dietContext.currentItem.mealId = "cafe";
+    dietContext.currentItem.mealName = "Café da manhã";
+    dietContext.currentItem.quantity = "80g";
+    dietContext.originalItem = { ...dietContext.currentItem };
+    await post("/guto/active-context", { context: dietContext });
+    setDietSubstitutionFaultsForTest({ memoryCommit: true });
+
+    const response = await post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "Não tenho esse alimento.",
+      turnId: "turn-memory-write-failure",
+      requestId: "request-memory-write-failure",
+      contextId: dietContext.id,
+      contextVersion: dietContext.version,
+      activeContextType: dietContext.type,
+      activeItemId: dietContext.currentItem.id,
+      lastSuggestedItem: null,
+    });
+
+    assert.match(response.fala || "", /não consegui confirmar.*mantive seu plano/i);
+    assert.deepEqual(response.activeContext, dietContext);
+    const plan = JSON.parse(readFileSync(dietFile, "utf8"))[userId];
+    assert.equal(plan.meals[0].foods[0].name, "Aveia em flocos");
+    assert.equal(plan.pendingSubstitutionOperation, undefined);
+  });
+
+  it("falha composta fica pendente, bloqueia repetição idempotente e reconcilia em nova autenticação", async () => {
+    seedDietPlan([{
+      id: "cafe",
+      name: "Café da manhã",
+      foods: [{ name: "Aveia em flocos", quantity: "80g" }],
+    }]);
+    const dietContext = context("ctx-composed-failure", "diet", "cafe:aveia em flocos", "Aveia em flocos");
+    dietContext.currentItem.mealId = "cafe";
+    dietContext.currentItem.mealName = "Café da manhã";
+    dietContext.currentItem.quantity = "80g";
+    dietContext.originalItem = { ...dietContext.currentItem };
+    await post("/guto/active-context", { context: dietContext });
+    setDietSubstitutionFaultsForTest({ memoryCommit: 1, compensation: 3 });
+    const request = {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "Não tenho esse alimento.",
+      turnId: "turn-composed-failure",
+      requestId: "request-composed-failure",
+      contextId: dietContext.id,
+      contextVersion: dietContext.version,
+      activeContextType: dietContext.type,
+      activeItemId: dietContext.currentItem.id,
+      lastSuggestedItem: null,
+    };
+
+    const failed = await post("/guto", request);
+    assert.match(failed.fala || "", /bloqueei novas trocas.*reconcilio/i);
+    assert.deepEqual(failed.activeContext, dietContext);
+    const pendingPlan = JSON.parse(readFileSync(dietFile, "utf8"))[userId];
+    const operationId = pendingPlan.pendingSubstitutionOperation?.operationId;
+    assert.ok(operationId);
+    assert.equal(pendingPlan.pendingSubstitutionOperation.status, "reconciliation_pending");
+    assert.notEqual(pendingPlan.meals[0].foods[0].name, "Aveia em flocos");
+
+    const repeated = await post("/guto", {
+      ...request,
+      turnId: "turn-composed-failure-retry",
+      requestId: "request-composed-failure-retry",
+    });
+    assert.match(repeated.fala || "", /bloqueei novas trocas.*reconcilio/i);
+    const afterRetry = JSON.parse(readFileSync(dietFile, "utf8"))[userId];
+    assert.equal(afterRetry.pendingSubstitutionOperation.operationId, operationId);
+    assert.equal(afterRetry.meals[0].foods.length, 1);
+
+    clearMemoryStoreCache();
+    const duringPending = await getAsFreshSession("/guto/memory");
+    assert.equal(duringPending.dietConsistencyStatus, "reconciliation_pending");
+    assert.deepEqual(duringPending.activeContext, dietContext);
+    const stillPendingPlan = JSON.parse(readFileSync(dietFile, "utf8"))[userId];
+    assert.equal(stillPendingPlan.pendingSubstitutionOperation.operationId, operationId);
+
+    clearMemoryStoreCache();
+    const reconciled = await getAsFreshSession("/guto/memory");
+    assert.equal(reconciled.dietConsistencyStatus, "consistent");
+    assert.deepEqual(reconciled.activeContext, dietContext);
+    const finalPlan = JSON.parse(readFileSync(dietFile, "utf8"))[userId];
+    assert.equal(finalPlan.meals[0].foods[0].name, "Aveia em flocos");
+    assert.equal(finalPlan.pendingSubstitutionOperation, undefined);
+  });
+
+  it("duas substituições alimentares concorrentes convergem sem reaplicar operação", async () => {
+    seedDietPlan([{
+      id: "cafe",
+      name: "Café da manhã",
+      foods: [{ name: "Aveia em flocos", quantity: "80g" }],
+    }]);
+    const dietContext = context("ctx-concurrent-diet-operation", "diet", "cafe:aveia em flocos", "Aveia em flocos");
+    dietContext.currentItem.mealId = "cafe";
+    dietContext.currentItem.mealName = "Café da manhã";
+    dietContext.currentItem.quantity = "80g";
+    dietContext.originalItem = { ...dietContext.currentItem };
+    await post("/guto/active-context", { context: dietContext });
+    const makeRequest = (suffix: string) => post("/guto", {
+      profile: { userId, name: "Will" },
+      language: "pt-BR",
+      history: [],
+      input: "Não tenho esse alimento.",
+      turnId: `turn-concurrent-diet-operation-${suffix}`,
+      requestId: `request-concurrent-diet-operation-${suffix}`,
+      contextId: dietContext.id,
+      contextVersion: dietContext.version,
+      activeContextType: dietContext.type,
+      activeItemId: dietContext.currentItem.id,
+      lastSuggestedItem: null,
+    });
+    const [first, second] = await Promise.all([makeRequest("a"), makeRequest("b")]);
+    const accepted = [first, second].find((item) => item.discardedReason !== "stale_context");
+    const stale = [first, second].find((item) => item.discardedReason === "stale_context");
+    assert.ok(accepted);
+    assert.ok(stale);
+    const plan = JSON.parse(readFileSync(dietFile, "utf8"))[userId];
+    assert.equal(plan.meals[0].foods.length, 1);
+    assert.equal(plan.pendingSubstitutionOperation, undefined);
+    clearMemoryStoreCache();
+    const stored = JSON.parse(readFileSync(memoryFile, "utf8"))[userId];
+    assert.equal(stored.activeContext.currentItem.id, accepted!.activeContext.currentItem.id);
   });
 
   it("resposta concorrente do treino não restaura o domínio após abrir a dieta", async () => {

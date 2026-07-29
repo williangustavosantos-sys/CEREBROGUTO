@@ -233,6 +233,22 @@ export interface DietMeal {
   alternatives?: string[];
 }
 
+export interface DietSubstitutionPendingOperation {
+  operationId: string;
+  status: "pending" | "reconciliation_pending";
+  contextId: string;
+  expectedContextVersion: number;
+  nextContextVersion: number;
+  basePlanRevision: string | null;
+  mealId: string;
+  foodIndex: number;
+  previousFood: DietFood;
+  replacementFood: DietFood;
+  createdAt: string;
+  updatedAt: string;
+  failureReason?: "memory_commit_failed" | "compensation_failed" | "finalization_failed";
+}
+
 export interface DietPlan {
   userId: string;
   /** Opaque revision changed on every persisted write for optimistic locking. */
@@ -262,6 +278,8 @@ export interface DietPlan {
   lockedByCoach?: boolean;
   updatedBy?: string;
   updatedAt?: string;
+  /** Internal two-store reconciliation marker; never rendered as diet content. */
+  pendingSubstitutionOperation?: DietSubstitutionPendingOperation;
 }
 
 function normalizeKey(value: string): string {
