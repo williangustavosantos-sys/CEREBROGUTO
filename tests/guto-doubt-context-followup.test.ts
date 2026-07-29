@@ -253,8 +253,8 @@ describe("BUG 2/3 — fluxo HTTP decidido pelo cérebro soberano", () => {
     rmSync(testMemoryFile, { force: true });
   });
 
-  // ── BUG 2 — exercício: SEM lastWorkoutPlan, ainda resolve pelo catálogo ──────
-  it("contexto de exercício + 'está ocupado' SEM plano persistido → substitui pelo catálogo, nunca 'qual aparelho'", async () => {
+  // ── BUG 2 — sem plano oficial, não publica uma troca só de contexto ──────────
+  it("contexto de exercício + 'está ocupado' SEM plano persistido → fallback honesto sem troca", async () => {
     const userId = "ex-busy-no-plan";
     // Repare: NENHUM lastWorkoutPlan — só o card de contexto. Era o cenário do bug.
     writeUserMemory(userId, {
@@ -267,10 +267,13 @@ describe("BUG 2/3 — fluxo HTTP decidido pelo cérebro soberano", () => {
     const ctx = '[WORKOUT EXERCISE CONTEXT — language: pt-BR] Exercise: "Supino reto máquina" (canonical PT: Supino reto máquina). Muscle group: peito.';
     const res = await postGuto(userId, `${ctx} User message: está ocupado`);
 
-    assert.equal(res.acao, "swapExercise");
+    assert.equal(res.acao, "none");
     assert.doesNotMatch(res.fala || "", RE_ASK_RE, "não pode reperguntar qual aparelho com o card ativo");
-    // Nomeia o exercício do contexto (não responde genérico/vazio).
-    assert.match(res.fala || "", /supino|troca por|pula ele|swap/i);
+    assert.ok(res.fala?.trim());
+    assert.doesNotMatch(res.fala || "", /troca por|vai de|pula ele|swap/i);
+    const stored = JSON.parse(readFileSync(testMemoryFile, "utf8"))[userId];
+    assert.equal(stored.lastWorkoutPlan ?? null, null);
+    assert.equal(stored.substitutionContext ?? null, null);
   });
 
   it("mensagem direta 'Tríceps polia alta ocupado' → substituto validado de tríceps, nunca bíceps", async () => {
@@ -421,7 +424,7 @@ describe("BUG 2/3 — fluxo HTTP decidido pelo cérebro soberano", () => {
     assert.match(turn2.fala || "", /troca|dispon[ií]vel|tem em casa|available/i);
   });
 
-  it("sem contexto explícito: 'não tenho banana' → substituto direto, sem perguntar 'o que?'", async () => {
+  it("sem plano oficial: 'não tenho banana' → fallback honesto sem materializar substituição", async () => {
     const userId = "food-banana-direct";
     writeUserMemory(userId, {
       trainingGoal: "fat_loss",
@@ -435,8 +438,11 @@ describe("BUG 2/3 — fluxo HTTP decidido pelo cérebro soberano", () => {
     const res = await postGuto(userId, "não tenho banana");
 
     assert.equal(res.acao, "none");
-    assert.match(res.fala || "", /troca/i);
-    assert.match(res.fala || "", /ma[çc][aã]|frutas vermelhas/i);
+    assert.ok(res.fala?.trim());
+    assert.doesNotMatch(res.fala || "", /troca|ma[çc][aã]|frutas vermelhas/i);
     assert.doesNotMatch(res.fala || "", /Não tem o qu[eê]|alimento ou aparelho|posso substituir/i);
+    const stored = JSON.parse(readFileSync(testMemoryFile, "utf8"))[userId];
+    assert.equal(stored.activeContext ?? null, null);
+    assert.equal(stored.substitutionContext ?? null, null);
   });
 });

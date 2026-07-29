@@ -195,7 +195,7 @@ export const foodCatalog: FoodItem[] = [
     countries: { italy: "available", brazil: "available", spain: "available", portugal: "available", usa: "available", uk: "available", germany: "common", france: "available", argentina: "rare" },
     tags: ["breakfast", "snack"],
     allergens: ["soy"],
-    substitutes: ["greek_yogurt"],
+    substitutes: ["greek_yogurt", "eggs"],
   },
   {
     id: "cottage_cheese",
