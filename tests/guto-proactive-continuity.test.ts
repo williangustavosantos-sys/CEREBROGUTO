@@ -275,6 +275,17 @@ describe("Continuidade Primeiro — caso 5: 'só tenho 10 minutos'", () => {
     assert.doesNotMatch(fala, /cancel/i);
     assert.equal(falaHasPassiveMindset(fala), false);
   });
+
+  it("ignora a duração injetada do exercício ao classificar a fala real", () => {
+    const input = [
+      "[WORKOUT EXERCISE CONTEXT — language: pt-BR]",
+      'Exercise: "Elíptico". Prescription: 1 sets × 5-8 min reps, rest 0s.',
+      "Limitations/pathology: condromalácia no joelho direito.",
+      "User message: Tenho condromalácia no joelho. Por que o elíptico está no meu treino?",
+    ].join(" ");
+
+    assert.equal(classifyProactiveContinuitySignal(input), "generic");
+  });
 });
 
 describe("Continuidade Primeiro — caso 6: 'semana corrida'", () => {
