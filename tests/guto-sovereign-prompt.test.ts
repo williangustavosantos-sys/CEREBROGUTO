@@ -54,4 +54,19 @@ describe("prompt soberano — foco no assunto atual", () => {
     assert.match(prompt, /nunca com "beleza\?", "pode ser\?", "vamos\?"/i);
     assert.match(prompt, /Pedido vago de troca sem motivo usa acao:"none"/i);
   });
+
+  it("mantém uma missão mínima diante de cansaço comum sem usar culpa", () => {
+    const prompt = buildSovereignBrainPrompt({
+      worldState: worldState(),
+      input: "Não quero treinar hoje porque estou cansado.",
+    });
+
+    assert.match(prompt, /CANSAÇO COMUM, sem dor, doença ou risco/i);
+    assert.match(prompt, /mantenha a missão de hoje viva/i);
+    assert.match(prompt, /versão mínima de 20 minutos agora/i);
+    assert.match(prompt, /pergunta operacional direta sobre começar a versão curta/i);
+    assert.match(prompt, /NÃO aceite imediatamente cancelar, descansar hoje ou deixar para amanhã/i);
+    assert.match(prompt, /NÃO use culpa, streak, pacto, XP ou ameaça/i);
+    assert.match(prompt, /adapta o tamanho da missão, não abandona a direção/i);
+  });
 });
