@@ -10213,7 +10213,10 @@ export type ProactiveContinuitySignal =
   | "generic";
 
 export function classifyProactiveContinuitySignal(rawInput: string): ProactiveContinuitySignal {
-  const text = normalize(rawInput);
+  // O app prefixa a fala com a prescrição do exercício ativo. Durações como
+  // "5-8 min" pertencem ao treino, não à mensagem do usuário; classificá-las
+  // como janela curta desvia perguntas de execução/patologia para proatividade.
+  const text = normalize(stripInjectedContext(rawInput));
   const isTravel = /\b(viajo|viajar|viagem|viagens|vou viajar|viajando|trips?|travels?|traveling|travelling|traveled|travelled|viaggio|viaggi|parto)\b/.test(text);
   if (isTravel) {
     const sig = detectTravelTrainingSignal(rawInput);
