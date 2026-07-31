@@ -612,6 +612,32 @@ async function mutateRedisMemoryStore(
   throw lastError;
 }
 
+async function replaceRedisMemoryStoreAtomically(
+  redis: RedisClient,
+  buildNext: (current: MemoryStore) => Promise<MemoryStore>
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= REDIS_WRITE_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      await withRedisWriteLock(redis, async (token) => {
+        await hydrateMemoryStoreFromRedisForWrite(redis);
+        const nextStore = await buildNext(cloneStoreValue(globalMemoryStore));
+        await commitMemoryStoreWhileLeaseOwned(redis, token, nextStore);
+        replaceGlobalMemoryStore(nextStore);
+        writeToFile(nextStore);
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof RedisMemoryWriteLeaseLostError) || attempt === REDIS_WRITE_MAX_ATTEMPTS) {
+        throw error;
+      }
+      await waitFor(25 * attempt);
+    }
+  }
+  throw lastError;
+}
+
 async function hydrateMemoryStoreFromRedisForWrite(redis: RedisClient): Promise<void> {
   // Escrita do store inteiro só é segura depois de uma leitura Redis bem-sucedida.
   // `readMemoryStoreAsync` possui fallback local por design; usá-lo aqui fazia
@@ -731,29 +757,28 @@ export async function updateUserMemoryAtomically<T>(
   let result: T | null = null;
   const redis = getRedisClient();
   const writeOperation = memWriteChain.then(async () => {
-    const updateStore = async (store: MemoryStore) => {
+    const buildNextStore = async (store: MemoryStore): Promise<MemoryStore> => {
+      const nextStore = cloneStoreValue(store);
       const current = cloneStoreValue(store[userId]);
       result = await updater(current);
-      if (result === null) delete store[userId];
-      else store[userId] = cloneStoreValue(result);
-      if (result === null) delete globalMemoryStore[userId];
-      else globalMemoryStore[userId] = cloneStoreValue(result);
+      if (result === null) delete nextStore[userId];
+      else nextStore[userId] = cloneStoreValue(result);
+      return nextStore;
     };
 
     if (redis) {
-      await mutateRedisMemoryStore(redis, async () => {
-        await updateStore(globalMemoryStore);
-      });
+      await replaceRedisMemoryStoreAtomically(redis, buildNextStore);
       return;
     }
 
-    const store = existsSync(config.memoryFile)
+    const currentStore = existsSync(config.memoryFile)
       ? JSON.parse(readFileSync(config.memoryFile, "utf8")) as MemoryStore
       : cloneStoreValue(globalMemoryStore);
-    await updateStore(store);
-    if (!writeToFile(store)) {
+    const nextStore = await buildNextStore(currentStore);
+    if (!writeToFile(nextStore)) {
       throw new Error("Atomic GUTO user memory update could not be persisted to disk.");
     }
+    replaceGlobalMemoryStore(nextStore);
   });
   memWriteChain = writeOperation.catch((error) => {
     console.warn("[GUTO] Atomic user memory update failed:", error);
