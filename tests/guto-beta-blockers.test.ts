@@ -266,3 +266,22 @@ describe("Fix 3 — sanitizeRest: mínimo de 30s, sem 0s", () => {
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 5 — Regra da 1 Substituição e Pergunta Direta na 2ª recusa
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("Fix 5 — Regra de 1 Substituição direta e Pergunta de Disponibilidade na 2ª recusa", () => {
+  it("frase de disponibilidade para treino pergunta o que está livre", () => {
+    const copyPt = "Academia lotada hoje! Me fala o que você tá vendo livre aí do seu lado agora para eu adaptar, ou quer pular esse por enquanto e voltar nele no fim do treino?";
+    assert.ok(copyPt.includes("Academia lotada"));
+    assert.ok(copyPt.includes("vendo livre"));
+    assert.ok(copyPt.includes("pular esse"));
+  });
+
+  it("frase de disponibilidade para dieta pergunta o que tem em casa", () => {
+    const copyPt = "Tranquilo! Me fala o que você tem aí em casa agora para essa refeição que eu calculo a porção exata para o seu objetivo.";
+    assert.ok(copyPt.includes("tem aí em casa"));
+    assert.ok(copyPt.includes("porção exata"));
+  });
+});

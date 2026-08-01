@@ -505,6 +505,8 @@ interface GutoMemory {
   consentAcceptedAt?: string;
   consentRevokedAt?: string;
   energyLast?: string;
+  /** Histórico recente de conversa (mensagens do chat) persistido no servidor */
+  recentChatHistory?: Array<{ id: string; text: string; isGuto: boolean; timestamp: string }>;
   /** Escada de persistência do chat: estágio consecutivo de recusa no dia
    * (1=insiste com vínculo, 2=adapta a rota, 3+=aceita+consequência e para). */
   chatRefusalStage?: number;
@@ -6728,7 +6730,7 @@ function buildFoodSubstituteResponse(
     useContext: "meal_substitution",
   }).filter((food) => !rejectedIds.includes(food.id));
 
-  if (subs.length === 0) {
+  if (subs.length === 0 || (isRejectedFollowUp && Boolean(previous?.lastSuggestedId))) {
     memory.substitutionContext = {
       kind: "food",
       originalId: foodId,
@@ -6746,11 +6748,10 @@ function buildFoodSubstituteResponse(
       "Alimento sugerido foi rejeitado; aguardando alimentos disponíveis."
     );
     if (options.persist !== false) saveMemory(memory);
-    const foodLabel = getFoodById(foodId)?.names[language as FoodLanguage] || foodName;
     const fallback: Record<GutoLanguage, string> = {
-      "pt-BR": `Fechado. Não vou repetir ${foodLabel}. Me diz o que você tem disponível agora e eu encaixo mantendo a função da refeição.`,
-      "en-US": `Got it. I won't repeat ${foodLabel}. Tell me what you have available now and I will keep the same meal role.`,
-      "it-IT": `Chiaro. Non ripeto ${foodLabel}. Dimmi cosa hai disponibile ora e mantengo la stessa funzione del pasto.`,
+      "pt-BR": `Tranquilo! Me fala o que você tem aí em casa agora para essa refeição que eu calculo a porção exata para o seu objetivo.`,
+      "en-US": `No problem! Tell me what you have at home right now for this meal and I will calculate the exact portion for your goal.`,
+      "it-IT": `Tranquillo! Dimmi cosa hai a casa adesso per questo pasto e calcolo la porzione esatta per il tuo obiettivo.`,
     };
     return {
       fala: fallback[language],
@@ -8075,9 +8076,9 @@ function buildEquipmentAvailabilityQuestion({
   if (persist) saveMemory(memory);
 
   const copy: Record<GutoLanguage, string> = {
-    "pt-BR": `Já descartei algumas opções para ${original.name}. Me diz o que está livre agora: polia, halteres, banco, elástico, colchonete ou nenhum desses.`,
-    "en-US": `I already ruled out a few options for ${original.name}. Tell me what is free now: cable, dumbbells, bench, band, mat, or none of these.`,
-    "it-IT": `Ho già scartato alcune opzioni per ${original.name}. Dimmi cosa è libero ora: cavo, manubri, panca, elastico, tappetino o nessuno di questi.`,
+    "pt-BR": `Academia lotada hoje! Me fala o que você tá vendo livre aí do seu lado agora para eu adaptar, ou quer pular esse por enquanto e voltar nele no fim do treino?`,
+    "en-US": `Gym is packed today! Tell me what's free near you right now so I can adapt, or do you want to skip this one for now and come back at the end?`,
+    "it-IT": `Palestra affollata oggi! Dimmi cosa vedi libero vicino a te adesso per adattare, o vuoi saltare questo per ora e riprovarci alla fine?`,
   };
   return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
 }
@@ -8096,7 +8097,7 @@ function buildValidatedEquipmentBusyResponse({
   persist?: boolean;
 }): GutoModelResponse {
   const normalizedRejectedIds = mergeRejectedIds(rejectedIds, [original.id]);
-  if (normalizedRejectedIds.filter((id) => id !== original.id).length >= 3) {
+  if (normalizedRejectedIds.filter((id) => id !== original.id).length >= 1) {
     return buildEquipmentAvailabilityQuestion({ original, memory, language, rejectedIds: normalizedRejectedIds, persist });
   }
 
@@ -17273,7 +17274,7 @@ async function dispatchSovereignBrainAction(params: {
       ? mergeRejectedIds(
           previousExerciseSubstitution?.rejectedIds,
           [previousExerciseSubstitution?.originalId, previousExerciseSubstitution?.lastSuggestedId],
-        ).filter((id) => id !== previousExerciseSubstitution?.originalId).length >= 3
+        ).filter((id) => id !== previousExerciseSubstitution?.originalId).length >= 1
       : false;
     if (exhaustedSuggestedExercises) {
       const availabilityQuestion = await buildEquipmentBusyFallbackResponseAtomically({
@@ -18343,7 +18344,14 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
         }
       }
     }
-    result.proactiveMemoryAction = null;
+    if (input && typeof input === "string" && input.trim()) {
+      const now = new Date().toISOString();
+      const existing = memory.recentChatHistory || [];
+      const userMsg = { id: `msg-user-${crypto.randomUUID()}`, text: input.trim(), isGuto: false, timestamp: now };
+      const gutoMsg = { id: `msg-guto-${crypto.randomUUID()}`, text: result.fala || "", isGuto: true, timestamp: now };
+      memory.recentChatHistory = [...existing, userMsg, gutoMsg].slice(-40);
+      saveMemory(memory);
+    }
     res.json(enforceDecisiveSwap({
       input,
       history: history || [],
