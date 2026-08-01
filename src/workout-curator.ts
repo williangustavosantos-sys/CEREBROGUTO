@@ -329,12 +329,33 @@ async function runCuratorAttempt(
       return { kind: "retryable", reason: `muscle group validation: ${muscleCheck.offending.join("; ")}` };
     }
 
+    // Coerce types — sanitizeRest garante mínimo de 30s em exercícios principais.
+    // "0s", "0", "" e ausente são truthy ou falsy mas inválidos; todos recebem 60s
+    // como fallback seguro. Aquecimento/mobilidade não passa por este parser.
+    const sanitizeRest = (raw: unknown): string => {
+      const s = String(raw ?? "").trim();
+      // Formato NNs (ex: "45s", "120s")
+      const secMatch = s.match(/^(\d+)\s*s$/i);
+      if (secMatch) {
+        const secs = parseInt(secMatch[1], 10);
+        return secs >= 30 ? s : "30s";
+      }
+      // Formato NN min ou NN minutes (ex: "2 min")
+      const minMatch = s.match(/^(\d+)\s*min/i);
+      if (minMatch) {
+        const secs = parseInt(minMatch[1], 10) * 60;
+        return `${Math.max(30, secs)}s`;
+      }
+      // Qualquer outro formato inválido ("0", "", null, undefined, "none") → 60s
+      return "60s";
+    };
+
     // Coerce types
     const exercises: CuratedExercise[] = parsed.exercises.map((e: any) => ({
       id: String(e.id),
       sets: Number(e.sets) || 3,
       reps: String(e.reps || "10"),
-      rest: String(e.rest || "60s"),
+      rest: sanitizeRest(e.rest),
       cue: String(e.cue || ""),
       note: String(e.note || ""),
     }));

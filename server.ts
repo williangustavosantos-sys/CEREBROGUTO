@@ -6073,8 +6073,8 @@ function validateDietAgainstRestrictions(
       issues.push("contains dairy despite lactose/dairy restriction");
     }
   }
-  if (hasRestriction(["gluten", "glúten", "celiaco", "celíaco", "celiac"])) {
-    if (hasFood(["pao", "pão", "bread", "pane", "massa", "pasta", "macarrao", "macarrão", "wheat", "trigo", "farinha"])) {
+  if (hasRestriction(["gluten", "gl\u00faten", "celiaco", "cel\u00edaco", "celiac"])) {
+    if (hasFood(["pao", "p\u00e3o", "bread", "pane", "massa", "pasta", "macarrao", "macarr\u00e3o", "wheat", "trigo", "farinha"])) {
       issues.push("contains gluten source despite gluten restriction");
     }
   }
@@ -6083,14 +6083,21 @@ function validateDietAgainstRestrictions(
       issues.push("contains peanut despite peanut restriction");
     }
   }
-  if (hasRestriction(["ovo", "egg", "uovo", "uova"])) {
+  if (hasRestriction(["ovo", "egg", "uovo", "uova", "sem ovo", "no egg"])) {
     if (hasFood(["ovo", "ovos", "egg", "eggs", "uovo", "uova", "frittata", "omelete", "omelet"])) {
       issues.push("contains egg despite egg restriction");
     }
   }
-  if (hasRestriction(["peixe", "fish", "pesce", "frutos do mar", "frutti di mare", "marisco", "camarão", "camarao", "shrimp", "seafood", "shellfish", "gamberi", "salmão", "salmao", "salmon", "atum", "tuna", "tonno"])) {
-    if (hasFood(["peixe", "fish", "pesce", "camarão", "camarao", "shrimp", "gamberi", "marisco", "seafood", "shellfish", "salmão", "salmao", "salmon", "atum", "tuna", "tonno", "bacalhau", "cod", "merluzzo", "tilapia", "tilápia"])) {
+  if (hasRestriction(["peixe", "fish", "pesce", "frutos do mar", "frutti di mare", "marisco", "camar\u00e3o", "camarao", "shrimp", "seafood", "shellfish", "gamberi", "salm\u00e3o", "salmao", "salmon", "atum", "tuna", "tonno"])) {
+    if (hasFood(["peixe", "fish", "pesce", "camar\u00e3o", "camarao", "shrimp", "gamberi", "marisco", "seafood", "shellfish", "salm\u00e3o", "salmao", "salmon", "atum", "tuna", "tonno", "bacalhau", "cod", "merluzzo", "tilapia", "til\u00e1pia"])) {
       issues.push("contains seafood/fish despite seafood restriction");
+    }
+  }
+  // soja: gap identificado no beta — sem soja/no soy deve excluir tofu, edamame, tempeh e
+  // prote\u00edna de soja que antes passavam sem valida\u00e7\u00e3o.
+  if (hasRestriction(["soja", "soy", "soia", "sem soja", "no soy", "alergia soja", "soy allergy"])) {
+    if (hasFood(["tofu", "soja", "soy", "soia", "edamame", "tempeh", "proteina de soja", "prote\u00edna de soja", "leite de soja", "soy milk", "soja texturizada", "proteina vegetal"])) {
+      issues.push("contains soy despite soy restriction");
     }
   }
   if (hasRestriction(["carne vermelha", "red meat", "manzo", "bovina"])) {
@@ -6347,52 +6354,77 @@ function getUnresolvedFoodRestriction(memory: GutoMemory): string | null {
 }
 
 /**
- * Deriva a região corporal de risco direto do texto bruto da patologia.
+ * Deriva TODAS as regiões corporais de risco a partir do texto bruto da patologia.
  * Regra Soberana 1: a segurança do corpo NÃO pode depender de a classificação
  * IA (resolvedFields) estar pronta — ela roda async e o treino pode ser gerado
- * antes. Este fallback determinístico garante proteção imediata. É uma lista de
- * termos usada APENAS como rede de segurança (permitido pela Regra 3).
+ * antes. Este fallback determinístico garante proteção imediata para TODAS as
+ * patologias declaradas simultaneamente (ex.: joelho + lombar + ombro).
+ *
+ * Retorna array com todas as regiões identificadas, ou array vazio se nenhuma.
+ */
+function deriveBodyRegionsFromPathology(memory: GutoMemory): string[] {
+  const text = normalize(`${memory.trainingPathology || ""} ${memory.trainingLimitations || ""}`);
+  if (!text.trim()) return [];
+  const regions: string[] = [];
+  if (/\b(joelho|knee|ginocchio|menisco|patela|ligamento|lca|acl|condromalacia|condromalácia)\b/.test(text)) regions.push("knee");
+  if (/\b(ombro|shoulder|spalla|manguito|rotador|tendinite|tendinitis)\b/.test(text)) regions.push("shoulder");
+  if (/\b(lombar|coluna|hernia|hérnia|lower back|schiena|disco)\b/.test(text)) regions.push("lower_back");
+  if (/\b(tornozelo|ankle|caviglia)\b/.test(text)) regions.push("ankle");
+  if (/\b(quadril|hip|anca|fianco)\b/.test(text)) regions.push("hip");
+  if (/\b(punho|wrist|polso)\b/.test(text)) regions.push("wrist");
+  if (/\b(cotovelo|elbow|gomito)\b/.test(text)) regions.push("elbow");
+  return regions;
+}
+
+/**
+ * Compat shim: callers que precisam de string|undefined (hasLimitation boolean check).
+ * Retorna a primeira região se houver alguma, ou undefined.
  */
 function deriveBodyRegionFromPathology(memory: GutoMemory): string | undefined {
-  const text = normalize(`${memory.trainingPathology || ""} ${memory.trainingLimitations || ""}`);
-  if (!text.trim()) return undefined;
-  if (/\b(joelho|knee|ginocchio|menisco|patela|ligamento|lca|acl)\b/.test(text)) return "knee";
-  if (/\b(ombro|shoulder|spalla|manguito|rotador)\b/.test(text)) return "shoulder";
-  if (/\b(lombar|coluna|hernia|hérnia|lower back|schiena|disco)\b/.test(text)) return "lower_back";
-  if (/\b(tornozelo|ankle|caviglia)\b/.test(text)) return "ankle";
-  if (/\b(quadril|hip|anca|fianco)\b/.test(text)) return "hip";
-  if (/\b(punho|wrist|polso)\b/.test(text)) return "wrist";
-  if (/\b(cotovelo|elbow|gomito)\b/.test(text)) return "elbow";
-  return undefined;
+  return deriveBodyRegionsFromPathology(memory)[0];
 }
 
 function safetyFilterWorkoutPlan(plan: WorkoutPlan, memory: GutoMemory): WorkoutPlan {
   const pathology = memory.resolvedFields?.pathology;
   const riskTags = pathology?.status === "clear" ? pathology.riskTags : [];
-  // bodyRegion: prioriza a classificação resolvida; se ainda não pronta
-  // (async), cai no fallback determinístico a partir da patologia bruta.
-  const bodyRegion =
-    (pathology?.status === "clear" ? pathology.bodyRegion : undefined) ||
-    deriveBodyRegionFromPathology(memory);
-  if (!riskTags.length && !bodyRegion) return plan;
+
+  // Coleta TODAS as regiões afetadas: resolvidas pela IA (se pronta) + fallback
+  // determinístico para as demais. Com múltiplas patologias (joelho + lombar +
+  // ombro), todas são protegidas em paralelo — não só a primeira.
+  const resolvedRegion = pathology?.status === "clear" ? pathology.bodyRegion : undefined;
+  const derivedRegions = deriveBodyRegionsFromPathology(memory);
+  const allRegions: string[] = [
+    ...(resolvedRegion ? [resolvedRegion] : []),
+    ...derivedRegions.filter((r) => r !== resolvedRegion),
+  ];
+
+  if (!riskTags.length && allRegions.length === 0) return plan;
 
   const location = getLocationMode(plan.location || memory.preferredTrainingLocation || memory.trainingLocation) as CatalogLocation;
-  const substituted = applySafeExerciseSubstitutions(plan, {
-    location,
-    userRiskTags: riskTags,
-    userBodyRegion: bodyRegion,
-    language: normalizeLanguage(memory.language) as CatalogLanguage,
-  }) as WorkoutPlan;
 
-  const safeIds = new Set(filterExercisesBySafety(substituted.exercises.map((exercise) => exercise.id), {
-    userRiskTags: riskTags,
-    userBodyRegion: bodyRegion,
-  }));
+  // Aplica substituições e filtra para cada região afetada em sequência.
+  // Um exercício só permanece se passar TODOS os filtros de segurança.
+  let current = plan as WorkoutPlan;
+  for (const region of allRegions.length > 0 ? allRegions : [undefined as unknown as string]) {
+    const substituted = applySafeExerciseSubstitutions(current, {
+      location,
+      userRiskTags: riskTags,
+      userBodyRegion: region,
+      language: normalizeLanguage(memory.language) as CatalogLanguage,
+    }) as WorkoutPlan;
 
-  return {
-    ...substituted,
-    exercises: substituted.exercises.filter((exercise) => safeIds.has(exercise.id)),
-  };
+    const safeIds = new Set(filterExercisesBySafety(substituted.exercises.map((exercise) => exercise.id), {
+      userRiskTags: riskTags,
+      userBodyRegion: region,
+    }));
+
+    current = {
+      ...substituted,
+      exercises: substituted.exercises.filter((exercise) => safeIds.has(exercise.id)),
+    };
+  }
+
+  return current;
 }
 
 function isEquipmentBusyMessage(input?: string) {

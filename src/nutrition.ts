@@ -518,6 +518,18 @@ export function buildDietPrompt(
   const foodRestrictions = profile.foodRestrictions?.trim();
   const restrictions = foodRestrictions || "none";
 
+  // Estrutura múltiplas restrições como lista explícita para reduzir chance do
+  // modelo ignorar itens no meio de uma string longa separada por vírgula.
+  const restrictionLines =
+    restrictions === "none"
+      ? "none"
+      : restrictions
+          .split(/[,;]+/)
+          .map((r) => r.trim())
+          .filter(Boolean)
+          .map((r) => `- ${r}`)
+          .join("\n");
+
   const foodHint = resolveCountryFoodHint(country, countryCode);
 
   return `You are the nutrition engine of GUTO. Generate a weekly meal plan (representative daily plan).
@@ -537,7 +549,11 @@ MACROS (pre-calculated — use exactly):
 FOOD SELECTION — CRITICAL:
 ${foodHint}
 Use the country code and city/region as structured location context. Do not infer food availability from the app language, user name, accent, slang, or native culture.
-Food restrictions must be strictly respected: ${restrictions}.
+
+FOOD RESTRICTIONS — ABSOLUTE PROHIBITION:
+Each item below must be entirely absent from EVERY meal, including hidden sources and derivatives.
+Zero tolerance: if in doubt whether a food contains a restricted ingredient, exclude it.
+${restrictionLines}
 
 OUTPUT LANGUAGE — CRITICAL:
 Write ALL text (meal names, food names, notes) in ${langLabel}.
