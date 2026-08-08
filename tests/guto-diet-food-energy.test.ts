@@ -29,6 +29,8 @@ describe("diet food energy consistency", () => {
   it("calcula energia por identidade e quantidade para unidades e gramas", () => {
     assert.equal(estimateDietFoodKcal({ name: "Maçã", quantity: "2 unidades" }), 190);
     assert.equal(estimateDietFoodKcal({ name: "Pasta de amendoim", quantity: "80g" }), 470);
+    assert.equal(estimateDietFoodKcal({ name: "Bolachas de arroz", quantity: "100g" }), 387);
+    assert.equal(estimateDietFoodKcal({ name: "Atum em conserva (em óleo)", quantity: "100g" }), 198);
   });
 
   it("corrige deterministicamente as kcal antes de publicar a refeição", () => {
