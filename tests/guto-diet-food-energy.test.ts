@@ -31,6 +31,12 @@ describe("diet food energy consistency", () => {
     assert.equal(estimateDietFoodKcal({ name: "Pasta de amendoim", quantity: "80g" }), 470);
     assert.equal(estimateDietFoodKcal({ name: "Bolachas de arroz", quantity: "100g" }), 387);
     assert.equal(estimateDietFoodKcal({ name: "Atum em conserva (em óleo)", quantity: "100g" }), 198);
+    assert.equal(estimateDietFoodKcal({ name: "Atum em conserva (em azeite)", quantity: "100g" }), 198);
+  });
+
+  it("rejeita item composto que mistura duas densidades numa única quantidade", () => {
+    assert.equal(estimateDietFoodKcal({ name: "Brócolis cozido com azeite", quantity: "20g" }), null);
+    assert.equal(estimateDietFoodKcal({ name: "Salada de folhas verdes com azeite", quantity: "20g" }), null);
   });
 
   it("corrige deterministicamente as kcal antes de publicar a refeição", () => {

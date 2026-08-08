@@ -256,7 +256,7 @@ const FOOD_ENERGY_REFERENCES: FoodEnergyReference[] = [
   { names: ["bresaola"], kcalPer100g: 151 },
   { names: ["frango desfiado", "frango grelhado", "peito de frango", "frango", "chicken breast", "grilled chicken", "chicken", "pollo grigliato", "pollo", "poulet", "hahnchen"], kcalPer100g: 165 },
   { names: ["carne magra", "carne bovina", "lean beef", "manzo magro"], kcalPer100g: 200 },
-  { names: ["atum em conserva em oleo", "atum em conserva no oleo", "atum em oleo", "tuna in oil", "tonno in scatola sott'olio", "tonno sott'olio", "tonno in olio"], kcalPer100g: 198 },
+  { names: ["atum em conserva em azeite", "atum em conserva em oleo", "atum em conserva no oleo", "atum em azeite", "atum em oleo", "tuna in oil", "tonno in scatola sott'olio", "tonno sott'olio", "tonno in olio"], kcalPer100g: 198 },
   { names: ["atum em conserva", "atum", "canned tuna", "tuna", "tonno in scatola", "tonno"], kcalPer100g: 132 },
   { names: ["peixe branco", "white fish", "pesce bianco", "pesce", "pescado", "poisson"], kcalPer100g: 120 },
   { names: ["salmao", "salmon", "lachs"], kcalPer100g: 208 },
@@ -287,6 +287,7 @@ const FOOD_ENERGY_REFERENCES: FoodEnergyReference[] = [
   { names: ["brocolis", "broccoli"], kcalPer100g: 35 },
   { names: ["espinafre", "spinach", "spinaci"], kcalPer100g: 23 },
   { names: ["abobrinha", "zucchini", "zucchine"], kcalPer100g: 17 },
+  { names: ["salada", "salad", "insalata"], kcalPer100g: 20 },
   { names: ["legumes", "vegetables", "verdure", "gemuse"], kcalPer100g: 35 },
   { names: ["tortilla de maiz", "tortillas de maiz", "corn tortilla", "corn tortillas"], kcalPer100g: 218, kcalPerUnit: 52 },
   { names: ["natto"], kcalPer100g: 211 },
@@ -305,15 +306,22 @@ function normalizeFoodEnergyName(value: string): string {
 
 function findFoodEnergyReference(foodName: string): FoodEnergyReference | null {
   const normalized = normalizeFoodEnergyName(foodName);
-  let best: { reference: FoodEnergyReference; length: number } | null = null;
+  const matches: Array<{ reference: FoodEnergyReference; candidate: string }> = [];
   for (const reference of FOOD_ENERGY_REFERENCES) {
     for (const name of reference.names) {
       const candidate = normalizeFoodEnergyName(name);
       if (!candidate || !` ${normalized} `.includes(` ${candidate} `)) continue;
-      if (!best || candidate.length > best.length) best = { reference, length: candidate.length };
+      matches.push({ reference, candidate });
     }
   }
-  return best?.reference || null;
+  if (!matches.length) return null;
+  matches.sort((a, b) => b.candidate.length - a.candidate.length);
+  const best = matches[0];
+  const hasIndependentComponent = matches.some((match) =>
+    match.reference !== best.reference &&
+    !` ${best.candidate} `.includes(` ${match.candidate} `)
+  );
+  return hasIndependentComponent ? null : best.reference;
 }
 
 function parseFoodEnergyQuantity(quantity: string): { value: number; kind: "grams" | "units" } | null {
@@ -697,7 +705,7 @@ Return a JSON object with a root key named exactly "meals" (NOT "mealPlan") cont
 IDs must be exactly: "cafe", "lanche1", "almoco", "lanche2", "jantar".
 Each meal: id (string), name (string), time (string), foods (array of 2-4 objects with name/quantity/kcal), totalKcal (number), gutoNote (string).
 CALORIE CONSISTENCY — CRITICAL:
-Every foods[].kcal MUST match the food identity and displayed quantity. Use grams (g), except whole fruit/eggs where units are allowed. Never use an ambiguous serving measure.
+Every foods[].kcal MUST match the food identity and displayed quantity. Each food object MUST contain exactly one food; list oils, sauces and side dishes as separate food objects. Use grams (g), except whole fruit/eggs where units are allowed. Never use an ambiguous serving measure.
 For every meal, totalKcal MUST equal the exact sum of foods[].kcal.
 The sum of all meal totalKcal values MUST be within ±80 kcal of ${macros.targetKcal}.
 gutoNote: max 12 words, direct friend tone, in ${langLabel}.
