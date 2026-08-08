@@ -233,6 +233,135 @@ export interface DietMeal {
   alternatives?: string[];
 }
 
+interface FoodEnergyReference {
+  names: string[];
+  kcalPer100g: number;
+  kcalPerUnit?: number;
+}
+
+// Referência determinística de energia para os alimentos liberados nos prompts
+// e no fallback oficial. Valores por 100 g usam a forma pronta para consumo.
+const FOOD_ENERGY_REFERENCES: FoodEnergyReference[] = [
+  { names: ["pasta de amendoim", "peanut butter", "burro di arachidi"], kcalPer100g: 588 },
+  { names: ["azeite de oliva", "azeite", "olive oil", "olio d'oliva", "olio di oliva"], kcalPer100g: 884 },
+  { names: ["amendoas", "almonds", "mandorle", "castanhas"], kcalPer100g: 579 },
+  { names: ["aveia em flocos", "aveia", "oats", "avena", "haferflocken"], kcalPer100g: 389 },
+  { names: ["biscoito de arroz", "rice cakes", "gallette di riso"], kcalPer100g: 387, kcalPerUnit: 35 },
+  { names: ["tapioca"], kcalPer100g: 330 },
+  { names: ["cupuacu", "cupuaçu"], kcalPer100g: 49 },
+  { names: ["mandioca", "cassava"], kcalPer100g: 125 },
+  { names: ["pao integral", "whole grain bread", "wholemeal bread", "pane integrale", "pain complet", "vollkornbrot"], kcalPer100g: 247, kcalPerUnit: 74 },
+  { names: ["pao", "bread", "pane", "pain"], kcalPer100g: 250, kcalPerUnit: 75 },
+  { names: ["hommus", "hummus"], kcalPer100g: 240 },
+  { names: ["bresaola"], kcalPer100g: 151 },
+  { names: ["frango desfiado", "frango grelhado", "peito de frango", "frango", "chicken breast", "grilled chicken", "chicken", "pollo grigliato", "pollo", "poulet", "hahnchen"], kcalPer100g: 165 },
+  { names: ["carne magra", "carne bovina", "lean beef", "manzo magro"], kcalPer100g: 200 },
+  { names: ["atum em oleo", "tuna in oil", "tonno sott'olio", "tonno in olio"], kcalPer100g: 198 },
+  { names: ["atum em conserva", "atum", "canned tuna", "tuna", "tonno in scatola", "tonno"], kcalPer100g: 132 },
+  { names: ["peixe branco", "white fish", "pesce bianco", "pesce", "pescado", "poisson"], kcalPer100g: 120 },
+  { names: ["salmao", "salmon", "lachs"], kcalPer100g: 208 },
+  { names: ["bacalhau", "salt cod"], kcalPer100g: 105 },
+  { names: ["ovos mexidos", "ovos", "eggs", "uova", "huevos", "eier", "oeufs"], kcalPer100g: 143, kcalPerUnit: 72 },
+  { names: ["arroz cozido", "arroz", "cooked rice", "rice", "riso cotto", "riso", "riz"], kcalPer100g: 128 },
+  { names: ["macarrao", "massa", "pasta", "spaghetti"], kcalPer100g: 158 },
+  { names: ["batata-doce", "sweet potato", "patata dolce"], kcalPer100g: 86 },
+  { names: ["batata cozida", "batata", "potato", "patata", "papa", "kartoffeln"], kcalPer100g: 87 },
+  { names: ["feijao", "beans", "fagioli", "frijoles"], kcalPer100g: 127 },
+  { names: ["lentilha", "lentils", "lenticchie", "lentejas"], kcalPer100g: 116 },
+  { names: ["grao-de-bico", "chickpeas", "ceci"], kcalPer100g: 164 },
+  { names: ["leguminosas", "legumes secs", "legumineuses"], kcalPer100g: 130 },
+  { names: ["iogurte de soja", "soy yogurt", "yogurt di soia"], kcalPer100g: 60 },
+  { names: ["iogurte grego", "greek yogurt", "yogurt greco", "iogurte", "yogurt", "yogur", "yaourt"], kcalPer100g: 80 },
+  { names: ["cottage cheese", "cottage", "ricotta", "quark", "huttenkase", "fromage blanc"], kcalPer100g: 98 },
+  { names: ["mozzarella"], kcalPer100g: 280 },
+  { names: ["parmigiano", "parmesao", "parmesan"], kcalPer100g: 431 },
+  { names: ["prosciutto", "presunto"], kcalPer100g: 195 },
+  { names: ["jamon serrano"], kcalPer100g: 241 },
+  { names: ["queso fresco"], kcalPer100g: 299 },
+  { names: ["tofu"], kcalPer100g: 120 },
+  { names: ["abacate", "avocado", "aguacate"], kcalPer100g: 160 },
+  { names: ["banana"], kcalPer100g: 89, kcalPerUnit: 105 },
+  { names: ["maca", "apple", "mela"], kcalPer100g: 52, kcalPerUnit: 95 },
+  { names: ["frutas vermelhas", "berries", "frutti di bosco"], kcalPer100g: 57 },
+  { names: ["fruta", "fruit", "frutto"], kcalPer100g: 52, kcalPerUnit: 80 },
+  { names: ["brocolis", "broccoli"], kcalPer100g: 35 },
+  { names: ["espinafre", "spinach", "spinaci"], kcalPer100g: 23 },
+  { names: ["abobrinha", "zucchini", "zucchine"], kcalPer100g: 17 },
+  { names: ["legumes", "vegetables", "verdure", "gemuse"], kcalPer100g: 35 },
+  { names: ["tortilla de maiz", "tortillas de maiz", "corn tortilla", "corn tortillas"], kcalPer100g: 218, kcalPerUnit: 52 },
+  { names: ["natto"], kcalPer100g: 211 },
+  { names: ["sopa de miso", "miso soup"], kcalPer100g: 40 },
+  { names: ["algas", "seaweed"], kcalPer100g: 45 },
+];
+
+function normalizeFoodEnergyName(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function findFoodEnergyReference(foodName: string): FoodEnergyReference | null {
+  const normalized = normalizeFoodEnergyName(foodName);
+  let best: { reference: FoodEnergyReference; length: number } | null = null;
+  for (const reference of FOOD_ENERGY_REFERENCES) {
+    for (const name of reference.names) {
+      const candidate = normalizeFoodEnergyName(name);
+      if (!candidate || !` ${normalized} `.includes(` ${candidate} `)) continue;
+      if (!best || candidate.length > best.length) best = { reference, length: candidate.length };
+    }
+  }
+  return best?.reference || null;
+}
+
+function parseFoodEnergyQuantity(quantity: string): { value: number; kind: "grams" | "units" } | null {
+  const match = quantity.trim().match(/(\d+(?:[.,]\d+)?)\s*([\p{L}]+)?/u);
+  if (!match) return null;
+  let value = Number(match[1].replace(",", "."));
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const unit = normalizeFoodEnergyName(match[2] || "");
+  if (["kg", "quilo", "quilos"].includes(unit)) {
+    value *= 1000;
+    return { value, kind: "grams" };
+  }
+  if (["g", "gr", "grama", "gramas", "ml"].includes(unit)) return { value, kind: "grams" };
+  if (["un", "und", "unidade", "unidades", "unit", "units", "pcs", "pc", "fatia", "fatias", "slice", "slices", "fetta", "fette"].includes(unit)) {
+    return { value, kind: "units" };
+  }
+  return null;
+}
+
+export function estimateDietFoodKcal(food: Pick<DietFood, "name" | "quantity">): number | null {
+  const reference = findFoodEnergyReference(food.name);
+  const quantity = parseFoodEnergyQuantity(food.quantity);
+  if (!reference || !quantity) return null;
+  if (quantity.kind === "units") {
+    return reference.kcalPerUnit ? Math.round(reference.kcalPerUnit * quantity.value) : null;
+  }
+  return Math.round((reference.kcalPer100g * quantity.value) / 100);
+}
+
+export function validateDietFoodEnergy(meals: DietMeal[]): { valid: boolean; issues: string[] } {
+  const issues: string[] = [];
+  for (const meal of meals) {
+    for (const food of meal.foods) {
+      const expected = estimateDietFoodKcal(food);
+      if (expected === null) {
+        issues.push(`${meal.id || meal.name}/${food.name}: energia não calculável para a quantidade "${food.quantity}"`);
+        continue;
+      }
+      const displayed = Math.round(Number(food.kcal) || 0);
+      const tolerance = Math.max(30, Math.round(expected * 0.25));
+      if (displayed <= 0 || Math.abs(displayed - expected) > tolerance) {
+        issues.push(`${meal.id || meal.name}/${food.name}: ${food.quantity} indica ~${expected} kcal, não ${displayed} kcal`);
+      }
+    }
+  }
+  return { valid: issues.length === 0, issues };
+}
+
 export interface DietSubstitutionPendingOperation {
   operationId: string;
   status: "pending" | "reconciliation_pending";
@@ -356,27 +485,24 @@ export function validateAndCorrectPortions(meals: DietMeal[]): {
     ...meal,
     foods: meal.foods.map((food) => {
       const rule = findPortionRule(food.name);
-      if (!rule) return food;
-
+      let correctedFood = food;
       const parsed = parseQuantityValue(food.quantity);
-      if (!parsed) return food;
-
-      const isUnits = rule.unit === "units";
-      const val = parsed.value;
-
-      if (val < rule.min) {
-        const corrected = `${rule.min}${isUnits ? " un" : "g"}`;
-        issues.push(`${food.name}: ${food.quantity} → corrigido para ${corrected} (mínimo)`);
-        return { ...food, quantity: corrected };
+      if (rule && parsed) {
+        const isUnits = rule.unit === "units";
+        const val = parsed.value;
+        if (val < rule.min) {
+          const corrected = `${rule.min}${isUnits ? " un" : "g"}`;
+          issues.push(`${food.name}: ${food.quantity} → corrigido para ${corrected} (mínimo)`);
+          correctedFood = { ...food, quantity: corrected };
+        } else if (val > rule.max) {
+          const corrected = `${rule.max}${isUnits ? " un" : "g"}`;
+          issues.push(`${food.name}: ${food.quantity} → corrigido para ${corrected} (máximo)`);
+          correctedFood = { ...food, quantity: corrected };
+        }
       }
 
-      if (val > rule.max) {
-        const corrected = `${rule.max}${isUnits ? " un" : "g"}`;
-        issues.push(`${food.name}: ${food.quantity} → corrigido para ${corrected} (máximo)`);
-        return { ...food, quantity: corrected };
-      }
-
-      return food;
+      const expectedKcal = estimateDietFoodKcal(correctedFood);
+      return expectedKcal === null ? correctedFood : { ...correctedFood, kcal: expectedKcal };
     }),
   }));
 
@@ -391,7 +517,7 @@ export function normalizeMealCalories(meals: DietMeal[]): DietMeal[] {
 }
 
 export function validateDietCalories(meals: DietMeal[], targetKcal: number): { valid: boolean; dailyTotal: number; issues: string[] } {
-  const issues: string[] = [];
+  const issues: string[] = [...validateDietFoodEnergy(meals).issues];
   meals.forEach((meal) => {
     const inputTotal = Math.round(Number(meal.totalKcal) || 0);
     const foodTotal = meal.foods.reduce((sum, food) => sum + Math.round(Number(food.kcal) || 0), 0);
@@ -451,14 +577,19 @@ export function scaleDietToTarget(meals: DietMeal[], targetKcal: number): DietMe
   };
 
   return meals.map((meal) => {
-    const foods = meal.foods.map((food) => ({
-      ...food,
-      kcal: Math.round((Number(food.kcal) || 0) * factor),
-      proteinG: typeof food.proteinG === "number" ? Math.round(food.proteinG * factor) : food.proteinG,
-      carbsG: typeof food.carbsG === "number" ? Math.round(food.carbsG * factor) : food.carbsG,
-      fatG: typeof food.fatG === "number" ? Math.round(food.fatG * factor) : food.fatG,
-      quantity: scaleQuantity(food.quantity),
-    }));
+    const foods = meal.foods.map((food) => {
+      const quantity = scaleQuantity(food.quantity);
+      const scaledFood = {
+        ...food,
+        kcal: Math.round((Number(food.kcal) || 0) * factor),
+        proteinG: typeof food.proteinG === "number" ? Math.round(food.proteinG * factor) : food.proteinG,
+        carbsG: typeof food.carbsG === "number" ? Math.round(food.carbsG * factor) : food.carbsG,
+        fatG: typeof food.fatG === "number" ? Math.round(food.fatG * factor) : food.fatG,
+        quantity,
+      };
+      const expectedKcal = estimateDietFoodKcal(scaledFood);
+      return expectedKcal === null ? scaledFood : { ...scaledFood, kcal: expectedKcal };
+    });
     return { ...meal, foods, totalKcal: foods.reduce((acc, food) => acc + food.kcal, 0) };
   });
 }
@@ -566,6 +697,7 @@ Return a JSON object with a root key named exactly "meals" (NOT "mealPlan") cont
 IDs must be exactly: "cafe", "lanche1", "almoco", "lanche2", "jantar".
 Each meal: id (string), name (string), time (string), foods (array of 2-4 objects with name/quantity/kcal), totalKcal (number), gutoNote (string).
 CALORIE CONSISTENCY — CRITICAL:
+Every foods[].kcal MUST match the food identity and displayed quantity. Use grams (g), except whole fruit/eggs where units are allowed. Never use an ambiguous serving measure.
 For every meal, totalKcal MUST equal the exact sum of foods[].kcal.
 The sum of all meal totalKcal values MUST be within ±80 kcal of ${macros.targetKcal}.
 gutoNote: max 12 words, direct friend tone, in ${langLabel}.
