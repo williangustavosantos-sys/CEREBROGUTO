@@ -19,8 +19,8 @@ describe("Fase 3 — BUG 1: scaleDietToTarget (reparo de calorias)", () => {
   it("escala um plano levemente fora da meta para dentro de ±80 kcal", () => {
     const target = 2000;
     const meals = [
-      meal("cafe", [food("Aveia", 700), food("Banana", 200)]),
-      meal("almoco", [food("Arroz", 800), food("Frango", 600)]),
+      meal("cafe", [food("Aveia", 700, "180g"), food("Banana", 210, "2 unidades")]),
+      meal("almoco", [food("Arroz", 800, "625g"), food("Frango", 590, "358g")]),
       // total = 2300 → +300 da meta (fora de ±80, mas reparável)
     ];
     const repaired = scaleDietToTarget(meals, target);
