@@ -41,8 +41,8 @@ export class RedisV3OperationalState implements OperationalStateStore {
   ) {}
 
   static fromEnvironment(): RedisV3OperationalState {
-    const url = process.env.UPSTASH_REDIS_REST_URL || "";
-    const token = process.env.UPSTASH_REDIS_REST_TOKEN || "";
+    const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL || "";
+    const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN || "";
     if (!url || !token) {
       throw new V3Error("V3_REDIS_NOT_CONFIGURED", "Redis V3 não configurado.", 503);
     }

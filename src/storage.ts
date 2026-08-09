@@ -47,8 +47,8 @@ function getImageRedisClient(): ImageRedisClient | null {
   if (imageRedisClientOverrideForTests !== undefined) return imageRedisClientOverrideForTests;
   if (process.env.NODE_ENV === "test" || !process.env.VERCEL) return null;
   if (imageRedisClient) return imageRedisClient;
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
   if (!url || !token) return null;
   imageRedisClient = new Redis({ url, token }) as unknown as ImageRedisClient;
   return imageRedisClient;

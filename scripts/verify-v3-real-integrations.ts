@@ -14,15 +14,15 @@ import type { ActiveContext, ActorContext } from "../src/v3/types.js";
 
 const required = [
   "DATABASE_URL",
-  "UPSTASH_REDIS_REST_URL",
-  "UPSTASH_REDIS_REST_TOKEN",
   "GEMINI_API_KEY",
   "MEM0_API_KEY",
   "LANGFUSE_PUBLIC_KEY",
   "LANGFUSE_SECRET_KEY",
 ] as const;
 
-const missing = required.filter((name) => !process.env[name]);
+const missing: string[] = required.filter((name) => !process.env[name]);
+if (!(process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL)) missing.push("UPSTASH_REDIS_REST_URL|KV_REST_API_URL");
+if (!(process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN)) missing.push("UPSTASH_REDIS_REST_TOKEN|KV_REST_API_TOKEN");
 if (missing.length) throw new Error(`Missing required V3 integration variables: ${missing.join(", ")}`);
 
 const pool = createV3Pool();
@@ -30,8 +30,8 @@ const repository = new PostgresOfficialStateRepository(pool);
 const operational = RedisV3OperationalState.fromEnvironment();
 const relationshipMemory = new Mem0RelationshipMemoryStore();
 const rawRedis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL || "",
-  token: process.env.UPSTASH_REDIS_REST_TOKEN || "",
+  url: process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL || "",
+  token: process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN || "",
 });
 const service = new V3CutoverService(repository);
 const tenantKey = "guto-v3-integration";

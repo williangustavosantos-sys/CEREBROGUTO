@@ -47,8 +47,8 @@ let localWriteChain: Promise<void> = Promise.resolve();
 function getRedisClient(): RedisClient | null {
   if (process.env.GUTO_DISABLE_REDIS_FOR_TESTS === "1") return null;
   if (redisClient) return redisClient;
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
   if (!url || !token) return null;
   try {
     redisClient = new Redis({ url, token }) as unknown as RedisClient;
