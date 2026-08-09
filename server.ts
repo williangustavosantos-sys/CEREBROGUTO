@@ -10142,10 +10142,9 @@ function getSovereignWorkoutMissingFields(memory: GutoMemory): string[] {
 }
 
 // ─── Escada de persistência do chat (recusa / cansaço / adiamento) ──────────
-// Estágio consecutivo na MESMA conversa-dia: 1 = insiste com o vínculo da dupla;
-// 2 = adapta a rota (caminhada/mínimo); 3+ = aceita, aplica a consequência de XP
-// e PARA de empurrar. A intensidade do estágio 1 sobe com os dias parados — a
-// A firmeza do GUTO vem do plano e dos fatos, nunca de coerção emocional.
+// Estágio consecutivo na MESMA conversa-dia: 1 = mantém a direção pelo plano;
+// 2 = adapta a rota (caminhada/mínimo); 3+ = respeita a decisão e PARA de
+// empurrar. A firmeza do GUTO vem de fatos e segurança, nunca de coerção.
 type RefusalIntentKind = "resistance_common" | "fatigue_common" | "postpone";
 
 function advanceChatRefusalStage(memory: GutoMemory): number {
