@@ -132,7 +132,16 @@ describe("Fase 3 — BUG 3: classificador determinístico de troca/dúvida", () 
       if (!url.includes("generativelanguage.googleapis.com")) return originalFetch(input as any, init);
       const body = JSON.parse(String(init?.body || "{}")) as { contents?: Array<{ parts?: Array<{ text?: string }> }> };
       const prompt = body.contents?.[0]?.parts?.[0]?.text || "";
-      const message = prompt.split("MENSAGEM DO USUÁRIO:").pop() || prompt;
+      const currentMessageBlock = prompt.match(/<CURRENT_MESSAGE>\s*([\s\S]*?)\s*<\/CURRENT_MESSAGE>/)?.[1];
+      let message = prompt.split("MENSAGEM DO USUÁRIO:").pop() || prompt;
+      if (currentMessageBlock) {
+        try {
+          const parsed = JSON.parse(currentMessageBlock) as { message?: unknown };
+          message = typeof parsed.message === "string" ? parsed.message : message;
+        } catch {
+          message = currentMessageBlock;
+        }
+      }
       let payload: any = { fala: "Foca no glúteo médio e controle a descida.", acao: "none", expectedResponse: null };
       if (/User message:\s*Troca\b/i.test(message)) {
         payload = {

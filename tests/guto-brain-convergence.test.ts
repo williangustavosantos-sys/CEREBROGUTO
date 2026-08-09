@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { Server } from "node:http";
+import { request as httpRequest, type Server } from "node:http";
 import jwt from "jsonwebtoken";
 import { getCatalogById, suggestExerciseSubstitutes, validateExerciseSubstitute } from "../exercise-catalog.js";
 
@@ -24,6 +24,7 @@ const META_KEYS = ["validation", "meta", "kind", "via", "reasoning", "modelCalle
 
 const originalFetch = globalThis.fetch;
 let callsByKind: Record<string, number> = {};
+let sovereignBrainRequestBodies: string[] = [];
 let brainModelDelayMs = 0;
 let curatorStubPayload: Record<string, unknown> | null = null;
 let stubPayload: Record<string, unknown> = {
@@ -60,6 +61,7 @@ function installFetchStub() {
       else if (body.includes("meal") || body.includes("calories") || body.includes("macros")) kind = "diet";
       else kind = "executorModel";
       callsByKind[kind] = (callsByKind[kind] || 0) + 1;
+      if (kind === "brain") sovereignBrainRequestBodies.push(body);
       if (kind === "brain" && brainModelDelayMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, brainModelDelayMs));
       }
@@ -204,6 +206,41 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2_000) {
   }
 }
 
+async function postJsonOnFreshConnection(
+  url: string,
+  headers: Record<string, string>,
+  body: Record<string, unknown>,
+): Promise<{ status: number; body: Record<string, any> }> {
+  const target = new URL(url);
+  const payload = JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: "POST",
+      agent: false,
+      headers: {
+        ...headers,
+        "Content-Length": Buffer.byteLength(payload),
+      },
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolve({
+          status: response.statusCode || 0,
+          body: text ? JSON.parse(text) as Record<string, any> : {},
+        });
+      });
+    });
+    request.once("error", reject);
+    request.end(payload);
+  });
+}
+
 describe("Convergência arquitetural — cérebro soberano principal", () => {
   before(async () => {
     process.env.GUTO_MEMORY_FILE = file;
@@ -239,6 +276,7 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     transcriptStub = "oi pelo audio";
     brainModelDelayMs = 0;
     curatorStubPayload = null;
+    sovereignBrainRequestBodies = [];
   });
 
   after(async () => {
@@ -777,17 +815,17 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     const arrival = fetch(`${baseUrl}/guto/proactive?force=1&language=pt-BR`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    await waitUntil(() => (callsByKind.brain || 0) >= 1);
+    await waitUntil(() => sovereignBrainRequestBodies.some((body) => body.includes(userId)));
 
-    const update = await fetch(`${baseUrl}/guto/memory`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({
+    const update = await postJsonOnFreshConnection(
+      `${baseUrl}/guto/memory`,
+      { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      {
         language: "pt-BR",
         trainingPathology: "dor no joelho direito",
         trainingLimitations: "dor no joelho direito",
-      }),
-    });
+      },
+    );
     assert.equal(update.status, 200);
 
     const response = await arrival;
@@ -843,7 +881,7 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     const arrival = fetch(`${baseUrl}/guto/proactive?force=1&language=pt-BR`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    await waitUntil(() => (callsByKind.brain || 0) >= 1);
+    await waitUntil(() => sovereignBrainRequestBodies.some((body) => body.includes(userId)));
 
     await updateMemoryAtomically<Record<string, any>>(userId, (current) => {
       const persisted = { ...(current as Record<string, any>) };
@@ -914,7 +952,7 @@ describe("Convergência arquitetural — cérebro soberano principal", () => {
     const arrival = fetch(`${baseUrl}/guto/proactive?force=1&language=pt-BR`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    await waitUntil(() => (callsByKind.brain || 0) >= 1);
+    await waitUntil(() => sovereignBrainRequestBodies.some((body) => body.includes(userId)));
 
     await updateMemoryAtomically<Record<string, any>>(userId, (current) => {
       const persisted = { ...(current as Record<string, any>) };

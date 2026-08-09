@@ -597,11 +597,52 @@ describe("GUTO as a single organism - 20 cross-system scenarios", () => {
       if (url.includes("generativelanguage.googleapis.com")) {
         const payload = {
           meals: [
-            { id: "cafe", name: "Cafe", time: "08:00", foods: [{ name: "Aveia", quantity: "100g", kcal: 520 }], totalKcal: 520 },
-            { id: "lanche1", name: "Lanche 1", time: "10:30", foods: [{ name: "Banana", quantity: "100g", kcal: 250 }], totalKcal: 250 },
-            { id: "almoco", name: "Almoco", time: "13:00", foods: [{ name: "Arroz", quantity: "160g", kcal: 520 }, { name: "Feijao", quantity: "160g", kcal: 430 }], totalKcal: 950 },
-            { id: "lanche2", name: "Lanche 2", time: "16:30", foods: [{ name: "Castanhas", quantity: "60g", kcal: 330 }], totalKcal: 330 },
-            { id: "jantar", name: "Jantar", time: "20:00", foods: [{ name: "Lentilha", quantity: "180g", kcal: 620 }], totalKcal: 620 },
+            {
+              id: "cafe",
+              name: "Cafe",
+              time: "08:00",
+              foods: [
+                { name: "Aveia", quantity: "80g", kcal: 311 },
+                { name: "Banana", quantity: "2 unidades", kcal: 210 },
+                { name: "Castanhas", quantity: "40g", kcal: 232 },
+              ],
+              totalKcal: 753,
+            },
+            {
+              id: "almoco",
+              name: "Almoco",
+              time: "13:00",
+              foods: [
+                { name: "Arroz", quantity: "180g", kcal: 230 },
+                { name: "Feijao", quantity: "160g", kcal: 203 },
+                { name: "Tofu", quantity: "200g", kcal: 240 },
+                { name: "Azeite", quantity: "15g", kcal: 133 },
+              ],
+              totalKcal: 806,
+            },
+            {
+              id: "lanche",
+              name: "Lanche",
+              time: "16:30",
+              foods: [
+                { name: "Castanhas", quantity: "40g", kcal: 232 },
+                { name: "Maca", quantity: "2 unidades", kcal: 190 },
+              ],
+              totalKcal: 422,
+            },
+            {
+              id: "jantar",
+              name: "Jantar",
+              time: "20:00",
+              foods: [
+                { name: "Lentilha", quantity: "160g", kcal: 186 },
+                { name: "Arroz", quantity: "180g", kcal: 230 },
+                { name: "Tofu", quantity: "200g", kcal: 240 },
+                { name: "Azeite", quantity: "15g", kcal: 133 },
+                { name: "Legumes", quantity: "200g", kcal: 70 },
+              ],
+              totalKcal: 859,
+            },
           ],
         };
         return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(payload) }] } }] }), {

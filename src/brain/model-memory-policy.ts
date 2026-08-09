@@ -36,7 +36,7 @@ function declaresFoodPreference(input: string): boolean {
   return /\b(nao como|nao consumo|nao posso comer|alerg|intoler|vegano|vegana|vegetariano|vegetariana|sem lactose|sem gluten|i do not eat|i dont eat|allerg|intoler|vegan|vegetarian|non mangio|non consumo|non posso mangiare|senza lattosio|senza glutine)\b/.test(text);
 }
 
-function declaresTrainingLocation(input: string): boolean {
+export function declaresTrainingLocation(input: string): boolean {
   const text = normalizeText(input);
   return /\b(treino|treinar|academia|ginasio|casa|parque|condominio|gym|train|training|home|park|palestra|alleno|allenarmi)\b/.test(text) &&
     /\b(em|na|no|num|mudei|agora|at|in|to|a|al|alla|cambiato)\b/.test(text);

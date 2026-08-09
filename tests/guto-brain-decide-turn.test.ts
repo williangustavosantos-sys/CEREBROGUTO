@@ -24,6 +24,7 @@ const baseWorldState: ReducedWorldState = {
 function makeDeps(opts: {
   modelResult: ModelCallResult | (() => Promise<ModelCallResult>);
   parsed: unknown;
+  authorizeMemoryPatch?: (proposal: Record<string, unknown>, currentMessage: string) => Record<string, unknown>;
   persist?: (userId: string, patch: Record<string, unknown>) => Promise<void>;
 }) {
   const counters = { build: 0, model: 0, parse: 0, persist: 0 };
@@ -42,6 +43,7 @@ function makeDeps(opts: {
       counters.parse++;
       return opts.parsed;
     },
+    authorizeMemoryPatch: opts.authorizeMemoryPatch,
     persist: opts.persist
       ? async (userId, patch) => {
           counters.persist++;
@@ -78,6 +80,7 @@ test("resposta válida com memoryPatch → persiste exatamente 1x + persisted:tr
       expectedResponse: null,
       memoryPatch: { lastMood: "motivado" },
     },
+    authorizeMemoryPatch: (proposal) => proposal,
     persist: async (_userId, patch) => {
       persistedPatch = patch;
     },
@@ -115,6 +118,7 @@ test("2B: updateWorkout → ok, preserva acao e persiste o memoryPatch", async (
       expectedResponse: null,
       memoryPatch: { nextWorkoutFocus: "chest_triceps" },
     },
+    authorizeMemoryPatch: (proposal) => proposal,
     persist: async () => {},
   });
   const contract = await decideTurn({ worldState: baseWorldState, input: "bora treinar" }, deps);
@@ -137,6 +141,7 @@ test("ação generateDiet → ok, preserva acao e persiste memoryPatch", async (
       expectedResponse: null,
       memoryPatch: { x: 1 },
     },
+    authorizeMemoryPatch: (proposal) => proposal,
     persist: async (_userId, patch) => {
       persistedPatch = patch;
     },
@@ -228,6 +233,7 @@ test("falha de persistência → validation continua ok, persisted:false, fala n
       expectedResponse: null,
       memoryPatch: { lastMood: "ok" },
     },
+    authorizeMemoryPatch: (proposal) => proposal,
     persist: async () => {
       throw new Error("disco cheio");
     },

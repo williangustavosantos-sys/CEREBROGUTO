@@ -67,8 +67,17 @@ function installGeminiMock() {
 
     const prompt = extractPrompt(init);
     const isBrainTurn = prompt.includes("CÉREBRO SOBERANO V2");
-    const inputMatch = prompt.match(/MENSAGEM DO USUÁRIO:\s*([\s\S]*)$/);
-    const inputMsg = inputMatch ? inputMatch[1].trim().toLowerCase() : "";
+    const currentMessageBlock = prompt.match(/<CURRENT_MESSAGE>\s*([\s\S]*?)\s*<\/CURRENT_MESSAGE>/)?.[1];
+    const legacyInputMatch = prompt.match(/MENSAGEM DO USUÁRIO:\s*([\s\S]*)$/);
+    let inputMsg = legacyInputMatch ? legacyInputMatch[1].trim().toLowerCase() : "";
+    if (currentMessageBlock) {
+      try {
+        const parsed = JSON.parse(currentMessageBlock) as { message?: unknown };
+        inputMsg = typeof parsed.message === "string" ? parsed.message.trim().toLowerCase() : inputMsg;
+      } catch {
+        inputMsg = currentMessageBlock.trim().toLowerCase();
+      }
+    }
 
     if (isBrainTurn && inputMsg.includes("dor nas pernas")) {
       // Esclarecimento da limitação → atualiza o campo certo + executa o treino.

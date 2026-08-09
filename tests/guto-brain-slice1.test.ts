@@ -228,7 +228,7 @@ describe("Golden Transcripts — Fatia 1 do Cérebro Soberano", () => {
       assert.equal(modelCallCount, 2, "persistência é efeito do cérebro — sem chamada extra de modelo");
       // O patch foi aplicado à memória uma vez (o legado/askGutoModel NÃO rodou).
       const mem = readMem("gt2-persist");
-      assert.match(String(mem.trainingLocation || ""), /academia central/i);
+      assert.equal(mem.trainingLocation, "gym");
       for (const k of META_KEYS) assert.ok(!(k in body), `body não pode conter '${k}'`);
     });
 

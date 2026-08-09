@@ -64,8 +64,9 @@ function writeUserMemory(userId: string, data: Record<string, any>) {
   writeFileSync(testMemoryFile, JSON.stringify(store, null, 2));
 }
 
-function seedVisibleWorkoutFocus(userId: string, focus = "legs_core") {
+function seedVisibleWorkoutFocus(userId: string, focus = "legs_core", language: GutoLanguage = "pt-BR") {
   writeUserMemory(userId, {
+    language,
     lastSuggestedFocus: focus,
     lastWorkoutPlan: { focusKey: focus },
   });
@@ -392,7 +393,7 @@ describe("GUTO contextual muscle history", () => {
   for (const testCase of localizedCases) {
     it(`resolves contextual and compound history in ${testCase.language}`, async () => {
       const yesterdayUserId = `history-context-${testCase.language}-yesterday`;
-      seedVisibleWorkoutFocus(yesterdayUserId);
+      seedVisibleWorkoutFocus(yesterdayUserId, "legs_core", testCase.language);
       const yesterdayResponse = await postGuto({
         language: testCase.language,
         profile: { userId: yesterdayUserId, name: "Will" },
@@ -406,7 +407,7 @@ describe("GUTO contextual muscle history", () => {
       assertNoPortugueseLeak(yesterdayResponse, testCase.language);
 
       const dayBeforeUserId = `history-context-${testCase.language}-day-before`;
-      seedVisibleWorkoutFocus(dayBeforeUserId);
+      seedVisibleWorkoutFocus(dayBeforeUserId, "legs_core", testCase.language);
       const dayBeforeResponse = await postGuto({
         language: testCase.language,
         profile: { userId: dayBeforeUserId, name: "Will" },
@@ -419,6 +420,7 @@ describe("GUTO contextual muscle history", () => {
       assert.equal(dayBeforeMemory.trainingLimitations, undefined);
 
       const compoundUserId = `history-context-${testCase.language}-compound`;
+      writeUserMemory(compoundUserId, { language: testCase.language });
       const compoundResponse = await postGuto({
         language: testCase.language,
         profile: { userId: compoundUserId, name: "Will", trainingLocation: "academia" },

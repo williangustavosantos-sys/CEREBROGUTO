@@ -110,7 +110,7 @@ import {
   buildSovereignSystemInstruction,
   buildSovereignTurnData,
 } from "./src/brain/sovereign-prompt.js";
-import { authorizeModelMemoryPatch } from "./src/brain/model-memory-policy.js";
+import { authorizeModelMemoryPatch, declaresTrainingLocation } from "./src/brain/model-memory-policy.js";
 import { enforcePersonalityBoundary } from "./src/brain/personality-policy.js";
 import { applyLevelStructure, resolveTrainingLevel, type WorkoutLanguage, type TrainingLevel } from "./src/workout-level.js";
 import {
@@ -3869,7 +3869,7 @@ function isClearNoLimitationFallback(value: string): boolean {
   return (
     /\b(sem dor|sem limitacao|sem lesao|nenhuma dor|nenhuma limitacao|nao tenho dor|nao tenho limitacao)\b/.test(normalized) ||
     /\b(no pain|no limitation|no injury|nothing hurts|all clear)\b/.test(normalized) ||
-    /\b(nessun dolore|nessun dolor|non ho dolori|non ho dolore|nessuna limitazione|nessun limite|sto libero|sono libero)\b/.test(normalized)
+    /\b(nessun dolore|nessun dolor|senza dolore|senza dolori|non ho dolori|non ho dolore|nessuna limitazione|nessun limite|sto libero|sono libero)\b/.test(normalized)
   );
 }
 
@@ -5686,7 +5686,8 @@ async function applyMemoryPatch(memory: GutoMemory, patch?: GutoModelResponse["m
     memory.trainingSchedule = patch.trainingSchedule;
   }
   if (typeof patch.trainingLocation === "string" && patch.trainingLocation.trim()) {
-    const next = normalizeMemoryValue(patch.trainingLocation);
+    const rawLocation = normalizeMemoryValue(patch.trainingLocation);
+    const next = extractTrainingLocation(rawLocation) || rawLocation;
     if (memory.trainingLocation !== next) changedFields.add("trainingLocation");
     memory.trainingLocation = next;
   }
@@ -14633,13 +14634,27 @@ function summarizeReportedLimitation(text: string): string {
 function applyLimitationToMemory(memory: GutoMemory, value: string, reason: string): void {
   memory.trainingLimitations = value;
   memory.trainingPathology = value;
+  const locallyResolved = resolveKnownPathologyLocally(value, new Date().toISOString());
+  if (locallyResolved) {
+    memory.resolvedFields = {
+      ...memory.resolvedFields,
+      pathology: locallyResolved,
+    };
+  }
   // Limitação mudou → o treino atual precisa adaptar. Invalida para recálculo,
   // salvo se travado pelo Coach (que o GUTO não pode sobrescrever automaticamente).
   if (memory.lastWorkoutPlan && !isCoachLockedWorkout(memory.lastWorkoutPlan)) {
     memory.lastWorkoutPlan = null;
     memory.nextWorkoutFocus = chooseNextWorkoutFocus(memory);
   }
-  appendMemoryAudit(memory, "chat_patch", ["trainingLimitations", "trainingPathology"], reason);
+  appendMemoryAudit(
+    memory,
+    "chat_patch",
+    locallyResolved
+      ? ["trainingLimitations", "trainingPathology", "resolvedFields"]
+      : ["trainingLimitations", "trainingPathology"],
+    reason,
+  );
   commitMemoryDecision(memory);
 }
 
@@ -14946,11 +14961,22 @@ function requestChangesWorkoutProfile(body: unknown): boolean {
 async function generateAndCommitBrainWorkout(
   memory: GutoMemory,
   language: GutoLanguage,
-  focusHint: WorkoutFocus | string | undefined
+  focusHint: WorkoutFocus | string | undefined,
+  requestGuard?: {
+    profileFingerprint: string;
+    profileMutationRevision: number;
+  },
 ): Promise<WorkoutPlan | null> {
-  const profileMutationRevision = getWorkoutProfileMutationRevision(memory.userId);
-  if (hasWorkoutProfileMutationInFlight(memory.userId)) return null;
-  const generationFingerprint = buildWorkoutGenerationFingerprint(memory);
+  const profileMutationRevision = requestGuard?.profileMutationRevision
+    ?? getWorkoutProfileMutationRevision(memory.userId);
+  if (
+    hasWorkoutProfileMutationInFlight(memory.userId) ||
+    getWorkoutProfileMutationRevision(memory.userId) !== profileMutationRevision
+  ) {
+    return null;
+  }
+  const generationFingerprint = requestGuard?.profileFingerprint
+    ?? buildWorkoutGenerationFingerprint(memory);
   const semanticFocus: WorkoutFocus = chooseNextWorkoutFocus(memory, (focusHint || memory.nextWorkoutFocus) as WorkoutFocus | undefined);
   const baseLocationRaw = memory.preferredTrainingLocation || memory.trainingLocation || "casa";
   const locationRaw = getWeatherAdjustedTrainingLocation(memory, baseLocationRaw, null);
@@ -16052,6 +16078,172 @@ function buildWorkoutCompletionFallbackResponse(
       nextWorkoutFocus: memory.nextWorkoutFocus,
     },
   };
+}
+
+function buildTrainingHistoryOperationalResponse(
+  memory: GutoMemory,
+  input: string,
+  language: GutoLanguage,
+): GutoModelResponse | null {
+  const normalizedInput = normalize(input);
+  const reportsTraining = /\b(treinei|trained|allenato|allenata|allenei)\b/.test(normalizedInput);
+  const reportsRecentPair = /\b(ultimos dois dias|last two days|ultimi due giorni)\b/.test(normalizedInput);
+
+  let historyItems: RecentTrainingHistoryItem[] = [];
+  if (reportsTraining && reportsRecentPair) {
+    const mentionedFocuses: WorkoutFocus[] = [];
+    if (/\b(perna|pernas|legs|gambe)\b/.test(normalizedInput)) mentionedFocuses.push("legs_core");
+    if (/\b(peito|chest|petto)\b/.test(normalizedInput)) mentionedFocuses.push("chest_triceps");
+    if (/\b(costas|back|schiena)\b/.test(normalizedInput)) mentionedFocuses.push("back_biceps");
+    if (/\b(ombros?|shoulders?|spalle)\b/.test(normalizedInput)) mentionedFocuses.push("shoulders_abs");
+    historyItems = Array.from(new Set(mentionedFocuses)).map((muscleGroup) => ({
+      dateLabel: "recent" as const,
+      muscleGroup,
+      raw: normalizeMemoryValue(input),
+      createdAt: new Date().toISOString(),
+    }));
+  } else {
+    const intent = classifyContractIntentFallback({ rawInput: input, memory });
+    if (intent.kind !== "history_reference" || intent.confidence < 0.6) return null;
+    const muscleGroup = intent.muscleGroup || getCurrentMissionFocus(memory);
+    if (!muscleGroup || !intent.dateLabel) return null;
+    historyItems = [{
+      dateLabel: intent.dateLabel,
+      muscleGroup,
+      raw: normalizeMemoryValue(input),
+      createdAt: new Date().toISOString(),
+    }];
+  }
+
+  if (historyItems.length === 0) return null;
+  memory.recentTrainingHistory = normalizeRecentTrainingHistory(historyItems, memory.recentTrainingHistory || []);
+  memory.nextWorkoutFocus = chooseNextWorkoutFocus(memory);
+  appendMemoryAudit(
+    memory,
+    "trained_reference",
+    ["recentTrainingHistory", "nextWorkoutFocus"],
+    "Histórico muscular explícito resolvido e persistido pelo executor determinístico.",
+  );
+  commitMemoryDecision(memory);
+
+  const isCompound = historyItems.length > 1;
+  const blocked = new Set((memory.recentTrainingHistory || []).map((item) => item.muscleGroup));
+  const needsSafetyProfile = !(memory.userAge || memory.trainingAge) || !(memory.trainingLimitations || memory.trainingPathology);
+  const ptSingleFala = blocked.has("chest_triceps") && blocked.has("back_biceps")
+    ? "Não repito peito nem costas. O próximo bloco é pernas e core."
+    : historyItems[0]?.muscleGroup === "chest_triceps"
+      ? "Boa. Não repito peito e tríceps."
+      : "Boa. Histórico confirmado. Não repito esse foco; o próximo bloco já está alinhado.";
+  return {
+    fala: isCompound
+      ? pickByLanguage(language, {
+          "pt-BR": "Não repito pernas/core nem peito/tríceps. O próximo bloco é costas e bíceps.",
+          "en-US": "Not repeating legs/core or chest/triceps. The next block is back and biceps.",
+          "it-IT": "Non ripeto gambe/core né petto/tricipiti. Il prossimo blocco è schiena e bicipiti.",
+        })
+      : pickByLanguage(language, {
+          "pt-BR": needsSafetyProfile ? `${ptSingleFala} Me manda tua idade e dor.` : ptSingleFala,
+          "en-US": "Good. History confirmed. I will not repeat that focus; the next block is lined up.",
+          "it-IT": "Bene. Storico confermato. Non ripeto quel focus; il prossimo blocco è pronto.",
+        }),
+    acao: "none",
+    expectedResponse: needsSafetyProfile
+      ? {
+          type: "text",
+          context: "training_limitations",
+          instruction: pickByLanguage(language, {
+            "pt-BR": "Responder idade e dor real, se houver.",
+            "en-US": "Reply with age and any real pain.",
+            "it-IT": "Rispondi con età e qualsiasi dolore reale.",
+          }),
+        }
+      : null,
+    avatarEmotion: "default",
+  };
+}
+
+function applyTrustedTrainingProfileFacts(
+  memory: GutoMemory,
+  input: string,
+  language: GutoLanguage,
+  expectedResponse?: ExpectedResponse | null,
+): void {
+  const raw = stripInjectedContext(input).trim();
+  if (!raw) return;
+  const text = normalize(raw);
+  const changedFields = new Set<string>();
+
+  const extractedLocation = extractTrainingLocation(raw);
+  const location = extractedLocation && (
+    declaresTrainingLocation(raw) ||
+    normalizeExpectedResponse(expectedResponse)?.context === "training_location"
+  )
+    ? extractedLocation
+    : undefined;
+  if (location) {
+    if (memory.trainingLocation !== location) changedFields.add("trainingLocation");
+    memory.trainingLocation = location;
+    const updatesPreferredLocation =
+      !memory.preferredTrainingLocation ||
+      normalizeExpectedResponse(expectedResponse)?.context === "training_location" ||
+      /\b(mudei|troquei|agora treino|i switched|i train at|now train at|cambiato|mi alleno)\b/.test(text);
+    if (updatesPreferredLocation && ["gym", "home", "park", "mixed"].includes(location)) {
+      if (memory.preferredTrainingLocation !== location) changedFields.add("preferredTrainingLocation");
+      memory.preferredTrainingLocation = location as GutoMemory["preferredTrainingLocation"];
+    }
+  }
+
+  const explicitAge = parseAgeFromText(raw);
+  if (explicitAge && memory.userAge !== explicitAge) {
+    memory.userAge = explicitAge;
+    changedFields.add("userAge");
+  }
+
+  if (/\b(amanha|tomorrow|domani)\b/.test(text) && memory.trainingSchedule !== "tomorrow") {
+    memory.trainingSchedule = "tomorrow";
+    changedFields.add("trainingSchedule");
+  } else if (/^\s*(hoje|today|oggi)\b/.test(text) && memory.trainingSchedule !== "today") {
+    memory.trainingSchedule = "today";
+    changedFields.add("trainingSchedule");
+  }
+
+  const illnessReturn = /\b(doente|doenca|sick|illness|malato|malattia)\b/.test(text);
+  const returning = /\b(voltando|retomando|returning|getting back|ripresa|riprendendo|tornando ad allenarmi)\b/.test(text);
+  if (illnessReturn) {
+    const status = language === "it-IT"
+      ? "in ripresa dopo malattia"
+      : language === "en-US"
+        ? "returning after illness"
+        : "doente e voltando agora";
+    const limitation = language === "it-IT"
+      ? "in ripresa dopo malattia"
+      : language === "en-US"
+        ? "returning after illness"
+        : "voltando de doença";
+    if (memory.trainingStatus !== status) changedFields.add("trainingStatus");
+    if (memory.trainingLimitations !== limitation) changedFields.add("trainingLimitations");
+    memory.trainingStatus = status;
+    memory.trainingLimitations = limitation;
+  } else if (returning) {
+    const status = language === "it-IT" ? "in ripresa" : language === "en-US" ? "returning" : "voltando agora";
+    if (memory.trainingStatus !== status) changedFields.add("trainingStatus");
+    memory.trainingStatus = status;
+  }
+
+  if (isClearNoLimitationFallback(raw)) {
+    const limitation = language === "it-IT" ? "nessuna" : language === "en-US" ? "no pain" : "sem dor";
+    if (memory.trainingLimitations !== limitation) changedFields.add("trainingLimitations");
+    memory.trainingLimitations = limitation;
+  }
+
+  if (changedFields.size === 0) return;
+  appendMemoryAudit(
+    memory,
+    "chat_patch",
+    Array.from(changedFields),
+    "Fatos de calibragem explicitamente declarados e validados pelo executor determinístico.",
+  );
+  commitMemoryDecision(memory);
 }
 
 function mapHistoryForBrain(history: GutoHistoryItem[] = []) {
@@ -17230,6 +17422,9 @@ async function buildNoModelOperationalFallback(params: {
   }
 
   if (scope === "all") {
+    const trainingHistoryFact = buildTrainingHistoryOperationalResponse(memory, input, language);
+    if (trainingHistoryFact) return trainingHistoryFact;
+
     const foodRestrictionFact = await buildFoodRestrictionFactResponse(memory, input, language);
     if (foodRestrictionFact) return foodRestrictionFact;
 
@@ -17364,6 +17559,10 @@ async function dispatchSovereignBrainAction(params: {
   worldState: WorldStateV2;
   resolverResult?: ResolverResult | null;
   turnId?: string;
+  workoutGenerationGuard?: {
+    profileFingerprint: string;
+    profileMutationRevision: number;
+  };
 }): Promise<GutoModelResponse> {
   const { response, memory, language } = params;
   const activeContext = normalizeActiveContext(memory.activeContext);
@@ -17516,7 +17715,12 @@ async function dispatchSovereignBrainAction(params: {
         return buildMissingTrainingFieldsResponse(language, missingTrainingFields);
       }
       const focusHint = (response.memoryPatch as { nextWorkoutFocus?: string } | undefined)?.nextWorkoutFocus;
-      const plan = await generateAndCommitBrainWorkout(memory, language, focusHint);
+      const plan = await generateAndCommitBrainWorkout(
+        memory,
+        language,
+        focusHint,
+        params.workoutGenerationGuard,
+      );
       if (!plan) return buildSovereignSafeFallback(language, "Não consegui executar o treino com segurança agora.");
       const contextTransitioned = await activateFirstWorkoutItem(memory, plan);
       return {
@@ -17657,6 +17861,16 @@ async function runSovereignBrainTurn(params: {
   classifyRiskFn?: typeof classifyRisk;
 }): Promise<GutoModelResponse> {
   const { memory, input, history, language, operationalContext } = params;
+  if (!params.systemTrigger) {
+    applyTrustedTrainingProfileFacts(memory, input, language, params.expectedResponse);
+  }
+  // The model and executor must share the same profile epoch. Capturing this
+  // before any model call closes the race where the profile changes while the
+  // LLM is deciding but finishes before workout generation starts.
+  const workoutGenerationGuard = {
+    profileFingerprint: buildWorkoutGenerationFingerprint(memory),
+    profileMutationRevision: getWorkoutProfileMutationRevision(memory.userId),
+  };
   const confirmedLastSuggestedItem = confirmRequestLastSuggestedItem(
     params.lastSuggestedItem,
     memory,
@@ -17743,6 +17957,14 @@ async function runSovereignBrainTurn(params: {
   if (!requestContextIsCurrent()) return staleContextResponse();
   if (proactiveStateFallback) return finalizeSovereignBrainResponse(proactiveStateFallback, input, language);
 
+  // Histórico muscular altera rotação e plano futuro, portanto nunca depende de
+  // memoryPatch do modelo. O executor valida o relato explícito contra a missão
+  // oficial e persiste antes de qualquer composição livre do LLM.
+  if (!params.systemTrigger) {
+    const trainingHistoryFact = buildTrainingHistoryOperationalResponse(memory, input, language);
+    if (trainingHistoryFact) return finalizeSovereignBrainResponse(trainingHistoryFact, input, language);
+  }
+
   if (!GEMINI_API_KEY) {
     const requiredSystemFallback = await runRequiredSystemFallback();
     if (requiredSystemFallback) return requiredSystemFallback;
@@ -17804,6 +18026,7 @@ async function runSovereignBrainTurn(params: {
       worldState,
       resolverResult: params.resolverResult ?? null,
       turnId: params.turnId,
+      workoutGenerationGuard,
     });
     return finalizeSovereignBrainResponse(workoutResult, input, language);
   }
@@ -17943,6 +18166,7 @@ async function runSovereignBrainTurn(params: {
     worldState,
     resolverResult: params.resolverResult ?? null,
     turnId: params.turnId,
+    workoutGenerationGuard,
   });
 
   return finalizeSovereignBrainResponse(dispatched, input, language);
