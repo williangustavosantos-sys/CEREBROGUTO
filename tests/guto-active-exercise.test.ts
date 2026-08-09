@@ -137,4 +137,25 @@ describe("active exercise bridge (chat ↔ GUTO Online)", () => {
     })
     assert.equal(res.status, 401)
   })
+
+  it("returns activeExercise = null for a new user and never leaks another user's exercise", async () => {
+    writeUserMemory(USER_ID, {
+      activeExercise: {
+        source: "online",
+        name: "elliptical machine",
+        updatedAt: new Date().toISOString(),
+      },
+    })
+
+    const newUserId = "active-exercise-brand-new-user"
+    const res = await fetch(`${baseUrl}/guto/memory`, {
+      headers: authHeaders(newUserId),
+    })
+    assert.equal(res.status, 200)
+
+    const memory = await res.json() as { userId: string; activeExercise?: unknown }
+    assert.equal(memory.userId, newUserId)
+    assert.equal(memory.activeExercise, null)
+    assert.equal((readUserMemory(USER_ID).activeExercise as { name?: string }).name, "elliptical machine")
+  })
 })

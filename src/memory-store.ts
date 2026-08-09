@@ -13,6 +13,7 @@ import { dirname } from "path";
 import { randomUUID } from "node:crypto";
 import { Redis } from "@upstash/redis";
 import { config } from "./config.js";
+import { assertValidUserId } from "./user-id.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -117,6 +118,7 @@ export async function acquireDistributedUserLease(
   userId: string,
   options: { ttlMs?: number; waitMs?: number } = {}
 ): Promise<{ waited: boolean; release: () => Promise<void> }> {
+  assertValidUserId(userId);
   const redis = getRedisClient();
   if (!redis) return { waited: false, release: async () => {} };
 
@@ -156,7 +158,7 @@ let globalMemoryLoaded = false;
 
 function cloneStoreValue<T>(value: T): T {
   if (value == null || typeof value !== "object") return value;
-  return JSON.parse(JSON.stringify(value)) as T;
+  return structuredClone(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -394,7 +396,7 @@ function replaceGlobalMemoryStore(store: MemoryStore): void {
   for (const key in globalMemoryStore) {
     delete globalMemoryStore[key];
   }
-  Object.assign(globalMemoryStore, store);
+  Object.assign(globalMemoryStore, cloneStoreValue(store));
 }
 
 // ─── Filesystem helpers ───────────────────────────────────────────────────────
@@ -438,7 +440,7 @@ export async function readMemoryStoreAsync(): Promise<MemoryStore> {
         ? (typeof raw === "string" ? JSON.parse(raw) : raw)
         : {}) as MemoryStore;
       replaceGlobalMemoryStore(store);
-      return store;
+      return cloneStoreValue(store);
     } catch (err) {
       console.warn("[GUTO] Redis read failed, falling back to filesystem:", err);
     }
@@ -448,11 +450,11 @@ export async function readMemoryStoreAsync(): Promise<MemoryStore> {
   const fromFile = readFromFile();
   if (Object.keys(fromFile).length > 0) {
     replaceGlobalMemoryStore(fromFile);
-    return fromFile;
+    return cloneStoreValue(fromFile);
   }
 
   // In-memory (last resort)
-  return { ...globalMemoryStore };
+  return cloneStoreValue(globalMemoryStore);
 }
 
 /**
@@ -465,6 +467,7 @@ export async function readMemoryStoreAsync(): Promise<MemoryStore> {
  * change from an optimistic-concurrency guard.
  */
 export async function readPersistedUserMemorySnapshot(userId: string): Promise<unknown> {
+  assertValidUserId(userId);
   const redis = getRedisClient();
   if (redis) {
     // A Redis read failure must remain observable. Falling back to a packaged
@@ -489,10 +492,7 @@ export async function readPersistedUserMemorySnapshot(userId: string): Promise<u
  */
 export async function writeMemoryStoreAsync(store: MemoryStore): Promise<void> {
   // Clear the in-memory cache to ensure a full replacement (especially for nuke/reset)
-  for (const key in globalMemoryStore) {
-    delete globalMemoryStore[key];
-  }
-  Object.assign(globalMemoryStore, store);
+  replaceGlobalMemoryStore(store);
 
   const redis = getRedisClient();
   if (redis) {
@@ -519,15 +519,15 @@ export function readMemoryStoreSync(): MemoryStore {
   // of that packaged file, or newly calibrated users appear to lose their
   // profile on the next request.
   if (getRedisClient()) {
-    return { ...globalMemoryStore };
+    return cloneStoreValue(globalMemoryStore);
   }
 
   const fromFile = readFromFile();
   if (Object.keys(fromFile).length > 0) {
     replaceGlobalMemoryStore(fromFile);
-    return fromFile;
+    return cloneStoreValue(fromFile);
   }
-  return { ...globalMemoryStore };
+  return cloneStoreValue(globalMemoryStore);
 }
 
 /**
@@ -535,10 +535,7 @@ export function readMemoryStoreSync(): MemoryStore {
  */
 export function writeMemoryStoreSync(store: MemoryStore): void {
   // Clear the in-memory cache to ensure a full replacement
-  for (const key in globalMemoryStore) {
-    delete globalMemoryStore[key];
-  }
-  Object.assign(globalMemoryStore, store);
+  replaceGlobalMemoryStore(store);
   writeToFile(store);
 }
 
@@ -654,6 +651,7 @@ async function hydrateMemoryStoreFromRedisForWrite(redis: RedisClient): Promise<
 }
 
 export function persistUserMemory(userId: string, memory: unknown): Promise<void> {
+  assertValidUserId(userId);
   const snapshot = cloneStoreValue(memory);
   globalMemoryStore[userId] = mergeProtectedUserMemorySnapshot(globalMemoryStore[userId], snapshot); // cache imediato p/ leituras sync
   const wroteLocalSnapshot = writeToFile(globalMemoryStore);
@@ -702,6 +700,7 @@ export function persistUserMemoryPatch(
   listAppends: UserMemoryListAppend[] = [],
   options: { requireExisting?: boolean } = {}
 ): Promise<void> {
+  assertValidUserId(userId);
   const patchSnapshot = cloneStoreValue(patch);
   const appendSnapshots = cloneStoreValue(listAppends);
 
@@ -754,6 +753,7 @@ export async function updateUserMemoryAtomically<T>(
   userId: string,
   updater: (current: unknown) => T | null | Promise<T | null>
 ): Promise<T | null> {
+  assertValidUserId(userId);
   let result: T | null = null;
   const redis = getRedisClient();
   const writeOperation = memWriteChain.then(async () => {
