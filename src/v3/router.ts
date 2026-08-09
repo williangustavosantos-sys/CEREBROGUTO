@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import express, { type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import { z } from "zod";
-import { CalibrationMutationSchema, V3TurnRequestSchema } from "./contracts.js";
+import { CalibrationMutationSchema, V3MemoryMutationSchema, V3TurnRequestSchema } from "./contracts.js";
+import { V3CutoverService } from "./cutover-service.js";
 import { asV3Error, V3Error } from "./errors.js";
 import { ProfileServiceV3 } from "./executors.js";
 import { isLangfuseConfigured } from "./observability/instrumentation.js";
@@ -11,15 +12,42 @@ import type { ActorContext } from "./types.js";
 import { getEffectiveUserAccessAsync } from "../user-access-store.js";
 import { GUTO_CORE_TEAM_ID } from "../team-store.js";
 
-const ActiveContextMutationSchema = z.object({
-  requestId: z.string().uuid(),
-  expectedVersion: z.number().int().positive().nullable(),
-  kind: z.enum(["workout", "diet"]),
-  planId: z.string().uuid(),
-  itemId: z.string().uuid(),
-});
+const ActiveContextMutationSchema = z.discriminatedUnion("clear", [
+  z.object({ requestId: z.string().uuid(), clear: z.literal(true), expectedVersion: z.number().int().positive().nullable() }),
+  z.object({
+    requestId: z.string().uuid(),
+    clear: z.literal(false),
+    expectedVersion: z.number().int().positive().nullable(),
+    kind: z.enum(["workout", "diet"]),
+    planId: z.string().uuid(),
+    itemId: z.string().uuid(),
+  }),
+]);
+
+const RequestIdSchema = z.object({ requestId: z.string().uuid() });
 
 function v3Enabled(): boolean { return process.env.GUTO_V3_ENABLED === "true"; }
+
+const legacyAuthorityPrefixes = [
+  "/guto/memory",
+  "/guto/consent/accept",
+  "/guto/consent/revoke",
+  "/guto/validate-workout",
+  "/guto/diet",
+  "/guto/active-context",
+  "/guto/active-exercise",
+  "/guto/arena",
+  "/guto/proactive",
+  "/guto/proactivity",
+  "/guto/online/exception",
+  "/guto-audio",
+] as const;
+
+export function isLegacyAuthorityPath(pathname: string): boolean {
+  if (pathname === "/guto") return true;
+  if (pathname.startsWith("/guto/v3")) return false;
+  return legacyAuthorityPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+}
 
 async function resolveActor(req: Request, options?: { provision?: boolean }): Promise<ActorContext> {
   if (!req.gutoUser) throw new V3Error("V3_AUTH_REQUIRED", "Autenticação necessária.", 401);
@@ -103,15 +131,59 @@ export function createV3Router(requireActiveUser: RequestHandler): express.Route
     try {
       const user = req.gutoUser!;
       const result = await withV3Trace({ requestId, externalSubject: user.userId, attributes: { "guto.input_category": "state_read" } }, async () => {
-        const actor = await resolveActor(req);
-        const [snapshot, activeContext] = await Promise.all([
-          withV3Span("POSTGRES_TRANSACTION", { "guto.operation": "state_read" }, () => getV3Runtime().repository.loadOfficialSnapshot(actor)),
+        const actor = await resolveActor(req, { provision: true });
+        const [state, activeContext] = await Promise.all([
+          withV3Span("POSTGRES_TRANSACTION", { "guto.operation": "state_read" }, () => getV3Runtime().repository.loadAppState(actor)),
           withV3Span("ACTIVE_CONTEXT_LOAD", {}, () => getV3Runtime().operational.getActiveContext(actor)),
         ]);
-        return { brainVersion: "guto-cerebro-v3", requestId, traceId: currentTraceId(), snapshot, activeContext };
+        return { brainVersion: "guto-cerebro-v3", requestId, traceId: currentTraceId(), state, activeContext };
       });
       res.setHeader("x-guto-trace-id", result.traceId);
       res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/consent/accept", requireActiveUser, guardEnabled, async (req, res, next) => {
+    try {
+      const input = RequestIdSchema.parse(req.body);
+      const actor = await resolveActor(req, { provision: true });
+      const state = await getV3Runtime().operational.withLock(actor, "consent", () =>
+        new V3CutoverService(getV3Runtime().repository).acceptConsent(actor, input.requestId));
+      const activeContext = await getV3Runtime().operational.getActiveContext(actor);
+      res.json({ brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext });
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/memory", requireActiveUser, guardEnabled, async (req, res, next) => {
+    try {
+      const input = V3MemoryMutationSchema.parse(req.body);
+      const actor = await resolveActor(req, { provision: true });
+      const state = await getV3Runtime().operational.withLock(actor, "memory", () =>
+        new V3CutoverService(getV3Runtime().repository).saveMemory(actor, input));
+      const activeContext = await getV3Runtime().operational.getActiveContext(actor);
+      res.json({ brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext });
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/workout/generate", requireActiveUser, guardEnabled, async (req, res, next) => {
+    try {
+      const input = RequestIdSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const state = await getV3Runtime().operational.withLock(actor, "workout-generate", () =>
+        new V3CutoverService(getV3Runtime().repository).generateWorkout(actor, input.requestId));
+      const activeContext = await getV3Runtime().operational.getActiveContext(actor);
+      res.json({ brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext });
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/diet/generate", requireActiveUser, guardEnabled, async (req, res, next) => {
+    try {
+      const input = RequestIdSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const state = await getV3Runtime().operational.withLock(actor, "diet-generate", () =>
+        new V3CutoverService(getV3Runtime().repository).generateDiet(actor, input.requestId));
+      const activeContext = await getV3Runtime().operational.getActiveContext(actor);
+      res.json({ brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext });
     } catch (error) { next(error); }
   });
 
@@ -136,6 +208,10 @@ export function createV3Router(requireActiveUser: RequestHandler): express.Route
       const user = req.gutoUser!;
       const result = await withV3Trace({ requestId: input.requestId, externalSubject: user.userId, attributes: { "guto.input_category": "active_context" } }, async () => {
         const actor = await withV3Span("AUTH", {}, () => resolveActor(req));
+        if (input.clear) {
+          await getV3Runtime().operational.clearActiveContext(actor, input.expectedVersion);
+          return { requestId: input.requestId, traceId: currentTraceId(), brainVersion: "guto-cerebro-v3", activeContext: null };
+        }
         const snapshot = await withV3Span("POSTGRES_TRANSACTION", { "guto.operation": "active_context_validate" }, () =>
           getV3Runtime().repository.loadOfficialSnapshot(actor));
         const plan = input.kind === "workout" ? snapshot.workout : snapshot.diet;
@@ -164,6 +240,17 @@ export function createV3Router(requireActiveUser: RequestHandler): express.Route
       res.setHeader("x-guto-trace-id", result.traceId);
       res.json(result);
     } catch (error) { next(error); }
+  });
+
+  // Em ambiente de cutover, uma rota legada não pode virar uma segunda fonte
+  // de verdade por chamada direta, cliente antigo ou retry fora de versão.
+  router.use((req, res, next) => {
+    if (!v3Enabled() || !isLegacyAuthorityPath(req.path)) return next();
+    res.status(409).json({
+      error: "V3_LEGACY_AUTHORITY_DISABLED",
+      message: "Este fluxo pertence exclusivamente ao Cérebro V3 neste ambiente.",
+      brainVersion: "guto-cerebro-v3",
+    });
   });
 
   router.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {

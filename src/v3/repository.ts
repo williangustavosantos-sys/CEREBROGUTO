@@ -5,6 +5,8 @@ import type {
   CandidateOption,
   DietPlan,
   OfficialSnapshot,
+  V3AppState,
+  XpReasonCode,
 } from "./types.js";
 
 export interface FoodReplacement {
@@ -48,7 +50,30 @@ export interface OfficialStateRepository {
     displayName?: string;
   }): Promise<ActorContext>;
   loadOfficialSnapshot(actor: ActorContext): Promise<OfficialSnapshot>;
+  loadAppState(actor: ActorContext): Promise<V3AppState>;
+  persistJourney(input: {
+    actor: ActorContext;
+    requestId: string;
+    displayName?: string;
+    preferredLanguage?: "pt-BR" | "en-US" | "it-IT";
+    acceptConsent?: boolean;
+    confirmName?: boolean;
+    initialXpRewardSeen?: boolean;
+  }): Promise<void>;
   persistCalibration(actor: ActorContext, input: CalibrationMutation): Promise<CalibrationResult>;
+  completePact(input: {
+    actor: ActorContext;
+    requestId: string;
+    displayName: string;
+    workoutDraft: WorkoutPlanDraft;
+    dietDraft: DietPlanDraft;
+  }): Promise<void>;
+  recordXp(input: {
+    actor: ActorContext;
+    requestId: string;
+    reasonCode: XpReasonCode;
+    sourceKey: string;
+  }): Promise<void>;
   replaceWorkoutPlan(input: { actor: ActorContext; requestId: string; draft: WorkoutPlanDraft }): Promise<import("./types.js").WorkoutPlan>;
   replaceDietPlan(input: { actor: ActorContext; requestId: string; draft: DietPlanDraft }): Promise<DietPlan>;
   swapExercise(input: {

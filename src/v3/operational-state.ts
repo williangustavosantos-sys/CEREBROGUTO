@@ -7,6 +7,7 @@ export interface OperationalStateStore {
   health(): Promise<{ ok: boolean; latencyMs: number }>;
   getActiveContext(actor: ActorContext): Promise<ActiveContext | null>;
   compareAndSetActiveContext(actor: ActorContext, expectedVersion: number | null, next: ActiveContext): Promise<void>;
+  clearActiveContext(actor: ActorContext, expectedVersion: number | null): Promise<void>;
   beginRequest(actor: ActorContext, requestId: string): Promise<{ state: "started" | "pending" | "completed"; response?: V3TurnResponse; requestToken?: string }>;
   completeRequest(actor: ActorContext, requestId: string, requestToken: string, response: V3TurnResponse): Promise<void>;
   abortRequest(actor: ActorContext, requestId: string, requestToken: string): Promise<void>;
@@ -82,6 +83,19 @@ export class RedisV3OperationalState implements OperationalStateStore {
     }
   }
 
+  async clearActiveContext(actor: ActorContext, expectedVersion: number | null): Promise<void> {
+    const result = await this.redis.eval(
+      `local current = redis.call('GET', KEYS[1])
+       if not current then return ARGV[1] == '-1' and 1 or 0 end
+       local decoded = cjson.decode(current)
+       if tostring(decoded.version) ~= ARGV[1] then return 0 end
+       return redis.call('DEL', KEYS[1])`,
+      [activeContextKey(actor)],
+      [String(expectedVersion ?? -1)],
+    );
+    if (Number(result) !== 1) throw new V3Error("V3_ACTIVE_CONTEXT_CONFLICT", "O contexto ativo mudou durante a limpeza.", 409);
+  }
+
   async beginRequest(actor: ActorContext, requestId: string): Promise<{ state: "started" | "pending" | "completed"; response?: V3TurnResponse; requestToken?: string }> {
     const key = idempotencyKey(actor, requestId);
     const requestToken = randomUUID();
@@ -149,6 +163,11 @@ export class InMemoryOperationalState implements OperationalStateStore {
     const current = this.contexts.get(scope(actor));
     if ((current?.version ?? null) !== expectedVersion) throw new V3Error("V3_ACTIVE_CONTEXT_CONFLICT", "O contexto ativo mudou durante a operação.", 409);
     this.contexts.set(scope(actor), structuredClone(next));
+  }
+  async clearActiveContext(actor: ActorContext, expectedVersion: number | null): Promise<void> {
+    const current = this.contexts.get(scope(actor));
+    if ((current?.version ?? null) !== expectedVersion) throw new V3Error("V3_ACTIVE_CONTEXT_CONFLICT", "O contexto ativo mudou durante a limpeza.", 409);
+    this.contexts.delete(scope(actor));
   }
   async beginRequest(actor: ActorContext, requestId: string): Promise<{ state: "started" | "pending" | "completed"; response?: V3TurnResponse; requestToken?: string }> {
     const key = `${scope(actor)}:${requestId}`;

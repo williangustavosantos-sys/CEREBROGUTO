@@ -64,6 +64,12 @@ export function generateWorkoutDraft(snapshot: OfficialSnapshot): WorkoutPlanDra
       position,
       sets: position === 0 ? 1 : returning ? 3 : 4,
       reps: position === 0 ? "5-8 min" : snapshot.goal.code === "hypertrophy" ? "8-12" : "10-15",
+      canonicalNamePt: exercise.canonicalNamePt,
+      rest: position === 0 ? "0:30min" : "1:30min",
+      cue: exercise.movementPattern ? `Executa ${exercise.movementPattern} com controle e sem dor.` : "Execução controlada e sem dor.",
+      note: "A técnica manda. Interrompe se houver dor.",
+      videoUrl: exercise.videoUrl,
+      sourceFileName: exercise.sourceFileName,
     })),
   };
 }

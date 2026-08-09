@@ -94,6 +94,33 @@ export const CalibrationMutationSchema = z.object({
 
 export type CalibrationMutation = z.infer<typeof CalibrationMutationSchema>;
 
+export const V3MemoryMutationSchema = z.object({
+  requestId: z.string().uuid(),
+  name: z.string().trim().min(1).max(80).optional(),
+  confirmedName: z.boolean().optional(),
+  language: z.enum(["pt-BR", "en-US", "it-IT"]).optional(),
+  initialXpRewardSeen: z.boolean().optional(),
+  xpEvent: z.enum([
+    "grant_initial_xp",
+    "complete_daily_mission",
+    "accept_adapted_mission",
+    "apply_daily_miss_penalty",
+  ]).optional(),
+  biologicalSex: z.enum(["female", "male"]).optional(),
+  userAge: z.number().int().min(13).max(120).optional(),
+  weightKg: z.number().positive().max(500).optional(),
+  heightCm: z.number().min(100).max(250).optional(),
+  trainingLevel: z.enum(["beginner", "returning", "consistent", "advanced"]).optional(),
+  trainingGoal: z.enum(["consistency", "fat_loss", "muscle_gain", "conditioning", "mobility_health"]).optional(),
+  preferredTrainingLocation: z.enum(["gym", "home", "park", "mixed"]).optional(),
+  trainingPathology: z.string().trim().max(500).optional(),
+  country: z.string().trim().max(160).optional(),
+  city: z.string().trim().max(160).optional(),
+  foodRestrictions: z.string().trim().max(500).optional(),
+});
+
+export type V3MemoryMutation = z.infer<typeof V3MemoryMutationSchema>;
+
 export const NutritionToleranceSchema = z.object({
   mealToPlanKcal: z.number().nonnegative().default(2),
   macroToPlanKcal: z.number().nonnegative().default(20),

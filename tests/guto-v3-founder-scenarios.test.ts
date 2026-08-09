@@ -5,6 +5,7 @@ import { genkit } from "genkit";
 import type { DecisionModel } from "../src/v3/ai.js";
 import type { CandidateProvider } from "../src/v3/candidate-provider.js";
 import type { DecisionEnvelope } from "../src/v3/contracts.js";
+import { isLegacyAuthorityPath } from "../src/v3/router.js";
 import { GutoContextBuilderV3 } from "../src/v3/context-builder.js";
 import { createGutoTurnFlow } from "../src/v3/flow.js";
 import { InMemoryOfficialStateRepository } from "../src/v3/in-memory-repository.js";
@@ -14,6 +15,7 @@ import { InMemoryRelationshipMemoryStore } from "../src/v3/relationship-memory.j
 import type { ActiveContext, CandidateOption, OfficialSnapshot, TurnEnvelope } from "../src/v3/types.js";
 import { generateDietDraft, generateWorkoutDraft } from "../src/v3/generation-engines.js";
 import { getCatalogById, getExerciseRiskTags } from "../exercise-catalog.js";
+import { V3CutoverService } from "../src/v3/cutover-service.js";
 
 const TENANT_A = "10000000-0000-4000-8000-000000000001";
 
@@ -367,4 +369,124 @@ test("V3 idempotency releases a failed request for a safe retry and rejects stal
     }),
     /idempotência/iu,
   );
+});
+
+test("V3 new-user cutover persists consent, calibration, pact, workout, diet and XP in one authority", async () => {
+  const repository = new InMemoryOfficialStateRepository();
+  const service = new V3CutoverService(repository);
+  const actor = await repository.provisionActor({
+    externalSubject: "cutover-new-user",
+    role: "student",
+    tenantKey: "GUTO_CORE",
+    tenantName: "GUTO_CORE",
+  });
+  await service.acceptConsent(actor, "91000000-0000-4000-8000-000000000001");
+  await service.saveMemory(actor, {
+    requestId: "91000000-0000-4000-8000-000000000002",
+    name: "Will",
+    confirmedName: true,
+    language: "pt-BR",
+  });
+  await service.saveMemory(actor, {
+    requestId: "91000000-0000-4000-8000-000000000003",
+    language: "pt-BR",
+    biologicalSex: "male",
+    userAge: 22,
+    weightKg: 80,
+    heightCm: 178,
+    trainingLevel: "returning",
+    trainingGoal: "muscle_gain",
+    preferredTrainingLocation: "gym",
+    trainingPathology: "limitação lombar",
+    country: "South Africa",
+    city: "Alberton",
+    foodRestrictions: "vegetariana",
+  });
+  const pactRequest = "91000000-0000-4000-8000-000000000004";
+  const first = await service.saveMemory(actor, {
+    requestId: pactRequest,
+    name: "Will",
+    language: "pt-BR",
+    xpEvent: "grant_initial_xp",
+  });
+  const repeated = await service.saveMemory(actor, {
+    requestId: pactRequest,
+    name: "Will",
+    language: "pt-BR",
+    xpEvent: "grant_initial_xp",
+  });
+  assert.ok(first.journey.consentAcceptedAt);
+  assert.ok(first.journey.sovereignNameConfirmedAt);
+  assert.ok(first.journey.pactAcceptedAt);
+  assert.ok(first.workout?.items.length);
+  assert.ok(first.workout?.items.every((item) => item.videoUrl?.startsWith("/exercise/visuals/")));
+  assert.ok(first.diet?.meals.length);
+  assert.equal(first.progression.totalXp, 100);
+  assert.equal(repeated.progression.totalXp, 100);
+  assert.equal(repeated.progression.xpEvents.filter((event) => event.reasonCode === "grant_initial_xp").length, 1);
+});
+
+test("V3 simultaneous users keep progression, plans and reload state isolated", async () => {
+  const repository = new InMemoryOfficialStateRepository();
+  const service = new V3CutoverService(repository);
+  const actors = await Promise.all(["sim-a", "sim-b"].map((externalSubject) => repository.provisionActor({
+    externalSubject,
+    role: "student",
+    tenantKey: "GUTO_CORE",
+    tenantName: "GUTO_CORE",
+  })));
+  for (const [index, actor] of actors.entries()) {
+    await service.acceptConsent(actor, `92000000-0000-4000-8000-00000000000${index + 1}`);
+    await repository.persistCalibration(actor, {
+      requestId: `92000000-0000-4000-8000-00000000001${index + 1}`,
+      profile: {
+        biologicalSex: "male", age: 22, weightKg: 80, heightCm: 178,
+        trainingStatus: "returning", trainingLocation: "gym", city: "Alberton",
+        country: "South Africa", language: "pt-BR",
+      },
+      goal: { code: "muscle_gain" },
+      preferences: { dietStyle: "vegetarian" },
+      healthConstraints: [],
+    });
+  }
+  await Promise.all(actors.map((actor, index) => service.saveMemory(actor, {
+    requestId: `92000000-0000-4000-8000-00000000002${index + 1}`,
+    name: index === 0 ? "Alpha" : "Beta",
+    confirmedName: true,
+    xpEvent: "grant_initial_xp",
+  })));
+  await service.saveMemory(actors[0]!, {
+    requestId: "92000000-0000-4000-8000-000000000031",
+    xpEvent: "complete_daily_mission",
+  });
+  const [a, b] = await Promise.all(actors.map((actor) => service.load(actor)));
+  assert.equal(a.displayName, "Alpha");
+  assert.equal(b.displayName, "Beta");
+  assert.equal(a.progression.totalXp, 200);
+  assert.equal(b.progression.totalXp, 100);
+  assert.notEqual(a.workout?.id, b.workout?.id);
+  assert.notEqual(a.diet?.id, b.diet?.id);
+});
+
+test("V3 cutover blocks every migrated V2 authority path while preserving non-authoritative routes", () => {
+  for (const path of [
+    "/guto",
+    "/guto/memory",
+    "/guto/consent/accept",
+    "/guto/validate-workout",
+    "/guto/diet/generate",
+    "/guto/active-context",
+    "/guto/arena/weekly",
+    "/guto/proactivity/memories",
+    "/guto-audio",
+  ]) assert.equal(isLegacyAuthorityPath(path), true, path);
+
+  for (const path of [
+    "/guto/v3",
+    "/guto/v3/state",
+    "/guto/events",
+    "/guto/account",
+    "/guto/push/subscribe",
+    "/guto/billing/checkout",
+  ]) assert.equal(isLegacyAuthorityPath(path), false, path);
 });

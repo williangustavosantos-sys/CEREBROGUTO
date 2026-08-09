@@ -44,6 +44,12 @@ interface MigrationBundle {
   dietStyle?: string;
   constraints: Array<{ id: string; kind: string; bodyRegion?: string; description: string }>;
   totalXp: number;
+  journey: {
+    consentAccepted: boolean;
+    nameConfirmed: boolean;
+    pactAccepted: boolean;
+    initialXpRewardSeen: boolean;
+  };
   workout: CanonicalWorkout | null;
   diet: DietPlan | null;
   activeContext: JsonRecord | null;
@@ -231,6 +237,12 @@ async function transform(userId: string, value: unknown): Promise<MigrationBundl
     dietStyle: /vegetar/iu.test(foodRestriction) ? "vegetarian" : undefined,
     constraints,
     totalXp: Math.max(0, Math.round(finite(memory.totalXp) || 0)),
+    journey: {
+      consentAccepted: Boolean(memory.consentHealthFitness || memory.acceptedTerms || text(memory.consentAcceptedAt)),
+      nameConfirmed: Boolean(text(memory.sovereignNameConfirmedAt) || memory.confirmedName),
+      pactAccepted: Boolean(memory.initialXpGranted),
+      initialXpRewardSeen: Boolean(memory.initialXpRewardSeen),
+    },
     workout,
     diet,
     activeContext,
@@ -252,6 +264,16 @@ async function insertBundle(client: PoolClient, bundle: MigrationBundle): Promis
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (user_id) DO NOTHING`, [bundle.actor.tenantId,bundle.actor.userId,bundle.profile.biologicalSex,bundle.profile.age,bundle.profile.weightKg,bundle.profile.heightCm,bundle.profile.trainingStatus,bundle.profile.trainingLocation,bundle.profile.language,bundle.profile.city,bundle.profile.country]);
     await client.query(`INSERT INTO guto_v3.user_preferences (tenant_id,user_id,diet_style) VALUES ($1,$2,$3) ON CONFLICT (user_id) DO NOTHING`, [bundle.actor.tenantId,bundle.actor.userId,bundle.dietStyle || null]);
     await client.query(`INSERT INTO guto_v3.user_goals (tenant_id,user_id,goal_code) VALUES ($1,$2,$3) ON CONFLICT (user_id) DO NOTHING`, [bundle.actor.tenantId,bundle.actor.userId,bundle.goal]);
+    await client.query(`INSERT INTO guto_v3.user_journey_state
+      (tenant_id,user_id,preferred_language,consent_accepted_at,sovereign_name_confirmed_at,pact_accepted_at,initial_xp_reward_seen)
+      VALUES ($1,$2,$3,CASE WHEN $4 THEN now() END,CASE WHEN $5 THEN now() END,CASE WHEN $6 THEN now() END,$7)
+      ON CONFLICT (user_id) DO UPDATE SET
+        preferred_language=EXCLUDED.preferred_language,
+        consent_accepted_at=COALESCE(guto_v3.user_journey_state.consent_accepted_at,EXCLUDED.consent_accepted_at),
+        sovereign_name_confirmed_at=COALESCE(guto_v3.user_journey_state.sovereign_name_confirmed_at,EXCLUDED.sovereign_name_confirmed_at),
+        pact_accepted_at=COALESCE(guto_v3.user_journey_state.pact_accepted_at,EXCLUDED.pact_accepted_at),
+        initial_xp_reward_seen=guto_v3.user_journey_state.initial_xp_reward_seen OR EXCLUDED.initial_xp_reward_seen`,
+      [bundle.actor.tenantId,bundle.actor.userId,bundle.profile.language,bundle.journey.consentAccepted,bundle.journey.nameConfirmed,bundle.journey.pactAccepted,bundle.journey.initialXpRewardSeen]);
     for (const constraint of bundle.constraints) await client.query(`INSERT INTO guto_v3.user_health_constraints (id,tenant_id,user_id,kind,body_region,description,confirmed,source) VALUES ($1,$2,$3,$4,$5,$6,true,'legacy_migration') ON CONFLICT DO NOTHING`, [constraint.id,bundle.actor.tenantId,bundle.actor.userId,constraint.kind,constraint.bodyRegion || null,constraint.description]);
     if (bundle.workout) {
       await client.query(`INSERT INTO guto_v3.workout_plans (id,tenant_id,user_id,title,status,version,generated_from) VALUES ($1,$2,$3,$4,'active',1,'{"source":"legacy_migration"}'::jsonb) ON CONFLICT (id) DO NOTHING`, [bundle.workout.id,bundle.actor.tenantId,bundle.actor.userId,bundle.workout.title]);
@@ -265,7 +287,7 @@ async function insertBundle(client: PoolClient, bundle: MigrationBundle): Promis
       }
     }
     await client.query(`INSERT INTO guto_v3.active_plan_versions (tenant_id,user_id,workout_plan_id,workout_plan_version,diet_plan_id,diet_plan_version) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (user_id) DO NOTHING`, [bundle.actor.tenantId,bundle.actor.userId,bundle.workout?.id || null,bundle.workout?.version || null,bundle.diet?.id || null,bundle.diet?.version || null]);
-    if (bundle.totalXp > 0) await client.query(`INSERT INTO guto_v3.xp_ledger (tenant_id,user_id,request_id,amount,reason_code) VALUES ($1,$2,$3,$4,'legacy_balance_migration') ON CONFLICT DO NOTHING`, [bundle.actor.tenantId,bundle.actor.userId,requestId,bundle.totalXp]);
+    if (bundle.totalXp > 0) await client.query(`INSERT INTO guto_v3.xp_ledger (tenant_id,user_id,request_id,amount,reason_code,source_key) VALUES ($1,$2,$3,$4,'legacy_balance_migration','lifetime') ON CONFLICT DO NOTHING`, [bundle.actor.tenantId,bundle.actor.userId,requestId,bundle.totalXp]);
     await client.query(`INSERT INTO guto_v3.guto_events (tenant_id,user_id,request_id,event_type,payload) VALUES ($1,$2,$3,'legacy.migrated',$4::jsonb) ON CONFLICT DO NOTHING`, [bundle.actor.tenantId,bundle.actor.userId,requestId,JSON.stringify({ workout: Boolean(bundle.workout), diet: Boolean(bundle.diet), xp: bundle.totalXp, activeContext: Boolean(bundle.activeContext) })]);
     await client.query("COMMIT");
   } catch (error) { await client.query("ROLLBACK"); throw error; }

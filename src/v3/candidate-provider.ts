@@ -83,6 +83,9 @@ export class LegacyCatalogCandidateProvider implements CandidateProvider {
               purpose: current.purpose,
               muscleGroup: exercise.muscleGroup,
               movementPattern: exercise.movementPattern || "unknown",
+              canonicalNamePt: exercise.canonicalNamePt,
+              videoUrl: exercise.videoUrl,
+              sourceFileName: exercise.sourceFileName,
             },
           } : null;
         })

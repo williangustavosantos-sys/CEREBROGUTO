@@ -51,6 +51,12 @@ export interface WorkoutItem {
   position: number;
   sets?: number;
   reps?: string;
+  canonicalNamePt?: string;
+  rest?: string;
+  cue?: string;
+  note?: string;
+  videoUrl?: string;
+  sourceFileName?: string;
 }
 
 export interface WorkoutPlan {
@@ -113,6 +119,51 @@ export interface OfficialSnapshot {
   healthConstraints: HealthConstraint[];
   workout: WorkoutPlan | null;
   diet: DietPlan | null;
+}
+
+export interface JourneyState {
+  preferredLanguage: "pt-BR" | "en-US" | "it-IT";
+  consentAcceptedAt: string | null;
+  sovereignNameConfirmedAt: string | null;
+  pactAcceptedAt: string | null;
+  initialXpRewardSeen: boolean;
+}
+
+export type XpReasonCode =
+  | "grant_initial_xp"
+  | "complete_daily_mission"
+  | "accept_adapted_mission"
+  | "apply_daily_miss_penalty"
+  | "legacy_balance_migration";
+
+export interface XpLedgerEntry {
+  id: string;
+  reasonCode: XpReasonCode;
+  amount: number;
+  sourceKey: string;
+  createdAt: string;
+}
+
+export interface ProgressionState {
+  totalXp: number;
+  evolutionStage: "baby" | "teen" | "adult" | "elite";
+  trainedToday: boolean;
+  adaptedMissionToday: boolean;
+  xpEvents: XpLedgerEntry[];
+}
+
+export interface V3AppState {
+  actor: ActorContext;
+  memoryVersion: number;
+  displayName: string;
+  journey: JourneyState;
+  profile: OfficialProfile | null;
+  goal: OfficialGoal | null;
+  preferences: OfficialPreferences;
+  healthConstraints: HealthConstraint[];
+  workout: WorkoutPlan | null;
+  diet: DietPlan | null;
+  progression: ProgressionState;
 }
 
 export interface CandidateOption {
