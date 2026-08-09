@@ -184,9 +184,17 @@ describe("Fix 2 — Restrições alimentares: soja e múltiplas", () => {
 describe("Fix 2b — buildDietPrompt: restrições como lista explícita", () => {
   const baseProfile: NutritionProfile = {
     biologicalSex: "male", userAge: 30, heightCm: 175, weightKg: 75,
-    trainingGoal: "fat_loss", country: "Brasil", countryCode: "BR", activityLevel: "moderately_active",
+    trainingGoal: "fat_loss", trainingLevel: "consistent", country: "Brasil", countryCode: "BR",
   };
-  const macros: DietMacros = { targetKcal: 2000, proteinG: 150, carbsG: 200, fatG: 65 };
+  const macros: DietMacros = {
+    bmr: 1700,
+    tdee: 2400,
+    targetKcal: 2000,
+    proteinG: 150,
+    carbsG: 200,
+    fatG: 65,
+    goal: "fat_loss",
+  };
 
   it("sem soja aparece como item de lista no prompt", () => {
     const prompt = buildDietPrompt({ ...baseProfile, foodRestrictions: "sem soja" }, macros, "pt-BR");

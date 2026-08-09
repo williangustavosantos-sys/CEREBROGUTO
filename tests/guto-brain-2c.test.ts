@@ -231,17 +231,17 @@ describe("Fatia 2C — cérebro possui adaptação/dor/continuidade (L3 não dec
     assert.equal(headerErr, false, "sem resposta dupla");
   });
 
-  // 8. Persistência não duplica.
-  it("persistência honesta e ÚNICA (memoryPatch aplicado 1x, sem dupla resposta)", async () => {
+  // 8. O modelo não grava campo fora da allowlist declarativa.
+  it("policy gate bloqueia memoryPatch fora da allowlist, sem dupla resposta", async () => {
     setBrainSlice1(true);
-    // energyLast é um campo whitelisted do applyMemoryPatch (persistência real, única).
     stubPayload = { flag: null, confidence: 0, fala: MARKER, acao: "none", expectedResponse: null, memoryPatch: { energyLast: "cansado" } };
     seed("2c-persist");
     const { body, headerErr } = await chat("2c-persist", "meu joelho tá ruim hoje");
     assert.equal(body.acao, "none");
     assert.equal(headerErr, false, "sem resposta dupla");
     const mem = readMem("2c-persist") as any;
-    assert.equal(mem.energyLast, "cansado", "memoryPatch persistido (1x, honesto)");
+    assert.equal(mem.energyLast, undefined, "campo não autorizado não pode ser persistido pelo modelo");
+    assert.equal((body.memoryPatch as object | undefined)?.hasOwnProperty("energyLast"), undefined);
   });
 
   // 9. Sem vazamento de meta/validation (já coberto no #2, reforço explícito).

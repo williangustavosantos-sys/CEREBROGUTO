@@ -142,7 +142,7 @@ describe("active context Beta 1.0 regressions", () => {
       const prompt = requestBody.contents?.[0]?.parts?.[0]?.text || "";
       const worldStateText = prompt
         .split("WORLD_STATE_V2:\n").pop()
-        ?.split("\n\nHISTÓRICO RECENTE:")[0];
+        ?.split("\n\n</USER_DATA>")[0];
       const worldState = worldStateText ? JSON.parse(worldStateText) as {
         activeContext?: { currentItem?: { name?: string }; lastSuggestedItem?: { name?: string } | null };
         catalog?: { workoutSubstitutes?: Array<{ id: string; name: string }> };
