@@ -1,3 +1,4 @@
+import "./src/v3/observability/instrumentation.js";
 import "dotenv/config";
 import express, {
   type Request as ExpressRequest,
@@ -62,6 +63,7 @@ import {
 } from "./src/push-dispatch.js";
 import webpush from "web-push";
 import { parseAuth, requireActiveUser } from "./src/auth-middleware.js";
+import { createV3Router } from "./src/v3/router.js";
 import {
   getEffectiveUserAccess,
   requireActiveUserAccessAsync,
@@ -875,6 +877,7 @@ app.use(express.json({ limit: "1mb" }));
 // Decodifica JWT antes do rate limit para separar usuários autenticados que
 // compartilham IP (academia/escritório). Visitantes continuam limitados por IP.
 app.use(parseAuth);
+app.use(createV3Router(requireActiveUser));
 app.use(createRateLimit({
   windowMs: config.rateLimitWindowMs,
   maxRequests: config.rateLimitMaxRequests,

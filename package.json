@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch server.ts",
+    "dev:v3": "tsx src/v3/genkit-entry.ts",
     "start": "tsx server.ts",
     "test": "npm run test:guto",
     "test:guto": "node scripts/run-guto-tests.mjs",
@@ -13,6 +14,10 @@
     "auxiliary-user-scenarios": "tsx tests/real-user-scenarios/run-real-user-scenarios.ts",
     "typecheck": "tsc --noEmit",
     "eval:guto": "tsx scripts/run-guto-evals.ts",
+    "test:v3": "node --import tsx --test --test-concurrency=1 tests/guto-v3-*.test.ts",
+    "db:v3:migrate": "tsx scripts/run-v3-migrations.ts",
+    "db:v3:legacy-dry-run": "tsx scripts/migrate-legacy-to-v3.ts",
+    "eval:v3": "tsx scripts/run-v3-evals.ts",
     "audit:post-pact-local": "tsx scripts/audit-new-user-arrival.ts",
     "release:gate": "node scripts/guto-release-gate.mjs",
     "eval:promptfoo": "npx promptfoo@0.121.7 eval -c promptfooconfig.yaml -o evals/reports/promptfoo-results.json --no-share"
@@ -21,6 +26,11 @@
   "license": "ISC",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.95.1",
+    "@genkit-ai/google-genai": "^1.40.1",
+    "@langfuse/otel": "^5.10.0",
+    "@langfuse/tracing": "^5.10.0",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-node": "^0.221.0",
     "@types/web-push": "^3.6.4",
     "@upstash/redis": "^1.37.0",
     "bcrypt": "^6.0.0",
@@ -28,13 +38,16 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "genkit": "^1.40.1",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.2.0",
     "node-fetch": "^3.3.2",
+    "pg": "^8.23.0",
     "sharp": "^0.35.3",
     "stripe": "^22.1.1",
     "tsx": "^4.21.0",
-    "web-push": "^3.6.7"
+    "web-push": "^3.6.7",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
