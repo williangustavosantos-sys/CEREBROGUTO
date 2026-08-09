@@ -33,3 +33,4 @@ tmp/
 
 # aider AI tool
 .aider*
+.vercel

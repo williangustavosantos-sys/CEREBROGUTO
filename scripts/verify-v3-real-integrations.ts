@@ -2,6 +2,7 @@ import "dotenv/config";
 import "../src/v3/observability/instrumentation.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { Redis } from "@upstash/redis";
 import { createV3Genkit, GenkitGeminiDecisionModel } from "../src/v3/ai.js";
 import { V3CutoverService } from "../src/v3/cutover-service.js";
 import { shutdownV3Telemetry } from "../src/v3/observability/instrumentation.js";
@@ -28,8 +29,16 @@ const pool = createV3Pool();
 const repository = new PostgresOfficialStateRepository(pool);
 const operational = RedisV3OperationalState.fromEnvironment();
 const relationshipMemory = new Mem0RelationshipMemoryStore();
+const rawRedis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL || "",
+  token: process.env.UPSTASH_REDIS_REST_TOKEN || "",
+});
 const service = new V3CutoverService(repository);
 const tenantKey = "guto-v3-integration";
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function provision(externalSubject: string): Promise<ActorContext> {
   const actor = await repository.provisionActor({
@@ -108,6 +117,12 @@ async function assertRedisIsolationAndConcurrency(actorA: ActorContext, actorB: 
   ]);
   assert.equal((await operational.getActiveContext(actorA))?.itemLabel, "user-a");
   assert.equal((await operational.getActiveContext(actorB))?.itemLabel, "user-b");
+  const [ttlA, ttlB] = await Promise.all([
+    rawRedis.ttl(`guto:v3:{${actorA.tenantId}:${actorA.userId}}:active-context`),
+    rawRedis.ttl(`guto:v3:{${actorB.tenantId}:${actorB.userId}}:active-context`),
+  ]);
+  assert.ok(ttlA > 0, "Redis context A must have a positive TTL");
+  assert.ok(ttlB > 0, "Redis context B must have a positive TTL");
 
   const competing = await Promise.allSettled([
     operational.compareAndSetActiveContext(actorA, 1, { ...initialA, version: 2, itemLabel: "winner-one" }),
@@ -123,9 +138,59 @@ async function assertRedisIsolationAndConcurrency(actorA: ActorContext, actorB: 
   ]);
 }
 
+async function assertMem0RelationshipMemory(actor: ActorContext): Promise<number> {
+  const marker = `guto-v3-preview-${randomUUID()}`;
+  await relationshipMemory.submit(actor, [{
+    classification: "RELATIONSHIP",
+    fact: `O usuário sintético do teste prefere confirmações curtas. ${marker}`,
+    evidence: "Declaração sintética do verificador de integração V3.",
+  }], randomUUID());
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const memories = await relationshipMemory.search(actor, "confirmações curtas", 5);
+    if (memories.length > 0) return memories.length;
+    await wait(1_000 * (attempt + 1));
+  }
+  assert.fail("Mem0 accepted the write but did not return relational memory after retries");
+}
+
+async function assertLangfuseTrace(requestId: string): Promise<{ traceId: string; observationCount: number }> {
+  const baseUrl = (process.env.LANGFUSE_BASE_URL || "https://cloud.langfuse.com").replace(/\/+$/, "");
+  const authorization = Buffer.from(`${process.env.LANGFUSE_PUBLIC_KEY}:${process.env.LANGFUSE_SECRET_KEY}`).toString("base64");
+  const headers = { Authorization: `Basic ${authorization}` };
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const response = await fetch(`${baseUrl}/api/public/traces?limit=100&name=GUTO_TURN`, {
+      headers,
+      signal: AbortSignal.timeout(5_000),
+    });
+    assert.equal(response.ok, true, `Langfuse trace query failed with status ${response.status}`);
+    const body = (await response.json()) as { data?: Array<{ id?: string; [key: string]: unknown }> };
+    const trace = (body.data || []).find((candidate) => JSON.stringify(candidate).includes(requestId));
+    if (trace?.id) {
+      const detailResponse = await fetch(`${baseUrl}/api/public/traces/${trace.id}`, {
+        headers,
+        signal: AbortSignal.timeout(5_000),
+      });
+      assert.equal(detailResponse.ok, true, `Langfuse trace detail failed with status ${detailResponse.status}`);
+      const detail = (await detailResponse.json()) as { observations?: Array<{ name?: string }> };
+      const observations = detail.observations || [];
+      const names = observations.map((observation) => observation.name);
+      assert.ok(names.includes("GUTO_TURN"), "Langfuse trace is missing GUTO_TURN");
+      assert.ok(names.includes("GEMINI_CALL"), "Langfuse trace is missing GEMINI_CALL");
+      assert.ok(names.includes("DECISION_VALIDATION"), "Langfuse trace is missing DECISION_VALIDATION");
+      return { traceId: trace.id, observationCount: observations.length };
+    }
+    await wait(1_000 * (attempt + 1));
+  }
+  assert.fail("Langfuse did not expose the flushed V3 trace after retries");
+}
+
+let telemetryShutdown = false;
 try {
+  const traceRequestId = randomUUID();
   const result = await withV3Trace({
-    requestId: randomUUID(),
+    requestId: traceRequestId,
     externalSubject: "guto-v3-integration-verifier",
     attributes: { "guto.input_category": "real_integration_verification" },
   }, async () => {
@@ -159,24 +224,24 @@ try {
     });
     assert.ok(decision.speech.length > 0);
 
-    await relationshipMemory.submit(actorA, [{
-      classification: "RELATIONSHIP",
-      fact: "O usuário sintético do teste prefere confirmações curtas.",
-      evidence: "Declaração sintética do verificador de integração V3.",
-    }], randomUUID());
-    await relationshipMemory.search(actorA, "confirmações curtas", 1);
+    const mem0ResultCount = await assertMem0RelationshipMemory(actorA);
 
     return {
       postgres: { ok: true, latencyMs: postgres.latencyMs },
       rls: { ok: true, isolatedUsers: 2 },
-      redis: { ok: true, latencyMs: redis.latencyMs, isolatedUsers: 2, concurrentWinners: 1 },
+      redis: { ok: true, latencyMs: redis.latencyMs, isolatedUsers: 2, concurrentWinners: 1, ttlValidated: true },
       gemini: { ok: true, action: decision.action, decisionEnvelopeValidated: true },
-      mem0: { ok: true, classification: "RELATIONSHIP" },
-      langfuse: { configured: true, traceFlushRequested: true },
+      mem0: { ok: true, classification: "RELATIONSHIP", resultCount: mem0ResultCount },
     };
   });
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  await shutdownV3Telemetry();
+  telemetryShutdown = true;
+  const langfuse = await assertLangfuseTrace(traceRequestId);
+  process.stdout.write(`${JSON.stringify({
+    ...result,
+    langfuse: { ok: true, traceFlushed: true, ...langfuse },
+  }, null, 2)}\n`);
 } finally {
   await pool.end();
-  await shutdownV3Telemetry();
+  if (!telemetryShutdown) await shutdownV3Telemetry();
 }
