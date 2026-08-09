@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { config } from "./config.js";
 import { GUTO_CORE_TEAM_ID } from "./team-store.js";
+import { isValidUserId } from "./user-id.js";
 import {
   getAllUserAccess,
   getEffectiveUserAccess,
@@ -145,7 +146,10 @@ export function signToken(payload: Omit<GutoJwtPayload, "iat" | "exp">): string 
 
 export function verifyToken(token: string): GutoJwtPayload | null {
   try {
-    return jwt.verify(token, config.jwtSecret) as GutoJwtPayload;
+    const payload = jwt.verify(token, config.jwtSecret) as Partial<GutoJwtPayload>;
+    if (!isValidUserId(payload.userId)) return null;
+    if (!payload.role || !["student", "coach", "admin", "super_admin"].includes(payload.role)) return null;
+    return payload as GutoJwtPayload;
   } catch {
     return null;
   }
