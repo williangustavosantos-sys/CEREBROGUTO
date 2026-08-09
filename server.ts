@@ -13,7 +13,7 @@ import { config, hasPushVapidConfiguration, isProductionEnv } from "./src/config
 import { createRateLimit } from "./src/http/rate-limit.js";
 import { requestLog } from "./src/http/request-log.js";
 import { parseRequestOriginalUrl } from "./src/http/request-url.js";
-import { readMemoryStoreSync, readMemoryStoreAsync, readPersistedUserMemorySnapshot, persistUserMemory, persistUserMemoryPatch, updateUserMemoryAtomically, acquireDistributedUserLease, ensureMemoryHydrated, flushMemoryStoreWrites } from "./src/memory-store.js";
+import { readMemoryStoreSync, readMemoryStoreAsync, readPersistedUserMemorySnapshot, persistUserMemory, persistUserMemoryPatch, updateUserMemoryAtomically, acquireDistributedUserLease, ensureMemoryHydrated, flushMemoryStoreWrites, MemoryStoreUnavailableError } from "./src/memory-store.js";
 import { verifyDurableCommit } from "./src/durable-commit.js";
 import {
   getCatalogById,
@@ -51,6 +51,7 @@ import {
   upsertSubscription,
   getAllSubscriptions,
   deleteSubscriptionByEndpoint,
+  deleteSubscriptionForUser,
   recordSuccessfulDelivery,
   recordFailedDelivery,
 } from "./src/push-store.js";
@@ -13288,9 +13289,10 @@ app.post("/guto/push/subscribe", requireActiveUser, async (req, res) => {
 });
 
 app.delete("/guto/push/subscribe", requireActiveUser, async (req, res) => {
+  const userId = req.gutoUser!.userId;
   const endpoint = typeof req.body?.endpoint === "string" ? req.body.endpoint : "";
   if (!endpoint) return res.status(400).json({ message: "endpoint required.", code: "PUSH_NO_ENDPOINT" });
-  const removed = await deleteSubscriptionByEndpoint(endpoint);
+  const removed = await deleteSubscriptionForUser(userId, endpoint);
   res.json({ ok: removed });
 });
 
@@ -13596,7 +13598,13 @@ async function ensurePostPactArtifacts(userId: string): Promise<PostPactBootstra
   };
 }
 
-app.post("/guto/memory", requireActiveUser, async (req, res) => {
+app.post("/guto/memory", requireActiveUser, (req, res, next) => {
+  if (!requestChangesWorkoutProfile(req.body)) return next();
+  const finishMutation = beginWorkoutProfileMutation(req.gutoUser!.userId);
+  res.once("finish", finishMutation);
+  res.once("close", finishMutation);
+  return next();
+}, async (req, res) => {
   const userId = req.gutoUser!.userId;
   await readMemoryStoreAsync();
   const memory = await applyPendingMissPenalties(getMemory(userId));
@@ -14878,11 +14886,70 @@ function buildWorkoutGenerationFingerprint(memory: GutoMemory): string {
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
 
+// Complements the durable fingerprint during the small interval in which a
+// profile update request has started but has not committed yet. Cross-instance
+// races remain guarded by the persisted fingerprint in the atomic commit.
+const workoutProfileMutationRevisions = new Map<string, number>();
+const workoutProfileMutationsInFlight = new Map<string, number>();
+
+function getWorkoutProfileMutationRevision(userId: string): number {
+  return workoutProfileMutationRevisions.get(userId) || 0;
+}
+
+function hasWorkoutProfileMutationInFlight(userId: string): boolean {
+  return (workoutProfileMutationsInFlight.get(userId) || 0) > 0;
+}
+
+function beginWorkoutProfileMutation(userId: string): () => void {
+  workoutProfileMutationRevisions.set(userId, getWorkoutProfileMutationRevision(userId) + 1);
+  workoutProfileMutationsInFlight.set(
+    userId,
+    (workoutProfileMutationsInFlight.get(userId) || 0) + 1,
+  );
+  let finished = false;
+  return () => {
+    if (finished) return;
+    finished = true;
+    const remaining = Math.max(0, (workoutProfileMutationsInFlight.get(userId) || 1) - 1);
+    if (remaining === 0) workoutProfileMutationsInFlight.delete(userId);
+    else workoutProfileMutationsInFlight.set(userId, remaining);
+    workoutProfileMutationRevisions.set(userId, getWorkoutProfileMutationRevision(userId) + 1);
+  };
+}
+
+function requestChangesWorkoutProfile(body: unknown): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const record = body as Record<string, unknown>;
+  // Initial post-pact bootstrap generates artifacts from the just-committed
+  // profile inside the same request and has its own durable commit checks.
+  if (record.xpEvent === "grant_initial_xp") return false;
+  return [
+    "language",
+    "userAge",
+    "biologicalSex",
+    "heightCm",
+    "weightKg",
+    "trainingLevel",
+    "trainingStatus",
+    "trainingGoal",
+    "trainingSchedule",
+    "trainingLocation",
+    "preferredTrainingLocation",
+    "trainingPathology",
+    "trainingLimitations",
+    "country",
+    "countryCode",
+    "city",
+  ].some((field) => Object.prototype.hasOwnProperty.call(record, field));
+}
+
 async function generateAndCommitBrainWorkout(
   memory: GutoMemory,
   language: GutoLanguage,
   focusHint: WorkoutFocus | string | undefined
 ): Promise<WorkoutPlan | null> {
+  const profileMutationRevision = getWorkoutProfileMutationRevision(memory.userId);
+  if (hasWorkoutProfileMutationInFlight(memory.userId)) return null;
   const generationFingerprint = buildWorkoutGenerationFingerprint(memory);
   const semanticFocus: WorkoutFocus = chooseNextWorkoutFocus(memory, (focusHint || memory.nextWorkoutFocus) as WorkoutFocus | undefined);
   const baseLocationRaw = memory.preferredTrainingLocation || memory.trainingLocation || "casa";
@@ -14999,6 +15066,12 @@ async function generateAndCommitBrainWorkout(
     if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
     const persisted = snapshot as GutoMemory;
     const current: GutoMemory = { ...memory, ...persisted };
+    if (
+      hasWorkoutProfileMutationInFlight(memory.userId) ||
+      getWorkoutProfileMutationRevision(memory.userId) !== profileMutationRevision
+    ) {
+      return current;
+    }
     const existingPlan = getTodayMissionPlan(current);
     if (existingPlan?.exercises?.length) {
       committedPlan = existingPlan;
@@ -15051,6 +15124,12 @@ async function generateAndCommitBrainWorkout(
     maxRetries: 2,
   });
   if (!durable) return null;
+  if (
+    hasWorkoutProfileMutationInFlight(memory.userId) ||
+    getWorkoutProfileMutationRevision(memory.userId) !== profileMutationRevision
+  ) {
+    return null;
+  }
 
   memory.lastWorkoutPlan = durable.value;
   memory.lastSuggestedFocus = durable.snapshot.lastSuggestedFocus;
@@ -18032,7 +18111,6 @@ async function runSovereignBrainSlice1(params: {
 app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision, async (req, res) => {
   const {
     input,
-    language,
     history,
     expectedResponse,
     turnId,
@@ -18041,10 +18119,8 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
     activeContextType,
     activeItemId,
     lastSuggestedItem,
-    profile: requestProfile,
   } = req.body as {
     input?: string;
-    language?: string;
     history?: GutoHistoryItem[];
     expectedResponse?: ExpectedResponse | null;
     turnId?: string;
@@ -18054,7 +18130,6 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
     activeContextType?: ActiveContextType | null;
     activeItemId?: string | null;
     lastSuggestedItem?: unknown;
-    profile?: Profile;
   };
 
   const userId = req.gutoUser!.userId;
@@ -18068,11 +18143,11 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
   }
 
   await readMemoryStoreAsync();
-  let memory = getMemory(userId);
-  const selectedLanguage = normalizeLanguage(language || memory.language || "pt-BR");
-  if (requestProfile && requestProfile.userId === userId) {
-    memory = mergeMemory({ ...requestProfile, userId }, selectedLanguage);
-  }
+  const memory = getMemory(userId);
+  // Perfil e idioma são autoritativos no backend. Campos homônimos enviados
+  // pelo cliente são ignorados; o body carrega apenas a mensagem e metadados
+  // efêmeros de correlação do turno.
+  const selectedLanguage = normalizeLanguage(memory.language || "pt-BR");
   const dietReconciliation = await reconcilePendingDietSubstitution(userId, memory);
   const activeAtTurnStart = normalizeActiveContext(memory.activeContext);
   const blockedDietSubstitution = Boolean(
@@ -18190,6 +18265,7 @@ app.post("/guto", requireActiveUser, serializeGutoTurn, attachAtomicTurnDecision
       input: input || "",
     }));
   } catch (e) {
+    if (e instanceof MemoryStoreUnavailableError) throw e;
     console.error("Erro na rota /guto soberana:", e);
     const fallbackMemory = mergeMemory(profile, selectedLanguage);
     const fallbackContext = getOperationalContext(new Date(), selectedLanguage || fallbackMemory.language);
@@ -20281,6 +20357,14 @@ app.post("/guto/online/exception", requireActiveUser, async (req, res) => {
 // Middleware global para capturar erros não tratados e evitar crash do Node
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error("🔥 Erro Crítico não capturado:", err);
+  if (err instanceof MemoryStoreUnavailableError) {
+    return res.status(503).json({
+      error: "memory_store_unavailable",
+      code: err.code,
+      acao: "none",
+      fala: "A memória durável está temporariamente indisponível. Nenhuma alteração foi confirmada; tente novamente em instantes.",
+    });
+  }
   const language = normalizeLanguage((req.body as { language?: string } | undefined)?.language);
   res.status(500).json({ error: fallbackLine(language, "internal_error"), acao: "none", fala: fallbackLine(language, "internal_error") });
 });

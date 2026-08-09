@@ -64,6 +64,7 @@ let app: { listen: (port: number, host: string, cb?: () => void) => Server };
 let server: Server;
 let baseUrl = "";
 let clearCache: () => void = () => {};
+let setRedisOverride: (client: null | undefined) => void = () => {};
 let setBrainSlice1: (on: boolean) => void;
 
 const BASE = {
@@ -85,12 +86,17 @@ function readMem(userId: string): Record<string, unknown> {
   return JSON.parse(readFileSync(file, "utf8"))[userId] || {};
 }
 
-async function chat(userId: string, input: string, turnId?: string) {
+async function chat(
+  userId: string,
+  input: string,
+  turnId?: string,
+  extraBody: Record<string, unknown> = {},
+) {
   const token = jwt.sign({ userId, role: "student" }, process.env.JWT_SECRET!);
   const r = await fetch(`${baseUrl}/guto`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ language: "pt-BR", history: [], input, ...(turnId ? { turnId } : {}) }),
+    body: JSON.stringify({ language: "pt-BR", history: [], input, ...(turnId ? { turnId } : {}), ...extraBody }),
   });
   return { status: r.status, body: (await r.json()) as Record<string, unknown> };
 }
@@ -131,9 +137,12 @@ describe("Golden Transcripts — Fatia 1 do Cérebro Soberano", () => {
       app: typeof app;
     };
     app = mod.app;
-    clearCache = ((await import(pathToFileURL(join(process.cwd(), "src/memory-store.ts")).href)) as {
+    const memoryStore = (await import(pathToFileURL(join(process.cwd(), "src/memory-store.ts")).href)) as {
       clearMemoryStoreCache: () => void;
-    }).clearMemoryStoreCache;
+      setMemoryStoreRedisClientForTests: (client: null | undefined) => void;
+    };
+    clearCache = memoryStore.clearMemoryStoreCache;
+    setRedisOverride = memoryStore.setMemoryStoreRedisClientForTests;
 
     // A flag é lida do config (process.env) no load. Para alternar OFF/ON dentro do
     // MESMO processo, mutamos o objeto config exportado — é a fonte que o handler lê.
@@ -250,6 +259,62 @@ describe("Golden Transcripts — Fatia 1 do Cérebro Soberano", () => {
       const memory = readMem("gt2-injection");
       assert.equal(memory.totalXp, 100);
       assert.equal((memory.lastWorkoutPlan as any)?.focus, "legs");
+    });
+
+    it("ignora profile e language forjados no body; perfil vem da memória do backend", async () => {
+      setBrainSlice1(false);
+      seed("gt2-profile-authority", {
+        name: "Will",
+        language: "pt-BR",
+        weightKg: 80,
+        totalXp: 100,
+        trainingPathology: "sem dor",
+      });
+      const { status } = await chat(
+        "gt2-profile-authority",
+        "obrigado pela ajuda de hoje",
+        undefined,
+        {
+          language: "it-IT",
+          profile: {
+            userId: "gt2-profile-authority",
+            name: "Mallory",
+            language: "it-IT",
+            weightKg: 1,
+            totalXp: 999999,
+            trainingPathology: "perfil forjado",
+          },
+        },
+      );
+      assert.equal(status, 200);
+      const memory = readMem("gt2-profile-authority");
+      assert.equal(memory.name, "Will");
+      assert.equal(memory.language, "pt-BR");
+      assert.equal(memory.weightKg, 80);
+      assert.equal(memory.totalXp, 100);
+      assert.equal(memory.trainingPathology, "sem dor");
+    });
+
+    it("memória durável indisponível responde 503 e não confirma alteração", async () => {
+      const previousNodeEnv = process.env.NODE_ENV;
+      setRedisOverride(null);
+      process.env.NODE_ENV = "production";
+      try {
+        const { status, body } = await chat(
+          "gt2-memory-unavailable",
+          "mude meu local de treino para academia",
+        );
+        assert.equal(status, 503);
+        assert.equal(body.error, "memory_store_unavailable");
+        assert.equal(body.code, "MEMORY_STORE_UNAVAILABLE");
+        assert.equal(body.acao, "none");
+        assert.match(String(body.fala || ""), /nenhuma alteração foi confirmada/i);
+      } finally {
+        if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = previousNodeEnv;
+        setRedisOverride(undefined);
+        clearCache();
+      }
     });
   });
 
