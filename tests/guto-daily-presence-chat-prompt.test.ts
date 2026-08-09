@@ -61,6 +61,11 @@ function extractPrompt(init?: RequestInit): string {
   return String(body?.contents?.[0]?.parts?.[0]?.text || "")
 }
 
+function extractSystemInstruction(init?: RequestInit): string {
+  const body = typeof init?.body === "string" ? JSON.parse(init.body) : null
+  return String(body?.system_instruction?.parts?.[0]?.text || "")
+}
+
 function geminiResponse(text: string) {
   return {
     candidates: [{ content: { parts: [{ text }] } }],
@@ -119,6 +124,7 @@ describe("DailyPresenceContext no chat", () => {
       }
 
       const prompt = extractPrompt(init)
+      const systemInstruction = extractSystemInstruction(init)
       if (prompt.includes("strict semantic safety classifier")) {
         return new Response(JSON.stringify(geminiResponse(JSON.stringify({
           flag: null,
@@ -142,7 +148,7 @@ describe("DailyPresenceContext no chat", () => {
         }))), { status: 200, headers: { "Content-Type": "application/json" } })
       }
 
-      if (prompt.includes("VOCÊ É GUTO")) {
+      if (systemInstruction.includes("VOCÊ É GUTO")) {
         capturedBrainPrompt = prompt
       }
       return new Response(JSON.stringify(geminiResponse(JSON.stringify({

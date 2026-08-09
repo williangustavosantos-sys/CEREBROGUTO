@@ -2,7 +2,7 @@
  * GUTO Memory Store
  *
  * Production: Upstash Redis (set UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN)
- * Development / fallback: local JSON file (data/guto-memory.json)
+ * Development: local JSON file (data/guto-memory.json)
  *
  * The layer is fully transparent — server.ts calls readMemoryStore / writeMemoryStore
  * exactly as before. Zero breaking change.
@@ -18,6 +18,36 @@ import { assertValidUserId } from "./user-id.js";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type MemoryStore = Record<string, unknown>;
+
+export class MemoryStoreUnavailableError extends Error {
+  readonly code = "MEMORY_STORE_UNAVAILABLE";
+
+  constructor(message = "Durable GUTO memory store is unavailable.", options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "MemoryStoreUnavailableError";
+  }
+}
+
+export function requiresDurableMemoryStore(
+  env: Partial<NodeJS.ProcessEnv> = process.env,
+): boolean {
+  return env.NODE_ENV === "production" || env.RENDER === "true" || env.VERCEL_ENV === "production";
+}
+
+function requireProductionRedis(redis: RedisClient | null): RedisClient | null {
+  if (!redis && requiresDurableMemoryStore()) {
+    throw new MemoryStoreUnavailableError(
+      "Redis is required for GUTO memory in production; local file/RAM fallback is disabled.",
+    );
+  }
+  return redis;
+}
+
+function observableStoreFailure(message: string, cause: unknown): MemoryStoreUnavailableError {
+  return cause instanceof MemoryStoreUnavailableError
+    ? cause
+    : new MemoryStoreUnavailableError(message, { cause });
+}
 
 // ─── Redis client (lazy) ──────────────────────────────────────────────────────
 
@@ -119,7 +149,7 @@ export async function acquireDistributedUserLease(
   options: { ttlMs?: number; waitMs?: number } = {}
 ): Promise<{ waited: boolean; release: () => Promise<void> }> {
   assertValidUserId(userId);
-  const redis = getRedisClient();
+  const redis = requireProductionRedis(getRedisClient());
   if (!redis) return { waited: false, release: async () => {} };
 
   const token = randomUUID();
@@ -151,7 +181,7 @@ export async function acquireDistributedUserLease(
   throw new Error(`Timed out waiting for distributed user lease (${scope}).`);
 }
 
-// ─── In-memory fallback (when filesystem fails in prod without Redis) ─────────
+// ─── Development cache/fallback (never authoritative in production) ──────────
 
 const globalMemoryStore: MemoryStore = {};
 let globalMemoryLoaded = false;
@@ -431,7 +461,7 @@ export async function readMemoryStoreAsync(): Promise<MemoryStore> {
   // authoritative; overlaying an arbitrary historical cache here could undo a
   // profile/mission change made by another instance.
   await memWriteChain;
-  const redis = getRedisClient();
+  const redis = requireProductionRedis(getRedisClient());
 
   if (redis) {
     try {
@@ -442,7 +472,10 @@ export async function readMemoryStoreAsync(): Promise<MemoryStore> {
       replaceGlobalMemoryStore(store);
       return cloneStoreValue(store);
     } catch (err) {
-      console.warn("[GUTO] Redis read failed, falling back to filesystem:", err);
+      if (requiresDurableMemoryStore()) {
+        throw observableStoreFailure("Redis memory read failed in production.", err);
+      }
+      console.warn("[GUTO] Redis read failed, falling back to development filesystem:", err);
     }
   }
 
@@ -468,15 +501,22 @@ export async function readMemoryStoreAsync(): Promise<MemoryStore> {
  */
 export async function readPersistedUserMemorySnapshot(userId: string): Promise<unknown> {
   assertValidUserId(userId);
-  const redis = getRedisClient();
+  const redis = requireProductionRedis(getRedisClient());
   if (redis) {
     // A Redis read failure must remain observable. Falling back to a packaged
     // or partial local file here could falsely authorize a stale commit.
-    const raw = await redis.get(REDIS_KEY);
-    const store = (raw
-      ? (typeof raw === "string" ? JSON.parse(raw) : raw)
-      : {}) as MemoryStore;
-    return cloneStoreValue(store[userId]);
+    try {
+      const raw = await redis.get(REDIS_KEY);
+      const store = (raw
+        ? (typeof raw === "string" ? JSON.parse(raw) : raw)
+        : {}) as MemoryStore;
+      return cloneStoreValue(store[userId]);
+    } catch (error) {
+      if (requiresDurableMemoryStore()) {
+        throw observableStoreFailure("Redis user memory read failed in production.", error);
+      }
+      throw error;
+    }
   }
 
   if (existsSync(config.memoryFile)) {
@@ -491,10 +531,7 @@ export async function readPersistedUserMemorySnapshot(userId: string): Promise<u
  * Write the full memory store.
  */
 export async function writeMemoryStoreAsync(store: MemoryStore): Promise<void> {
-  // Clear the in-memory cache to ensure a full replacement (especially for nuke/reset)
-  replaceGlobalMemoryStore(store);
-
-  const redis = getRedisClient();
+  const redis = requireProductionRedis(getRedisClient());
   if (redis) {
     try {
       await mutateRedisMemoryStore(redis, (current) => {
@@ -503,10 +540,14 @@ export async function writeMemoryStoreAsync(store: MemoryStore): Promise<void> {
       });
       return;
     } catch (err) {
-      console.warn("[GUTO] Redis write failed, falling back to filesystem:", err);
+      if (requiresDurableMemoryStore()) {
+        throw observableStoreFailure("Redis memory write failed in production.", err);
+      }
+      console.warn("[GUTO] Redis write failed, falling back to development filesystem:", err);
     }
   }
 
+  replaceGlobalMemoryStore(store);
   writeToFile(store);
 }
 
@@ -518,7 +559,8 @@ export function readMemoryStoreSync(): MemoryStore {
   // Redis is configured, sync reads must use the already-hydrated cache instead
   // of that packaged file, or newly calibrated users appear to lose their
   // profile on the next request.
-  if (getRedisClient()) {
+  const redis = requireProductionRedis(getRedisClient());
+  if (redis) {
     return cloneStoreValue(globalMemoryStore);
   }
 
@@ -534,6 +576,11 @@ export function readMemoryStoreSync(): MemoryStore {
  * Synchronous write — filesystem or in-memory only.
  */
 export function writeMemoryStoreSync(store: MemoryStore): void {
+  if (requiresDurableMemoryStore()) {
+    throw new MemoryStoreUnavailableError(
+      "Synchronous local memory writes are disabled in production.",
+    );
+  }
   // Clear the in-memory cache to ensure a full replacement
   replaceGlobalMemoryStore(store);
   writeToFile(store);
@@ -551,16 +598,24 @@ let memHydrated = false;
 let memHydrationPromise: Promise<void> | null = null;
 
 export function ensureMemoryHydrated(): Promise<void> {
-  if (memHydrated || !getRedisClient()) return Promise.resolve();
+  const redis = requireProductionRedis(getRedisClient());
+  if (memHydrated || !redis) return Promise.resolve();
   if (!memHydrationPromise) {
     memHydrationPromise = readMemoryStoreAsync()
       .then(() => { memHydrated = true; })
-      .catch(() => { memHydrationPromise = null; });
+      .catch((error) => {
+        memHydrationPromise = null;
+        if (requiresDurableMemoryStore()) throw observableStoreFailure(
+          "Redis memory hydration failed in production.",
+          error,
+        );
+      });
   }
   return memHydrationPromise;
 }
 
 let memWriteChain: Promise<void> = Promise.resolve();
+let memLastWriteFailure: unknown = null;
 
 async function withRedisWriteLock(redis: RedisClient, fn: (token: string) => Promise<void>): Promise<void> {
   const lease = await acquireRedisWriteLock(redis);
@@ -593,9 +648,11 @@ async function mutateRedisMemoryStore(
     try {
       await withRedisWriteLock(redis, async (token) => {
         await hydrateMemoryStoreFromRedisForWrite(redis);
-        await mutate(globalMemoryStore);
-        await commitMemoryStoreWhileLeaseOwned(redis, token, globalMemoryStore);
-        writeToFile(globalMemoryStore);
+        const nextStore = cloneStoreValue(globalMemoryStore);
+        await mutate(nextStore);
+        await commitMemoryStoreWhileLeaseOwned(redis, token, nextStore);
+        replaceGlobalMemoryStore(nextStore);
+        if (!requiresDurableMemoryStore()) writeToFile(nextStore);
       });
       return;
     } catch (error) {
@@ -621,7 +678,7 @@ async function replaceRedisMemoryStoreAtomically(
         const nextStore = await buildNext(cloneStoreValue(globalMemoryStore));
         await commitMemoryStoreWhileLeaseOwned(redis, token, nextStore);
         replaceGlobalMemoryStore(nextStore);
-        writeToFile(nextStore);
+        if (!requiresDurableMemoryStore()) writeToFile(nextStore);
       });
       return;
     } catch (error) {
@@ -653,10 +710,10 @@ async function hydrateMemoryStoreFromRedisForWrite(redis: RedisClient): Promise<
 export function persistUserMemory(userId: string, memory: unknown): Promise<void> {
   assertValidUserId(userId);
   const snapshot = cloneStoreValue(memory);
-  globalMemoryStore[userId] = mergeProtectedUserMemorySnapshot(globalMemoryStore[userId], snapshot); // cache imediato p/ leituras sync
-  const wroteLocalSnapshot = writeToFile(globalMemoryStore);
-  const redis = getRedisClient();
+  const redis = requireProductionRedis(getRedisClient());
   if (!redis) {
+    globalMemoryStore[userId] = mergeProtectedUserMemorySnapshot(globalMemoryStore[userId], snapshot);
+    const wroteLocalSnapshot = writeToFile(globalMemoryStore);
     const localWrite = wroteLocalSnapshot
       ? Promise.resolve()
       : Promise.reject(new Error("GUTO memory snapshot could not be persisted to disk."));
@@ -671,16 +728,19 @@ export function persistUserMemory(userId: string, memory: unknown): Promise<void
   // `memWriteChain` continua resiliente para que uma falha não envenene todas
   // as gravações seguintes. Assim, callers legados podem ignorar a Promise sem
   // gerar unhandled rejection, enquanto callers atômicos podem usar `await`.
-  const writeOperation = memWriteChain.then(() => mutateRedisMemoryStore(redis, async () => {
-    globalMemoryStore[userId] = mergeProtectedUserMemorySnapshot(globalMemoryStore[userId], snapshot); // re-aplica sobre o store hidratado
-  }));
+  const writeOperation = memWriteChain.then(() => mutateRedisMemoryStore(redis, async (store) => {
+    store[userId] = mergeProtectedUserMemorySnapshot(store[userId], snapshot);
+  })).then(() => { memLastWriteFailure = null; });
   memWriteChain = writeOperation.catch((err) => {
     // Antes era silenciado: uma falha de escrita no Redis sumia sem rastro,
     // contradizendo "memória é confiança". Alinha com o console.warn já usado
     // nos caminhos de leitura/escrita acima.
+    memLastWriteFailure = err;
     console.warn("[GUTO] Redis memory write failed (async write chain):", err);
   });
-  return writeOperation;
+  return requiresDurableMemoryStore()
+    ? writeOperation.catch((error) => { throw observableStoreFailure("Redis user memory write failed.", error); })
+    : writeOperation;
 }
 
 export type UserMemoryListAppend = {
@@ -718,14 +778,13 @@ export function persistUserMemoryPatch(
         : values;
     }
     store[userId] = next;
-    globalMemoryStore[userId] = cloneStoreValue(next);
   };
 
-  const redis = getRedisClient();
+  const redis = requireProductionRedis(getRedisClient());
   const writeOperation = memWriteChain.then(async () => {
     if (redis) {
-      await mutateRedisMemoryStore(redis, async () => {
-        applyPatch(globalMemoryStore);
+      await mutateRedisMemoryStore(redis, async (store) => {
+        applyPatch(store);
       });
       return;
     }
@@ -737,11 +796,15 @@ export function persistUserMemoryPatch(
     if (!writeToFile(store)) {
       throw new Error("GUTO memory patch could not be persisted to disk.");
     }
-  });
+    replaceGlobalMemoryStore(store);
+  }).then(() => { memLastWriteFailure = null; });
   memWriteChain = writeOperation.catch((error) => {
+    memLastWriteFailure = error;
     console.warn("[GUTO] Memory patch write failed:", error);
   });
-  return writeOperation;
+  return requiresDurableMemoryStore()
+    ? writeOperation.catch((error) => { throw observableStoreFailure("Redis user memory patch failed.", error); })
+    : writeOperation;
 }
 
 /**
@@ -755,7 +818,7 @@ export async function updateUserMemoryAtomically<T>(
 ): Promise<T | null> {
   assertValidUserId(userId);
   let result: T | null = null;
-  const redis = getRedisClient();
+  const redis = requireProductionRedis(getRedisClient());
   const writeOperation = memWriteChain.then(async () => {
     const buildNextStore = async (store: MemoryStore): Promise<MemoryStore> => {
       const nextStore = cloneStoreValue(store);
@@ -779,21 +842,37 @@ export async function updateUserMemoryAtomically<T>(
       throw new Error("Atomic GUTO user memory update could not be persisted to disk.");
     }
     replaceGlobalMemoryStore(nextStore);
-  });
+  }).then(() => { memLastWriteFailure = null; });
   memWriteChain = writeOperation.catch((error) => {
+    memLastWriteFailure = error;
     console.warn("[GUTO] Atomic user memory update failed:", error);
   });
-  await writeOperation;
+  try {
+    await writeOperation;
+  } catch (error) {
+    if (requiresDurableMemoryStore()) {
+      throw observableStoreFailure("Atomic Redis user memory update failed.", error);
+    }
+    throw error;
+  }
   return result;
 }
 
-export function flushMemoryStoreWrites(): Promise<void> {
-  return memWriteChain;
+export async function flushMemoryStoreWrites(): Promise<void> {
+  await memWriteChain;
+  if (requiresDurableMemoryStore() && memLastWriteFailure) {
+    throw observableStoreFailure("A durable memory write did not commit.", memLastWriteFailure);
+  }
 }
 
 // Bootstrap: hidrata o cache no init do módulo (encolhe a janela de clobber p/ TODOS
 // os caminhos, pois readMemoryStoreSync passa a devolver o cache cheio).
-void ensureMemoryHydrated();
+void ensureMemoryHydrated().catch((error) => {
+  const code = error instanceof MemoryStoreUnavailableError
+    ? error.code
+    : "MEMORY_STORE_HYDRATION_FAILED";
+  console.error("[GUTO][memory_store_unavailable] Durable memory bootstrap failed.", { code });
+});
 
 /**
  * Clear the in-memory cache. Use in tests to prevent state leaking between test cases.
@@ -802,4 +881,5 @@ export function clearMemoryStoreCache(): void {
   for (const key in globalMemoryStore) {
     delete globalMemoryStore[key];
   }
+  memLastWriteFailure = null;
 }

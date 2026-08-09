@@ -63,7 +63,7 @@ function lastSuggestedPayload(active: Record<string, any>) {
 function worldStateFromPrompt(prompt = brainPrompts.at(-1) || "") {
   const worldStateText = prompt
     .split("WORLD_STATE_V2:\n").pop()
-    ?.split("\n\nHISTÓRICO RECENTE:")[0];
+    ?.split("\n\n</USER_DATA>")[0];
   return worldStateText ? JSON.parse(worldStateText) as Record<string, any> : {};
 }
 
@@ -159,10 +159,16 @@ describe("active context correlation", () => {
           brainCalls += 1;
           brainPrompts.push(prompt);
         }
-        const message = prompt.split("MENSAGEM DO USUÁRIO:").pop()?.trim() || "";
+        const currentMessageJson = prompt
+          .split("<CURRENT_MESSAGE>").pop()
+          ?.split("</CURRENT_MESSAGE>")[0]
+          ?.trim();
+        const message = currentMessageJson
+          ? String((JSON.parse(currentMessageJson) as { message?: unknown }).message || "")
+          : prompt.split("MENSAGEM DO USUÁRIO:").pop()?.trim() || "";
         const worldStateText = prompt
           .split("WORLD_STATE_V2:\n").pop()
-          ?.split("\n\nHISTÓRICO RECENTE:")[0];
+          ?.split("\n\n</USER_DATA>")[0];
         const worldState = worldStateText ? JSON.parse(worldStateText) as {
           language?: string;
           activeContext?: {

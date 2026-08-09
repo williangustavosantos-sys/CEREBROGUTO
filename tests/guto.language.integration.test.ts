@@ -195,8 +195,17 @@ function installGeminiMock() {
       memory.lastWorkoutFocus ||
       (/\b(peito|chest|petto)\b/i.test(prompt) ? "chest_triceps" : undefined);
 
+    const currentMessageBlock = prompt.match(/<CURRENT_MESSAGE>\s*([\s\S]*?)\s*<\/CURRENT_MESSAGE>/)?.[1];
     const inputMatch = prompt.match(/MENSAGEM DO USUÁRIO:\s*([\s\S]*)$/) || prompt.match(/Mensagem atual do usuário: (.*)/);
-    const inputMsg = inputMatch ? inputMatch[1].trim().toLowerCase() : prompt.toLowerCase();
+    let inputMsg = inputMatch ? inputMatch[1].trim().toLowerCase() : "";
+    if (currentMessageBlock) {
+      try {
+        const parsed = JSON.parse(currentMessageBlock) as { message?: unknown };
+        inputMsg = typeof parsed.message === "string" ? parsed.message.trim().toLowerCase() : inputMsg;
+      } catch {
+        inputMsg = currentMessageBlock.trim().toLowerCase();
+      }
+    }
 
     // Check if it's a full workout request
     if (inputMsg.includes("30") && (inputMsg.includes("15") || inputMsg.includes("3 pm"))) {
@@ -358,6 +367,8 @@ describe("GUTO visible language guarantees", () => {
   for (const { language, input } of fullInputs) {
     it(`keeps full workout creation visible text in ${language}`, async () => {
       const userId = `language-full-${language}`;
+      writeUserMemory(userId, { language });
+      clearMemoryStoreCache();
       const response = await postGuto({
         language,
         profile: { userId, name: "Will" },
@@ -371,8 +382,8 @@ describe("GUTO visible language guarantees", () => {
       assert.ok(expectedFocusByLanguage[language].map(normalize).includes(normalize(response.workoutPlan.focus || "")));
 
       const memory = readUserMemory(userId);
-      assert.equal(memory.trainingAge, 30);
-      assert.notEqual(memory.trainingAge, 15);
+      assert.equal(memory.userAge, 30);
+      assert.notEqual(memory.userAge, 15);
 
       if (language !== "pt-BR") {
         assertNoPortugueseLeak(response, language);
@@ -406,7 +417,8 @@ describe("GUTO visible language guarantees", () => {
   for (const { language, historyText, input, expected } of historyCases) {
     it(`understands chest/triceps history reference in ${language}`, async () => {
       const userId = `language-history-${language}`;
-      writeUserMemory(userId, { lastSuggestedFocus: "chest_triceps" });
+      writeUserMemory(userId, { language, lastSuggestedFocus: "chest_triceps" });
+      clearMemoryStoreCache();
       const response = await postGuto({
         language,
         profile: { userId, name: "Will" },

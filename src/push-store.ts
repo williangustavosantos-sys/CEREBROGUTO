@@ -207,6 +207,24 @@ export async function deleteSubscriptionByEndpoint(endpoint: string): Promise<bo
   });
 }
 
+/**
+ * User-facing unsubscribe. An authenticated user may remove only an endpoint
+ * that currently belongs to that same user. Delivery cleanup keeps using the
+ * endpoint-only variant because it acts on a provider-confirmed invalid token.
+ */
+export async function deleteSubscriptionForUser(
+  userId: string,
+  endpoint: string,
+): Promise<boolean> {
+  return mutateStore((store) => {
+    const before = store.subscriptions.length;
+    store.subscriptions = store.subscriptions.filter(
+      (item) => !(item.userId === userId && item.endpoint === endpoint),
+    );
+    return store.subscriptions.length !== before;
+  });
+}
+
 export async function deleteSubscriptionsByUser(userId: string): Promise<number> {
   return mutateStore((store) => {
     const before = store.subscriptions.length;

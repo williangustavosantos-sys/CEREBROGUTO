@@ -288,9 +288,10 @@ describe("Fatia 1 — interceptação da flag no handler /guto", () => {
         return okContract;
       },
     });
-    assert.ok(
-      String(memory.trainingLocation || "").includes("academia"),
-      "o patch deve ter sido aplicado à memória via applyMemoryPatch"
+    assert.equal(
+      memory.trainingLocation,
+      "gym",
+      "o patch deve ser aplicado e canonicalizado via applyMemoryPatch"
     );
   });
 });

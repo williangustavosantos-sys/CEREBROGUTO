@@ -57,6 +57,11 @@ export interface DecideTurnDeps {
   callModel: (prompt: string) => Promise<ModelCallResult>;
   /** Wrap de parseGutoResponse: texto cru → objeto candidato {fala, acao, ...}. */
   parseResponse: (rawText: string | undefined, language: string) => unknown;
+  /** Policy gate: model proposes, backend authorizes only declared safe facts. */
+  authorizeMemoryPatch?: (
+    proposal: Record<string, unknown>,
+    currentMessage: string,
+  ) => Record<string, unknown>;
   /**
    * Persistência injetada (applyMemoryPatch + commit do server.ts). Opcional:
    * ausente => nunca grava. Só é chamada DEPOIS de validateContract passar.
@@ -193,7 +198,13 @@ export async function decideTurn(
     response.avatarEmotion = candidate.avatarEmotion;
   }
 
-  const memoryPatch = readMemoryPatch(candidate.memoryPatch);
+  const proposedMemoryPatch = readMemoryPatch(candidate.memoryPatch);
+  const authorizedMemoryPatch = proposedMemoryPatch && deps.authorizeMemoryPatch
+    ? deps.authorizeMemoryPatch(proposedMemoryPatch, input.input)
+    : null;
+  const memoryPatch = authorizedMemoryPatch && Object.keys(authorizedMemoryPatch).length > 0
+    ? authorizedMemoryPatch
+    : null;
   if (memoryPatch) response.memoryPatch = memoryPatch;
   const proactiveMemoryAction = readMemoryPatch(candidate.proactiveMemoryAction);
   if (proactiveMemoryAction) response.proactiveMemoryAction = proactiveMemoryAction;

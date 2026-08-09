@@ -139,8 +139,17 @@ function installGeminiMock() {
       memory.lastWorkoutFocus ||
       (/\b(peito|chest|petto)\b/i.test(prompt) ? "chest_triceps" : undefined);
 
+    const currentMessageBlock = prompt.match(/<CURRENT_MESSAGE>\s*([\s\S]*?)\s*<\/CURRENT_MESSAGE>/)?.[1];
     const inputMatch = prompt.match(/MENSAGEM DO USUÁRIO:\s*([\s\S]*)$/) || prompt.match(/Mensagem atual do usuário: (.*)/);
-    const inputMsg = inputMatch ? inputMatch[1].trim().toLowerCase() : "";
+    let inputMsg = inputMatch ? inputMatch[1].trim().toLowerCase() : "";
+    if (currentMessageBlock) {
+      try {
+        const parsed = JSON.parse(currentMessageBlock) as { message?: unknown };
+        inputMsg = typeof parsed.message === "string" ? parsed.message.trim().toLowerCase() : inputMsg;
+      } catch {
+        inputMsg = currentMessageBlock.trim().toLowerCase();
+      }
+    }
 
     // 1. Treino completo com tudo fornecido
     if (inputMsg.includes("15") && inputMsg.includes("30") && inputMsg.includes("academia")) {
@@ -384,8 +393,8 @@ describe("GUTO /guto integration", () => {
     assert.equal(memory.trainingSchedule, "tomorrow");
     assert.equal(memory.trainingLocation, "gym");
     assert.match(memory.trainingStatus, /voltando agora/i);
-    assert.equal(memory.trainingAge, 30);
-    assert.notEqual(memory.trainingAge, 15);
+    assert.equal(memory.userAge, 30);
+    assert.notEqual(memory.userAge, 15);
     assert.equal(memory.trainingLimitations, "sem dor");
     assert.ok(memory.lastWorkoutPlan);
     assert.ok(Array.isArray(memory.memoryAudit));
@@ -549,6 +558,14 @@ describe("GUTO /guto integration", () => {
 
   it("IT clear no pain without location asks before workout", async () => {
     const userId = "test-it-nessun-dolore";
+    writeUserMemory(userId, {
+      name: "Luca",
+      language: "it-IT",
+      trainingStatus: "sto tornando ad allenarmi",
+      trainingLevel: "returning",
+      userAge: 35,
+    });
+    clearMemoryStoreCache();
     const response = await postGuto({
       language: "it-IT",
       profile: {
@@ -591,11 +608,8 @@ describe("GUTO /guto integration", () => {
 
     const memory = readUserMemory(userId);
     assert.notEqual(memory.trainedToday, true);
-    assert.ok(
-      memory.memoryAudit?.some((entry: any) =>
-        String(entry.reason || "").includes("trainedToday vindo do chat foi ignorado")
-      )
-    );
+    assert.equal(memory.completedWorkoutDates?.length || 0, 0);
+    assert.equal(memory.xpEvents?.length || 0, 0);
   });
 
   it("keeps a sick user on a light route and asks for a simple location", async () => {
