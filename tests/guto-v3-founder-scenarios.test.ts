@@ -232,6 +232,7 @@ test("V3 generation engines create safe catalog workouts and one-truth vegetaria
   const state = snapshot("founder-generation", "10000000-0000-4000-8000-000000000012");
   const workout = generateWorkoutDraft(state);
   assert.ok(workout.items.length >= 4);
+  assert.equal(workout.items.find((item) => item.muscleGroup === "peito")?.exerciseId, "supino_reto_maquina");
   for (const item of workout.items) {
     const exercise = getCatalogById(item.exerciseId);
     assert.ok(exercise);

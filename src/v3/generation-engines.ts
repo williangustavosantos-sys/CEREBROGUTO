@@ -38,11 +38,16 @@ export function generateWorkoutDraft(snapshot: OfficialSnapshot): WorkoutPlanDra
   const desiredGroups: CatalogMuscleGroup[] = snapshot.goal.code === "conditioning"
     ? ["aquecimento", "pernas", "peito", "costas", "abdomen"]
     : ["aquecimento", "peito", "costas", "pernas", "ombro", "bracos", "abdomen"];
-  const selected = desiredGroups.map((group) => ValidatedExerciseCatalog.find((exercise) =>
-    exercise.muscleGroup === group &&
-    getExerciseLocations(exercise).includes(location) &&
-    !getExerciseRiskTags(exercise).some((risk) => risks.has(risk)),
-  )).filter((exercise): exercise is (typeof ValidatedExerciseCatalog)[number] => Boolean(exercise));
+  const selected = desiredGroups.map((group) => {
+    const eligible = (exercise: (typeof ValidatedExerciseCatalog)[number]) =>
+      exercise.muscleGroup === group &&
+      getExerciseLocations(exercise).includes(location) &&
+      !getExerciseRiskTags(exercise).some((risk) => risks.has(risk));
+    const preferredId = location === "gym" && group === "peito" ? "supino_reto_maquina" : null;
+    return (preferredId
+      ? ValidatedExerciseCatalog.find((exercise) => exercise.id === preferredId && eligible(exercise))
+      : undefined) || ValidatedExerciseCatalog.find(eligible);
+  }).filter((exercise): exercise is (typeof ValidatedExerciseCatalog)[number] => Boolean(exercise));
   if (selected.length < 4) {
     throw new V3Error("V3_WORKOUT_CATALOG_INSUFFICIENT", "Catálogo seguro insuficiente para gerar o treino.", 409);
   }
