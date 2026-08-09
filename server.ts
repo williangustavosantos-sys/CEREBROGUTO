@@ -1454,7 +1454,7 @@ export function getMemory(userId: string): GutoMemory {
       activeContext: normalizeActiveContext(existing.activeContext),
       contextHistory: Array.isArray(existing.contextHistory)
         ? existing.contextHistory
-            .map(normalizeActiveContext)
+            .map((item) => normalizeActiveContext(item, { allowExpired: true }))
             .filter((item): item is ActiveContext => Boolean(item))
             .slice(-10)
         : [],
@@ -3939,6 +3939,7 @@ function formatHistoryForPrompt(history: GutoHistoryItem[] = []) {
 // Exercício ativo vira contexto morto após algumas horas (sessão antiga / dúvida
 // abandonada). TTL de segurança: não injeta exercício velho como se fosse o atual.
 const ACTIVE_EXERCISE_TTL_MS = 3 * 60 * 60 * 1000;
+const ACTIVE_CONTEXT_TTL_MS = 3 * 60 * 60 * 1000;
 const SUBSTITUTION_CONTEXT_TTL_MS = 3 * 60 * 60 * 1000;
 
 function normalizeActiveExerciseContext(value: unknown): ActiveExerciseContext | null | undefined {
@@ -4028,7 +4029,10 @@ function normalizeActiveContextItem(value: unknown): ActiveContextItem | null {
   };
 }
 
-function normalizeActiveContext(value: unknown): ActiveContext | null | undefined {
+function normalizeActiveContext(
+  value: unknown,
+  options: { allowExpired?: boolean } = {},
+): ActiveContext | null | undefined {
   if (value === null) return null;
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const raw = value as Partial<ActiveContext>;
@@ -4043,6 +4047,14 @@ function normalizeActiveContext(value: unknown): ActiveContext | null | undefine
   const updatedAt = typeof raw.updatedAt === "string" && raw.updatedAt.trim()
     ? raw.updatedAt
     : createdAt;
+  const updated = Date.parse(updatedAt);
+  if (
+    !options.allowExpired &&
+    Number.isFinite(updated) &&
+    Date.now() - updated > ACTIVE_CONTEXT_TTL_MS
+  ) {
+    return null;
+  }
   return {
     id: raw.id.trim().slice(0, 160),
     version: typeof raw.version === "number" && Number.isInteger(raw.version) && raw.version > 0
@@ -6730,7 +6742,7 @@ function buildFoodSubstituteResponse(
     useContext: "meal_substitution",
   }).filter((food) => !rejectedIds.includes(food.id));
 
-  if (subs.length === 0 || (isRejectedFollowUp && Boolean(previous?.lastSuggestedId))) {
+  if (subs.length === 0) {
     memory.substitutionContext = {
       kind: "food",
       originalId: foodId,
@@ -8076,7 +8088,7 @@ function buildEquipmentAvailabilityQuestion({
   if (persist) saveMemory(memory);
 
   const copy: Record<GutoLanguage, string> = {
-    "pt-BR": `Academia lotada hoje! Me fala o que você tá vendo livre aí do seu lado agora para eu adaptar, ou quer pular esse por enquanto e voltar nele no fim do treino?`,
+    "pt-BR": `Academia lotada hoje. Me fala o que está livre aí do seu lado agora para eu adaptar, ou prefere deixar este exercício para o fim do treino?`,
     "en-US": `Gym is packed today! Tell me what's free near you right now so I can adapt, or do you want to skip this one for now and come back at the end?`,
     "it-IT": `Palestra affollata oggi! Dimmi cosa vedi libero vicino a te adesso per adattare, o vuoi saltare questo per ora e riprovarci alla fine?`,
   };
@@ -8097,10 +8109,6 @@ function buildValidatedEquipmentBusyResponse({
   persist?: boolean;
 }): GutoModelResponse {
   const normalizedRejectedIds = mergeRejectedIds(rejectedIds, [original.id]);
-  if (normalizedRejectedIds.filter((id) => id !== original.id).length >= 1) {
-    return buildEquipmentAvailabilityQuestion({ original, memory, language, rejectedIds: normalizedRejectedIds, persist });
-  }
-
   const substitute = pickValidatedExerciseSubstitute({ originalId: original.id, memory, rejectedIds: normalizedRejectedIds });
 
   if (!substitute) {
@@ -8234,6 +8242,33 @@ function buildEquipmentBusyFallbackResponse({
       "it-IT": "Chiaro. Dimmi quale attrezzo è occupato e te lo cambio subito, senza perdere l'allenamento.",
     };
     return { fala: copy[language], acao: "none", expectedResponse: null, avatarEmotion: "default" };
+  }
+
+  // Oferece no máximo três alternativas distintas. Na quarta recusa, não
+  // inventa outra opção em sequência: preserva o último commit íntegro e
+  // coleta do usuário quais equipamentos estão realmente disponíveis.
+  const activeWorkoutContext = normalizeActiveContext(memory.activeContext);
+  const previouslyRejectedSubstitutes = activeWorkoutContext?.type === "workout"
+    ? activeWorkoutContext.rejectedItems
+        .filter((item) => item.id !== activeWorkoutContext.originalItem.id)
+    : [];
+  if (
+    isRejectedFollowUp &&
+    activeWorkoutContext?.type === "workout" &&
+    activeWorkoutContext.lastSuggestedItem &&
+    previouslyRejectedSubstitutes.length >= 2
+  ) {
+    return buildEquipmentAvailabilityQuestion({
+      original: {
+        id: activeWorkoutContext.originalItem.id,
+        name: activeWorkoutContext.originalItem.name,
+        planExercise: previous?.planExercise || original.planExercise,
+      },
+      memory,
+      language,
+      rejectedIds: activeWorkoutContext.rejectedItems.map((item) => item.id),
+      persist,
+    });
   }
 
   const recoveredSuggestedId = !previous?.lastSuggestedId && isSubstitutionRejectionFollowUp(input)
@@ -17266,17 +17301,15 @@ async function dispatchSovereignBrainAction(params: {
       isSubstitutionRejectionFollowUp(params.input)
     );
   if (hasWorkoutOperationalAction) {
-    const previousExerciseSubstitution = getFreshSubstitutionContext(memory, "exercise");
-    const isRejectedExerciseFollowUp =
-      Boolean(previousExerciseSubstitution?.lastSuggestedId) &&
-      isSubstitutionRejectionFollowUp(params.input);
-    const exhaustedSuggestedExercises = isRejectedExerciseFollowUp
-      ? mergeRejectedIds(
-          previousExerciseSubstitution?.rejectedIds,
-          [previousExerciseSubstitution?.originalId, previousExerciseSubstitution?.lastSuggestedId],
-        ).filter((id) => id !== previousExerciseSubstitution?.originalId).length >= 1
-      : false;
-    if (exhaustedSuggestedExercises) {
+    const reachedRecommendationLimit = Boolean(
+      activeContext?.type === "workout" &&
+      activeContext.lastSuggestedItem &&
+      isSubstitutionRejectionFollowUp(params.input) &&
+      activeContext.rejectedItems
+        .filter((item) => item.id !== activeContext.originalItem.id)
+        .length >= 2
+    );
+    if (reachedRecommendationLimit) {
       const availabilityQuestion = await buildEquipmentBusyFallbackResponseAtomically({
         input: params.input,
         history: params.history,

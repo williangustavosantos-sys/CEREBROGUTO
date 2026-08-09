@@ -31,6 +31,16 @@ type RedisClient = {
 let redisClient: RedisClient | null = null;
 
 function getRedisClient() {
+  // Integration/unit tests must never consult the configured production Redis.
+  // `test-env` sets this before importing the server; honor it on every call so
+  // dotenv credentials cannot make an isolated active-context test read a real
+  // tenant store instead of its temporary fixture.
+  if (
+    process.env.NODE_ENV === "test" ||
+    process.env.GUTO_DISABLE_REDIS_FOR_TESTS === "1"
+  ) {
+    return null;
+  }
   if (redisClient) return redisClient;
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
