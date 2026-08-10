@@ -25,6 +25,7 @@ const ActiveContextMutationSchema = z.discriminatedUnion("clear", [
 ]);
 
 const RequestIdSchema = z.object({ requestId: z.string().uuid() });
+const NameValidationRequestSchema = z.object({ name: z.string().trim().min(1).max(80) });
 
 function v3Enabled(): boolean { return process.env.GUTO_V3_ENABLED === "true"; }
 
@@ -36,6 +37,8 @@ const legacyAuthorityPrefixes = [
   "/guto/diet",
   "/guto/active-context",
   "/guto/active-exercise",
+  "/guto/events",
+  "/guto/validate-name",
   "/guto/arena",
   "/guto/proactive",
   "/guto/proactivity",
@@ -72,6 +75,17 @@ async function resolveActor(req: Request, options?: { provision?: boolean }): Pr
 function guardEnabled(_req: Request, _res: Response, next: NextFunction): void {
   if (!v3Enabled()) return next(new V3Error("V3_NOT_ENABLED", "Cérebro V3 ainda não habilitado neste ambiente.", 503));
   next();
+}
+
+function validateV3Name(value: string): { status: "invalid" | "confirm" | "valid"; normalized: string; message: string } {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  const lower = normalized.toLocaleLowerCase("pt-BR");
+  const suspiciousNames = new Set(["banana", "teste", "asdf", "qwerty", "nome", "usuario", "usuário", "nada", "ovo"]);
+  if (normalized.length < 2) return { status: "invalid", normalized, message: "Nome curto demais. Me dá um nome real." };
+  if (normalized.length > 20) return { status: "invalid", normalized, message: "Nome longo demais. Usa até 20 caracteres." };
+  if (!/^[\p{L} ]+$/u.test(normalized)) return { status: "invalid", normalized, message: "Nome não precisa de número nem símbolo. Só letras." };
+  if (suspiciousNames.has(lower)) return { status: "confirm", normalized, message: `Esse é o nome que você quer que eu use com você: ${normalized}?` };
+  return { status: "valid", normalized, message: "Nome aceito." };
 }
 
 export function createV3Router(requireActiveUser: RequestHandler): express.Router {
@@ -113,6 +127,12 @@ export function createV3Router(requireActiveUser: RequestHandler): express.Route
       postgres,
       redis,
     });
+  });
+
+  router.post("/guto/v3/name/validate", requireActiveUser, guardEnabled, (req, res, next) => {
+    try {
+      res.json(validateV3Name(NameValidationRequestSchema.parse(req.body).name));
+    } catch (error) { next(error); }
   });
 
   router.post("/guto/v3", requireActiveUser, guardEnabled, async (req, res, next) => {

@@ -479,6 +479,8 @@ test("V3 cutover blocks every migrated V2 authority path while preserving non-au
     "/guto/validate-workout",
     "/guto/diet/generate",
     "/guto/active-context",
+    "/guto/events",
+    "/guto/validate-name",
     "/guto/arena/weekly",
     "/guto/proactivity/memories",
     "/guto-audio",
@@ -487,7 +489,6 @@ test("V3 cutover blocks every migrated V2 authority path while preserving non-au
   for (const path of [
     "/guto/v3",
     "/guto/v3/state",
-    "/guto/events",
     "/guto/account",
     "/guto/push/subscribe",
     "/guto/billing/checkout",

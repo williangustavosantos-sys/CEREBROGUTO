@@ -159,7 +159,9 @@ async function assertLangfuseTrace(requestId: string): Promise<{ traceId: string
   const authorization = Buffer.from(`${process.env.LANGFUSE_PUBLIC_KEY}:${process.env.LANGFUSE_SECRET_KEY}`).toString("base64");
   const headers = { Authorization: `Basic ${authorization}` };
 
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  const maxAttempts = Number(process.env.GUTO_V3_LANGFUSE_VERIFY_ATTEMPTS || 8);
+  const pollDelayMs = Number(process.env.GUTO_V3_LANGFUSE_VERIFY_POLL_DELAY_MS || 1_000);
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const response = await fetch(`${baseUrl}/api/public/traces?limit=100&name=GUTO_TURN`, {
       headers,
       signal: AbortSignal.timeout(5_000),
@@ -181,7 +183,7 @@ async function assertLangfuseTrace(requestId: string): Promise<{ traceId: string
       assert.ok(names.includes("DECISION_VALIDATION"), "Langfuse trace is missing DECISION_VALIDATION");
       return { traceId: trace.id, observationCount: observations.length };
     }
-    await wait(1_000 * (attempt + 1));
+    await wait(pollDelayMs);
   }
   assert.fail("Langfuse did not expose the flushed V3 trace after retries");
 }
