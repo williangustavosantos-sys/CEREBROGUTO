@@ -22,13 +22,13 @@ const required = [
   "MEM0_API_KEY",
   "LANGFUSE_PUBLIC_KEY",
   "LANGFUSE_SECRET_KEY",
-  "INNGEST_EVENT_KEY",
 ] as const;
 
 const missing: string[] = required.filter((name) => !process.env[name]);
 if (!(process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL)) missing.push("UPSTASH_REDIS_REST_URL|KV_REST_API_URL");
 if (!(process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN)) missing.push("UPSTASH_REDIS_REST_TOKEN|KV_REST_API_TOKEN");
 if (missing.length) throw new Error(`Missing required V3 integration variables: ${missing.join(", ")}`);
+const inngestConfigured = Boolean(process.env.INNGEST_EVENT_KEY);
 
 const pool = createV3Pool();
 const repository = new PostgresOfficialStateRepository(pool);
@@ -258,7 +258,7 @@ try {
     assert.ok(decision.speech.length > 0);
 
     const mem0ResultCount = await assertMem0RelationshipMemory(actorA);
-    const inngestResultCount = await assertInngestRelationshipMemory(actorA);
+    const inngestResultCount = inngestConfigured ? await assertInngestRelationshipMemory(actorA) : null;
 
     return {
       postgres: { ok: true, latencyMs: postgres.latencyMs },
@@ -266,16 +266,20 @@ try {
       redis: { ok: true, latencyMs: redis.latencyMs, isolatedUsers: 2, concurrentWinners: 1, ttlValidated: true },
       gemini: { ok: true, api: "interactions", action: decision.action, decisionEnvelopeValidated: true, genkitFlowValidated: true },
       mem0: { ok: true, classification: "RELATIONSHIP", resultCount: mem0ResultCount },
-      inngest: { ok: true, durableRelationshipMemoryResultCount: inngestResultCount },
+      inngest: inngestConfigured
+        ? { ok: true, durableRelationshipMemoryResultCount: inngestResultCount }
+        : { ok: false, reason: "INNGEST_EVENT_KEY is not configured for this isolated Preview" },
     };
   });
   await shutdownV3Telemetry();
   telemetryShutdown = true;
   const langfuse = await assertLangfuseTrace(traceRequestId);
-  process.stdout.write(`${JSON.stringify({
+  const verification = {
     ...result,
     langfuse: { ok: true, traceFlushed: true, ...langfuse },
-  }, null, 2)}\n`);
+  };
+  process.stdout.write(`${JSON.stringify(verification, null, 2)}\n`);
+  if (!verification.inngest.ok) process.exitCode = 1;
 } finally {
   await pool.end();
   if (!telemetryShutdown) await shutdownV3Telemetry();
