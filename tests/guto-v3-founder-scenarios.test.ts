@@ -323,6 +323,8 @@ test("V3 nutrition engine rejects a published plan with divergent meal totals", 
   const replacement = calculateFoodReplacement(plan.meals[0].items[0], candidate);
   const valid = applyFoodReplacement(plan, plan.meals[0].items[0].id, replacement);
   assertNutritionPlanValid(valid);
+  const macroCalories = Number((replacement.proteinGrams * 4 + replacement.carbsGrams * 4 + replacement.fatGrams * 9).toFixed(2));
+  assert.equal(replacement.calories, macroCalories);
   const invalid = structuredClone(valid);
   invalid.meals[0].calories += 10;
   assert.throws(() => assertNutritionPlanValid(invalid), /validação determinística/);

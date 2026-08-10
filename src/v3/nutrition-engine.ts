@@ -91,13 +91,16 @@ export function calculateFoodReplacement(target: DietItem, candidate: CandidateO
     throw new V3Error("V3_FOOD_REPLACEMENT_QUANTITY_UNSAFE", "A quantidade calculada não é operacionalmente válida.", 409);
   }
   const factor = quantityGrams / 100;
+  const proteinGrams = round(candidateNutrient(candidate, "proteinPer100g") * factor);
+  const carbsGrams = round(candidateNutrient(candidate, "carbsPer100g") * factor);
+  const fatGrams = round(candidateNutrient(candidate, "fatPer100g") * factor);
   return {
     candidate,
     quantityGrams,
-    calories: round(kcalPer100 * factor),
-    proteinGrams: round(candidateNutrient(candidate, "proteinPer100g") * factor),
-    carbsGrams: round(candidateNutrient(candidate, "carbsPer100g") * factor),
-    fatGrams: round(candidateNutrient(candidate, "fatPer100g") * factor),
+    calories: round(proteinGrams * 4 + carbsGrams * 4 + fatGrams * 9),
+    proteinGrams,
+    carbsGrams,
+    fatGrams,
   };
 }
 
@@ -141,4 +144,3 @@ export function assertNutritionPlanValid(plan: DietPlan, tolerance: NutritionTol
     });
   }
 }
-
