@@ -58,7 +58,9 @@ function foodCandidate(foodId: string, locale: FoodLanguage): CandidateOption | 
   };
 }
 
-export class LegacyCatalogCandidateProvider implements CandidateProvider {
+// Catalogs are immutable reference data only; this provider never reads or
+// writes V1/V2 state and is the sole candidate source for V3 executors.
+export class ConservativeCatalogCandidateProviderV3 implements CandidateProvider {
   async getCandidates(snapshot: OfficialSnapshot, activeContext: ActiveContext | null, message: string): Promise<CandidateOption[]> {
     if (!activeContext) return [];
     const locale = language(snapshot.profile.language);

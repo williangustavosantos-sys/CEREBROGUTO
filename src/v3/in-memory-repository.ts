@@ -1,7 +1,8 @@
 import type { CalibrationMutation } from "./contracts.js";
 import { randomUUID } from "node:crypto";
 import { V3Error } from "./errors.js";
-import type { DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
+import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
+import { emptyConversationDecisionState, type ConversationDecisionState, type ConversationKnownFact } from "./conversation-state.js";
 import type {
   ActorContext,
   CalibrationResult,
@@ -16,13 +17,14 @@ import type {
 
 function key(actor: Pick<ActorContext, "tenantId" | "userId">): string { return `${actor.tenantId}:${actor.userId}`; }
 
-export class InMemoryOfficialStateRepository implements OfficialStateRepository {
+export class InMemoryOfficialStateRepository implements OfficialStateRepository, ConversationStateRepository {
   private readonly snapshots = new Map<string, OfficialSnapshot>();
   private readonly byExternal = new Map<string, ActorContext>();
   private readonly calibrationResults = new Map<string, CalibrationResult>();
   private readonly journeys = new Map<string, JourneyState>();
   private readonly xpLedger = new Map<string, XpLedgerEntry[]>();
   private readonly pactRequests = new Set<string>();
+  private readonly conversationStates = new Map<string, ConversationDecisionState>();
   readonly events: Array<{ requestId: string; action: string; resultCode: string }> = [];
 
   seed(snapshot: OfficialSnapshot): void {
@@ -307,5 +309,20 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository 
     if (!this.events.some((event) => event.requestId === input.requestId)) {
       this.events.push({ requestId: input.requestId, action: input.action, resultCode: input.resultCode });
     }
+  }
+  async loadConversationDecisionState(actor: ActorContext, threadKey = "companion"): Promise<ConversationDecisionState> {
+    return structuredClone(this.conversationStates.get(`${key(actor)}:${threadKey}`) || emptyConversationDecisionState(threadKey));
+  }
+  async recordConversationDecision(input: {
+    actor: ActorContext;
+    requestId: string;
+    state: ConversationDecisionState;
+    interactionId?: string;
+    decisionId: string;
+    resolvedFacts: ConversationKnownFact[];
+  }): Promise<void> {
+    const state = structuredClone(input.state);
+    state.previousInteractionId = input.interactionId || state.previousInteractionId;
+    this.conversationStates.set(`${key(input.actor)}:${state.threadKey}`, state);
   }
 }

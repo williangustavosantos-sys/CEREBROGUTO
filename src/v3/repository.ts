@@ -1,4 +1,5 @@
 import type { CalibrationMutation } from "./contracts.js";
+import type { ConversationDecisionState, ConversationKnownFact } from "./conversation-state.js";
 import type {
   ActorContext,
   CalibrationResult,
@@ -97,4 +98,21 @@ export interface OfficialStateRepository {
     action: string;
     resultCode: string;
   }): Promise<void>;
+}
+
+export interface ConversationStateRepository {
+  loadConversationDecisionState(actor: ActorContext, threadKey?: string): Promise<ConversationDecisionState>;
+  recordConversationDecision(input: {
+    actor: ActorContext;
+    requestId: string;
+    state: ConversationDecisionState;
+    interactionId?: string;
+    decisionId: string;
+    resolvedFacts: ConversationKnownFact[];
+  }): Promise<void>;
+}
+
+export function supportsConversationState(repository: OfficialStateRepository): repository is OfficialStateRepository & ConversationStateRepository {
+  const candidate = repository as Partial<ConversationStateRepository>;
+  return typeof candidate.loadConversationDecisionState === "function" && typeof candidate.recordConversationDecision === "function";
 }

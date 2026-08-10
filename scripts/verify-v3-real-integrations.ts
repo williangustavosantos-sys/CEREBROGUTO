@@ -3,8 +3,12 @@ import "../src/v3/observability/instrumentation.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Redis } from "@upstash/redis";
-import { createV3Genkit, GenkitGeminiDecisionModel } from "../src/v3/ai.js";
+import { createV3Genkit, GeminiInteractionsDecisionModel } from "../src/v3/ai.js";
+import { ConservativeCatalogCandidateProviderV3 } from "../src/v3/candidate-provider.js";
+import { GutoContextBuilderV3 } from "../src/v3/context-builder.js";
 import { V3CutoverService } from "../src/v3/cutover-service.js";
+import { InngestDurableEventPublisher } from "../src/v3/durable-events.js";
+import { createGutoTurnFlow } from "../src/v3/flow.js";
 import { shutdownV3Telemetry } from "../src/v3/observability/instrumentation.js";
 import { withV3Span, withV3Trace } from "../src/v3/observability/tracing.js";
 import { RedisV3OperationalState } from "../src/v3/operational-state.js";
@@ -18,6 +22,7 @@ const required = [
   "MEM0_API_KEY",
   "LANGFUSE_PUBLIC_KEY",
   "LANGFUSE_SECRET_KEY",
+  "INNGEST_EVENT_KEY",
 ] as const;
 
 const missing: string[] = required.filter((name) => !process.env[name]);
@@ -154,6 +159,26 @@ async function assertMem0RelationshipMemory(actor: ActorContext): Promise<number
   assert.fail("Mem0 accepted the write but did not return relational memory after retries");
 }
 
+async function assertInngestRelationshipMemory(actor: ActorContext): Promise<number> {
+  const marker = `guto-v3-inngest-${randomUUID()}`;
+  await new InngestDurableEventPublisher().enqueueRelationshipMemorySync({
+    actor,
+    correlationId: randomUUID(),
+    facts: [{
+      classification: "RELATIONSHIP",
+      fact: `O usuário sintético do fluxo durável prefere confirmação objetiva. ${marker}`,
+      evidence: "Evento sintético do verificador de integração V3.",
+    }],
+  });
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const memories = await relationshipMemory.search(actor, marker, 10);
+    if (memories.some((memory) => memory.text.includes(marker))) return memories.length;
+    await wait(2_000);
+  }
+  assert.fail("Inngest accepted the event but did not complete the durable relationship-memory sync");
+}
+
 async function assertLangfuseTrace(requestId: string): Promise<{ traceId: string; observationCount: number }> {
   const baseUrl = (process.env.LANGFUSE_BASE_URL || "https://cloud.langfuse.com").replace(/\/+$/, "");
   const authorization = Buffer.from(`${process.env.LANGFUSE_PUBLIC_KEY}:${process.env.LANGFUSE_SECRET_KEY}`).toString("base64");
@@ -207,33 +232,41 @@ try {
     await withV3Span("RLS_ISOLATION_TEST", {}, () => assertRlsIsolation(actorA, actorB));
     await withV3Span("REDIS_CONCURRENCY_TEST", {}, () => assertRedisIsolationAndConcurrency(actorA, actorB));
 
-    const snapshot = await repository.loadOfficialSnapshot(actorA);
     const ai = createV3Genkit();
-    const decision = await new GenkitGeminiDecisionModel(ai).decide({
-      brainVersion: "guto-cerebro-v3",
-      requestId: randomUUID(),
-      actor: { tenantId: actorA.tenantId, userId: actorA.userId, role: actorA.role },
-      message: "Oi GUTO. Confirma que está comigo sem alterar meu plano.",
-      official: {
-        profile: snapshot.profile,
-        goal: snapshot.goal,
-        preferences: snapshot.preferences,
-        healthConstraints: snapshot.healthConstraints,
-      },
-      activeContext: null,
-      relationshipMemories: [],
-      candidates: [],
+    const contextBuilder = new GutoContextBuilderV3(
+      repository,
+      operational,
+      relationshipMemory,
+      new ConservativeCatalogCandidateProviderV3(),
+    );
+    const flow = createGutoTurnFlow({
+      ai,
+      repository,
+      operational,
+      relationshipMemory,
+      contextBuilder,
+      decisionModel: new GeminiInteractionsDecisionModel(),
+      durableEvents: new InngestDurableEventPublisher(),
     });
+    const decision = await flow({
+      externalSubject: actorA.externalSubject,
+      role: actorA.role,
+      message: "Oi GUTO. Confirma que está comigo sem alterar meu plano.",
+      requestId: randomUUID(),
+    });
+    assert.equal(decision.brainVersion, "guto-cerebro-v3");
     assert.ok(decision.speech.length > 0);
 
     const mem0ResultCount = await assertMem0RelationshipMemory(actorA);
+    const inngestResultCount = await assertInngestRelationshipMemory(actorA);
 
     return {
       postgres: { ok: true, latencyMs: postgres.latencyMs },
       rls: { ok: true, isolatedUsers: 2 },
       redis: { ok: true, latencyMs: redis.latencyMs, isolatedUsers: 2, concurrentWinners: 1, ttlValidated: true },
-      gemini: { ok: true, action: decision.action, decisionEnvelopeValidated: true },
+      gemini: { ok: true, api: "interactions", action: decision.action, decisionEnvelopeValidated: true, genkitFlowValidated: true },
       mem0: { ok: true, classification: "RELATIONSHIP", resultCount: mem0ResultCount },
+      inngest: { ok: true, durableRelationshipMemoryResultCount: inngestResultCount },
     };
   });
   await shutdownV3Telemetry();

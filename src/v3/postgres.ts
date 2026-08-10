@@ -1,8 +1,9 @@
 import { performance } from "node:perf_hooks";
 import pg, { type PoolClient, type QueryResultRow } from "pg";
 import type { CalibrationMutation } from "./contracts.js";
+import { emptyConversationDecisionState, type ConversationDecisionState, type ConversationKnownFact } from "./conversation-state.js";
 import { V3Error } from "./errors.js";
-import type { DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
+import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
 import type {
   ActorContext,
   CalibrationResult,
@@ -48,7 +49,7 @@ export function createV3Pool(connectionString = process.env.DATABASE_URL || ""):
   });
 }
 
-export class PostgresOfficialStateRepository implements OfficialStateRepository {
+export class PostgresOfficialStateRepository implements OfficialStateRepository, ConversationStateRepository {
   constructor(private readonly pool: pg.Pool) {}
 
   private async withActorTransaction<T>(actor: ActorContext, fn: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -169,12 +170,17 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository 
 
   async loadAppState(actor: ActorContext): Promise<V3AppState> {
     return this.withActorTransaction(actor, async (client) => {
-      const [userResult, profileResult, goalResult, preferencesResult, healthResult, workoutResult, dietResult, journeyResult, xpResult] = await Promise.all([
+      const [userResult, profileResult, goalResult, preferencesResult, healthResult, factHealthResult, workoutResult, dietResult, journeyResult, xpResult] = await Promise.all([
         client.query(`SELECT version, display_name FROM guto_v3.users WHERE tenant_id = $1 AND id = $2`, [actor.tenantId, actor.userId]),
         client.query(`SELECT * FROM guto_v3.user_profile WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
         client.query(`SELECT * FROM guto_v3.user_goals WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
         client.query(`SELECT * FROM guto_v3.user_preferences WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
         client.query(`SELECT * FROM guto_v3.user_health_constraints WHERE tenant_id = $1 AND user_id = $2 AND confirmed = true ORDER BY created_at`, [actor.tenantId, actor.userId]),
+        client.query(`SELECT user_fact_id, fact_type, value_json, confirmation_status
+                        FROM guto_v3.user_facts
+                       WHERE tenant_id = $1 AND user_id = $2 AND superseded_at IS NULL
+                         AND fact_type IN ('physical_constraint','food_restriction')
+                       ORDER BY recorded_at`, [actor.tenantId, actor.userId]),
         client.query(`SELECT * FROM guto_v3.workout_plans WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'`, [actor.tenantId, actor.userId]),
         client.query(`SELECT * FROM guto_v3.diet_plans WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'`, [actor.tenantId, actor.userId]),
         client.query(`SELECT * FROM guto_v3.user_journey_state WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
@@ -220,6 +226,27 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository 
         severity: row.severity,
         confirmed: row.confirmed,
       }));
+      const knownConstraintValues = new Set(healthConstraints.map((constraint) => `${constraint.kind}:${constraint.bodyRegion || ""}:${constraint.description}`));
+      for (const row of factHealthResult.rows) {
+        const value = jsonObject(row.value_json);
+        const bodyRegion = typeof value.bodyRegion === "string" ? value.bodyRegion : typeof value.area === "string" ? value.area : undefined;
+        const description = typeof value.description === "string"
+          ? value.description
+          : bodyRegion ? `Limitação declarada: ${bodyRegion}` : String(row.fact_type);
+        const kind: HealthConstraint["kind"] = row.fact_type === "food_restriction" ? "food_restriction" : "limitation";
+        const identity = `${kind}:${bodyRegion || ""}:${description}`;
+        if (!knownConstraintValues.has(identity)) {
+          healthConstraints.push({
+            id: row.user_fact_id,
+            kind,
+            bodyRegion,
+            description,
+            severity: "unknown",
+            confirmed: row.confirmation_status === "FACT_CONFIRMED",
+          });
+          knownConstraintValues.add(identity);
+        }
+      }
 
       const journeyRow = journeyResult.rows[0];
       const xpEvents = xpResult.rows.map((row) => ({
@@ -432,7 +459,26 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository 
            VALUES ($1,$2,$3,$4,$5,$6,true,'calibration')`,
           [actor.tenantId, actor.userId, constraint.kind, constraint.bodyRegion || null, constraint.description, constraint.severity],
         );
+        await this.persistFact(client, actor, {
+          factType: constraint.kind === "food_restriction" ? "food_restriction" : "physical_constraint",
+          value: {
+            kind: constraint.kind,
+            bodyRegion: constraint.bodyRegion || null,
+            description: constraint.description,
+            severity: constraint.severity,
+          },
+          source: "system",
+          confirmationStatus: "FACT_CONFIRMED",
+          supersedeCurrent: false,
+        });
       }
+      await this.persistFact(client, actor, {
+        factType: "goal",
+        value: { code: input.goal.code },
+        source: "system",
+        confirmationStatus: "FACT_CONFIRMED",
+        supersedeCurrent: true,
+      });
       const userResult = await client.query<{ version: string }>(
         `UPDATE guto_v3.users SET version = version + 1 WHERE tenant_id = $1 AND id = $2 RETURNING version`,
         [actor.tenantId, actor.userId],
@@ -844,6 +890,158 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository 
         [input.actor.tenantId, input.actor.userId, input.requestId, JSON.stringify({ action: input.action, resultCode: input.resultCode })],
       );
     });
+  }
+
+  async loadConversationDecisionState(actor: ActorContext, threadKey = "companion"): Promise<ConversationDecisionState> {
+    return this.withActorTransaction(actor, async (client) => {
+      const result = await client.query<QueryResultRow>(
+        `SELECT t.thread_key, t.last_interaction_id, s.*
+           FROM guto_v3.conversation_threads t
+           LEFT JOIN guto_v3.conversation_decision_states s ON s.thread_id = t.id
+          WHERE t.tenant_id = $1 AND t.user_id = $2 AND t.thread_key = $3`,
+        [actor.tenantId, actor.userId, threadKey],
+      );
+      const row = result.rows[0];
+      if (!row) return emptyConversationDecisionState(threadKey);
+      const fallback = emptyConversationDecisionState(threadKey);
+      return {
+        threadKey: String(row.thread_key),
+        version: row.version == null ? 0 : asNumber(row.version),
+        activeTopic: row.active_topic || null,
+        activeGoal: row.active_goal || null,
+        knownFacts: Array.isArray(row.known_facts) ? row.known_facts as ConversationKnownFact[] : [],
+        resolvedSlots: Array.isArray(row.resolved_slots) ? row.resolved_slots.map(String) : [],
+        missingInformation: Array.isArray(row.missing_information) ? row.missing_information as ConversationDecisionState["missingInformation"] : [],
+        uncertaintyType: row.uncertainty_type || fallback.uncertaintyType,
+        decisionSufficiency: row.decision_sufficiency || fallback.decisionSufficiency,
+        pendingAction: row.pending_action || null,
+        nextAllowedAction: row.next_allowed_action || null,
+        previousInteractionId: row.previous_interaction_id || row.last_interaction_id || null,
+        status: row.status || fallback.status,
+        updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : fallback.updatedAt,
+      };
+    });
+  }
+
+  async recordConversationDecision(input: {
+    actor: ActorContext;
+    requestId: string;
+    state: ConversationDecisionState;
+    interactionId?: string;
+    decisionId: string;
+    resolvedFacts: ConversationKnownFact[];
+  }): Promise<void> {
+    await this.withActorTransaction(input.actor, async (client) => {
+      const threadResult = await client.query<{ id: string; last_interaction_id: string | null }>(
+        `INSERT INTO guto_v3.conversation_threads (tenant_id,user_id,thread_key,last_interaction_id,last_interaction_at)
+         VALUES ($1,$2,$3,$4,CASE WHEN $4 IS NULL THEN NULL ELSE now() END)
+         ON CONFLICT (tenant_id,user_id,thread_key) DO UPDATE SET
+           last_interaction_id=COALESCE(EXCLUDED.last_interaction_id,guto_v3.conversation_threads.last_interaction_id),
+           last_interaction_at=CASE WHEN EXCLUDED.last_interaction_id IS NULL THEN guto_v3.conversation_threads.last_interaction_at ELSE now() END,
+           version=guto_v3.conversation_threads.version+1
+         RETURNING id,last_interaction_id`,
+        [input.actor.tenantId, input.actor.userId, input.state.threadKey, input.interactionId || null],
+      );
+      const thread = threadResult.rows[0]!;
+      const current = await client.query<{ version: string }>(
+        `SELECT version FROM guto_v3.conversation_decision_states WHERE thread_id=$1 FOR UPDATE`,
+        [thread.id],
+      );
+      const previousVersion = current.rows[0] ? asNumber(current.rows[0].version) : 0;
+      const state = { ...input.state, version: Math.max(input.state.version, previousVersion + 1), previousInteractionId: input.interactionId || input.state.previousInteractionId };
+      await client.query(
+        `INSERT INTO guto_v3.conversation_decision_states
+          (thread_id,tenant_id,user_id,active_topic,active_goal,known_facts,resolved_slots,missing_information,
+           uncertainty_type,decision_sufficiency,pending_action,next_allowed_action,previous_interaction_id,status,version)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9,$10,$11,$12,$13,$14,$15)
+         ON CONFLICT (thread_id) DO UPDATE SET
+           active_topic=EXCLUDED.active_topic,active_goal=EXCLUDED.active_goal,known_facts=EXCLUDED.known_facts,
+           resolved_slots=EXCLUDED.resolved_slots,missing_information=EXCLUDED.missing_information,
+           uncertainty_type=EXCLUDED.uncertainty_type,decision_sufficiency=EXCLUDED.decision_sufficiency,
+           pending_action=EXCLUDED.pending_action,next_allowed_action=EXCLUDED.next_allowed_action,
+           previous_interaction_id=EXCLUDED.previous_interaction_id,status=EXCLUDED.status,version=EXCLUDED.version`,
+        [
+          thread.id, input.actor.tenantId, input.actor.userId, state.activeTopic, state.activeGoal,
+          JSON.stringify(state.knownFacts), JSON.stringify(state.resolvedSlots), JSON.stringify(state.missingInformation),
+          state.uncertaintyType, state.decisionSufficiency, state.pendingAction, state.nextAllowedAction,
+          state.previousInteractionId, state.status, state.version,
+        ],
+      );
+      for (const fact of input.resolvedFacts) {
+        await this.persistFact(client, input.actor, {
+          factType: fact.key,
+          value: fact.value,
+          source: fact.source || "derived",
+          confirmationStatus: fact.certainty,
+          supersedeCurrent: true,
+        });
+      }
+      await client.query(
+        `INSERT INTO guto_v3.conversation_state_events (tenant_id,user_id,thread_id,request_id,previous_version,next_version,payload)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
+         ON CONFLICT (tenant_id,user_id,request_id,next_version) DO NOTHING`,
+        [input.actor.tenantId, input.actor.userId, thread.id, input.requestId, previousVersion, state.version, JSON.stringify({
+          activeTopic: state.activeTopic,
+          decisionSufficiency: state.decisionSufficiency,
+          pendingAction: state.pendingAction,
+          result: "persisted",
+        })],
+      );
+      if (input.interactionId) {
+        const retentionDays = Math.max(1, Math.min(55, Number(process.env.GUTO_V3_GEMINI_INTERACTION_RETENTION_DAYS || 7)));
+        await client.query(
+          `INSERT INTO guto_v3.gemini_interactions
+            (tenant_id,user_id,thread_id,interaction_id,previous_interaction_id,decision_id,expires_at)
+           VALUES ($1,$2,$3,$4,$5,$6,now() + ($7::text || ' days')::interval)
+           ON CONFLICT (tenant_id,user_id,interaction_id) DO NOTHING`,
+          [input.actor.tenantId, input.actor.userId, thread.id, input.interactionId, input.state.previousInteractionId, input.decisionId, String(retentionDays)],
+        );
+      }
+      await client.query(
+        `INSERT INTO guto_v3.outbox_events (tenant_id,aggregate_type,aggregate_id,event_type,payload)
+         VALUES ($1,'user',$2,'conversation.decision.persisted',$3::jsonb)`,
+        [input.actor.tenantId, input.actor.userId, JSON.stringify({
+          requestId: input.requestId,
+          correlationId: input.requestId,
+          threadId: thread.id,
+          interactionId: input.interactionId || null,
+        })],
+      );
+    });
+  }
+
+  private async persistFact(
+    client: PoolClient,
+    actor: ActorContext,
+    input: {
+      factType: string;
+      value: unknown;
+      source: "user_declared" | "derived" | "system";
+      confirmationStatus: "FACT_CONFIRMED" | "FACT_UNKNOWN";
+      supersedeCurrent: boolean;
+    },
+  ): Promise<void> {
+    const valueJson = JSON.stringify(input.value);
+    const existing = await client.query<{ user_fact_id: string; value_json: unknown }>(
+      `SELECT user_fact_id,value_json FROM guto_v3.user_facts
+        WHERE tenant_id=$1 AND user_id=$2 AND fact_type=$3 AND superseded_at IS NULL
+        ORDER BY recorded_at DESC FOR UPDATE`,
+      [actor.tenantId, actor.userId, input.factType],
+    );
+    if (existing.rows.some((row) => JSON.stringify(row.value_json) === valueJson)) return;
+    const inserted = await client.query<{ user_fact_id: string }>(
+      `INSERT INTO guto_v3.user_facts
+        (tenant_id,user_id,fact_type,value_json,source,confirmation_status,created_by)
+       VALUES ($1,$2,$3,$4::jsonb,$5,$6,'guto-v3.1') RETURNING user_fact_id`,
+      [actor.tenantId, actor.userId, input.factType, valueJson, input.source, input.confirmationStatus],
+    );
+    if (input.supersedeCurrent && existing.rows.length) {
+      await client.query(
+        `UPDATE guto_v3.user_facts SET valid_to=now(),superseded_at=now(),superseded_by=$1
+          WHERE tenant_id=$2 AND user_id=$3 AND fact_type=$4 AND superseded_at IS NULL AND user_fact_id <> $1`,
+        [inserted.rows[0]!.user_fact_id, actor.tenantId, actor.userId, input.factType],
+      );
+    }
   }
 
   private async appendMutationEvent(

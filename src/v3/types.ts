@@ -1,4 +1,5 @@
 import type { DecisionEnvelope } from "./contracts.js";
+import type { ConversationDecisionState } from "./conversation-state.js";
 
 export type ActorRole = "student" | "coach" | "admin" | "super_admin";
 
@@ -194,6 +195,7 @@ export interface TurnEnvelope {
     diet?: Pick<DietPlan, "id" | "version" | "totalCalories" | "proteinGrams" | "carbsGrams" | "fatGrams">;
   };
   activeContext: ActiveContext | null;
+  conversation: ConversationDecisionState;
   relationshipMemories: RelationshipMemory[];
   candidates: CandidateOption[];
 }

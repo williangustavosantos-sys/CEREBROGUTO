@@ -9,7 +9,10 @@ import type { OperationalStateStore } from "./operational-state.js";
 import { PolicyGateV3 } from "./policy-gate.js";
 import type { RelationshipMemoryStore } from "./relationship-memory.js";
 import type { OfficialStateRepository } from "./repository.js";
+import { supportsConversationState } from "./repository.js";
+import { applyConversationDecision } from "./conversation-state.js";
 import type { V3TurnResponse } from "./types.js";
+import type { DurableEventPublisher } from "./durable-events.js";
 
 const InternalFlowInputSchema = z.object({
   externalSubject: z.string().trim().min(1).max(200),
@@ -50,6 +53,7 @@ export interface GutoTurnFlowDependencies {
   decisionModel: DecisionModel;
   policyGate?: PolicyGateV3;
   executor?: DeterministicExecutorV3;
+  durableEvents?: DurableEventPublisher;
 }
 
 function finalSpeech(action: string, modelSpeech: string, clarification: string | undefined, executorMessage: string, confirmed: boolean): string {
@@ -89,9 +93,12 @@ export function createGutoTurnFlow(deps: GutoTurnFlowDependencies) {
 
       try {
         return await deps.operational.withLock(actor, "turn", async () => {
+        const conversationRepository = supportsConversationState(deps.repository) ? deps.repository : null;
         const { envelope, snapshot } = await deps.ai.run("CONTEXT_BUILD", () =>
           deps.contextBuilder.build(actor, input.requestId, input.message));
-        const decision = await deps.ai.run("GEMINI_CALL", () => deps.decisionModel.decide(envelope));
+        const modelOutput = await deps.ai.run("GEMINI_CALL", () => deps.decisionModel.decide(envelope));
+        const modelResult = "decision" in modelOutput ? modelOutput : { decision: modelOutput };
+        const decision = modelResult.decision;
         const gate = await deps.ai.run("POLICY_GATE", () => withV3Span("POLICY_GATE", {
           "guto.action": decision.action,
         }, async () => policyGate.authorize(decision, envelope, snapshot)));
@@ -107,6 +114,33 @@ export function createGutoTurnFlow(deps: GutoTurnFlowDependencies) {
           action: gate.decision.action,
           resultCode: execution.code,
         }));
+
+        if (conversationRepository) {
+          const nextConversation = applyConversationDecision(envelope.conversation, {
+            proposedAction: decision.actionProposal?.proposed || decision.action,
+            requiresMoreInformation: decision.actionProposal?.requiresMoreInformation ?? decision.action === "askClarification",
+            proposal: decision.conversation
+              ? {
+                  ...decision.conversation,
+                  resolvedFacts: decision.conversation.resolvedFacts?.map((fact) => ({ ...fact, value: fact.value ?? null })),
+                }
+              : undefined,
+            clarification: decision.clarification,
+            interactionId: modelResult.interactionId,
+            resultCode: execution.code,
+          });
+          await withV3Span("FACT_STATE_PERSIST", {
+            "guto.conversation_state_version": nextConversation.version,
+            "guto.interaction_id_present": Boolean(modelResult.interactionId),
+          }, () => conversationRepository.recordConversationDecision({
+            actor,
+            requestId: input.requestId,
+            state: nextConversation,
+            interactionId: modelResult.interactionId,
+            decisionId: input.requestId,
+            resolvedFacts: (decision.conversation?.resolvedFacts || []).map((fact) => ({ ...fact, value: fact.value ?? null })),
+          }));
+        }
 
         const response: V3TurnResponse = {
           speech: finalSpeech(
@@ -131,13 +165,13 @@ export function createGutoTurnFlow(deps: GutoTurnFlowDependencies) {
         await withV3Span("REDIS_UPDATE", { "guto.operation": "idempotency_complete" }, () =>
           deps.operational.completeRequest(actor, input.requestId, requestToken, response));
 
-        if (gate.decision.factsToPropose?.length) {
-          await withV3Span("MEM0_WRITE", { "guto.fact_count": gate.decision.factsToPropose.length }, async () => {
-            try {
-              await deps.relationshipMemory.submit(actor, gate.decision.factsToPropose || [], input.requestId);
-            } catch {
-              // Official transaction remains valid. Mem0 is relationship-only and never owns truth.
-            }
+        if (gate.decision.factsToPropose?.length && deps.durableEvents) {
+          await withV3Span("INNGEST_EVENT", { "guto.fact_count": gate.decision.factsToPropose.length }, async () => {
+            await deps.durableEvents!.enqueueRelationshipMemorySync({
+              actor,
+              correlationId: input.requestId,
+              facts: gate.decision.factsToPropose || [],
+            }).catch(() => undefined);
           });
         }
 

@@ -3,6 +3,9 @@ import type { CandidateProvider } from "./candidate-provider.js";
 import type { OperationalStateStore } from "./operational-state.js";
 import type { RelationshipMemoryStore } from "./relationship-memory.js";
 import type { OfficialStateRepository } from "./repository.js";
+import { supportsConversationState } from "./repository.js";
+import { emptyConversationDecisionState } from "./conversation-state.js";
+import type { ConversationDecisionState } from "./conversation-state.js";
 import type { ActorContext, OfficialSnapshot, TurnEnvelope } from "./types.js";
 import { withV3Span } from "./observability/tracing.js";
 
@@ -23,7 +26,8 @@ export class GutoContextBuilderV3 {
   ) {}
 
   async build(actor: ActorContext, requestId: string, message: string): Promise<{ envelope: TurnEnvelope; snapshot: OfficialSnapshot }> {
-    const [snapshot, activeContext, relationshipMemories] = await Promise.all([
+    const conversationRepository = supportsConversationState(this.repository) ? this.repository : null;
+    const [snapshot, activeContext, relationshipMemories, conversation] = await Promise.all([
       withV3Span("POSTGRES_TRANSACTION", { "guto.operation": "official_snapshot" }, () => this.repository.loadOfficialSnapshot(actor)),
       withV3Span("ACTIVE_CONTEXT_LOAD", {}, () => this.operational.getActiveContext(actor)),
       withV3Span("RELATIONSHIP_MEMORY_RETRIEVAL", {}, async () => {
@@ -33,6 +37,9 @@ export class GutoContextBuilderV3 {
           return [];
         }
       }),
+      conversationRepository
+        ? withV3Span("CONVERSATION_STATE_LOAD", {}, () => conversationRepository.loadConversationDecisionState(actor))
+        : Promise.resolve<ConversationDecisionState>(emptyConversationDecisionState()),
     ]);
 
     await withV3Span("PROFILE_LOAD", { "guto.profile_version": snapshot.profile.version }, async () => undefined);
@@ -70,6 +77,7 @@ export class GutoContextBuilderV3 {
           : {}),
       },
       activeContext,
+      conversation,
       relationshipMemories,
       candidates: candidateOptions,
     };
@@ -80,6 +88,7 @@ export class GutoContextBuilderV3 {
       "guto.plan_version": activeContext?.planVersion || 0,
       "guto.relationship_memory_count": relationshipMemories.length,
       "guto.candidate_count": candidateOptions.length,
+      "guto.conversation_state_version": conversation.version,
     }, async () => ({ envelope, snapshot }));
   }
 }

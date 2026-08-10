@@ -64,6 +64,8 @@ import {
 import webpush from "web-push";
 import { parseAuth, requireActiveUser } from "./src/auth-middleware.js";
 import { createV3Router } from "./src/v3/router.js";
+import { gutoV3Inngest, gutoV3InngestFunctions } from "./src/v3/durable-events.js";
+import { serve as serveInngest } from "inngest/express";
 import {
   getEffectiveUserAccess,
   requireActiveUserAccessAsync,
@@ -877,7 +879,8 @@ app.use(express.json({ limit: "1mb" }));
 // Decodifica JWT antes do rate limit para separar usuários autenticados que
 // compartilham IP (academia/escritório). Visitantes continuam limitados por IP.
 app.use(parseAuth);
-app.use(createV3Router(requireActiveUser));
+app.use(createV3Router());
+app.use("/api/inngest", serveInngest({ client: gutoV3Inngest, functions: gutoV3InngestFunctions }));
 app.use(createRateLimit({
   windowMs: config.rateLimitWindowMs,
   maxRequests: config.rateLimitMaxRequests,

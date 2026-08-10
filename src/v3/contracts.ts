@@ -1,4 +1,5 @@
 import { z } from "genkit";
+import { ActionSufficiency, ClinicalCertainty, ConversationFactStatus, ConversationStatus } from "./conversation-state.js";
 
 export const BrainVersion = "guto-cerebro-v3" as const;
 
@@ -31,6 +32,36 @@ export const DecisionEnvelopeSchema = z
       .max(5)
       .optional(),
     clarificationQuestion: z.string().trim().min(1).max(300).optional(),
+    certainty: z.object({
+      factCertainty: z.enum(ConversationFactStatus),
+      actionSufficiency: z.enum(ActionSufficiency),
+      clinicalCertainty: z.enum(ClinicalCertainty),
+    }).optional(),
+    clarification: z.object({
+      required: z.boolean(),
+      reason: z.string().trim().min(1).max(240).optional(),
+      missingInformation: z.array(z.object({
+        key: z.string().trim().min(1).max(120),
+        reason: z.string().trim().min(1).max(240),
+        expectedDecisionImpact: z.string().trim().min(1).max(240),
+      })).max(8).optional(),
+      expectedDecisionImpact: z.string().trim().min(1).max(240).optional(),
+    }).optional(),
+    conversation: z.object({
+      topic: z.string().trim().min(1).max(120).optional(),
+      resolvedFacts: z.array(z.object({
+        key: z.string().trim().min(1).max(120),
+        value: z.unknown(),
+        certainty: z.enum(ConversationFactStatus),
+        source: z.enum(["user_declared", "derived", "system"]).optional(),
+      })).max(12).optional(),
+      unresolvedFacts: z.array(z.string().trim().min(1).max(120)).max(12).optional(),
+    }).optional(),
+    actionProposal: z.object({
+      proposed: V3ActionSchema,
+      requiresMoreInformation: z.boolean(),
+    }).optional(),
+    conversationStatus: z.enum(ConversationStatus).optional(),
   })
   .superRefine((decision, ctx) => {
     const needsCandidate = decision.action === "swapExercise" || decision.action === "swapFood";

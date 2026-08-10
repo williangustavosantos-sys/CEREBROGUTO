@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import express, { type NextFunction, type Request, type RequestHandler, type Response } from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import { CalibrationMutationSchema, V3MemoryMutationSchema, V3TurnRequestSchema } from "./contracts.js";
 import { V3CutoverService } from "./cutover-service.js";
@@ -9,8 +9,6 @@ import { isLangfuseConfigured } from "./observability/instrumentation.js";
 import { currentTraceId, withV3Span, withV3Trace } from "./observability/tracing.js";
 import { getV3Runtime } from "./runtime.js";
 import type { ActorContext } from "./types.js";
-import { getEffectiveUserAccessAsync } from "../user-access-store.js";
-import { GUTO_CORE_TEAM_ID } from "../team-store.js";
 
 const ActiveContextMutationSchema = z.discriminatedUnion("clear", [
   z.object({ requestId: z.string().uuid(), clear: z.literal(true), expectedVersion: z.number().int().positive().nullable() }),
@@ -57,15 +55,12 @@ async function resolveActor(req: Request, options?: { provision?: boolean }): Pr
   const runtime = getV3Runtime();
   const actor = await runtime.repository.resolveActor(req.gutoUser.userId, req.gutoUser.role);
   if (!actor && options?.provision) {
-    const access = await getEffectiveUserAccessAsync(req.gutoUser.userId);
-    if (!access) throw new V3Error("V3_ACCESS_NOT_FOUND", "Acesso oficial não encontrado.", 409);
-    const tenantKey = access.teamId || GUTO_CORE_TEAM_ID;
+    const tenantKey = process.env.GUTO_V3_TENANT_KEY || "guto-v3-preview";
     return runtime.repository.provisionActor({
       externalSubject: req.gutoUser.userId,
       role: req.gutoUser.role,
       tenantKey,
-      tenantName: tenantKey,
-      displayName: access.name || [access.firstName, access.lastName].filter(Boolean).join(" ") || undefined,
+      tenantName: process.env.GUTO_V3_TENANT_NAME || "GUTO Cérebro V3 Preview",
     });
   }
   if (!actor) throw new V3Error("V3_IDENTITY_NOT_MIGRATED", "Identidade ainda não migrada para o Cérebro V3.", 409);
@@ -74,6 +69,20 @@ async function resolveActor(req: Request, options?: { provision?: boolean }): Pr
 
 function guardEnabled(_req: Request, _res: Response, next: NextFunction): void {
   if (!v3Enabled()) return next(new V3Error("V3_NOT_ENABLED", "Cérebro V3 ainda não habilitado neste ambiente.", 503));
+  next();
+}
+
+// The isolated V3 Preview accepts only an already verified JWT. It never
+// consults V1/V2 access, team, memory or subscription stores as a fallback.
+function requireV3Jwt(req: Request, res: Response, next: NextFunction): void {
+  if (!req.gutoUser) {
+    res.status(401).json({
+      error: "V3_AUTH_REQUIRED",
+      message: "Autenticação necessária para o Cérebro V3.",
+      brainVersion: "guto-cerebro-v3",
+    });
+    return;
+  }
   next();
 }
 
@@ -88,7 +97,7 @@ function validateV3Name(value: string): { status: "invalid" | "confirm" | "valid
   return { status: "valid", normalized, message: "Nome aceito." };
 }
 
-export function createV3Router(requireActiveUser: RequestHandler): express.Router {
+export function createV3Router(): express.Router {
   const router = express.Router();
 
   router.get("/health/v3", async (_req, res) => {
@@ -98,9 +107,10 @@ export function createV3Router(requireActiveUser: RequestHandler): express.Route
         (process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL) &&
         (process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN),
       ),
-      gemini: Boolean(process.env.GEMINI_API_KEY),
+      geminiInteractions: Boolean(process.env.GEMINI_API_KEY) && process.env.GUTO_V3_GEMINI_INTERACTIONS_STORE !== "false",
       mem0: Boolean(process.env.MEM0_API_KEY),
       langfuse: isLangfuseConfigured(),
+      inngest: Boolean(process.env.INNGEST_EVENT_KEY),
     };
     let postgres: unknown = { ok: false, configured: configured.postgres };
     let redis: unknown = { ok: false, configured: configured.redis };
@@ -129,13 +139,13 @@ export function createV3Router(requireActiveUser: RequestHandler): express.Route
     });
   });
 
-  router.post("/guto/v3/name/validate", requireActiveUser, guardEnabled, (req, res, next) => {
+  router.post("/guto/v3/name/validate", requireV3Jwt, guardEnabled, (req, res, next) => {
     try {
       res.json(validateV3Name(NameValidationRequestSchema.parse(req.body).name));
     } catch (error) { next(error); }
   });
 
-  router.post("/guto/v3", requireActiveUser, guardEnabled, async (req, res, next) => {
+  router.post("/guto/v3", requireV3Jwt, guardEnabled, async (req, res, next) => {
     try {
       const input = V3TurnRequestSchema.parse(req.body);
       const user = req.gutoUser!;
@@ -149,7 +159,7 @@ export function createV3Router(requireActiveUser: RequestHandler): express.Route
     } catch (error) { next(error); }
   });
 
-  router.get("/guto/v3/state", requireActiveUser, guardEnabled, async (req, res, next) => {
+  router.get("/guto/v3/state", requireV3Jwt, guardEnabled, async (req, res, next) => {
     const requestId = typeof req.headers["x-request-id"] === "string" ? req.headers["x-request-id"] : randomUUID();
     try {
       const user = req.gutoUser!;
@@ -166,7 +176,7 @@ export function createV3Router(requireActiveUser: RequestHandler): express.Route
     } catch (error) { next(error); }
   });
 
-  router.post("/guto/v3/consent/accept", requireActiveUser, guardEnabled, async (req, res, next) => {
+  router.post("/guto/v3/consent/accept", requireV3Jwt, guardEnabled, async (req, res, next) => {
     try {
       const input = RequestIdSchema.parse(req.body);
       const actor = await resolveActor(req, { provision: true });
@@ -177,7 +187,7 @@ export function createV3Router(requireActiveUser: RequestHandler): express.Route
     } catch (error) { next(error); }
   });
 
-  router.post("/guto/v3/memory", requireActiveUser, guardEnabled, async (req, res, next) => {
+  router.post("/guto/v3/memory", requireV3Jwt, guardEnabled, async (req, res, next) => {
     try {
       const input = V3MemoryMutationSchema.parse(req.body);
       const actor = await resolveActor(req, { provision: true });
@@ -188,7 +198,7 @@ export function createV3Router(requireActiveUser: RequestHandler): express.Route
     } catch (error) { next(error); }
   });
 
-  router.post("/guto/v3/workout/generate", requireActiveUser, guardEnabled, async (req, res, next) => {
+  router.post("/guto/v3/workout/generate", requireV3Jwt, guardEnabled, async (req, res, next) => {
     try {
       const input = RequestIdSchema.parse(req.body);
       const actor = await resolveActor(req);
@@ -199,7 +209,7 @@ export function createV3Router(requireActiveUser: RequestHandler): express.Route
     } catch (error) { next(error); }
   });
 
-  router.post("/guto/v3/diet/generate", requireActiveUser, guardEnabled, async (req, res, next) => {
+  router.post("/guto/v3/diet/generate", requireV3Jwt, guardEnabled, async (req, res, next) => {
     try {
       const input = RequestIdSchema.parse(req.body);
       const actor = await resolveActor(req);
@@ -210,7 +220,7 @@ export function createV3Router(requireActiveUser: RequestHandler): express.Route
     } catch (error) { next(error); }
   });
 
-  router.post("/guto/v3/calibration", requireActiveUser, guardEnabled, async (req, res, next) => {
+  router.post("/guto/v3/calibration", requireV3Jwt, guardEnabled, async (req, res, next) => {
     try {
       const input = CalibrationMutationSchema.parse(req.body);
       const user = req.gutoUser!;
@@ -225,7 +235,7 @@ export function createV3Router(requireActiveUser: RequestHandler): express.Route
     } catch (error) { next(error); }
   });
 
-  router.post("/guto/v3/active-context", requireActiveUser, guardEnabled, async (req, res, next) => {
+  router.post("/guto/v3/active-context", requireV3Jwt, guardEnabled, async (req, res, next) => {
     try {
       const input = ActiveContextMutationSchema.parse(req.body);
       const user = req.gutoUser!;
