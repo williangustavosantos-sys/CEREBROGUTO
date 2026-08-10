@@ -71,7 +71,19 @@ const DecisionEnvelopeJsonSchema = {
     reasonCode: { type: "string" },
     selectedCandidateId: { type: "string" },
     clarificationQuestion: { type: "string" },
-    factsToPropose: { type: "array" },
+    factsToPropose: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          classification: { type: "string", enum: ["RELATIONSHIP"] },
+          fact: { type: "string" },
+          evidence: { type: "string" },
+        },
+        required: ["classification", "fact", "evidence"],
+      },
+    },
     certainty: {
       type: "object",
       properties: {
@@ -83,24 +95,52 @@ const DecisionEnvelopeJsonSchema = {
     },
     clarification: {
       type: "object",
+      additionalProperties: false,
       properties: {
         required: { type: "boolean" },
         reason: { type: "string" },
         expectedDecisionImpact: { type: "string" },
-        missingInformation: { type: "array" },
+        missingInformation: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              key: { type: "string" },
+              reason: { type: "string" },
+              expectedDecisionImpact: { type: "string" },
+            },
+            required: ["key", "reason", "expectedDecisionImpact"],
+          },
+        },
       },
       required: ["required"],
     },
     conversation: {
       type: "object",
+      additionalProperties: false,
       properties: {
         topic: { type: "string" },
-        resolvedFacts: { type: "array" },
+        resolvedFacts: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              key: { type: "string" },
+              value: {},
+              certainty: { type: "string", enum: ["FACT_CONFIRMED", "FACT_UNKNOWN"] },
+              source: { type: "string", enum: ["user_declared", "derived", "system"] },
+            },
+            required: ["key", "value", "certainty"],
+          },
+        },
         unresolvedFacts: { type: "array", items: { type: "string" } },
       },
     },
     actionProposal: {
       type: "object",
+      additionalProperties: false,
       properties: {
         proposed: { type: "string", enum: ["none", "askClarification", "swapExercise", "swapFood", "generateWorkout", "generateDiet", "startMinimumMission", "acknowledge", "callSafetyPath"] },
         requiresMoreInformation: { type: "boolean" },
@@ -144,12 +184,9 @@ export class GeminiInteractionsDecisionModel implements DecisionModel {
           max_output_tokens: 1_024,
         },
         response_format: {
+          type: "text",
           mime_type: "application/json",
           schema: DecisionEnvelopeJsonSchema,
-        },
-        labels: {
-          guto_brain: "v3",
-          correlation_id: envelope.requestId,
         },
       });
       const rawOutput = interaction.output_text;

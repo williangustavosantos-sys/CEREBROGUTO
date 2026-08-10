@@ -934,7 +934,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     await this.withActorTransaction(input.actor, async (client) => {
       const threadResult = await client.query<{ id: string; last_interaction_id: string | null }>(
         `INSERT INTO guto_v3.conversation_threads (tenant_id,user_id,thread_key,last_interaction_id,last_interaction_at)
-         VALUES ($1,$2,$3,$4,CASE WHEN $4 IS NULL THEN NULL ELSE now() END)
+         VALUES ($1,$2,$3,$4::text,CASE WHEN $4::text IS NULL THEN NULL ELSE now() END)
          ON CONFLICT (tenant_id,user_id,thread_key) DO UPDATE SET
            last_interaction_id=COALESCE(EXCLUDED.last_interaction_id,guto_v3.conversation_threads.last_interaction_id),
            last_interaction_at=CASE WHEN EXCLUDED.last_interaction_id IS NULL THEN guto_v3.conversation_threads.last_interaction_at ELSE now() END,

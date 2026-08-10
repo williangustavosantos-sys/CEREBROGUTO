@@ -45,6 +45,10 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function stage(name: string): void {
+  process.stderr.write(`[verify-v3] ${name}\n`);
+}
+
 async function provision(externalSubject: string): Promise<ActorContext> {
   const actor = await repository.provisionActor({
     externalSubject,
@@ -179,59 +183,72 @@ async function assertInngestRelationshipMemory(actor: ActorContext): Promise<num
   assert.fail("Inngest accepted the event but did not complete the durable relationship-memory sync");
 }
 
-async function assertLangfuseTrace(requestId: string): Promise<{ traceId: string; observationCount: number }> {
+async function assertLangfuseTrace(traceId: string): Promise<{ traceId: string; observationCount: number }> {
   const baseUrl = (process.env.LANGFUSE_BASE_URL || "https://cloud.langfuse.com").replace(/\/+$/, "");
   const authorization = Buffer.from(`${process.env.LANGFUSE_PUBLIC_KEY}:${process.env.LANGFUSE_SECRET_KEY}`).toString("base64");
   const headers = { Authorization: `Basic ${authorization}` };
 
-  const maxAttempts = Number(process.env.GUTO_V3_LANGFUSE_VERIFY_ATTEMPTS || 8);
+  const maxAttempts = Number(process.env.GUTO_V3_LANGFUSE_VERIFY_ATTEMPTS || 3);
   const pollDelayMs = Number(process.env.GUTO_V3_LANGFUSE_VERIFY_POLL_DELAY_MS || 1_000);
+  const requestTimeoutMs = Number(process.env.GUTO_V3_LANGFUSE_VERIFY_TIMEOUT_MS || 15_000);
+  const requiredObservations = [
+    "GUTO_TURN",
+    "CONTEXT_BUILD",
+    "GEMINI_CALL",
+    "GEMINI_INTERACTION",
+    "DECISION_VALIDATION",
+    "POLICY_GATE",
+    "EXECUTOR",
+    "FACT_STATE_PERSIST",
+  ];
+  let lastObserved = "";
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const response = await fetch(`${baseUrl}/api/public/traces?limit=100&name=GUTO_TURN`, {
+    const observationsResponse = await fetch(`${baseUrl}/api/public/observations?traceId=${encodeURIComponent(traceId)}&limit=100`, {
       headers,
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(requestTimeoutMs),
     });
-    assert.equal(response.ok, true, `Langfuse trace query failed with status ${response.status}`);
-    const body = (await response.json()) as { data?: Array<{ id?: string; [key: string]: unknown }> };
-    const trace = (body.data || []).find((candidate) => JSON.stringify(candidate).includes(requestId));
-    if (trace?.id) {
-      const detailResponse = await fetch(`${baseUrl}/api/public/traces/${trace.id}`, {
-        headers,
-        signal: AbortSignal.timeout(5_000),
-      });
-      assert.equal(detailResponse.ok, true, `Langfuse trace detail failed with status ${detailResponse.status}`);
-      const detail = (await detailResponse.json()) as { observations?: Array<{ name?: string }> };
-      const observations = detail.observations || [];
+    if (observationsResponse.ok) {
+      const body = (await observationsResponse.json()) as { data?: Array<{ name?: string }> };
+      const observations = body.data || [];
       const names = observations.map((observation) => observation.name);
-      assert.ok(names.includes("GUTO_TURN"), "Langfuse trace is missing GUTO_TURN");
-      assert.ok(names.includes("GEMINI_CALL"), "Langfuse trace is missing GEMINI_CALL");
-      assert.ok(names.includes("DECISION_VALIDATION"), "Langfuse trace is missing DECISION_VALIDATION");
-      return { traceId: trace.id, observationCount: observations.length };
+      const observed = names.filter((name): name is string => Boolean(name)).join(",");
+      if (requiredObservations.every((name) => names.includes(name))) {
+        return { traceId, observationCount: observations.length };
+      }
+      lastObserved = observed;
+    }
+    if (!observationsResponse.ok && observationsResponse.status !== 404) {
+      assert.fail(`Langfuse observation query failed with status ${observationsResponse.status}`);
     }
     await wait(pollDelayMs);
   }
-  assert.fail("Langfuse did not expose the flushed V3 trace after retries");
+  assert.fail(`Langfuse did not expose all flushed V3 observations after retries; observed=${lastObserved}`);
 }
 
 let telemetryShutdown = false;
 try {
   const traceRequestId = randomUUID();
+  stage("trace-start");
   const result = await withV3Trace({
     requestId: traceRequestId,
     externalSubject: "guto-v3-integration-verifier",
     attributes: { "guto.input_category": "real_integration_verification" },
   }, async () => {
+    stage("postgres-and-redis-health");
     const [postgres, redis] = await Promise.all([repository.health(), operational.health()]);
     assert.equal(postgres.ok, true);
     assert.equal(redis.ok, true);
 
+    stage("provision-test-actors");
     const [actorA, actorB] = await Promise.all([
       provision("guto-v3-integration-a"),
       provision("guto-v3-integration-b"),
     ]);
+    stage("rls-and-redis-isolation");
     await withV3Span("RLS_ISOLATION_TEST", {}, () => assertRlsIsolation(actorA, actorB));
     await withV3Span("REDIS_CONCURRENCY_TEST", {}, () => assertRedisIsolationAndConcurrency(actorA, actorB));
 
+    stage("gemini-interactions-genkit-flow");
     const ai = createV3Genkit();
     const contextBuilder = new GutoContextBuilderV3(
       repository,
@@ -257,10 +274,13 @@ try {
     assert.equal(decision.brainVersion, "guto-cerebro-v3");
     assert.ok(decision.speech.length > 0);
 
+    stage("mem0-direct-relationship-memory");
     const mem0ResultCount = await assertMem0RelationshipMemory(actorA);
+    stage("inngest-durable-relationship-memory");
     const inngestResultCount = inngestConfigured ? await assertInngestRelationshipMemory(actorA) : null;
 
     return {
+      langfuseTraceId: decision.traceId,
       postgres: { ok: true, latencyMs: postgres.latencyMs },
       rls: { ok: true, isolatedUsers: 2 },
       redis: { ok: true, latencyMs: redis.latencyMs, isolatedUsers: 2, concurrentWinners: 1, ttlValidated: true },
@@ -273,7 +293,8 @@ try {
   });
   await shutdownV3Telemetry();
   telemetryShutdown = true;
-  const langfuse = await assertLangfuseTrace(traceRequestId);
+  stage(`langfuse-trace-read:${result.langfuseTraceId}`);
+  const langfuse = await assertLangfuseTrace(result.langfuseTraceId);
   const verification = {
     ...result,
     langfuse: { ok: true, traceFlushed: true, ...langfuse },
