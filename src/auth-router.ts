@@ -32,6 +32,7 @@ import {
   GutoTeamPlanLimitError,
 } from "./team-store.js";
 import crypto from "crypto";
+import { provisionV3CredentialForStudent } from "./v3/panel-provisioning.js";
 
 export const authRouter = express.Router();
 
@@ -350,6 +351,15 @@ authRouter.post("/invite/:token/claim", async (req: Request, res: Response) => {
     passwordHash,
     subscriptionStatus: "active",
     subscriptionEndsAt: endsAt.toISOString(),
+  });
+
+  const access = getUserAccess(invite.userId);
+  await provisionV3CredentialForStudent({
+    userId: invite.userId,
+    email: access?.email,
+    passwordHash,
+    displayName: inviteDisplayName(invite),
+    teamId: access?.teamId,
   });
 
   const jwtToken = signToken({

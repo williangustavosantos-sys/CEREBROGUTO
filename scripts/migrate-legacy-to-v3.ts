@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { createHash } from "node:crypto";
 import pg, { type PoolClient } from "pg";
+import { deriveV3Identity, deterministicUuid } from "../src/v3/legacy-identity.js";
 import { getDietPlan } from "../src/diet-store.js";
 import { resolveFoodIdByName } from "../src/food-catalog.js";
 import { readMemoryStoreAsync } from "../src/memory-store.js";
@@ -61,13 +62,6 @@ function record(value: unknown): JsonRecord { return value && typeof value === "
 function text(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
 function finite(value: unknown): number | null { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : null; }
 function opaque(value: string): string { return createHash("sha256").update(value).digest("hex").slice(0, 16); }
-function deterministicUuid(value: string): string {
-  const hex = createHash("sha256").update(value).digest("hex").slice(0, 32).split("");
-  hex[12] = "4";
-  hex[16] = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
-  const joined = hex.join("");
-  return `${joined.slice(0, 8)}-${joined.slice(8, 12)}-${joined.slice(12, 16)}-${joined.slice(16, 20)}-${joined.slice(20)}`;
-}
 function language(value: unknown): MigrationBundle["profile"]["language"] | null {
   const normalized = text(value).toLowerCase();
   if (normalized.startsWith("pt")) return "pt-BR";
@@ -203,8 +197,9 @@ async function transform(userId: string, value: unknown): Promise<MigrationBundl
   if (!trainingLocation) errors.push("TRAINING_LOCATION_MISSING");
   if (!goal) errors.push("GOAL_MISSING");
 
-  const tenantId = deterministicUuid(`v3-tenant:${tenantSlug}`);
-  const canonicalUserId = deterministicUuid(`v3-user:${tenantId}:${userId}`);
+  const derivedIdentity = deriveV3Identity(userId, access?.teamId);
+  const tenantId = derivedIdentity.tenantId;
+  const canonicalUserId = derivedIdentity.userId;
   const constraints: MigrationBundle["constraints"] = [];
   const limitation = text(memory.trainingLimitations || memory.trainingPathology);
   const foodRestriction = text(memory.foodRestrictions);
@@ -252,7 +247,9 @@ async function transform(userId: string, value: unknown): Promise<MigrationBundl
 }
 
 async function insertBundle(client: PoolClient, bundle: MigrationBundle): Promise<void> {
-  const identityId = deterministicUuid(`v3-identity:${bundle.tenantSlug}:${bundle.sourceUserId}`);
+  // O slug do bundle é a chave estável de tenant; deriveV3Identity apenas
+  // trim/defaulta, então o identityId continua idêntico ao da migração original.
+  const identityId = deriveV3Identity(bundle.sourceUserId, bundle.tenantSlug).identityId;
   const requestId = deterministicUuid(`v3-migration-request:${bundle.sourceUserId}`);
   await client.query("BEGIN");
   try {

@@ -1,12 +1,13 @@
-import type { V3MemoryMutation } from "./contracts.js";
+import { randomUUID } from "node:crypto";
+import type { FirstContactConfirmation, FirstContactResponse, V3MemoryMutation } from "./contracts.js";
 import { V3Error } from "./errors.js";
 import { generateDietDraft, generateWorkoutDraft } from "./generation-engines.js";
 import type { OfficialStateRepository } from "./repository.js";
-import type { ActorContext, OfficialSnapshot, V3AppState } from "./types.js";
+import type { ActorContext, ConfirmedUserContext, OfficialSnapshot, V3AppState } from "./types.js";
 
-function toSnapshot(state: V3AppState): OfficialSnapshot {
-  if (!state.profile || !state.goal) {
-    throw new V3Error("V3_CALIBRATION_REQUIRED", "Calibragem oficial necessária para gerar os planos.", 409);
+function calibrationSnapshot(state: V3AppState, context: ConfirmedUserContext): OfficialSnapshot {
+  if (!state.profile || !state.goal || state.profile.weeklyFrequencyDaysPerWeek == null) {
+    throw new V3Error("V3_CALIBRATION_REQUIRED", "Calibragem objetiva completa necessária.", 409);
   }
   return {
     actor: state.actor,
@@ -15,6 +16,8 @@ function toSnapshot(state: V3AppState): OfficialSnapshot {
     goal: state.goal,
     preferences: state.preferences,
     healthConstraints: state.healthConstraints,
+    firstContact: state.firstContact,
+    confirmedContext: context,
     workout: state.workout,
     diet: state.diet,
   };
@@ -28,11 +31,7 @@ function hasCalibrationPatch(input: V3MemoryMutation): boolean {
     input.heightCm,
     input.trainingLevel,
     input.trainingGoal,
-    input.preferredTrainingLocation,
-    input.trainingPathology,
-    input.country,
-    input.city,
-    input.foodRestrictions,
+    input.trainingFrequency,
   ].some((value) => value !== undefined);
 }
 
@@ -70,15 +69,11 @@ export class V3CutoverService {
       const trainingStatus = input.trainingLevel
         ? input.trainingLevel === "consistent" ? "active" : input.trainingLevel
         : currentProfile?.trainingStatus;
-      const trainingLocation = input.preferredTrainingLocation || currentProfile?.trainingLocation;
-      const city = input.city || currentProfile?.city;
-      const country = input.country || currentProfile?.country;
-      const language = input.language || currentProfile?.language || current.journey.preferredLanguage;
+      const weeklyFrequencyDaysPerWeek = input.trainingFrequency ?? currentProfile?.weeklyFrequencyDaysPerWeek;
       const goalCode = input.trainingGoal || current.goal?.code;
-      if (!biologicalSex || age == null || weightKg == null || heightCm == null || !trainingStatus || !trainingLocation || !city || !country || !goalCode) {
+      if (!biologicalSex || age == null || weightKg == null || heightCm == null || !trainingStatus || weeklyFrequencyDaysPerWeek == null || !goalCode) {
         throw new V3Error("V3_CALIBRATION_INCOMPLETE", "A calibragem V3 precisa de todos os campos obrigatórios.", 400);
       }
-      const preserved = current.healthConstraints.filter((constraint) => !["limitation", "food_restriction"].includes(constraint.kind));
       await this.repository.persistCalibration(actor, {
         requestId: input.requestId,
         profile: {
@@ -87,51 +82,31 @@ export class V3CutoverService {
           weightKg,
           heightCm,
           trainingStatus: trainingStatus as "beginner" | "returning" | "active" | "advanced",
-          trainingLocation,
-          city,
-          country,
-          language,
+          weeklyFrequencyDaysPerWeek,
         },
         goal: { code: goalCode },
-        preferences: { dietStyle: current.preferences.dietStyle },
-        healthConstraints: [
-          ...preserved.map((constraint) => ({
-            kind: constraint.kind,
-            bodyRegion: constraint.bodyRegion,
-            description: constraint.description,
-            severity: constraint.severity,
-          })),
-          ...(input.trainingPathology?.trim()
-            ? [{ kind: "limitation" as const, description: input.trainingPathology.trim(), severity: "unknown" as const }]
-            : current.healthConstraints.filter((constraint) => constraint.kind === "limitation").map((constraint) => ({
-                kind: constraint.kind,
-                bodyRegion: constraint.bodyRegion,
-                description: constraint.description,
-                severity: constraint.severity,
-              }))),
-          ...(input.foodRestrictions?.trim()
-            ? [{ kind: "food_restriction" as const, description: input.foodRestrictions.trim(), severity: "unknown" as const }]
-            : current.healthConstraints.filter((constraint) => constraint.kind === "food_restriction").map((constraint) => ({
-                kind: constraint.kind,
-                bodyRegion: constraint.bodyRegion,
-                description: constraint.description,
-                severity: constraint.severity,
-              }))),
-        ],
+      });
+    }
+
+    // País/cidade são campos OFICIAIS de perfil no V3. preferredTrainingLocation
+    // NÃO entra aqui: é hint de sessão — o local oficial fica fixado no contexto
+    // confirmado ("gym") e nunca é mutado por memory mutation (teste V3.2).
+    if (input.country !== undefined || input.city !== undefined) {
+      await this.repository.persistProfileLocation(actor, {
+        requestId: input.requestId,
+        country: input.country,
+        city: input.city,
       });
     }
 
     if (input.xpEvent === "grant_initial_xp") {
       const state = await this.load(actor);
-      const snapshot = toSnapshot(state);
       const displayName = input.name?.trim() || state.displayName.trim();
       if (!displayName) throw new V3Error("V3_NAME_REQUIRED", "Nome confirmado necessário antes do pacto.", 409);
       await this.repository.completePact({
         actor,
         requestId: input.requestId,
         displayName,
-        workoutDraft: generateWorkoutDraft(snapshot),
-        dietDraft: generateDietDraft(snapshot),
       });
     } else if (input.xpEvent) {
       const sourceKey = new Intl.DateTimeFormat("en-CA", {
@@ -146,15 +121,77 @@ export class V3CutoverService {
     return this.load(actor);
   }
 
+  async startFirstContact(actor: ActorContext, requestId: string): Promise<V3AppState> {
+    const state = await this.load(actor);
+    if (!state.profile || !state.goal || state.profile.weeklyFrequencyDaysPerWeek == null) {
+      throw new V3Error("V3_CALIBRATION_REQUIRED", "Calibragem objetiva completa necessária antes do First Contact.", 409);
+    }
+    await this.repository.startFirstContact({ actor, requestId });
+    return this.load(actor);
+  }
+
+  async respondFirstContact(actor: ActorContext, input: FirstContactResponse): Promise<V3AppState> {
+    await this.repository.respondFirstContact({ actor, requestId: input.requestId, expectedStep: input.expectedStep, answer: input.answer });
+    return this.load(actor);
+  }
+
+  async confirmFirstContact(actor: ActorContext, input: FirstContactConfirmation): Promise<V3AppState> {
+    const state = await this.load(actor);
+    if (state.firstContact.status === "COMPLETED") return state;
+    if (!state.profile || !state.goal || state.profile.weeklyFrequencyDaysPerWeek == null) {
+      throw new V3Error("V3_CALIBRATION_REQUIRED", "Calibragem objetiva completa necessária.", 409);
+    }
+    if (state.firstContact.step !== "confirmation" || !state.firstContact.foodDeclaration || !state.firstContact.limitationDeclaration) {
+      throw new V3Error("V3_FIRST_CONTACT_INCOMPLETE", "Responda às duas perguntas antes de confirmar.", 409);
+    }
+    const context: ConfirmedUserContext = {
+      id: randomUUID(),
+      version: (state.confirmedContext?.version || 0) + 1,
+      confirmedAt: new Date().toISOString(),
+      foodDeclaration: state.firstContact.foodDeclaration,
+      limitationDeclaration: state.firstContact.limitationDeclaration,
+      profileVersion: state.profile.version,
+      goalVersion: state.goal.version,
+      weeklyFrequencyDaysPerWeek: state.profile.weeklyFrequencyDaysPerWeek,
+      trainingLocation: "gym",
+    };
+    const snapshot = calibrationSnapshot(state, context);
+    await this.repository.confirmFirstContact({
+      actor,
+      requestId: input.requestId,
+      contextId: context.id,
+      contextVersion: context.version,
+      expectedProfileVersion: state.profile.version,
+      expectedGoalVersion: state.goal.version,
+      confirmedSnapshot: {
+        profile: state.profile,
+        goal: state.goal,
+        foodDeclaration: context.foodDeclaration,
+        limitationDeclaration: context.limitationDeclaration,
+        trainingLocation: "gym",
+        weeklyFrequencyDaysPerWeek: context.weeklyFrequencyDaysPerWeek,
+      },
+      workoutDraft: generateWorkoutDraft(snapshot),
+      dietDraft: generateDietDraft(snapshot),
+    });
+    return this.load(actor);
+  }
+
   async generateWorkout(actor: ActorContext, requestId: string): Promise<V3AppState> {
-    const snapshot = toSnapshot(await this.load(actor));
-    await this.repository.replaceWorkoutPlan({ actor, requestId, draft: generateWorkoutDraft(snapshot) });
+    const snapshot = await this.repository.loadOfficialSnapshot(actor);
+    if (!snapshot.confirmedContext || snapshot.firstContact.status !== "COMPLETED") {
+      throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Confirme o contexto do usuário antes de gerar o treino.", 409);
+    }
+    await this.repository.replaceWorkoutPlan({ actor, requestId, context: snapshot.confirmedContext, draft: generateWorkoutDraft(snapshot) });
     return this.load(actor);
   }
 
   async generateDiet(actor: ActorContext, requestId: string): Promise<V3AppState> {
-    const snapshot = toSnapshot(await this.load(actor));
-    await this.repository.replaceDietPlan({ actor, requestId, draft: generateDietDraft(snapshot) });
+    const snapshot = await this.repository.loadOfficialSnapshot(actor);
+    if (!snapshot.confirmedContext || snapshot.firstContact.status !== "COMPLETED") {
+      throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Confirme o contexto do usuário antes de gerar a dieta.", 409);
+    }
+    await this.repository.replaceDietPlan({ actor, requestId, context: snapshot.confirmedContext, draft: generateDietDraft(snapshot) });
     return this.load(actor);
   }
 }

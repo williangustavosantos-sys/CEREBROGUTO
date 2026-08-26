@@ -42,6 +42,7 @@ import {
   GutoTeamNotFoundError,
   GutoTeamPlanLimitError,
 } from "./team-store.js";
+import { provisionV3CredentialForStudent } from "./v3/panel-provisioning.js";
 
 export const coachRouter = express.Router();
 export const coachRankingsRouter = express.Router();
@@ -511,6 +512,13 @@ coachRouter.post("/student/:userId/reset-password", requireAdmin, async (req: Re
   const tempPassword = Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
   const passwordHash = await bcrypt.hash(tempPassword, 10);
   await upsertUserAccessAsync(userId, { passwordHash });
+  await provisionV3CredentialForStudent({
+    userId,
+    email: existing.email,
+    passwordHash,
+    displayName: existing.name || existing.firstName,
+    teamId: existing.teamId,
+  });
   return res.json({ tempPassword, message: "Senha temporária gerada." });
 });
 

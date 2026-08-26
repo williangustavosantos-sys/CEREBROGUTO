@@ -12,6 +12,7 @@ import type {
 } from "./types.js";
 import { withV3Span } from "./observability/tracing.js";
 import { generateDietDraft, generateWorkoutDraft } from "./generation-engines.js";
+import { impactsFor, type FactChange } from "./facts.js";
 
 export class ProfileServiceV3 {
   constructor(private readonly repository: OfficialStateRepository) {}
@@ -57,11 +58,13 @@ export class DeterministicExecutorV3 {
   private readonly workout: WorkoutServiceV3;
   private readonly diet: DietServiceV3;
   private readonly activeContext: ActiveContextServiceV3;
+  private readonly repository: OfficialStateRepository;
 
   constructor(
     repository: OfficialStateRepository,
     operational: OperationalStateStore,
   ) {
+    this.repository = repository;
     this.workout = new WorkoutServiceV3(repository);
     this.diet = new DietServiceV3(repository);
     this.activeContext = new ActiveContextServiceV3(operational);
@@ -75,6 +78,7 @@ export class DeterministicExecutorV3 {
     if (decision.action === "swapFood") return this.swapFood(decision, envelope, snapshot);
     if (decision.action === "generateWorkout") return this.generateWorkout(envelope, snapshot);
     if (decision.action === "generateDiet") return this.generateDiet(envelope, snapshot);
+    if (decision.action === "updateFacts") return this.updateFacts(decision, envelope, snapshot);
     return {
       status: "rejected",
       code: "EXECUTOR_NOT_AVAILABLE",
@@ -82,10 +86,49 @@ export class DeterministicExecutorV3 {
     };
   }
 
+  private async updateFacts(decision: DecisionEnvelope, envelope: TurnEnvelope, snapshot: OfficialSnapshot): Promise<ExecutorResult> {
+    if (!snapshot.confirmedContext || !decision.operationalFacts?.length) {
+      throw new V3Error("V3_FACT_CONTEXT_REQUIRED", "Contexto confirmado e fatos estruturados são necessários.", 409);
+    }
+    const changes: FactChange[] = decision.operationalFacts.map((fact) => ({
+      ...fact,
+      source: "user_declared" as const,
+    }));
+    const applied = await withV3Span("FACT_EXECUTOR", {
+      "guto.fact_count": changes.length,
+      "guto.context_version": snapshot.confirmedContext.version,
+    }, () => this.repository.applyFactChanges({
+      actor: snapshot.actor,
+      requestId: envelope.requestId,
+      changes,
+      expectedContextVersion: snapshot.confirmedContext!.version,
+    }));
+    const next = await withV3Span("CONTEXT_VERSION", { "guto.context_version": applied.context.version }, () => this.repository.loadOfficialSnapshot(snapshot.actor));
+    const impacts = impactsFor(changes);
+    let planVersion: number | undefined;
+    if (impacts.has("WORKOUT")) {
+      const workout = await this.workout.generate({ actor: next.actor, requestId: `${envelope.requestId}-workout`, context: applied.context, draft: generateWorkoutDraft(next) });
+      planVersion = workout.version;
+    }
+    if (impacts.has("NUTRITION")) {
+      const diet = await this.diet.generate({ actor: next.actor, requestId: `${envelope.requestId}-diet`, context: applied.context, draft: generateDietDraft(next) });
+      planVersion = diet.version;
+    }
+    return {
+      status: "confirmed",
+      code: "FACTS_CONFIRMED",
+      message: "Atualizei o contexto oficial com o que você declarou.",
+      planVersion,
+      factContextVersion: applied.context.version,
+      affectedDomains: applied.affectedDomains as ExecutorResult["affectedDomains"],
+    };
+  }
+
   private async generateWorkout(envelope: TurnEnvelope, snapshot: OfficialSnapshot): Promise<ExecutorResult> {
+    if (!snapshot.confirmedContext) throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Contexto confirmado necessário.", 409);
     const draft = generateWorkoutDraft(snapshot);
     const plan = await withV3Span("POSTGRES_TRANSACTION", { "guto.operation": "generate_workout" }, () =>
-      this.workout.generate({ actor: snapshot.actor, requestId: envelope.requestId, draft }));
+      this.workout.generate({ actor: snapshot.actor, requestId: envelope.requestId, context: snapshot.confirmedContext!, draft }));
     return {
       status: "confirmed",
       code: "WORKOUT_GENERATED",
@@ -95,11 +138,13 @@ export class DeterministicExecutorV3 {
   }
 
   private async generateDiet(envelope: TurnEnvelope, snapshot: OfficialSnapshot): Promise<ExecutorResult> {
+    if (!snapshot.confirmedContext) throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Contexto confirmado necessário.", 409);
     const draft = generateDietDraft(snapshot);
     const validationPlan = {
       id: "draft",
       version: 1,
       status: "draft" as const,
+      confirmedContextVersion: snapshot.confirmedContext.version,
       totalCalories: draft.totalCalories,
       proteinGrams: draft.proteinGrams,
       carbsGrams: draft.carbsGrams,
@@ -112,7 +157,7 @@ export class DeterministicExecutorV3 {
     };
     assertNutritionPlanValid(validationPlan);
     const plan = await withV3Span("POSTGRES_TRANSACTION", { "guto.operation": "generate_diet" }, () =>
-      this.diet.generate({ actor: snapshot.actor, requestId: envelope.requestId, draft }));
+      this.diet.generate({ actor: snapshot.actor, requestId: envelope.requestId, context: snapshot.confirmedContext!, draft }));
     return {
       status: "confirmed",
       code: "DIET_GENERATED",

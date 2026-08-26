@@ -867,12 +867,14 @@ export async function flushMemoryStoreWrites(): Promise<void> {
 
 // Bootstrap: hidrata o cache no init do módulo (encolhe a janela de clobber p/ TODOS
 // os caminhos, pois readMemoryStoreSync passa a devolver o cache cheio).
-void ensureMemoryHydrated().catch((error) => {
-  const code = error instanceof MemoryStoreUnavailableError
-    ? error.code
-    : "MEMORY_STORE_HYDRATION_FAILED";
-  console.error("[GUTO][memory_store_unavailable] Durable memory bootstrap failed.", { code });
-});
+if (process.env.GUTO_V3_ONLY !== "true") {
+  void ensureMemoryHydrated().catch((error) => {
+    const code = error instanceof MemoryStoreUnavailableError
+      ? error.code
+      : "MEMORY_STORE_HYDRATION_FAILED";
+    console.error("[GUTO][memory_store_unavailable] Durable memory bootstrap failed.", { code });
+  });
+}
 
 /**
  * Clear the in-memory cache. Use in tests to prevent state leaking between test cases.

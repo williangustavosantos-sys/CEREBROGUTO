@@ -35,6 +35,7 @@ function snapshot(externalSubject: string, userId: string): OfficialSnapshot {
       heightCm: 178,
       trainingStatus: "returning",
       trainingLocation: "gym",
+      weeklyFrequencyDaysPerWeek: 4,
     },
     goal: { version: 1, code: "hypertrophy" },
     preferences: { version: 1, dietStyle: "vegetarian" },
@@ -46,6 +47,28 @@ function snapshot(externalSubject: string, userId: string): OfficialSnapshot {
       severity: "medium",
       confirmed: true,
     }],
+    firstContact: {
+      status: "COMPLETED",
+      step: "completed",
+      foodDeclaration: "Vegetariana.",
+      limitationDeclaration: "Limitação no joelho declarada pelo usuário.",
+      startedAt: new Date(0).toISOString(),
+      completedAt: new Date(0).toISOString(),
+      currentPrompt: null,
+      summary: "Contexto confirmado.",
+      confirmedContextVersion: 1,
+    },
+    confirmedContext: {
+      id: "70000000-0000-4000-8000-000000000001",
+      version: 1,
+      confirmedAt: new Date(0).toISOString(),
+      foodDeclaration: "Vegetariana.",
+      limitationDeclaration: "Limitação no joelho declarada pelo usuário.",
+      profileVersion: 1,
+      goalVersion: 1,
+      weeklyFrequencyDaysPerWeek: 4,
+      trainingLocation: "gym",
+    },
     workout: {
       id: "20000000-0000-4000-8000-000000000001",
       version: 1,
@@ -170,6 +193,27 @@ function harness(state: OfficialSnapshot) {
   return { repository, operational, flow, actor: state.actor };
 }
 
+test("V3 HTTP-style turn uses the authenticated actor without a global identity lookup", async () => {
+  const state = snapshot("authenticated-founder", "10000000-0000-4000-8000-000000000009");
+  const { repository, flow, actor } = harness(state);
+  let globalLookups = 0;
+  const originalResolveActor = repository.resolveActor.bind(repository);
+  repository.resolveActor = async (...args) => {
+    globalLookups += 1;
+    return originalResolveActor(...args);
+  };
+
+  const response = await flow({
+    actor,
+    message: "Oi GUTO.",
+    requestId: "90000000-0000-4000-8000-000000000009",
+  });
+
+  assert.equal(response.brainVersion, "guto-cerebro-v3");
+  assert.equal(response.action, "acknowledge");
+  assert.equal(globalLookups, 0);
+});
+
 test("V3 calibration is idempotent and language remains independent from South Africa location", async () => {
   const state = snapshot("founder-calibration", "10000000-0000-4000-8000-000000000010");
   const repository = new InMemoryOfficialStateRepository();
@@ -182,6 +226,7 @@ test("V3 calibration is idempotent and language remains independent from South A
       weightKg: 80,
       heightCm: 178,
       trainingStatus: "returning" as const,
+      weeklyFrequencyDaysPerWeek: 4,
       trainingLocation: "gym",
       city: "Alberton",
       country: "South Africa",
@@ -197,6 +242,7 @@ test("V3 calibration is idempotent and language remains independent from South A
   const reloaded = await repository.loadOfficialSnapshot(state.actor);
   assert.equal(reloaded.profile.language, "pt-BR");
   assert.equal(reloaded.profile.city, "Alberton");
+  assert.equal(reloaded.profile.trainingLocation, "gym");
   assert.equal(reloaded.profile.country, "South Africa");
   assert.equal(reloaded.profile.version, 2);
 });
@@ -214,6 +260,7 @@ test("V3 provisions a backend-derived identity before the first idempotent calib
     profile: {
       biologicalSex: "male" as const, age: 20, weightKg: 80, heightCm: 178,
       trainingStatus: "returning" as const, trainingLocation: "gym",
+      weeklyFrequencyDaysPerWeek: 4,
       city: "Alberton", country: "South Africa", language: "pt-BR" as const,
     },
     goal: { code: "hypertrophy" },
@@ -224,7 +271,7 @@ test("V3 provisions a backend-derived identity before the first idempotent calib
   const second = await repository.persistCalibration(actor, input);
   assert.deepEqual(second, first);
   const reloaded = await repository.loadOfficialSnapshot(actor);
-  assert.equal(reloaded.profile.city, "Alberton");
+  assert.equal(reloaded.profile.city, undefined);
   assert.equal(reloaded.profile.language, "pt-BR");
 });
 
@@ -399,6 +446,7 @@ test("V3 new-user cutover persists consent, calibration, pact, workout, diet and
     heightCm: 178,
     trainingLevel: "returning",
     trainingGoal: "muscle_gain",
+    trainingFrequency: 4,
     preferredTrainingLocation: "gym",
     trainingPathology: "limitação lombar",
     country: "South Africa",
@@ -421,12 +469,19 @@ test("V3 new-user cutover persists consent, calibration, pact, workout, diet and
   assert.ok(first.journey.consentAcceptedAt);
   assert.ok(first.journey.sovereignNameConfirmedAt);
   assert.ok(first.journey.pactAcceptedAt);
-  assert.ok(first.workout?.items.length);
-  assert.ok(first.workout?.items.every((item) => item.videoUrl?.startsWith("/exercise/visuals/")));
-  assert.ok(first.diet?.meals.length);
+  assert.equal(first.workout, null);
+  assert.equal(first.diet, null);
   assert.equal(first.progression.totalXp, 100);
   assert.equal(repeated.progression.totalXp, 100);
   assert.equal(repeated.progression.xpEvents.filter((event) => event.reasonCode === "grant_initial_xp").length, 1);
+  await service.startFirstContact(actor, "91000000-0000-4000-8000-000000000005");
+  await service.respondFirstContact(actor, { requestId: "91000000-0000-4000-8000-000000000006", expectedStep: "food_restrictions", answer: "Vegetariana." });
+  await service.respondFirstContact(actor, { requestId: "91000000-0000-4000-8000-000000000007", expectedStep: "training_limitations", answer: "Limitação lombar declarada." });
+  const completed = await service.confirmFirstContact(actor, { requestId: "91000000-0000-4000-8000-000000000008", confirmed: true });
+  assert.ok(completed.workout?.items.length);
+  assert.ok(completed.diet?.meals.length);
+  assert.equal(completed.workout?.confirmedContextVersion, completed.confirmedContext?.version);
+  assert.equal(completed.diet?.confirmedContextVersion, completed.confirmedContext?.version);
 });
 
 test("V3 simultaneous users keep progression, plans and reload state isolated", async () => {
@@ -444,12 +499,10 @@ test("V3 simultaneous users keep progression, plans and reload state isolated", 
       requestId: `92000000-0000-4000-8000-00000000001${index + 1}`,
       profile: {
         biologicalSex: "male", age: 22, weightKg: 80, heightCm: 178,
-        trainingStatus: "returning", trainingLocation: "gym", city: "Alberton",
-        country: "South Africa", language: "pt-BR",
+        trainingStatus: "returning",
+        weeklyFrequencyDaysPerWeek: 4,
       },
       goal: { code: "muscle_gain" },
-      preferences: { dietStyle: "vegetarian" },
-      healthConstraints: [],
     });
   }
   await Promise.all(actors.map((actor, index) => service.saveMemory(actor, {
@@ -458,6 +511,12 @@ test("V3 simultaneous users keep progression, plans and reload state isolated", 
     confirmedName: true,
     xpEvent: "grant_initial_xp",
   })));
+  await Promise.all(actors.map(async (actor, index) => {
+    await service.startFirstContact(actor, `92000000-0000-4000-8000-00000000004${index + 1}`);
+    await service.respondFirstContact(actor, { requestId: `92000000-0000-4000-8000-00000000005${index + 1}`, expectedStep: "food_restrictions", answer: "Sem restrições." });
+    await service.respondFirstContact(actor, { requestId: `92000000-0000-4000-8000-00000000006${index + 1}`, expectedStep: "training_limitations", answer: "Sem limitações." });
+    await service.confirmFirstContact(actor, { requestId: `92000000-0000-4000-8000-00000000007${index + 1}`, confirmed: true });
+  }));
   await service.saveMemory(actors[0]!, {
     requestId: "92000000-0000-4000-8000-000000000031",
     xpEvent: "complete_daily_mission",

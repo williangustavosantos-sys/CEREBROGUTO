@@ -1,5 +1,6 @@
 import type { DecisionEnvelope } from "./contracts.js";
 import type { OfficialSnapshot, PolicyGateResult, TurnEnvelope } from "./types.js";
+import { assertFactChange } from "./facts.js";
 
 function detectsAcuteRisk(message: string): boolean {
   return /dor (forte|aguda)|machuquei|les[aã]o|desmaio|falta de ar|peito doendo|doente|febre|vomit|injur|sharp pain|chest pain|sick|fever/iu.test(message);
@@ -50,6 +51,17 @@ export class PolicyGateV3 {
 
     if (decision.action === "askClarification" && !decision.clarificationQuestion) {
       return { authorized: false, code: "CLARIFICATION_REQUIRED", decision };
+    }
+    if (decision.action === "updateFacts") {
+      if (!decision.operationalFacts?.length) return { authorized: false, code: "OPERATIONAL_FACT_REQUIRED", decision };
+      try {
+        for (const fact of decision.operationalFacts) assertFactChange({ ...fact, source: "user_declared" });
+      } catch {
+        return { authorized: false, code: "OPERATIONAL_FACT_INVALID", decision };
+      }
+      if (decision.operationalFacts.some((fact) => fact.factType === "PHYSICAL_CONSTRAINT") && detectsAcuteRisk(envelope.message)) {
+        return { authorized: false, code: "SAFETY_PATH_REQUIRED", decision: { ...decision, action: "callSafetyPath", operationalFacts: undefined } };
+      }
     }
 
     return { authorized: true, code: "AUTHORIZED", decision };

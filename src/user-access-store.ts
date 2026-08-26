@@ -365,4 +365,6 @@ export async function upsertUserAccessAsync(
 // Sem isso, após um cold start do Render (file system zerado), readStoreSync
 // leria um arquivo vazio e perderia todo usuário salvo no Redis. ensureHydration
 // também trava os writes ao Redis até a hidratação completar (anti-clobber).
-void ensureHydration();
+if (process.env.GUTO_V3_ONLY !== "true") {
+  void ensureHydration();
+}

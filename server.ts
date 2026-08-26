@@ -63,7 +63,7 @@ import {
 } from "./src/push-dispatch.js";
 import webpush from "web-push";
 import { parseAuth, requireActiveUser } from "./src/auth-middleware.js";
-import { createV3Router } from "./src/v3/router.js";
+import { createV3Router, isV3AdministrativePanelPath, isV3OnlyAllowedPath, v3OnlyEnabled } from "./src/v3/router.js";
 import { gutoV3Inngest, gutoV3InngestFunctions } from "./src/v3/durable-events.js";
 import { serve as serveInngest } from "inngest/express";
 import {
@@ -744,6 +744,7 @@ interface OperationalContext {
 }
 
 const app = express();
+if (process.env.VERCEL === "1" || process.env.GUTO_TRUST_PROXY === "1") app.set("trust proxy", 1);
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 12 * 1024 * 1024 } });
 
 // ── Arena group resolver ──────────────────────────────────────────────────────
@@ -864,6 +865,26 @@ app.use(cors({
   },
 }));
 
+// Preview/Test V3 is an explicit allowlist. This gate runs before the Stripe
+// raw-body webhook and before every legacy router, so an old handler cannot
+// read or mutate V1/V2 stores even through a direct request.
+app.use((req, res, next) => {
+  if (!v3OnlyEnabled() || isV3OnlyAllowedPath(req.path) || isV3AdministrativePanelPath(req.path)) {
+    next();
+    return;
+  }
+  console.warn(JSON.stringify({
+    event: "v3_legacy_authority_blocked",
+    method: req.method,
+    path: req.path,
+  }));
+  res.status(409).json({
+    error: "V3_LEGACY_AUTHORITY_DISABLED",
+    message: "Esta rota não participa do ambiente isolado do Cérebro V3.",
+    brainVersion: "guto-cerebro-v3",
+  });
+});
+
 const pushEnabled = hasPushVapidConfiguration(config);
 if (pushEnabled) {
   webpush.setVapidDetails(
@@ -875,19 +896,52 @@ if (pushEnabled) {
 // Stripe webhook MUST be mounted before express.json() — needs raw body.
 app.post("/guto/billing/webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
 
+// V3 responds before the legacy middleware chain. Log first so 401/429 are
+// observable; every request is IP-limited before JWT/DB, login has a tighter
+// bucket, and authenticated operations are also limited by stable userId. The
+// pre-auth layers intentionally run before JSON parsing so malformed/oversized
+// V3 requests are still correlated and rate-limited.
+app.use("/guto/v3", requestLog);
+app.use("/guto/v3", createRateLimit({
+  windowMs: config.rateLimitWindowMs,
+  maxRequests: config.rateLimitMaxRequests,
+}));
+app.use("/guto/v3/auth/login", createRateLimit({
+  windowMs: config.rateLimitWindowMs,
+  maxRequests: Number(process.env.GUTO_V3_LOGIN_RATE_LIMIT_MAX || 20),
+}));
 app.use(express.json({ limit: "1mb" }));
-// Decodifica JWT antes do rate limit para separar usuários autenticados que
-// compartilham IP (academia/escritório). Visitantes continuam limitados por IP.
-app.use(parseAuth);
-app.use(createV3Router());
+app.use((error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const pathname = req.path;
+  const isV3Request = pathname === "/guto/v3" || pathname.startsWith("/guto/v3/");
+  const bodyError = error as { type?: string };
+  const tooLarge = bodyError?.type === "entity.too.large";
+  const malformed = error instanceof SyntaxError || bodyError?.type === "entity.parse.failed";
+  if (!isV3Request || (!tooLarge && !malformed)) return next(error);
+  res.status(tooLarge ? 413 : 400).json({
+    error: "V3_INVALID_REQUEST",
+    message: tooLarge ? "Payload V3 excede o limite permitido." : "JSON V3 inválido.",
+    brainVersion: "guto-cerebro-v3",
+  });
+});
+// V3 owns and verifies its PostgreSQL session before any legacy auth parser.
+app.use(createV3Router({
+  authenticatedRateLimit: createRateLimit({
+    windowMs: config.rateLimitWindowMs,
+    maxRequests: config.rateLimitMaxRequests,
+  }),
+}));
 app.use("/api/inngest", serveInngest({ client: gutoV3Inngest, functions: gutoV3InngestFunctions }));
+// Decodifica JWT apenas para rotas legadas que continuam disponíveis quando o
+// ambiente não está em GUTO_V3_ONLY.
+app.use(parseAuth);
 app.use(createRateLimit({
   windowMs: config.rateLimitWindowMs,
   maxRequests: config.rateLimitMaxRequests,
 }));
 app.use(requestLog);
 app.use(async (_req, _res, next) => {
-  await ensureMemoryHydrated().catch(() => {});
+  if (!v3OnlyEnabled()) await ensureMemoryHydrated().catch(() => {});
   next();
 });
 

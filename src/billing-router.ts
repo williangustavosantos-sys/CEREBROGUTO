@@ -24,10 +24,22 @@ function disabled(res: Response) {
   return res.status(503).json({ message: "Billing not configured.", code: "BILLING_DISABLED" });
 }
 
+function v3OnlyDisabled(res: Response) {
+  return res.status(409).json({
+    error: "V3_LEGACY_AUTHORITY_DISABLED",
+    message: "Billing legado não participa do ambiente V3-only.",
+    brainVersion: "guto-cerebro-v3",
+  });
+}
+
 // Webhook needs the raw body for signature verification, so it must be mounted
 // before express.json() runs. We export the handler separately to wire it on
 // the app directly.
 export async function stripeWebhookHandler(req: Request, res: Response) {
+  // Defense in depth: this runs before body parsing and must never update the
+  // legacy user-access store in an isolated V3 Preview.
+  if (process.env.GUTO_V3_ONLY === "true") return v3OnlyDisabled(res);
+
   if (!stripe || !config.stripeWebhookSecret) {
     return disabled(res);
   }
@@ -122,6 +134,13 @@ function findUserByCustomerId(customerId: string): string | undefined {
 
 export const billingRouter = Router();
 
+billingRouter.use((_req, res, next) => {
+  if (process.env.GUTO_V3_ONLY === "true") {
+    v3OnlyDisabled(res);
+    return;
+  }
+  next();
+});
 billingRouter.use(requireActiveUser);
 
 billingRouter.post("/checkout", async (req, res) => {

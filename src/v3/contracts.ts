@@ -10,6 +10,7 @@ export const V3ActionSchema = z.enum([
   "swapFood",
   "generateWorkout",
   "generateDiet",
+  "updateFacts",
   "startMinimumMission",
   "acknowledge",
   "callSafetyPath",
@@ -21,6 +22,13 @@ export const DecisionEnvelopeSchema = z
     action: V3ActionSchema,
     reasonCode: z.string().trim().min(1).max(80),
     selectedCandidateId: z.string().trim().min(1).max(160).optional(),
+    operationalFacts: z.array(z.object({
+      factType: z.enum(["GOAL", "BODY_WEIGHT", "TRAINING_FREQUENCY", "EXPERIENCE_LEVEL", "FOOD_CONSTRAINT", "FOOD_EXCLUSION", "PHYSICAL_CONSTRAINT", "LOCATION", "BEHAVIORAL_PREFERENCE"]),
+      canonicalValue: z.string().trim().min(1).max(500),
+      value: z.record(z.string(), z.unknown()),
+      confirmationStatus: z.enum(["FACT_CONFIRMED", "FACT_UNKNOWN"]),
+      scope: z.enum(["profile", "session"]).optional(),
+    })).max(4).optional(),
     factsToPropose: z
       .array(
         z.object({
@@ -79,6 +87,9 @@ export const DecisionEnvelopeSchema = z
         message: "askClarification requires one concise question",
       });
     }
+    if (decision.action === "updateFacts" && !decision.operationalFacts?.length) {
+      ctx.addIssue({ code: "custom", path: ["operationalFacts"], message: "updateFacts requires operationalFacts" });
+    }
   });
 
 export type V3Action = z.infer<typeof V3ActionSchema>;
@@ -100,28 +111,12 @@ export const CalibrationMutationSchema = z.object({
     weightKg: z.number().positive().max(500),
     heightCm: z.number().min(100).max(250),
     trainingStatus: z.enum(["beginner", "returning", "active", "advanced"]),
-    trainingLocation: z.string().trim().min(1).max(120),
-    city: z.string().trim().min(1).max(160),
-    country: z.string().trim().min(1).max(160),
-    language: z.enum(["pt-BR", "en-US", "it-IT"]),
-  }),
+    weeklyFrequencyDaysPerWeek: z.number().int().min(1).max(7),
+  }).strict(),
   goal: z.object({
     code: z.string().trim().min(1).max(80),
-  }),
-  preferences: z.object({
-    dietStyle: z.string().trim().min(1).max(80).optional(),
-  }),
-  healthConstraints: z
-    .array(
-      z.object({
-        kind: z.enum(["limitation", "injury", "illness", "allergy", "food_restriction"]),
-        bodyRegion: z.string().trim().min(1).max(120).optional(),
-        description: z.string().trim().min(1).max(500),
-        severity: z.enum(["low", "medium", "high", "unknown"]).default("unknown"),
-      }),
-    )
-    .max(30),
-});
+  }).strict(),
+}).strict();
 
 export type CalibrationMutation = z.infer<typeof CalibrationMutationSchema>;
 
@@ -143,14 +138,29 @@ export const V3MemoryMutationSchema = z.object({
   heightCm: z.number().min(100).max(250).optional(),
   trainingLevel: z.enum(["beginner", "returning", "consistent", "advanced"]).optional(),
   trainingGoal: z.enum(["consistency", "fat_loss", "muscle_gain", "conditioning", "mobility_health"]).optional(),
+  trainingFrequency: z.number().int().min(1).max(7).optional(),
   preferredTrainingLocation: z.enum(["gym", "home", "park", "mixed"]).optional(),
   trainingPathology: z.string().trim().max(500).optional(),
+  foodRestrictions: z.string().trim().max(500).optional(),
   country: z.string().trim().max(160).optional(),
   city: z.string().trim().max(160).optional(),
-  foodRestrictions: z.string().trim().max(500).optional(),
 });
 
 export type V3MemoryMutation = z.infer<typeof V3MemoryMutationSchema>;
+
+export const FirstContactResponseSchema = z.object({
+  requestId: z.string().uuid(),
+  expectedStep: z.enum(["food_restrictions", "training_limitations"]),
+  answer: z.string().trim().min(1).max(2_000),
+}).strict();
+
+export const FirstContactConfirmationSchema = z.object({
+  requestId: z.string().uuid(),
+  confirmed: z.literal(true),
+}).strict();
+
+export type FirstContactResponse = z.infer<typeof FirstContactResponseSchema>;
+export type FirstContactConfirmation = z.infer<typeof FirstContactConfirmationSchema>;
 
 export const NutritionToleranceSchema = z.object({
   mealToPlanKcal: z.number().nonnegative().default(2),

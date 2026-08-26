@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
-import express, { type NextFunction, type Request, type Response } from "express";
+import express, { type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import { z } from "zod";
-import { CalibrationMutationSchema, V3MemoryMutationSchema, V3TurnRequestSchema } from "./contracts.js";
+import { CalibrationMutationSchema, FirstContactConfirmationSchema, FirstContactResponseSchema, V3MemoryMutationSchema, V3TurnRequestSchema } from "./contracts.js";
 import { V3CutoverService } from "./cutover-service.js";
 import { asV3Error, V3Error } from "./errors.js";
 import { ProfileServiceV3 } from "./executors.js";
 import { isLangfuseConfigured } from "./observability/instrumentation.js";
 import { currentTraceId, withV3Span, withV3Trace } from "./observability/tracing.js";
-import { getV3Runtime } from "./runtime.js";
+import { getV3AuthService, getV3Runtime } from "./runtime.js";
 import type { ActorContext } from "./types.js";
 
 const ActiveContextMutationSchema = z.discriminatedUnion("clear", [
@@ -24,8 +24,40 @@ const ActiveContextMutationSchema = z.discriminatedUnion("clear", [
 
 const RequestIdSchema = z.object({ requestId: z.string().uuid() });
 const NameValidationRequestSchema = z.object({ name: z.string().trim().min(1).max(80) });
+const V3LoginRequestSchema = z.object({
+  emailOrId: z.string().trim().min(1).max(254),
+  password: z.string().min(1).max(512),
+});
+const WorkoutExerciseEventSchema = z.object({
+  requestId: z.string().uuid(),
+  exerciseId: z.string().trim().min(1).max(160),
+  loadValue: z.number().nonnegative().max(2_000).optional(),
+  repetitions: z.number().int().positive().max(200).optional(),
+  setsCompleted: z.number().int().nonnegative().max(30).optional(),
+  completed: z.boolean(),
+  perceivedDifficulty: z.number().int().min(1).max(10).optional(),
+  substitutedFromExerciseId: z.string().trim().min(1).max(160).optional(),
+  substitutionReason: z.string().trim().min(1).max(500).optional(),
+  context: z.record(z.string(), z.unknown()).optional(),
+}).strict();
 
 function v3Enabled(): boolean { return process.env.GUTO_V3_ENABLED === "true"; }
+export function v3OnlyEnabled(): boolean { return process.env.GUTO_V3_ONLY === "true"; }
+
+export function isV3OnlyAllowedPath(pathname: string): boolean {
+  return pathname === "/health/v3" ||
+    pathname === "/guto/v3" || pathname.startsWith("/guto/v3/") ||
+    pathname === "/api/inngest" || pathname.startsWith("/api/inngest/");
+}
+
+/** Administrative panel remains an explicit bounded surface during the V3
+ * cutover. It is never a Companion authority and still has its own legacy
+ * admin middleware. */
+export function isV3AdministrativePanelPath(pathname: string): boolean {
+  if (process.env.GUTO_V3_PANEL_ENABLED !== "true") return false;
+  return pathname === "/auth/admin/login" || pathname === "/auth/coach/login" ||
+    pathname.startsWith("/admin/") || pathname === "/admin";
+}
 
 const legacyAuthorityPrefixes = [
   "/guto/memory",
@@ -50,20 +82,9 @@ export function isLegacyAuthorityPath(pathname: string): boolean {
   return legacyAuthorityPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
-async function resolveActor(req: Request, options?: { provision?: boolean }): Promise<ActorContext> {
-  if (!req.gutoUser) throw new V3Error("V3_AUTH_REQUIRED", "Autenticação necessária.", 401);
-  const runtime = getV3Runtime();
-  const actor = await runtime.repository.resolveActor(req.gutoUser.userId, req.gutoUser.role);
-  if (!actor && options?.provision) {
-    const tenantKey = process.env.GUTO_V3_TENANT_KEY || "guto-v3-preview";
-    return runtime.repository.provisionActor({
-      externalSubject: req.gutoUser.userId,
-      role: req.gutoUser.role,
-      tenantKey,
-      tenantName: process.env.GUTO_V3_TENANT_NAME || "GUTO Cérebro V3 Preview",
-    });
-  }
-  if (!actor) throw new V3Error("V3_IDENTITY_NOT_MIGRATED", "Identidade ainda não migrada para o Cérebro V3.", 409);
+async function resolveActor(req: Request): Promise<ActorContext> {
+  const actor = req.gutoV3Auth?.principal.actor;
+  if (!actor) throw new V3Error("V3_AUTH_REQUIRED", "Autenticação necessária para o Cérebro V3.", 401);
   return actor;
 }
 
@@ -72,18 +93,13 @@ function guardEnabled(_req: Request, _res: Response, next: NextFunction): void {
   next();
 }
 
-// The isolated V3 Preview accepts only an already verified JWT. It never
-// consults V1/V2 access, team, memory or subscription stores as a fallback.
-function requireV3Jwt(req: Request, res: Response, next: NextFunction): void {
-  if (!req.gutoUser) {
-    res.status(401).json({
-      error: "V3_AUTH_REQUIRED",
-      message: "Autenticação necessária para o Cérebro V3.",
-      brainVersion: "guto-cerebro-v3",
-    });
-    return;
+async function requireV3Session(req: Request, _res: Response, next: NextFunction): Promise<void> {
+  try {
+    req.gutoV3Auth = await getV3AuthService().authenticateHeader(req.headers.authorization);
+    next();
+  } catch (error) {
+    next(error);
   }
-  next();
 }
 
 function validateV3Name(value: string): { status: "invalid" | "confirm" | "valid"; normalized: string; message: string } {
@@ -97,11 +113,12 @@ function validateV3Name(value: string): { status: "invalid" | "confirm" | "valid
   return { status: "valid", normalized, message: "Nome aceito." };
 }
 
-export function createV3Router(): express.Router {
+export function createV3Router(options: { authenticatedRateLimit?: RequestHandler } = {}): express.Router {
   const router = express.Router();
 
   router.get("/health/v3", async (_req, res) => {
     const configured = {
+      v3Only: v3OnlyEnabled(),
       postgres: Boolean(process.env.DATABASE_URL),
       redis: Boolean(
         (process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL) &&
@@ -110,10 +127,18 @@ export function createV3Router(): express.Router {
       geminiInteractions: Boolean(process.env.GEMINI_API_KEY) && process.env.GUTO_V3_GEMINI_INTERACTIONS_STORE !== "false",
       mem0: Boolean(process.env.MEM0_API_KEY),
       langfuse: isLangfuseConfigured(),
-      inngest: Boolean(process.env.INNGEST_EVENT_KEY),
+      inngest: Boolean(process.env.INNGEST_EVENT_KEY && process.env.INNGEST_SIGNING_KEY),
+      auth: Boolean(process.env.GUTO_V3_JWT_SECRET && process.env.GUTO_V3_JWT_SECRET.length >= 32),
     };
     let postgres: unknown = { ok: false, configured: configured.postgres };
     let redis: unknown = { ok: false, configured: configured.redis };
+    let auth: unknown = { ok: false, configured: configured.auth };
+    if (configured.postgres && configured.auth) {
+      auth = await getV3AuthService().health().catch((error) => ({
+        ok: false,
+        error: error instanceof V3Error ? error.code : error instanceof Error ? error.name : "unknown",
+      }));
+    }
     if (configured.postgres && configured.redis) {
       try {
         const runtime = getV3Runtime();
@@ -127,31 +152,74 @@ export function createV3Router(): express.Router {
       }
     }
     const ready = v3Enabled() && Object.values(configured).every(Boolean) &&
-      Boolean((postgres as { ok?: boolean }).ok) && Boolean((redis as { ok?: boolean }).ok);
+      Boolean((postgres as { ok?: boolean }).ok) && Boolean((redis as { ok?: boolean }).ok) &&
+      Boolean((auth as { ok?: boolean }).ok);
     res.status(ready ? 200 : 503).json({
       service: "guto-cerebro-v3",
       brainVersion: "guto-cerebro-v3",
       enabled: v3Enabled(),
+      v3Only: configured.v3Only,
       ready,
       configured,
       postgres,
       redis,
+      auth,
     });
   });
 
-  router.post("/guto/v3/name/validate", requireV3Jwt, guardEnabled, (req, res, next) => {
+  router.post("/guto/v3/auth/login", guardEnabled, async (req, res, next) => {
+    try {
+      const input = V3LoginRequestSchema.parse(req.body);
+      const result = await getV3AuthService().login(input.emailOrId, input.password);
+      const principal = result.principal;
+      res.json({
+        token: result.token,
+        role: principal.actor.role,
+        userId: principal.actor.userId,
+        name: principal.displayName,
+        ...(principal.loginIdentifier.includes("@") ? { email: principal.loginIdentifier } : {}),
+        brainVersion: "guto-cerebro-v3",
+      });
+    } catch (error) { next(error); }
+  });
+
+  // Every route below /guto/v3 is authorized exclusively by a live PostgreSQL
+  // session. Legacy req.gutoUser/JWT state is deliberately ignored.
+  router.use("/guto/v3", guardEnabled, requireV3Session);
+  if (options.authenticatedRateLimit) router.use("/guto/v3", options.authenticatedRateLimit);
+
+  router.get("/guto/v3/auth/me", async (req, res, next) => {
+    try {
+      const principal = req.gutoV3Auth!.principal;
+      res.json({
+        role: principal.actor.role,
+        userId: principal.actor.userId,
+        name: principal.displayName,
+        ...(principal.loginIdentifier.includes("@") ? { email: principal.loginIdentifier } : {}),
+        brainVersion: "guto-cerebro-v3",
+      });
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/auth/logout", async (req, res, next) => {
+    try {
+      await getV3AuthService().logout(req.gutoV3Auth!);
+      res.json({ ok: true, brainVersion: "guto-cerebro-v3" });
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/name/validate", (req, res, next) => {
     try {
       res.json(validateV3Name(NameValidationRequestSchema.parse(req.body).name));
     } catch (error) { next(error); }
   });
 
-  router.post("/guto/v3", requireV3Jwt, guardEnabled, async (req, res, next) => {
+  router.post("/guto/v3", async (req, res, next) => {
     try {
       const input = V3TurnRequestSchema.parse(req.body);
-      const user = req.gutoUser!;
+      const actor = await resolveActor(req);
       const result = await getV3Runtime().gutoTurnFlow({
-        externalSubject: user.userId,
-        role: user.role,
+        actor,
         ...input,
       });
       res.setHeader("x-guto-trace-id", result.traceId);
@@ -159,12 +227,11 @@ export function createV3Router(): express.Router {
     } catch (error) { next(error); }
   });
 
-  router.get("/guto/v3/state", requireV3Jwt, guardEnabled, async (req, res, next) => {
+  router.get("/guto/v3/state", async (req, res, next) => {
     const requestId = typeof req.headers["x-request-id"] === "string" ? req.headers["x-request-id"] : randomUUID();
     try {
-      const user = req.gutoUser!;
-      const result = await withV3Trace({ requestId, externalSubject: user.userId, attributes: { "guto.input_category": "state_read" } }, async () => {
-        const actor = await resolveActor(req, { provision: true });
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "state_read" } }, async () => {
         const [state, activeContext] = await Promise.all([
           withV3Span("POSTGRES_TRANSACTION", { "guto.operation": "state_read" }, () => getV3Runtime().repository.loadAppState(actor)),
           withV3Span("ACTIVE_CONTEXT_LOAD", {}, () => getV3Runtime().operational.getActiveContext(actor)),
@@ -176,56 +243,170 @@ export function createV3Router(): express.Router {
     } catch (error) { next(error); }
   });
 
-  router.post("/guto/v3/consent/accept", requireV3Jwt, guardEnabled, async (req, res, next) => {
+  router.get("/guto/v3/facts/history", async (req, res, next) => {
+    const requestId = typeof req.headers["x-request-id"] === "string" ? req.headers["x-request-id"] : randomUUID();
     try {
-      const input = RequestIdSchema.parse(req.body);
-      const actor = await resolveActor(req, { provision: true });
-      const state = await getV3Runtime().operational.withLock(actor, "consent", () =>
-        new V3CutoverService(getV3Runtime().repository).acceptConsent(actor, input.requestId));
-      const activeContext = await getV3Runtime().operational.getActiveContext(actor);
-      res.json({ brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext });
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "facts_history" } }, async () => {
+        const facts = await withV3Span("FACT_HISTORY_LOAD", {}, () => getV3Runtime().repository.listFactHistory(actor));
+        return { brainVersion: "guto-cerebro-v3", requestId, traceId: currentTraceId(), facts };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
     } catch (error) { next(error); }
   });
 
-  router.post("/guto/v3/memory", requireV3Jwt, guardEnabled, async (req, res, next) => {
+  router.post("/guto/v3/workout/session-exercises", async (req, res, next) => {
+    try {
+      const input = WorkoutExerciseEventSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "workout_evolution" } }, async () => {
+        const decision = await withV3Span("WORKOUT_EVOLUTION", {}, () => getV3Runtime().repository.recordWorkoutExerciseEvent({ actor, requestId: input.requestId, event: input }));
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), decision };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/consent/accept", async (req, res, next) => {
+    try {
+      const input = RequestIdSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({
+        requestId: input.requestId,
+        externalSubject: actor.externalSubject,
+        attributes: { "guto.input_category": "consent_accept" },
+      }, async () => {
+        const runtime = getV3Runtime();
+        const state = await withV3Span("CONSENT_SAVE", {}, () =>
+          runtime.operational.withLock(actor, "consent", () =>
+            new V3CutoverService(runtime.repository).acceptConsent(actor, input.requestId)));
+        const activeContext = await withV3Span("ACTIVE_CONTEXT_LOAD", {}, () =>
+          runtime.operational.getActiveContext(actor));
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/memory", async (req, res, next) => {
     try {
       const input = V3MemoryMutationSchema.parse(req.body);
-      const actor = await resolveActor(req, { provision: true });
-      const state = await getV3Runtime().operational.withLock(actor, "memory", () =>
-        new V3CutoverService(getV3Runtime().repository).saveMemory(actor, input));
-      const activeContext = await getV3Runtime().operational.getActiveContext(actor);
-      res.json({ brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext });
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({
+        requestId: input.requestId,
+        externalSubject: actor.externalSubject,
+        attributes: { "guto.input_category": "memory_save" },
+      }, async () => {
+        const runtime = getV3Runtime();
+        const state = await withV3Span("MEMORY_SAVE", {}, () =>
+          runtime.operational.withLock(actor, "memory", () =>
+            new V3CutoverService(runtime.repository).saveMemory(actor, input)));
+        const activeContext = await withV3Span("ACTIVE_CONTEXT_LOAD", {}, () =>
+          runtime.operational.getActiveContext(actor));
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
     } catch (error) { next(error); }
   });
 
-  router.post("/guto/v3/workout/generate", requireV3Jwt, guardEnabled, async (req, res, next) => {
+  router.post("/guto/v3/first-contact/start", async (req, res, next) => {
     try {
       const input = RequestIdSchema.parse(req.body);
       const actor = await resolveActor(req);
-      const state = await getV3Runtime().operational.withLock(actor, "workout-generate", () =>
-        new V3CutoverService(getV3Runtime().repository).generateWorkout(actor, input.requestId));
-      const activeContext = await getV3Runtime().operational.getActiveContext(actor);
-      res.json({ brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext });
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "first_contact_start" } }, async () => {
+        const runtime = getV3Runtime();
+        const state = await runtime.operational.withLock(actor, "first-contact", () => new V3CutoverService(runtime.repository).startFirstContact(actor, input.requestId));
+        const activeContext = await runtime.operational.getActiveContext(actor);
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
     } catch (error) { next(error); }
   });
 
-  router.post("/guto/v3/diet/generate", requireV3Jwt, guardEnabled, async (req, res, next) => {
+  router.post("/guto/v3/first-contact/respond", async (req, res, next) => {
+    try {
+      const input = FirstContactResponseSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "first_contact_respond" } }, async () => {
+        const runtime = getV3Runtime();
+        const state = await runtime.operational.withLock(actor, "first-contact", () => new V3CutoverService(runtime.repository).respondFirstContact(actor, input));
+        const activeContext = await runtime.operational.getActiveContext(actor);
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/first-contact/confirm", async (req, res, next) => {
+    try {
+      const input = FirstContactConfirmationSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "first_contact_confirm" } }, async () => {
+        const runtime = getV3Runtime();
+        const state = await runtime.operational.withLock(actor, "first-contact", () => new V3CutoverService(runtime.repository).confirmFirstContact(actor, input));
+        const activeContext = await runtime.operational.getActiveContext(actor);
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/workout/generate", async (req, res, next) => {
     try {
       const input = RequestIdSchema.parse(req.body);
       const actor = await resolveActor(req);
-      const state = await getV3Runtime().operational.withLock(actor, "diet-generate", () =>
-        new V3CutoverService(getV3Runtime().repository).generateDiet(actor, input.requestId));
-      const activeContext = await getV3Runtime().operational.getActiveContext(actor);
-      res.json({ brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext });
+      const result = await withV3Trace({
+        requestId: input.requestId,
+        externalSubject: actor.externalSubject,
+        attributes: { "guto.input_category": "workout_generate" },
+      }, async () => {
+        const runtime = getV3Runtime();
+        const state = await withV3Span("WORKOUT_GENERATE", {}, () =>
+          runtime.operational.withLock(actor, "workout-generate", () =>
+            new V3CutoverService(runtime.repository).generateWorkout(actor, input.requestId)));
+        const activeContext = await withV3Span("ACTIVE_CONTEXT_LOAD", {}, () =>
+          runtime.operational.getActiveContext(actor));
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
     } catch (error) { next(error); }
   });
 
-  router.post("/guto/v3/calibration", requireV3Jwt, guardEnabled, async (req, res, next) => {
+  router.post("/guto/v3/diet/generate", async (req, res, next) => {
+    try {
+      const input = RequestIdSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({
+        requestId: input.requestId,
+        externalSubject: actor.externalSubject,
+        attributes: { "guto.input_category": "diet_generate" },
+      }, async () => {
+        const runtime = getV3Runtime();
+        const state = await withV3Span("DIET_GENERATE", {}, () =>
+          runtime.operational.withLock(actor, "diet-generate", () =>
+            new V3CutoverService(runtime.repository).generateDiet(actor, input.requestId)));
+        const activeContext = await withV3Span("ACTIVE_CONTEXT_LOAD", {}, () =>
+          runtime.operational.getActiveContext(actor));
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/calibration", async (req, res, next) => {
     try {
       const input = CalibrationMutationSchema.parse(req.body);
-      const user = req.gutoUser!;
-      const result = await withV3Trace({ requestId: input.requestId, externalSubject: user.userId, attributes: { "guto.input_category": "calibration" } }, async () => {
-        const actor = await withV3Span("AUTH", {}, () => resolveActor(req, { provision: true }));
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "calibration" } }, async () => {
         const calibration = await getV3Runtime().operational.withLock(actor, "calibration", () =>
           withV3Span("CALIBRATION_SAVE", {}, () => new ProfileServiceV3(getV3Runtime().repository).persistCalibration(actor, input)));
         return { ...calibration, brainVersion: "guto-cerebro-v3", traceId: currentTraceId() };
@@ -235,12 +416,11 @@ export function createV3Router(): express.Router {
     } catch (error) { next(error); }
   });
 
-  router.post("/guto/v3/active-context", requireV3Jwt, guardEnabled, async (req, res, next) => {
+  router.post("/guto/v3/active-context", async (req, res, next) => {
     try {
       const input = ActiveContextMutationSchema.parse(req.body);
-      const user = req.gutoUser!;
-      const result = await withV3Trace({ requestId: input.requestId, externalSubject: user.userId, attributes: { "guto.input_category": "active_context" } }, async () => {
-        const actor = await withV3Span("AUTH", {}, () => resolveActor(req));
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "active_context" } }, async () => {
         if (input.clear) {
           await getV3Runtime().operational.clearActiveContext(actor, input.expectedVersion);
           return { requestId: input.requestId, traceId: currentTraceId(), brainVersion: "guto-cerebro-v3", activeContext: null };

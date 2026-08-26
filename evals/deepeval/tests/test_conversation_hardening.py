@@ -1,4 +1,4 @@
-"""DeepEval multi-turn contract regressions for the V3.1 conversation core.
+"""DeepEval multi-turn contract regressions for the V3.3 Companion.
 
 These are intentionally state-and-policy assertions rather than a medical judge:
 the model may propose language, but only V3 state, policy and executors can
@@ -55,6 +55,10 @@ class ConversationHardeningMetric(BaseConversationalMetric):
                 failures.append("clarification has no material decision impact")
 
             resolved_slots.update(metadata.get("resolved_slots", []))
+            if metadata.get("invented_fact", False):
+                failures.append("invented a fact not declared by the user")
+            if metadata.get("first_contact_restarted", False):
+                failures.append("restarted completed First Contact")
 
         assistant_turns = [turn for turn in test_case.turns if turn.role == "assistant"]
         if not assistant_turns:
@@ -69,6 +73,8 @@ class ConversationHardeningMetric(BaseConversationalMetric):
                 failures.append(f"expected action {expected_action}, got {final.get('action')}")
             if final.get("conservative_catalog") is not True:
                 failures.append("conservative catalog policy was not recorded")
+            if final.get("fact_persisted") is not True:
+                failures.append("operational fact was not persisted through V3")
 
         self.score = 1.0 if not failures else 0.0
         self.success = self.score >= self.threshold
@@ -102,39 +108,46 @@ def assistant(
             "action": action,
             "conservative_catalog": True,
             "relationship_memory_classes": [],
+            "fact_persisted": True,
+            "invented_fact": False,
+            "first_contact_restarted": False,
         },
     )
 
 
 def golden_cases() -> list[ConversationalTestCase]:
+    # V3.3 acceptance cases A-E. These transcripts are deterministic policy
+    # contracts; they complement (and do not replace) repository/engine tests.
     scenarios = [
-        ("lower_back", "Tenho uma limitação na lombar.", "physical_constraint", "generateWorkout"),
-        ("knee", "Meu joelho tem uma limitação funcional.", "physical_constraint", "generateWorkout"),
-        ("shoulder", "Meu ombro limita alguns movimentos.", "physical_constraint", "generateWorkout"),
-        ("food_restriction", "Não consumo lactose.", "food_restriction", "generateDiet"),
-        ("equipment", "Hoje só tenho halteres.", "available_equipment", "generateWorkout"),
-        ("routine", "Só consigo treinar três vezes por semana.", "routine_availability", "generateWorkout"),
+        ("A_physical_limitation", "Tenho uma limitação lombar.", "physical_constraint", "updateFacts"),
+        ("A_specific_exercise", "Esse exercício incomoda meu joelho.", "physical_constraint", "updateFacts"),
+        ("B_vegetarian", "Sou vegetariano.", "food_constraint", "updateFacts"),
+        ("B_egg_exclusion", "Esqueci de falar que não como ovo.", "food_exclusion", "updateFacts"),
+        ("C_goal_changed", "Meu objetivo agora é perder gordura.", "goal", "updateFacts"),
+        ("D_preference_not_limitation", "Não quero fazer perna porque não gosto.", "behavioral_preference", "acknowledge"),
+        ("D_knee_limitation", "Não consigo fazer esse exercício porque meu joelho incomoda.", "physical_constraint", "updateFacts"),
+        ("E_unknown_fact", "O que você sabe sobre mim?", "known_context_only", "acknowledge"),
     ]
     cases: list[ConversationalTestCase] = []
     for name, declaration, fact, action in scenarios:
         cases.append(
             ConversationalTestCase(
-                name=f"v3_1_{name}",
+                name=f"v3_3_{name}",
                 scenario=f"Founder regression: {name}",
                 expected_outcome="The declared operational fact is retained and one conservative action is sufficient.",
                 metadata={"expected_fact": fact, "expected_action": action},
                 turns=[
                     Turn(role="user", content=declaration),
-                    assistant("Entendi. Vou adaptar pelo catálogo conservador.", fact=fact, action=action),
+                    assistant("Entendi. Vou registrar só o que você declarou e seguir pelo catálogo conservador.", fact=fact, action=action),
                     Turn(role="user", content="Pode seguir."),
-                    assistant("Segui com a adaptação sem repetir a pergunta.", fact=fact, action=action),
+                    assistant("Segui sem repetir a pergunta e sem inventar informação.", fact=fact, action=action),
                 ],
             )
         )
     return cases
 
 
-def test_v3_1_multi_turn_conversation_hardening() -> None:
+def test_v3_3_multi_turn_conversation_hardening() -> None:
     result = evaluate(
         test_cases=golden_cases(),
         metrics=[ConversationHardeningMetric()],

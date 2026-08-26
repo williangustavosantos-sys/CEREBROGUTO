@@ -1,13 +1,19 @@
 import type { CalibrationMutation } from "./contracts.js";
 import { randomUUID } from "node:crypto";
 import { V3Error } from "./errors.js";
+import { materializeFirstContact } from "./first-contact.js";
+import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from "./facts.js";
+import { generateDietDraft, generateWorkoutDraft } from "./generation-engines.js";
+import { decideWorkoutEvolution } from "./workout-evolution.js";
 import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
 import { emptyConversationDecisionState, type ConversationDecisionState, type ConversationKnownFact } from "./conversation-state.js";
 import type {
   ActorContext,
   CalibrationResult,
   CandidateOption,
+  ConfirmedUserContext,
   DietPlan,
+  FirstContactState,
   JourneyState,
   OfficialSnapshot,
   V3AppState,
@@ -24,6 +30,10 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
   private readonly journeys = new Map<string, JourneyState>();
   private readonly xpLedger = new Map<string, XpLedgerEntry[]>();
   private readonly pactRequests = new Set<string>();
+  private readonly firstContacts = new Map<string, FirstContactState>();
+  private readonly confirmedContexts = new Map<string, ConfirmedUserContext>();
+  private readonly firstContactResponseRequests = new Set<string>();
+  private readonly facts = new Map<string, RecordedFact[]>();
   private readonly conversationStates = new Map<string, ConversationDecisionState>();
   readonly events: Array<{ requestId: string; action: string; resultCode: string }> = [];
 
@@ -37,6 +47,8 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       pactAcceptedAt: null,
       initialXpRewardSeen: false,
     });
+    this.firstContacts.set(key(snapshot.actor), structuredClone(snapshot.firstContact));
+    if (snapshot.confirmedContext) this.confirmedContexts.set(key(snapshot.actor), structuredClone(snapshot.confirmedContext));
   }
 
   async health(): Promise<{ ok: boolean; latencyMs: number }> { return { ok: true, latencyMs: 0 }; }
@@ -65,7 +77,13 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
   async loadOfficialSnapshot(actor: ActorContext): Promise<OfficialSnapshot> {
     const snapshot = this.snapshots.get(key(actor));
     if (!snapshot) throw new V3Error("V3_OFFICIAL_PROFILE_INCOMPLETE", "Perfil oficial ausente.", 409);
-    return structuredClone(snapshot);
+    const state = await this.loadAppState(actor);
+    return {
+      ...structuredClone(snapshot),
+      firstContact: state.firstContact,
+      confirmedContext: structuredClone(this.confirmedContexts.get(key(actor)) || null),
+      currentFacts: state.currentFacts,
+    };
   }
   async loadAppState(actor: ActorContext): Promise<V3AppState> {
     const snapshot = this.snapshots.get(key(actor));
@@ -88,6 +106,15 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       goal: snapshot ? structuredClone(snapshot.goal) : null,
       preferences: snapshot ? structuredClone(snapshot.preferences) : { version: 1 },
       healthConstraints: snapshot ? structuredClone(snapshot.healthConstraints) : [],
+      firstContact: structuredClone(this.firstContacts.get(key(actor)) || materializeFirstContact({
+        displayName: snapshot?.profile.displayName || "",
+        profile: snapshot?.profile || null,
+        goal: snapshot?.goal || null,
+      })),
+      confirmedContext: this.confirmedContexts.has(key(actor))
+        ? (({ id, version, confirmedAt }) => ({ id, version, confirmedAt }))(this.confirmedContexts.get(key(actor))!)
+        : null,
+      currentFacts: structuredClone((this.facts.get(key(actor)) || []).filter((fact) => fact.supersededAt === null)),
       workout: snapshot?.workout ? structuredClone(snapshot.workout) : null,
       diet: snapshot?.diet ? structuredClone(snapshot.diet) : null,
       progression: {
@@ -135,19 +162,22 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       profile: {
         version: 0,
         displayName: undefined,
-        language: input.profile.language,
-        city: input.profile.city,
-        country: input.profile.country,
+        language: "pt-BR",
+        city: undefined,
+        country: undefined,
         biologicalSex: input.profile.biologicalSex,
         age: input.profile.age,
         weightKg: input.profile.weightKg,
         heightCm: input.profile.heightCm,
         trainingStatus: input.profile.trainingStatus,
-        trainingLocation: input.profile.trainingLocation,
+        trainingLocation: "gym",
+        weeklyFrequencyDaysPerWeek: input.profile.weeklyFrequencyDaysPerWeek,
       },
       goal: { version: 0, code: input.goal.code },
       preferences: { version: 0 },
       healthConstraints: [],
+      firstContact: materializeFirstContact({ displayName: "", profile: null, goal: null }),
+      confirmedContext: null,
       workout: null,
       diet: null,
     };
@@ -159,20 +189,33 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       weightKg: input.profile.weightKg,
       heightCm: input.profile.heightCm,
       trainingStatus: input.profile.trainingStatus,
-      trainingLocation: input.profile.trainingLocation,
-      language: input.profile.language,
-      city: input.profile.city,
-      country: input.profile.country,
+      trainingLocation: "gym",
+      weeklyFrequencyDaysPerWeek: input.profile.weeklyFrequencyDaysPerWeek,
+      language: snapshot.profile.language || "pt-BR",
+      city: snapshot.profile.city,
+      country: snapshot.profile.country,
     };
     snapshot.goal = { version: snapshot.goal.version + 1, code: input.goal.code };
-    snapshot.preferences = { version: snapshot.preferences.version + 1, dietStyle: input.preferences.dietStyle };
-    snapshot.healthConstraints = input.healthConstraints.map((constraint, index) => ({
-      id: `health-${index + 1}`,
-      ...constraint,
-      confirmed: true,
-    }));
+    snapshot.preferences = { version: snapshot.preferences.version + 1 };
+    snapshot.healthConstraints = [];
     snapshot.memoryVersion += 1;
     this.snapshots.set(key(actor), snapshot);
+    const now = new Date().toISOString();
+    const history = this.facts.get(key(actor)) || [];
+    const seedFacts: FactChange[] = [
+      { factType: "GOAL", canonicalValue: input.goal.code, value: { code: input.goal.code }, source: "system", confirmationStatus: "FACT_CONFIRMED" },
+      { factType: "BODY_WEIGHT", canonicalValue: String(input.profile.weightKg), value: { weightKg: input.profile.weightKg }, source: "system", confirmationStatus: "FACT_CONFIRMED" },
+      { factType: "TRAINING_FREQUENCY", canonicalValue: String(input.profile.weeklyFrequencyDaysPerWeek), value: { daysPerWeek: input.profile.weeklyFrequencyDaysPerWeek }, source: "system", confirmationStatus: "FACT_CONFIRMED" },
+      { factType: "EXPERIENCE_LEVEL", canonicalValue: input.profile.trainingStatus, value: { code: input.profile.trainingStatus }, source: "system", confirmationStatus: "FACT_CONFIRMED" },
+    ];
+    for (const fact of seedFacts) {
+      const prior = history.find((item) => !item.supersededAt && item.factType === fact.factType && item.scope === fact.scope);
+      if (prior?.canonicalValue === fact.canonicalValue) continue;
+      const next: RecordedFact = { ...fact, id: randomUUID(), validFrom: now, validTo: null, recordedAt: now, supersededAt: null, supersededBy: null };
+      if (prior) { prior.validTo = now; prior.supersededAt = now; prior.supersededBy = next.id; }
+      history.push(next);
+    }
+    this.facts.set(key(actor), history);
     const result: CalibrationResult = {
       status: "confirmed",
       requestId: input.requestId,
@@ -182,20 +225,149 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     this.calibrationResults.set(idempotencyKey, result);
     return structuredClone(result);
   }
+  async persistProfileLocation(actor: ActorContext, input: { requestId: string; country?: string; city?: string }): Promise<void> {
+    const snapshot = this.snapshots.get(key(actor));
+    if (!snapshot?.profile) return; // sem perfil ainda — no-op
+    snapshot.profile = {
+      ...snapshot.profile,
+      country: input.country?.trim() || snapshot.profile.country,
+      city: input.city?.trim() || snapshot.profile.city,
+    };
+    snapshot.memoryVersion += 1;
+    this.snapshots.set(key(actor), snapshot);
+  }
+  async startFirstContact(input: { actor: ActorContext; requestId: string }): Promise<void> {
+    const state = await this.loadAppState(input.actor);
+    if (!state.profile || !state.goal || state.profile.weeklyFrequencyDaysPerWeek == null) {
+      throw new V3Error("V3_CALIBRATION_REQUIRED", "Calibragem objetiva completa necessária antes do First Contact.", 409);
+    }
+    if (state.firstContact.status !== "NOT_STARTED") return;
+    const now = new Date().toISOString();
+    this.firstContacts.set(key(input.actor), materializeFirstContact({
+      status: "IN_PROGRESS",
+      step: "food_restrictions",
+      startedAt: now,
+      displayName: state.displayName,
+      profile: state.profile,
+      goal: state.goal,
+    }));
+  }
+  async respondFirstContact(input: { actor: ActorContext; requestId: string; expectedStep: "food_restrictions" | "training_limitations"; answer: string }): Promise<void> {
+    const requestKey = `${key(input.actor)}:${input.requestId}`;
+    if (this.firstContactResponseRequests.has(requestKey)) return;
+    const state = await this.loadAppState(input.actor);
+    if (state.firstContact.status === "COMPLETED") return;
+    if (state.firstContact.status !== "IN_PROGRESS") {
+      throw new V3Error("V3_FIRST_CONTACT_NOT_STARTED", "First Contact ainda não iniciado.", 409);
+    }
+    if (state.firstContact.step !== input.expectedStep) {
+      throw new V3Error("V3_FIRST_CONTACT_STEP_CONFLICT", "A etapa do First Contact mudou. Recarregue o estado oficial.", 409);
+    }
+    const foodDeclaration = input.expectedStep === "food_restrictions"
+      ? input.answer.trim()
+      : state.firstContact.foodDeclaration;
+    const limitationDeclaration = input.expectedStep === "training_limitations"
+      ? input.answer.trim()
+      : state.firstContact.limitationDeclaration;
+    this.firstContacts.set(key(input.actor), materializeFirstContact({
+      status: "IN_PROGRESS",
+      step: input.expectedStep === "food_restrictions" ? "training_limitations" : "confirmation",
+      foodDeclaration,
+      limitationDeclaration,
+      startedAt: state.firstContact.startedAt,
+      displayName: state.displayName,
+      profile: state.profile,
+      goal: state.goal,
+    }));
+    this.firstContactResponseRequests.add(requestKey);
+  }
+  async confirmFirstContact(input: {
+    actor: ActorContext;
+    requestId: string;
+    contextId: string;
+    contextVersion: number;
+    expectedProfileVersion: number;
+    expectedGoalVersion: number;
+    confirmedSnapshot: Record<string, unknown>;
+    workoutDraft: WorkoutPlanDraft;
+    dietDraft: DietPlanDraft;
+  }): Promise<ConfirmedUserContext> {
+    const state = await this.loadAppState(input.actor);
+    const existingContext = this.confirmedContexts.get(key(input.actor));
+    if (state.firstContact.status === "COMPLETED" && existingContext) return structuredClone(existingContext);
+    if (state.firstContact.step !== "confirmation" || !state.firstContact.foodDeclaration || !state.firstContact.limitationDeclaration) {
+      throw new V3Error("V3_FIRST_CONTACT_INCOMPLETE", "As duas declarações precisam ser confirmadas.", 409);
+    }
+    if (!state.profile || !state.goal || state.profile.weeklyFrequencyDaysPerWeek == null) {
+      throw new V3Error("V3_CALIBRATION_REQUIRED", "Calibragem objetiva completa necessária.", 409);
+    }
+    if (state.profile.version !== input.expectedProfileVersion || state.goal.version !== input.expectedGoalVersion) {
+      throw new V3Error("V3_CONTEXT_SOURCE_CHANGED", "O perfil mudou antes da confirmação.", 409);
+    }
+    const confirmedAt = new Date().toISOString();
+    const context: ConfirmedUserContext = {
+      id: input.contextId,
+      version: input.contextVersion,
+      confirmedAt,
+      foodDeclaration: state.firstContact.foodDeclaration,
+      limitationDeclaration: state.firstContact.limitationDeclaration,
+      profileVersion: state.profile.version,
+      goalVersion: state.goal.version,
+      weeklyFrequencyDaysPerWeek: state.profile.weeklyFrequencyDaysPerWeek,
+      trainingLocation: "gym",
+    };
+    this.confirmedContexts.set(key(input.actor), context);
+    const persistedSnapshot = this.snapshots.get(key(input.actor));
+    if (persistedSnapshot) {
+      // Mirror the PostgreSQL repository: these are literal user declarations,
+      // not inferred clinical diagnoses.  Keeping them in the official
+      // snapshot makes reload and safety filtering behave the same in tests.
+      persistedSnapshot.healthConstraints = [
+        ...persistedSnapshot.healthConstraints.filter((constraint) =>
+          constraint.kind !== "food_restriction" && constraint.kind !== "limitation"),
+        {
+          id: `first-contact-food-${context.id}`,
+          kind: "food_restriction",
+          description: context.foodDeclaration,
+          severity: "unknown",
+          confirmed: true,
+        },
+        {
+          id: `first-contact-limitation-${context.id}`,
+          kind: "limitation",
+          description: context.limitationDeclaration,
+          severity: "unknown",
+          confirmed: true,
+        },
+      ];
+      this.snapshots.set(key(input.actor), persistedSnapshot);
+    }
+    this.firstContacts.set(key(input.actor), materializeFirstContact({
+      status: "COMPLETED",
+      step: "completed",
+      foodDeclaration: context.foodDeclaration,
+      limitationDeclaration: context.limitationDeclaration,
+      startedAt: state.firstContact.startedAt,
+      completedAt: confirmedAt,
+      confirmedContextVersion: context.version,
+      displayName: state.displayName,
+      profile: state.profile,
+      goal: state.goal,
+    }));
+    await this.replaceWorkoutPlan({ actor: input.actor, requestId: input.requestId, context, draft: input.workoutDraft });
+    await this.replaceDietPlan({ actor: input.actor, requestId: input.requestId, context, draft: input.dietDraft });
+    return structuredClone(context);
+  }
   async completePact(input: {
     actor: ActorContext;
     requestId: string;
     displayName: string;
-    workoutDraft: WorkoutPlanDraft;
-    dietDraft: DietPlanDraft;
   }): Promise<void> {
     const requestKey = `${key(input.actor)}:${input.requestId}`;
     if (this.pactRequests.has(requestKey)) return;
     const snapshot = await this.loadOfficialSnapshot(input.actor);
     snapshot.profile.displayName = input.displayName;
     this.snapshots.set(key(input.actor), snapshot);
-    if (!snapshot.workout) await this.replaceWorkoutPlan({ actor: input.actor, requestId: input.requestId, draft: input.workoutDraft });
-    if (!snapshot.diet) await this.replaceDietPlan({ actor: input.actor, requestId: input.requestId, draft: input.dietDraft });
     const journey = (await this.loadAppState(input.actor)).journey;
     const now = new Date().toISOString();
     this.journeys.set(key(input.actor), {
@@ -222,13 +394,13 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     entries.push({ id: randomUUID(), reasonCode: input.reasonCode, sourceKey: input.sourceKey, amount, createdAt: new Date().toISOString() });
     this.xpLedger.set(key(input.actor), entries);
   }
-  async replaceWorkoutPlan(input: { actor: ActorContext; requestId: string; draft: WorkoutPlanDraft }) {
+  async replaceWorkoutPlan(input: { actor: ActorContext; requestId: string; context: ConfirmedUserContext; draft: WorkoutPlanDraft }) {
     const snapshot = await this.loadOfficialSnapshot(input.actor);
     const prior = this.events.find((event) => event.requestId === input.requestId && event.action === "generateWorkout");
     if (prior && snapshot.workout) return structuredClone(snapshot.workout);
     const plan = {
       id: randomUUID(), version: (snapshot.workout?.version || 0) + 1, title: input.draft.title,
-      status: "active" as const,
+      status: "active" as const, confirmedContextVersion: input.context.version,
       items: input.draft.items.map((item) => ({ ...item, id: randomUUID() })),
     };
     snapshot.workout = plan;
@@ -236,12 +408,13 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     this.events.push({ requestId: input.requestId, action: "generateWorkout", resultCode: "WORKOUT_GENERATED" });
     return structuredClone(plan);
   }
-  async replaceDietPlan(input: { actor: ActorContext; requestId: string; draft: DietPlanDraft }) {
+  async replaceDietPlan(input: { actor: ActorContext; requestId: string; context: ConfirmedUserContext; draft: DietPlanDraft }) {
     const snapshot = await this.loadOfficialSnapshot(input.actor);
     const prior = this.events.find((event) => event.requestId === input.requestId && event.action === "generateDiet");
     if (prior && snapshot.diet) return structuredClone(snapshot.diet);
     const plan = {
       id: randomUUID(), version: (snapshot.diet?.version || 0) + 1, status: "active" as const,
+      confirmedContextVersion: input.context.version,
       totalCalories: input.draft.totalCalories, proteinGrams: input.draft.proteinGrams,
       carbsGrams: input.draft.carbsGrams, fatGrams: input.draft.fatGrams,
       meals: input.draft.meals.map((meal) => ({ ...meal, id: randomUUID(), items: meal.items.map((item) => ({ ...item, id: randomUUID() })) })),
@@ -250,6 +423,85 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     this.snapshots.set(key(input.actor), snapshot);
     this.events.push({ requestId: input.requestId, action: "generateDiet", resultCode: "DIET_GENERATED" });
     return structuredClone(plan);
+  }
+  async applyFactChanges(input: {
+    actor: ActorContext;
+    requestId: string;
+    changes: FactChange[];
+    expectedContextVersion: number;
+  }): Promise<{ context: ConfirmedUserContext; facts: RecordedFact[]; affectedDomains: string[] }> {
+    const state = await this.loadAppState(input.actor);
+    const current = this.confirmedContexts.get(key(input.actor));
+    if (!current || state.firstContact.status !== "COMPLETED") {
+      throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Contexto confirmado necessário para registrar um fato.", 409);
+    }
+    if (current.version !== input.expectedContextVersion) {
+      throw new V3Error("V3_CONTEXT_VERSION_CONFLICT", "O contexto mudou; recarregue antes de registrar o fato.", 409);
+    }
+    const now = new Date().toISOString();
+    const history = this.facts.get(key(input.actor)) || [];
+    const recorded: RecordedFact[] = [];
+    for (const change of input.changes) {
+      assertFactChange(change);
+      const equivalent = history.find((fact) => !fact.supersededAt && fact.factType === change.factType && fact.canonicalValue === change.canonicalValue && fact.scope === change.scope);
+      if (equivalent) { recorded.push(structuredClone(equivalent)); continue; }
+      const next: RecordedFact = { ...change, id: randomUUID(), validFrom: now, validTo: null, recordedAt: now, supersededAt: null, supersededBy: null };
+      for (const previous of history) {
+        if (!previous.supersededAt && previous.factType === change.factType && previous.scope === change.scope) {
+          previous.validTo = now;
+          previous.supersededAt = now;
+          previous.supersededBy = next.id;
+        }
+      }
+      history.push(next);
+      recorded.push(structuredClone(next));
+    }
+    this.facts.set(key(input.actor), history);
+    const nextContext: ConfirmedUserContext = {
+      ...current,
+      id: randomUUID(),
+      version: current.version + 1,
+      confirmedAt: now,
+      factIds: history.filter((fact) => !fact.supersededAt).map((fact) => fact.id),
+    };
+    this.confirmedContexts.set(key(input.actor), nextContext);
+    const persisted = this.snapshots.get(key(input.actor));
+    if (persisted) {
+      persisted.confirmedContext = nextContext;
+      persisted.firstContact = { ...persisted.firstContact, confirmedContextVersion: nextContext.version };
+      this.snapshots.set(key(input.actor), persisted);
+    }
+    const impacts = impactsFor(input.changes);
+    const snapshot = await this.loadOfficialSnapshot(input.actor);
+    // Plans always refer to one context version. Unaffected content is simply
+    // reissued against the new context; its engine is not regenerated.
+    if (impacts.has("WORKOUT")) {
+      await this.replaceWorkoutPlan({ actor: input.actor, requestId: `${input.requestId}-workout`, context: nextContext, draft: generateWorkoutDraft(snapshot) });
+    } else if (snapshot.workout) {
+      snapshot.workout.confirmedContextVersion = nextContext.version;
+    }
+    if (impacts.has("NUTRITION")) {
+      await this.replaceDietPlan({ actor: input.actor, requestId: `${input.requestId}-diet`, context: nextContext, draft: generateDietDraft(snapshot) });
+    } else if (snapshot.diet) {
+      snapshot.diet.confirmedContextVersion = nextContext.version;
+    }
+    const reconciled = await this.loadOfficialSnapshot(input.actor);
+    if (!impacts.has("WORKOUT") && reconciled.workout) reconciled.workout.confirmedContextVersion = nextContext.version;
+    if (!impacts.has("NUTRITION") && reconciled.diet) reconciled.diet.confirmedContextVersion = nextContext.version;
+    this.snapshots.set(key(input.actor), reconciled);
+    return { context: structuredClone(nextContext), facts: recorded, affectedDomains: [...impacts] };
+  }
+  async listFactHistory(actor: ActorContext): Promise<RecordedFact[]> {
+    return structuredClone(this.facts.get(key(actor)) || []);
+  }
+  async recordWorkoutExerciseEvent(input: { actor: ActorContext; requestId: string; event: import("./types.js").WorkoutExerciseSessionEvent }): Promise<import("./types.js").WorkoutEvolutionDecision> {
+    const state = await this.loadAppState(input.actor);
+    if (!state.workout?.items.some((item) => item.exerciseId === input.event.exerciseId)) {
+      throw new V3Error("V3_WORKOUT_EXERCISE_NOT_ACTIVE", "Exercício não pertence ao treino oficial ativo.", 409);
+    }
+    const decision = decideWorkoutEvolution(input.event);
+    this.events.push({ requestId: input.requestId, action: "workoutEvolution", resultCode: decision.decision });
+    return decision;
   }
   async swapExercise(input: {
     actor: ActorContext;

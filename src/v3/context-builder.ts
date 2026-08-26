@@ -8,6 +8,7 @@ import { emptyConversationDecisionState } from "./conversation-state.js";
 import type { ConversationDecisionState } from "./conversation-state.js";
 import type { ActorContext, OfficialSnapshot, TurnEnvelope } from "./types.js";
 import { withV3Span } from "./observability/tracing.js";
+import { V3Error } from "./errors.js";
 
 function messageNeedsWorkout(message: string): boolean {
   return /trein|exerc|ocupad|máquina|maquina|halter|série|serie|reps?/iu.test(message);
@@ -42,11 +43,19 @@ export class GutoContextBuilderV3 {
         : Promise.resolve<ConversationDecisionState>(emptyConversationDecisionState()),
     ]);
 
+    if (!snapshot.confirmedContext || snapshot.firstContact.status !== "COMPLETED") {
+      throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Conclua e confirme o First Contact antes de usar o chat.", 409);
+    }
+    if (snapshot.profile.version !== snapshot.confirmedContext.profileVersion || snapshot.goal.version !== snapshot.confirmedContext.goalVersion) {
+      throw new V3Error("V3_CONTEXT_RECONFIRMATION_REQUIRED", "O perfil mudou. Confirme novamente o contexto antes de continuar.", 409);
+    }
+
     await withV3Span("PROFILE_LOAD", { "guto.profile_version": snapshot.profile.version }, async () => undefined);
     await withV3Span("WORKOUT_LOAD", { "guto.workout_found": Boolean(snapshot.workout) }, async () => undefined);
     await withV3Span("DIET_LOAD", { "guto.diet_found": Boolean(snapshot.diet) }, async () => undefined);
 
-    const candidateOptions = await this.candidates.getCandidates(snapshot, activeContext, message);
+    const candidateOptions = await withV3Span("DOMAIN_KNOWLEDGE_LOOKUP", { "guto.active_context_kind": activeContext?.kind || "none" }, () =>
+      this.candidates.getCandidates(snapshot, activeContext, message));
     const includeWorkout = activeContext?.kind === "workout" || messageNeedsWorkout(message);
     const includeDiet = activeContext?.kind === "diet" || messageNeedsDiet(message);
 
@@ -60,6 +69,7 @@ export class GutoContextBuilderV3 {
         goal: snapshot.goal,
         preferences: snapshot.preferences,
         healthConstraints: snapshot.healthConstraints,
+        confirmedContext: snapshot.confirmedContext,
         ...(includeWorkout && snapshot.workout
           ? { workout: { id: snapshot.workout.id, version: snapshot.workout.version, title: snapshot.workout.title } }
           : {}),

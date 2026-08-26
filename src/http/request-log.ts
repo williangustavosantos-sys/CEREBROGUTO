@@ -21,10 +21,14 @@ export function requestLog(req: Request, res: Response, next: NextFunction) {
   // application error. originalUrl is already materialized by Express, so parse
   // it with the WHATWG API once while the request is active.
   const requestUrl = parseRequestOriginalUrl(req.originalUrl);
-  const userId = resolveRequestLogUserId(req);
+  const requestId = typeof req.headers?.["x-request-id"] === "string"
+    ? req.headers["x-request-id"]
+    : typeof req.body?.requestId === "string" ? req.body.requestId : undefined;
 
   res.on("finish", () => {
     const durationMs = Date.now() - startedAt;
+    const isV3Request = requestUrl.pathname === "/guto/v3" || requestUrl.pathname.startsWith("/guto/v3/");
+    const userId = req.gutoV3Auth?.principal.actor.userId || (isV3Request ? undefined : resolveRequestLogUserId(req));
 
     console.log(
       JSON.stringify({
@@ -34,6 +38,7 @@ export function requestLog(req: Request, res: Response, next: NextFunction) {
         status: res.statusCode,
         durationMs,
         userId,
+        requestId,
       })
     );
   });

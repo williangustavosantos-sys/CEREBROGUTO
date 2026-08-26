@@ -4,8 +4,30 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import pg from "pg";
 
-const connectionString = process.env.DATABASE_URL || "";
-if (!connectionString) throw new Error("DATABASE_URL is required.");
+const connectionString = process.env.GUTO_V3_ADMIN_DATABASE_URL || "";
+if (!connectionString) throw new Error("GUTO_V3_ADMIN_DATABASE_URL is required for V3 migrations.");
+if ((process.env.VERCEL_ENV !== "preview" && process.env.GUTO_V3_TARGET_ENV !== "preview") || process.env.VERCEL_ENV === "production") {
+  throw new Error("Refusing to run V3 migrations outside the explicit Preview target.");
+}
+if (process.env.GUTO_V3_ONLY !== "true") throw new Error("V3 migrations require GUTO_V3_ONLY=true.");
+try {
+  const parsed = new URL(connectionString);
+  const username = decodeURIComponent(parsed.username).toLowerCase();
+  if (username.startsWith("guto_v3_runtime")) {
+    throw new Error("The restricted V3 runtime DSN cannot execute migrations.");
+  }
+  const supabaseHost = new URL(process.env.SUPABASE_URL || "").hostname.toLowerCase();
+  const expectedProjectRef = (process.env.GUTO_V3_TEST_PROJECT_REF || supabaseHost.split(".")[0] || "").toLowerCase();
+  const usernameProjectRef = username.includes(".") ? username.split(".").at(-1) : undefined;
+  const hostLabels = parsed.hostname.toLowerCase().split(".");
+  const hostProjectRef = hostLabels[0] === "db" ? hostLabels[1] : undefined;
+  if (!expectedProjectRef || ![usernameProjectRef, hostProjectRef].includes(expectedProjectRef)) {
+    throw new Error("GUTO_V3_ADMIN_DATABASE_URL does not target the isolated Preview Supabase project.");
+  }
+} catch (error) {
+  if (error instanceof Error && (error.message.includes("restricted V3 runtime DSN") || error.message.includes("isolated Preview Supabase project"))) throw error;
+  throw new Error("GUTO_V3_ADMIN_DATABASE_URL is invalid for V3 migrations.");
+}
 
 const { Pool } = pg;
 const pool = new Pool({

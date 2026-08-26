@@ -353,6 +353,9 @@ export function getAllArenaProfiles(): ArenaProfile[] {
   return Object.values(store.profiles);
 }
 
-// Warm reads for legacy synchronous consumers. Durable request paths still await
-// a fresh Redis read or mutation, so this optimization is never a correctness gate.
-arenaHydrationPromise = readArenaStoreAsync();
+// Warm reads only for the legacy server. An isolated V3 Preview must not touch
+// any V1/V2 state key during module initialization, even though its HTTP gate
+// would later reject every Arena route.
+if (process.env.GUTO_V3_ONLY !== "true") {
+  arenaHydrationPromise = readArenaStoreAsync();
+}

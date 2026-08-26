@@ -1,6 +1,7 @@
 import { z, type Genkit } from "genkit";
 import type { DecisionModel } from "./ai.js";
 import { BrainVersion } from "./contracts.js";
+import { resolveDeclaredOperationalFacts } from "./facts.js";
 import { GutoContextBuilderV3 } from "./context-builder.js";
 import { V3Error } from "./errors.js";
 import { DeterministicExecutorV3 } from "./executors.js";
@@ -11,16 +12,31 @@ import type { RelationshipMemoryStore } from "./relationship-memory.js";
 import type { OfficialStateRepository } from "./repository.js";
 import { supportsConversationState } from "./repository.js";
 import { applyConversationDecision } from "./conversation-state.js";
-import type { V3TurnResponse } from "./types.js";
+import type { ActorContext, V3TurnResponse } from "./types.js";
 import type { DurableEventPublisher } from "./durable-events.js";
 
-const InternalFlowInputSchema = z.object({
+const ActorContextSchema = z.object({
+  tenantId: z.string().uuid(),
+  userId: z.string().uuid(),
   externalSubject: z.string().trim().min(1).max(200),
   role: z.enum(["student", "coach", "admin", "super_admin"]),
+});
+
+const InternalTurnSchema = z.object({
   message: z.string().trim().min(1).max(4_000),
   requestId: z.string().uuid(),
   uiContextId: z.string().trim().min(1).max(160).optional(),
 });
+
+const InternalFlowInputSchema = z.union([
+  InternalTurnSchema.extend({ actor: ActorContextSchema }),
+  // Compatibility for local evaluators and in-memory tests. The HTTP router
+  // always uses the authenticated ActorContext branch above.
+  InternalTurnSchema.extend({
+    externalSubject: z.string().trim().min(1).max(200),
+    role: z.enum(["student", "coach", "admin", "super_admin"]),
+  }),
+]);
 
 const ExecutorResultSchema = z.object({
   status: z.enum(["confirmed", "not_executed", "rejected"]),
@@ -28,11 +44,13 @@ const ExecutorResultSchema = z.object({
   message: z.string(),
   planVersion: z.number().optional(),
   activeContextVersion: z.number().optional(),
+  factContextVersion: z.number().optional(),
+  affectedDomains: z.array(z.enum(["WORKOUT", "NUTRITION", "PROGRESS", "PROACTIVITY", "SESSION"])).optional(),
 });
 
 const V3TurnResponseSchema = z.object({
   speech: z.string(),
-  action: z.enum(["none", "askClarification", "swapExercise", "swapFood", "generateWorkout", "generateDiet", "startMinimumMission", "acknowledge", "callSafetyPath"]),
+  action: z.enum(["none", "askClarification", "swapExercise", "swapFood", "generateWorkout", "generateDiet", "updateFacts", "startMinimumMission", "acknowledge", "callSafetyPath"]),
   requestId: z.string().uuid(),
   traceId: z.string(),
   brainVersion: z.literal("guto-cerebro-v3"),
@@ -58,8 +76,8 @@ export interface GutoTurnFlowDependencies {
 
 function finalSpeech(action: string, modelSpeech: string, clarification: string | undefined, executorMessage: string, confirmed: boolean): string {
   if (action === "askClarification") return clarification || modelSpeech;
-  if ((action === "swapExercise" || action === "swapFood") && confirmed) return executorMessage;
-  if ((action === "swapExercise" || action === "swapFood") && !confirmed) return `Não alterei nada. ${executorMessage}`;
+  if ((action === "swapExercise" || action === "swapFood" || action === "updateFacts") && confirmed) return executorMessage;
+  if ((action === "swapExercise" || action === "swapFood" || action === "updateFacts") && !confirmed) return `Não alterei nada. ${executorMessage}`;
   return modelSpeech;
 }
 
@@ -75,10 +93,11 @@ export function createGutoTurnFlow(deps: GutoTurnFlowDependencies) {
     },
     async (input): Promise<V3TurnResponse> => withV3Trace({
       requestId: input.requestId,
-      externalSubject: input.externalSubject,
+      externalSubject: "actor" in input ? input.actor.externalSubject : input.externalSubject,
       attributes: { "guto.input_category": "user_turn" },
     }, async () => {
-      const actor = await deps.ai.run("AUTH", () => withV3Span("AUTH", {}, async () => {
+      const actor: ActorContext = await deps.ai.run("AUTH", () => withV3Span("AUTH", {}, async () => {
+        if ("actor" in input) return input.actor;
         const resolved = await deps.repository.resolveActor(input.externalSubject, input.role);
         if (!resolved) throw new V3Error("V3_IDENTITY_NOT_MIGRATED", "Identidade ainda não migrada para o Cérebro V3.", 409);
         return resolved;
@@ -98,7 +117,15 @@ export function createGutoTurnFlow(deps: GutoTurnFlowDependencies) {
           deps.contextBuilder.build(actor, input.requestId, input.message));
         const modelOutput = await deps.ai.run("GEMINI_CALL", () => deps.decisionModel.decide(envelope));
         const modelResult = "decision" in modelOutput ? modelOutput : { decision: modelOutput };
-        const decision = modelResult.decision;
+        const detectedFacts = await withV3Span("FACT_RESOLUTION", {
+          "guto.fact_resolution_source": "deterministic_declaration_parser",
+        }, async () => resolveDeclaredOperationalFacts(input.message));
+        // The model remains the conversational interpreter; this conservative
+        // resolver only prevents a clear user declaration from silently being
+        // left in an untrusted conversation cache.
+        const decision = detectedFacts.length && !["callSafetyPath", "askClarification"].includes(modelResult.decision.action)
+          ? { ...modelResult.decision, action: "updateFacts" as const, reasonCode: "user_declared_operational_fact", operationalFacts: detectedFacts }
+          : modelResult.decision;
         const gate = await deps.ai.run("POLICY_GATE", () => withV3Span("POLICY_GATE", {
           "guto.action": decision.action,
         }, async () => policyGate.authorize(decision, envelope, snapshot)));

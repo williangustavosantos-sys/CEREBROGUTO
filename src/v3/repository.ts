@@ -1,9 +1,11 @@
 import type { CalibrationMutation } from "./contracts.js";
 import type { ConversationDecisionState, ConversationKnownFact } from "./conversation-state.js";
+import type { FactChange, RecordedFact } from "./facts.js";
 import type {
   ActorContext,
   CalibrationResult,
   CandidateOption,
+  ConfirmedUserContext,
   DietPlan,
   OfficialSnapshot,
   V3AppState,
@@ -62,12 +64,25 @@ export interface OfficialStateRepository {
     initialXpRewardSeen?: boolean;
   }): Promise<void>;
   persistCalibration(actor: ActorContext, input: CalibrationMutation): Promise<CalibrationResult>;
+  /** Persiste país/cidade vindos de /guto/v3/memory (V3MemoryMutation.country/city). No-op sem perfil. trainingLocation NÃO entra aqui: o local oficial fica fixado no contexto confirmado ("gym") — hint de sessão não muta o perfil. */
+  persistProfileLocation(actor: ActorContext, input: { requestId: string; country?: string; city?: string }): Promise<void>;
+  startFirstContact(input: { actor: ActorContext; requestId: string }): Promise<void>;
+  respondFirstContact(input: { actor: ActorContext; requestId: string; expectedStep: "food_restrictions" | "training_limitations"; answer: string }): Promise<void>;
+  confirmFirstContact(input: {
+    actor: ActorContext;
+    requestId: string;
+    contextId: string;
+    contextVersion: number;
+    expectedProfileVersion: number;
+    expectedGoalVersion: number;
+    confirmedSnapshot: Record<string, unknown>;
+    workoutDraft: WorkoutPlanDraft;
+    dietDraft: DietPlanDraft;
+  }): Promise<ConfirmedUserContext>;
   completePact(input: {
     actor: ActorContext;
     requestId: string;
     displayName: string;
-    workoutDraft: WorkoutPlanDraft;
-    dietDraft: DietPlanDraft;
   }): Promise<void>;
   recordXp(input: {
     actor: ActorContext;
@@ -75,8 +90,18 @@ export interface OfficialStateRepository {
     reasonCode: XpReasonCode;
     sourceKey: string;
   }): Promise<void>;
-  replaceWorkoutPlan(input: { actor: ActorContext; requestId: string; draft: WorkoutPlanDraft }): Promise<import("./types.js").WorkoutPlan>;
-  replaceDietPlan(input: { actor: ActorContext; requestId: string; draft: DietPlanDraft }): Promise<DietPlan>;
+  replaceWorkoutPlan(input: { actor: ActorContext; requestId: string; context: ConfirmedUserContext; draft: WorkoutPlanDraft }): Promise<import("./types.js").WorkoutPlan>;
+  replaceDietPlan(input: { actor: ActorContext; requestId: string; context: ConfirmedUserContext; draft: DietPlanDraft }): Promise<DietPlan>;
+  /** Writes append-only bitemporal facts, confirms a new context and only
+   * re-evaluates the engines declared by the deterministic impact map. */
+  applyFactChanges(input: {
+    actor: ActorContext;
+    requestId: string;
+    changes: FactChange[];
+    expectedContextVersion: number;
+  }): Promise<{ context: ConfirmedUserContext; facts: RecordedFact[]; affectedDomains: string[] }>;
+  listFactHistory(actor: ActorContext): Promise<RecordedFact[]>;
+  recordWorkoutExerciseEvent(input: { actor: ActorContext; requestId: string; event: import("./types.js").WorkoutExerciseSessionEvent }): Promise<import("./types.js").WorkoutEvolutionDecision>;
   swapExercise(input: {
     actor: ActorContext;
     requestId: string;

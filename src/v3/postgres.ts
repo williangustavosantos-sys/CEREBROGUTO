@@ -1,13 +1,18 @@
 import { performance } from "node:perf_hooks";
+import { randomUUID } from "node:crypto";
 import pg, { type PoolClient, type QueryResultRow } from "pg";
 import type { CalibrationMutation } from "./contracts.js";
 import { emptyConversationDecisionState, type ConversationDecisionState, type ConversationKnownFact } from "./conversation-state.js";
 import { V3Error } from "./errors.js";
+import { materializeFirstContact } from "./first-contact.js";
+import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from "./facts.js";
+import { decideWorkoutEvolution } from "./workout-evolution.js";
 import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
 import type {
   ActorContext,
   CalibrationResult,
   CandidateOption,
+  ConfirmedUserContext,
   DietItem,
   DietMeal,
   DietPlan,
@@ -69,10 +74,87 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     }
   }
 
-  async health(): Promise<{ ok: boolean; latencyMs: number }> {
+  private mapConfirmedContext(row: QueryResultRow): ConfirmedUserContext {
+    return {
+      id: String(row.id),
+      version: asNumber(row.version),
+      confirmedAt: new Date(row.confirmed_at).toISOString(),
+      foodDeclaration: String(row.food_declaration),
+      limitationDeclaration: String(row.limitation_declaration),
+      profileVersion: asNumber(row.profile_version),
+      goalVersion: asNumber(row.goal_version),
+      weeklyFrequencyDaysPerWeek: asNumber(row.weekly_frequency),
+      trainingLocation: "gym",
+      factIds: Array.isArray(jsonObject(row.context_snapshot).factIds) ? jsonObject(row.context_snapshot).factIds as string[] : undefined,
+    };
+  }
+
+  private async assertContextCurrent(client: PoolClient, actor: ActorContext, context: ConfirmedUserContext): Promise<void> {
+    const result = await client.query(
+      `SELECT 1 FROM guto_v3.confirmed_user_contexts c
+        JOIN guto_v3.user_profile p ON p.tenant_id=c.tenant_id AND p.user_id=c.user_id AND p.version=c.profile_version
+        JOIN guto_v3.user_goals g ON g.tenant_id=c.tenant_id AND g.user_id=c.user_id AND g.version=c.goal_version
+       WHERE c.tenant_id=$1 AND c.user_id=$2 AND c.id=$3 AND c.version=$4
+       FOR UPDATE OF p,g`,
+      [actor.tenantId, actor.userId, context.id, context.version],
+    );
+    if (!result.rows[0]) throw new V3Error("V3_CONTEXT_RECONFIRMATION_REQUIRED", "O perfil mudou. Confirme novamente o contexto antes de gerar planos.", 409);
+  }
+
+  async health(): Promise<{ ok: boolean; latencyMs: number; sessionUser: string; activeRole: string }> {
     const started = performance.now();
-    await this.pool.query("SELECT 1");
-    return { ok: true, latencyMs: Math.round(performance.now() - started) };
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const identity = await client.query<{ session_user: string }>("SELECT session_user AS session_user");
+      const sessionUser = identity.rows[0]?.session_user || "unknown";
+      if (process.env.GUTO_V3_ONLY === "true") {
+        const expectedRole = process.env.GUTO_V3_RUNTIME_DB_ROLE || "guto_v3_runtime";
+        if (sessionUser !== expectedRole) {
+          throw new V3Error(
+            "V3_DATABASE_RUNTIME_ROLE_REQUIRED",
+            "A conexão runtime do Cérebro V3 não usa o papel restrito esperado.",
+            503,
+          );
+        }
+      }
+
+      const sentinelId = "00000000-0000-0000-0000-000000000000";
+      await client.query(
+        "SELECT set_config('app.tenant_id', $1, true), set_config('app.user_id', $1, true)",
+        [sentinelId],
+      );
+      await client.query("SET LOCAL ROLE guto_v3_app");
+      for (const table of [
+        "users",
+        "user_journey_state",
+        "user_profile",
+        "workout_plans",
+        "diet_plans",
+        "conversation_threads",
+        "first_contact_state",
+        "confirmed_user_contexts",
+      ]) {
+        await client.query(`SELECT 1 FROM guto_v3.${table} LIMIT 0`);
+      }
+      const role = await client.query<{ active_role: string }>("SELECT current_user AS active_role");
+      const activeRole = role.rows[0]?.active_role || "unknown";
+      if (activeRole !== "guto_v3_app") {
+        throw new V3Error("V3_DATABASE_APP_ROLE_REQUIRED", "O papel de aplicação V3 não está ativo.", 503);
+      }
+      await client.query("COMMIT");
+      return {
+        ok: true,
+        latencyMs: Math.round(performance.now() - started),
+        sessionUser,
+        activeRole,
+      };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async resolveActor(externalSubject: string, role: ActorContext["role"]): Promise<ActorContext | null> {
@@ -156,13 +238,47 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     if (!state.profile || !state.goal) {
       throw new V3Error("V3_OFFICIAL_PROFILE_INCOMPLETE", "Perfil oficial V3 ainda não foi migrado.", 409);
     }
+    const confirmedSource = await this.withActorTransaction(actor, async (client) => {
+      const result = await client.query(
+        `SELECT c.*,p.version AS current_profile_version,g.version AS current_goal_version
+           FROM guto_v3.confirmed_user_contexts c
+           JOIN guto_v3.user_profile p ON p.tenant_id=c.tenant_id AND p.user_id=c.user_id
+           JOIN guto_v3.user_goals g ON g.tenant_id=c.tenant_id AND g.user_id=c.user_id
+          WHERE c.tenant_id=$1 AND c.user_id=$2 ORDER BY c.version DESC LIMIT 1`,
+        [actor.tenantId, actor.userId],
+      );
+      const row = result.rows[0];
+      return row ? {
+        context: this.mapConfirmedContext(row),
+        snapshot: jsonObject(row.context_snapshot),
+        currentProfileVersion: asNumber(row.current_profile_version),
+        currentGoalVersion: asNumber(row.current_goal_version),
+      } : null;
+    });
+    const confirmedContext = confirmedSource?.context || null;
+    if (confirmedContext && (confirmedSource!.currentProfileVersion !== confirmedContext.profileVersion || confirmedSource!.currentGoalVersion !== confirmedContext.goalVersion)) {
+      throw new V3Error("V3_CONTEXT_RECONFIRMATION_REQUIRED", "O perfil mudou. Confirme novamente o contexto antes de continuar.", 409);
+    }
+    const storedProfile = jsonObject(confirmedSource?.snapshot.profile);
+    const storedGoal = jsonObject(confirmedSource?.snapshot.goal);
+    const profile = confirmedContext ? {
+      ...state.profile,
+      ...storedProfile,
+      version: confirmedContext.profileVersion,
+      weeklyFrequencyDaysPerWeek: confirmedContext.weeklyFrequencyDaysPerWeek,
+      trainingLocation: "gym",
+    } as OfficialProfile : state.profile;
+    const goal = confirmedContext ? { ...state.goal, ...storedGoal, version: confirmedContext.goalVersion } as OfficialGoal : state.goal;
     return {
       actor,
       memoryVersion: state.memoryVersion,
-      profile: state.profile,
-      goal: state.goal,
+      profile,
+      goal,
       preferences: state.preferences,
       healthConstraints: state.healthConstraints,
+      currentFacts: state.currentFacts,
+      firstContact: state.firstContact,
+      confirmedContext,
       workout: state.workout,
       diet: state.diet,
     };
@@ -170,21 +286,23 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
 
   async loadAppState(actor: ActorContext): Promise<V3AppState> {
     return this.withActorTransaction(actor, async (client) => {
-      const [userResult, profileResult, goalResult, preferencesResult, healthResult, factHealthResult, workoutResult, dietResult, journeyResult, xpResult] = await Promise.all([
+      const [userResult, profileResult, goalResult, preferencesResult, healthResult, factHealthResult, workoutResult, dietResult, journeyResult, xpResult, firstContactResult, contextResult] = await Promise.all([
         client.query(`SELECT version, display_name FROM guto_v3.users WHERE tenant_id = $1 AND id = $2`, [actor.tenantId, actor.userId]),
         client.query(`SELECT * FROM guto_v3.user_profile WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
         client.query(`SELECT * FROM guto_v3.user_goals WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
         client.query(`SELECT * FROM guto_v3.user_preferences WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
         client.query(`SELECT * FROM guto_v3.user_health_constraints WHERE tenant_id = $1 AND user_id = $2 AND confirmed = true ORDER BY created_at`, [actor.tenantId, actor.userId]),
-        client.query(`SELECT user_fact_id, fact_type, value_json, confirmation_status
+        client.query(`SELECT user_fact_id, fact_type, value_json, source, confirmation_status, valid_from, valid_to, recorded_at, superseded_at, superseded_by
                         FROM guto_v3.user_facts
                        WHERE tenant_id = $1 AND user_id = $2 AND superseded_at IS NULL
-                         AND fact_type IN ('physical_constraint','food_restriction')
+                         AND fact_type IN ('physical_constraint','food_restriction','PHYSICAL_CONSTRAINT','FOOD_CONSTRAINT','FOOD_EXCLUSION')
                        ORDER BY recorded_at`, [actor.tenantId, actor.userId]),
         client.query(`SELECT * FROM guto_v3.workout_plans WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'`, [actor.tenantId, actor.userId]),
         client.query(`SELECT * FROM guto_v3.diet_plans WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'`, [actor.tenantId, actor.userId]),
         client.query(`SELECT * FROM guto_v3.user_journey_state WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
         client.query(`SELECT id, reason_code, amount, source_key, created_at FROM guto_v3.xp_ledger WHERE tenant_id = $1 AND user_id = $2 ORDER BY created_at, id`, [actor.tenantId, actor.userId]),
+        client.query(`SELECT * FROM guto_v3.first_contact_state WHERE tenant_id=$1 AND user_id=$2`, [actor.tenantId, actor.userId]),
+        client.query(`SELECT * FROM guto_v3.confirmed_user_contexts WHERE tenant_id=$1 AND user_id=$2 ORDER BY version DESC LIMIT 1`, [actor.tenantId, actor.userId]),
       ]);
 
       const user = userResult.rows[0];
@@ -203,14 +321,15 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         version: asNumber(profileRow.version),
         displayName: user.display_name || undefined,
         language: profileRow.language,
-        city: profileRow.city,
-        country: profileRow.country,
+        city: profileRow.city || undefined,
+        country: profileRow.country || undefined,
         biologicalSex: profileRow.biological_sex,
         age: asNumber(profileRow.age),
         weightKg: asNumber(profileRow.weight_kg),
         heightCm: asNumber(profileRow.height_cm),
         trainingStatus: profileRow.training_status,
         trainingLocation: profileRow.training_location,
+        weeklyFrequencyDaysPerWeek: profileRow.weekly_frequency == null ? null : asNumber(profileRow.weekly_frequency),
       } : null;
       const goal: OfficialGoal | null = goalRow ? { version: asNumber(goalRow.version), code: goalRow.goal_code } : null;
       const preferencesRow = preferencesResult.rows[0];
@@ -227,11 +346,28 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         confirmed: row.confirmed,
       }));
       const knownConstraintValues = new Set(healthConstraints.map((constraint) => `${constraint.kind}:${constraint.bodyRegion || ""}:${constraint.description}`));
+      const currentFacts: RecordedFact[] = factHealthResult.rows.map((row) => {
+        const value = jsonObject(row.value_json);
+        return {
+          id: String(row.user_fact_id),
+          factType: String(row.fact_type).toUpperCase() as RecordedFact["factType"],
+          canonicalValue: typeof value.code === "string" ? value.code : typeof value.declaration === "string" ? value.declaration : JSON.stringify(value),
+          value,
+          source: row.source === "system" ? "system" : "user_declared",
+          confirmationStatus: row.confirmation_status,
+          validFrom: new Date(row.valid_from).toISOString(),
+          validTo: row.valid_to ? new Date(row.valid_to).toISOString() : null,
+          recordedAt: new Date(row.recorded_at).toISOString(),
+          supersededAt: row.superseded_at ? new Date(row.superseded_at).toISOString() : null,
+          supersededBy: row.superseded_by ? String(row.superseded_by) : null,
+        };
+      });
       for (const row of factHealthResult.rows) {
         const value = jsonObject(row.value_json);
         const bodyRegion = typeof value.bodyRegion === "string" ? value.bodyRegion : typeof value.area === "string" ? value.area : undefined;
         const description = typeof value.description === "string"
           ? value.description
+          : typeof value.declaration === "string" ? value.declaration
           : bodyRegion ? `Limitação declarada: ${bodyRegion}` : String(row.fact_type);
         const kind: HealthConstraint["kind"] = row.fact_type === "food_restriction" ? "food_restriction" : "limitation";
         const identity = `${kind}:${bodyRegion || ""}:${description}`;
@@ -249,6 +385,22 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       }
 
       const journeyRow = journeyResult.rows[0];
+      const firstContactRow = firstContactResult.rows[0];
+      const fullContext = contextResult.rows[0] ? this.mapConfirmedContext(contextResult.rows[0]) : null;
+      const firstContact = materializeFirstContact({
+        status: firstContactRow?.status,
+        step: firstContactRow?.step,
+        foodDeclaration: firstContactRow?.food_declaration || null,
+        limitationDeclaration: firstContactRow?.limitation_declaration || null,
+        startedAt: firstContactRow?.started_at ? new Date(firstContactRow.started_at).toISOString() : null,
+        completedAt: firstContactRow?.completed_at ? new Date(firstContactRow.completed_at).toISOString() : null,
+        confirmedContextVersion: firstContactRow?.confirmed_context_version == null ? null : asNumber(firstContactRow.confirmed_context_version),
+        displayName: user.display_name || "",
+        profile,
+        goal,
+      });
+      const confirmedWorkout = fullContext && workout?.confirmedContextVersion === fullContext.version ? workout : null;
+      const confirmedDiet = fullContext && diet?.confirmedContextVersion === fullContext.version ? diet : null;
       const xpEvents = xpResult.rows.map((row) => ({
         id: String(row.id),
         reasonCode: row.reason_code as XpReasonCode,
@@ -273,8 +425,11 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         goal,
         preferences,
         healthConstraints,
-        workout,
-        diet,
+        firstContact,
+        confirmedContext: fullContext ? { id: fullContext.id, version: fullContext.version, confirmedAt: fullContext.confirmedAt } : null,
+        currentFacts,
+        workout: confirmedWorkout,
+        diet: confirmedDiet,
         progression: {
           totalXp,
           evolutionStage: totalXp >= 12_000 ? "elite" : totalXp >= 5_000 ? "adult" : totalXp >= 1_500 ? "teen" : "baby",
@@ -334,6 +489,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       version: asNumber(row.version),
       title: row.title,
       status: row.status,
+      confirmedContextVersion: row.confirmed_context_version == null ? null : asNumber(row.confirmed_context_version),
       items: items.rows.map((item): WorkoutItem => ({
         id: item.id,
         exerciseId: item.exercise_id,
@@ -381,6 +537,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       id: row.id,
       version: asNumber(row.version),
       status: row.status,
+      confirmedContextVersion: row.confirmed_context_version == null ? null : asNumber(row.confirmed_context_version),
       totalCalories: asNumber(row.total_calories),
       proteinGrams: asNumber(row.protein_grams),
       carbsGrams: asNumber(row.carbs_grams),
@@ -409,18 +566,21 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       const profileResult = await client.query<{ version: string }>(
         `INSERT INTO guto_v3.user_profile (
            tenant_id, user_id, biological_sex, age, weight_kg, height_cm, training_status,
-           training_location, language, city, country
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+           training_location, language, city, country, weekly_frequency
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,'gym',
+           COALESCE((SELECT preferred_language FROM guto_v3.user_journey_state WHERE tenant_id=$1 AND user_id=$2),'pt-BR'),
+           NULL,NULL,$8)
          ON CONFLICT (user_id) DO UPDATE SET
            biological_sex = EXCLUDED.biological_sex,
            age = EXCLUDED.age,
            weight_kg = EXCLUDED.weight_kg,
            height_cm = EXCLUDED.height_cm,
            training_status = EXCLUDED.training_status,
-           training_location = EXCLUDED.training_location,
+           training_location = 'gym',
            language = EXCLUDED.language,
-           city = EXCLUDED.city,
-           country = EXCLUDED.country,
+           city = NULL,
+           country = NULL,
+           weekly_frequency = EXCLUDED.weekly_frequency,
            version = guto_v3.user_profile.version + 1
          RETURNING version`,
         [
@@ -431,18 +591,14 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
           input.profile.weightKg,
           input.profile.heightCm,
           input.profile.trainingStatus,
-          input.profile.trainingLocation,
-          input.profile.language,
-          input.profile.city,
-          input.profile.country,
+          input.profile.weeklyFrequencyDaysPerWeek,
         ],
       );
       await client.query(
         `INSERT INTO guto_v3.user_preferences (tenant_id, user_id, diet_style)
-         VALUES ($1,$2,$3)
-         ON CONFLICT (user_id) DO UPDATE SET diet_style = EXCLUDED.diet_style,
-           version = guto_v3.user_preferences.version + 1`,
-        [actor.tenantId, actor.userId, input.preferences.dietStyle || null],
+         VALUES ($1,$2,NULL)
+         ON CONFLICT (user_id) DO NOTHING`,
+        [actor.tenantId, actor.userId],
       );
       await client.query(
         `INSERT INTO guto_v3.user_goals (tenant_id, user_id, goal_code)
@@ -452,33 +608,17 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         [actor.tenantId, actor.userId, input.goal.code],
       );
       await client.query(`DELETE FROM guto_v3.user_health_constraints WHERE tenant_id = $1 AND user_id = $2 AND source = 'calibration'`, [actor.tenantId, actor.userId]);
-      for (const constraint of input.healthConstraints) {
-        await client.query(
-          `INSERT INTO guto_v3.user_health_constraints
-             (tenant_id, user_id, kind, body_region, description, severity, confirmed, source)
-           VALUES ($1,$2,$3,$4,$5,$6,true,'calibration')`,
-          [actor.tenantId, actor.userId, constraint.kind, constraint.bodyRegion || null, constraint.description, constraint.severity],
-        );
-        await this.persistFact(client, actor, {
-          factType: constraint.kind === "food_restriction" ? "food_restriction" : "physical_constraint",
-          value: {
-            kind: constraint.kind,
-            bodyRegion: constraint.bodyRegion || null,
-            description: constraint.description,
-            severity: constraint.severity,
-          },
-          source: "system",
-          confirmationStatus: "FACT_CONFIRMED",
-          supersedeCurrent: false,
-        });
-      }
       await this.persistFact(client, actor, {
-        factType: "goal",
+        factType: "GOAL",
         value: { code: input.goal.code },
+        canonicalValue: input.goal.code,
         source: "system",
         confirmationStatus: "FACT_CONFIRMED",
         supersedeCurrent: true,
       });
+      await this.persistFact(client, actor, { factType: "BODY_WEIGHT", value: { weightKg: input.profile.weightKg }, canonicalValue: String(input.profile.weightKg), source: "system", confirmationStatus: "FACT_CONFIRMED", supersedeCurrent: true });
+      await this.persistFact(client, actor, { factType: "TRAINING_FREQUENCY", value: { daysPerWeek: input.profile.weeklyFrequencyDaysPerWeek }, canonicalValue: String(input.profile.weeklyFrequencyDaysPerWeek), source: "system", confirmationStatus: "FACT_CONFIRMED", supersedeCurrent: true });
+      await this.persistFact(client, actor, { factType: "EXPERIENCE_LEVEL", value: { code: input.profile.trainingStatus }, canonicalValue: input.profile.trainingStatus, source: "system", confirmationStatus: "FACT_CONFIRMED", supersedeCurrent: true });
       const userResult = await client.query<{ version: string }>(
         `UPDATE guto_v3.users SET version = version + 1 WHERE tenant_id = $1 AND id = $2 RETURNING version`,
         [actor.tenantId, actor.userId],
@@ -503,12 +643,172 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     });
   }
 
+  async persistProfileLocation(actor: ActorContext, input: { requestId: string; country?: string; city?: string }): Promise<void> {
+    await this.withActorTransaction(actor, async (client) => {
+      const prior = await client.query(
+        `SELECT 1 FROM guto_v3.guto_events WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND event_type='profile.location_updated'`,
+        [actor.tenantId, actor.userId, input.requestId],
+      );
+      if (prior.rows[0]) return;
+      const updated = await client.query(
+        `UPDATE guto_v3.user_profile SET
+           city = COALESCE($1, city),
+           country = COALESCE($2, country),
+           version = version + 1
+         WHERE tenant_id=$3 AND user_id=$4
+         RETURNING version`,
+        [input.city?.trim() || null, input.country?.trim() || null, actor.tenantId, actor.userId],
+      );
+      if (!updated.rows[0]) return; // sem perfil ainda (pré-calibragem) — nada a persistir
+      await this.appendMutationEvent(client, actor, input.requestId, "profile.location_updated", {
+        country: input.country?.trim() || null,
+        city: input.city?.trim() || null,
+      });
+    });
+  }
+
+  async startFirstContact(input: { actor: ActorContext; requestId: string }): Promise<void> {
+    await this.withActorTransaction(input.actor, async (client) => {
+      const prior = await client.query(`SELECT 1 FROM guto_v3.guto_events WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND event_type='first_contact.started'`, [input.actor.tenantId, input.actor.userId, input.requestId]);
+      if (prior.rows[0]) return;
+      const source = await client.query<{ weekly_frequency: string | null }>(
+        `SELECT p.weekly_frequency FROM guto_v3.user_profile p
+          JOIN guto_v3.user_goals g ON g.tenant_id=p.tenant_id AND g.user_id=p.user_id
+         WHERE p.tenant_id=$1 AND p.user_id=$2 FOR UPDATE OF p,g`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      if (!source.rows[0] || source.rows[0].weekly_frequency == null) {
+        throw new V3Error("V3_CALIBRATION_REQUIRED", "Calibragem objetiva completa necessária antes do First Contact.", 409);
+      }
+      const current = await client.query<{ status: string }>(
+        `SELECT status FROM guto_v3.first_contact_state WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      if (current.rows[0]?.status === "COMPLETED" || current.rows[0]?.status === "IN_PROGRESS") return;
+      await client.query(
+        `INSERT INTO guto_v3.first_contact_state (tenant_id,user_id,status,step,started_at)
+         VALUES ($1,$2,'IN_PROGRESS','food_restrictions',now())
+         ON CONFLICT (user_id) DO UPDATE SET status='IN_PROGRESS',step='food_restrictions',started_at=COALESCE(guto_v3.first_contact_state.started_at,now()),version=guto_v3.first_contact_state.version+1
+         WHERE guto_v3.first_contact_state.status='NOT_STARTED'`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      await this.appendMutationEvent(client, input.actor, input.requestId, "first_contact.started", { step: "food_restrictions" });
+    });
+  }
+
+  async respondFirstContact(input: { actor: ActorContext; requestId: string; expectedStep: "food_restrictions" | "training_limitations"; answer: string }): Promise<void> {
+    await this.withActorTransaction(input.actor, async (client) => {
+      const prior = await client.query(`SELECT 1 FROM guto_v3.guto_events WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND event_type='first_contact.responded'`, [input.actor.tenantId, input.actor.userId, input.requestId]);
+      if (prior.rows[0]) return;
+      const current = await client.query<{ status: string; step: string }>(
+        `SELECT status,step FROM guto_v3.first_contact_state WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      if (!current.rows[0] || current.rows[0].status !== "IN_PROGRESS") {
+        throw new V3Error("V3_FIRST_CONTACT_NOT_STARTED", "First Contact ainda não iniciado.", 409);
+      }
+      if (current.rows[0].step !== input.expectedStep) {
+        throw new V3Error("V3_FIRST_CONTACT_STEP_CONFLICT", "A etapa do First Contact mudou. Recarregue o estado oficial.", 409);
+      }
+      const nextStep = input.expectedStep === "food_restrictions" ? "training_limitations" : "confirmation";
+      await client.query(
+        input.expectedStep === "food_restrictions"
+          ? `UPDATE guto_v3.first_contact_state SET food_declaration=$1,step=$2,version=version+1 WHERE tenant_id=$3 AND user_id=$4`
+          : `UPDATE guto_v3.first_contact_state SET limitation_declaration=$1,step=$2,version=version+1 WHERE tenant_id=$3 AND user_id=$4`,
+        [input.answer.trim(), nextStep, input.actor.tenantId, input.actor.userId],
+      );
+      await this.appendMutationEvent(client, input.actor, input.requestId, "first_contact.responded", { expectedStep: input.expectedStep, nextStep });
+    });
+  }
+
+  async confirmFirstContact(input: {
+    actor: ActorContext;
+    requestId: string;
+    contextId: string;
+    contextVersion: number;
+    expectedProfileVersion: number;
+    expectedGoalVersion: number;
+    confirmedSnapshot: Record<string, unknown>;
+    workoutDraft: WorkoutPlanDraft;
+    dietDraft: DietPlanDraft;
+  }): Promise<ConfirmedUserContext> {
+    return this.withActorTransaction(input.actor, async (client) => {
+      const prior = await client.query(`SELECT c.* FROM guto_v3.guto_events e JOIN guto_v3.confirmed_user_contexts c ON c.tenant_id=e.tenant_id AND c.user_id=e.user_id AND c.id=(e.payload->>'contextId')::uuid WHERE e.tenant_id=$1 AND e.user_id=$2 AND e.request_id=$3 AND e.event_type='first_contact.completed'`, [input.actor.tenantId, input.actor.userId, input.requestId]);
+      if (prior.rows[0]) return this.mapConfirmedContext(prior.rows[0]);
+
+      const contact = await client.query<{ status: string; step: string; food_declaration: string | null; limitation_declaration: string | null; started_at: Date | null; confirmed_context_id: string | null }>(
+        `SELECT status,step,food_declaration,limitation_declaration,started_at,confirmed_context_id FROM guto_v3.first_contact_state WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      if (contact.rows[0]?.status === "COMPLETED" && contact.rows[0].confirmed_context_id) {
+        const existing = await client.query(`SELECT * FROM guto_v3.confirmed_user_contexts WHERE tenant_id=$1 AND user_id=$2 AND id=$3`, [input.actor.tenantId, input.actor.userId, contact.rows[0].confirmed_context_id]);
+        if (existing.rows[0]) return this.mapConfirmedContext(existing.rows[0]);
+      }
+      if (contact.rows[0]?.status !== "IN_PROGRESS" || contact.rows[0].step !== "confirmation" || !contact.rows[0].food_declaration || !contact.rows[0].limitation_declaration) {
+        throw new V3Error("V3_FIRST_CONTACT_INCOMPLETE", "Responda às duas perguntas antes de confirmar.", 409);
+      }
+      const sources = await client.query<{ profile_version: string; goal_version: string; weekly_frequency: string | null }>(
+        `SELECT p.version AS profile_version,g.version AS goal_version,p.weekly_frequency
+           FROM guto_v3.user_profile p JOIN guto_v3.user_goals g ON g.tenant_id=p.tenant_id AND g.user_id=p.user_id
+          WHERE p.tenant_id=$1 AND p.user_id=$2 FOR UPDATE OF p,g`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      const source = sources.rows[0];
+      if (!source || source.weekly_frequency == null) throw new V3Error("V3_CALIBRATION_REQUIRED", "Calibragem objetiva completa necessária.", 409);
+      if (asNumber(source.profile_version) !== input.expectedProfileVersion || asNumber(source.goal_version) !== input.expectedGoalVersion) {
+        throw new V3Error("V3_CONTEXT_SOURCE_CHANGED", "O perfil mudou antes da confirmação. Revise o resumo novamente.", 409);
+      }
+      const versionResult = await client.query<{ next_version: string }>(`SELECT COALESCE(max(version),0)+1 AS next_version FROM guto_v3.confirmed_user_contexts WHERE tenant_id=$1 AND user_id=$2`, [input.actor.tenantId, input.actor.userId]);
+      const nextVersion = asNumber(versionResult.rows[0]?.next_version);
+      if (nextVersion !== input.contextVersion) throw new V3Error("V3_CONTEXT_VERSION_CONFLICT", "A versão do contexto mudou.", 409);
+      const contextResult = await client.query(
+        `INSERT INTO guto_v3.confirmed_user_contexts
+          (id,tenant_id,user_id,version,profile_version,goal_version,food_declaration,limitation_declaration,training_location,weekly_frequency,context_snapshot)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'gym',$9,$10::jsonb) RETURNING *`,
+        [input.contextId, input.actor.tenantId, input.actor.userId, nextVersion, input.expectedProfileVersion, input.expectedGoalVersion, contact.rows[0].food_declaration, contact.rows[0].limitation_declaration, source.weekly_frequency, JSON.stringify(input.confirmedSnapshot)],
+      );
+      const context = this.mapConfirmedContext(contextResult.rows[0]!);
+      await this.persistFact(client, input.actor, { factType: "food_restriction", value: { declaration: context.foodDeclaration }, source: "user_declared", confirmationStatus: "FACT_CONFIRMED", supersedeCurrent: true });
+      await this.persistFact(client, input.actor, { factType: "physical_constraint", value: { declaration: context.limitationDeclaration }, source: "user_declared", confirmationStatus: "FACT_CONFIRMED", supersedeCurrent: true });
+
+      await client.query(`UPDATE guto_v3.workout_plans SET status='superseded' WHERE tenant_id=$1 AND user_id=$2 AND status='active'`, [input.actor.tenantId, input.actor.userId]);
+      await client.query(`UPDATE guto_v3.diet_plans SET status='superseded' WHERE tenant_id=$1 AND user_id=$2 AND status='active'`, [input.actor.tenantId, input.actor.userId]);
+
+      const workout = await client.query<{ id: string; version: string }>(
+        `INSERT INTO guto_v3.workout_plans (tenant_id,user_id,title,status,generated_from,confirmed_context_id,confirmed_context_version)
+         VALUES ($1,$2,$3,'active',$4::jsonb,$5,$6) RETURNING id,version`,
+        [input.actor.tenantId, input.actor.userId, input.workoutDraft.title, JSON.stringify(input.workoutDraft.generatedFrom), context.id, context.version],
+      );
+      for (const item of input.workoutDraft.items) {
+        await client.query(`INSERT INTO guto_v3.workout_plan_items (tenant_id,plan_id,exercise_id,name,purpose,muscle_group,position,sets,reps,canonical_name_pt,rest_text,cue,note,video_url,source_file_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, [input.actor.tenantId, workout.rows[0]!.id, item.exerciseId, item.name, item.purpose, item.muscleGroup, item.position, item.sets || null, item.reps || null, item.canonicalNamePt || null, item.rest || null, item.cue || null, item.note || null, item.videoUrl || null, item.sourceFileName || null]);
+      }
+      const diet = await client.query<{ id: string; version: string }>(
+        `INSERT INTO guto_v3.diet_plans (tenant_id,user_id,status,total_calories,protein_grams,carbs_grams,fat_grams,calculation_method,generated_from,confirmed_context_id,confirmed_context_version)
+         VALUES ($1,$2,'active',$3,$4,$5,$6,$7,$8::jsonb,$9,$10) RETURNING id,version`,
+        [input.actor.tenantId, input.actor.userId, input.dietDraft.totalCalories, input.dietDraft.proteinGrams, input.dietDraft.carbsGrams, input.dietDraft.fatGrams, input.dietDraft.calculationMethod, JSON.stringify(input.dietDraft.generatedFrom), context.id, context.version],
+      );
+      for (const meal of input.dietDraft.meals) {
+        const insertedMeal = await client.query<{ id: string }>(`INSERT INTO guto_v3.diet_meals (tenant_id,plan_id,name,position,calories) VALUES ($1,$2,$3,$4,$5) RETURNING id`, [input.actor.tenantId, diet.rows[0]!.id, meal.name, meal.position, meal.calories]);
+        for (const item of meal.items) {
+          await client.query(`INSERT INTO guto_v3.diet_items (tenant_id,meal_id,food_id,name,quantity_grams,calories,protein_grams,carbs_grams,fat_grams,position) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [input.actor.tenantId, insertedMeal.rows[0]!.id, item.foodId, item.name, item.quantityGrams, item.calories, item.proteinGrams, item.carbsGrams, item.fatGrams, item.position]);
+        }
+      }
+      await client.query(
+        `INSERT INTO guto_v3.active_plan_versions (tenant_id,user_id,workout_plan_id,workout_plan_version,diet_plan_id,diet_plan_version,confirmed_context_id,confirmed_context_version)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (user_id) DO UPDATE SET workout_plan_id=EXCLUDED.workout_plan_id,workout_plan_version=EXCLUDED.workout_plan_version,diet_plan_id=EXCLUDED.diet_plan_id,diet_plan_version=EXCLUDED.diet_plan_version,confirmed_context_id=EXCLUDED.confirmed_context_id,confirmed_context_version=EXCLUDED.confirmed_context_version,version=guto_v3.active_plan_versions.version+1`,
+        [input.actor.tenantId, input.actor.userId, workout.rows[0]!.id, workout.rows[0]!.version, diet.rows[0]!.id, diet.rows[0]!.version, context.id, context.version],
+      );
+      await client.query(`UPDATE guto_v3.first_contact_state SET status='COMPLETED',step='completed',completed_at=now(),confirmed_context_id=$1,confirmed_context_version=$2,version=version+1 WHERE tenant_id=$3 AND user_id=$4`, [context.id, context.version, input.actor.tenantId, input.actor.userId]);
+      await this.appendMutationEvent(client, input.actor, input.requestId, "first_contact.completed", { contextId: context.id, contextVersion: context.version, workoutPlanId: workout.rows[0]!.id, dietPlanId: diet.rows[0]!.id });
+      return context;
+    });
+  }
+
   async completePact(input: {
     actor: ActorContext;
     requestId: string;
     displayName: string;
-    workoutDraft: WorkoutPlanDraft;
-    dietDraft: DietPlanDraft;
   }): Promise<void> {
     await this.withActorTransaction(input.actor, async (client) => {
       await client.query(
@@ -530,65 +830,6 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       const profile = await client.query(`SELECT 1 FROM guto_v3.user_profile WHERE tenant_id=$1 AND user_id=$2`, [input.actor.tenantId, input.actor.userId]);
       if (!profile.rows[0]) throw new V3Error("V3_CALIBRATION_REQUIRED", "Calibragem oficial necessária antes do pacto.", 409);
 
-      const activeWorkout = await client.query<{ id: string }>(
-        `SELECT id FROM guto_v3.workout_plans WHERE tenant_id=$1 AND user_id=$2 AND status='active' FOR UPDATE`,
-        [input.actor.tenantId, input.actor.userId],
-      );
-      if (!activeWorkout.rows[0]) {
-        const plan = await client.query<{ id: string; version: string }>(
-          `INSERT INTO guto_v3.workout_plans (tenant_id,user_id,title,status,generated_from)
-           VALUES ($1,$2,$3,'active',$4::jsonb) RETURNING id,version`,
-          [input.actor.tenantId, input.actor.userId, input.workoutDraft.title, JSON.stringify(input.workoutDraft.generatedFrom)],
-        );
-        for (const item of input.workoutDraft.items) {
-          await client.query(
-            `INSERT INTO guto_v3.workout_plan_items
-               (tenant_id,plan_id,exercise_id,name,purpose,muscle_group,position,sets,reps,canonical_name_pt,rest_text,cue,note,video_url,source_file_name)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-            [input.actor.tenantId, plan.rows[0]!.id, item.exerciseId, item.name, item.purpose, item.muscleGroup, item.position, item.sets || null, item.reps || null, item.canonicalNamePt || null, item.rest || null, item.cue || null, item.note || null, item.videoUrl || null, item.sourceFileName || null],
-          );
-        }
-        await client.query(
-          `INSERT INTO guto_v3.active_plan_versions (tenant_id,user_id,workout_plan_id,workout_plan_version)
-           VALUES ($1,$2,$3,$4)
-           ON CONFLICT (user_id) DO UPDATE SET workout_plan_id=EXCLUDED.workout_plan_id,workout_plan_version=EXCLUDED.workout_plan_version,version=guto_v3.active_plan_versions.version+1`,
-          [input.actor.tenantId, input.actor.userId, plan.rows[0]!.id, plan.rows[0]!.version],
-        );
-      }
-
-      const activeDiet = await client.query<{ id: string }>(
-        `SELECT id FROM guto_v3.diet_plans WHERE tenant_id=$1 AND user_id=$2 AND status='active' FOR UPDATE`,
-        [input.actor.tenantId, input.actor.userId],
-      );
-      if (!activeDiet.rows[0]) {
-        const plan = await client.query<{ id: string; version: string }>(
-          `INSERT INTO guto_v3.diet_plans
-             (tenant_id,user_id,status,total_calories,protein_grams,carbs_grams,fat_grams,calculation_method,generated_from)
-           VALUES ($1,$2,'active',$3,$4,$5,$6,$7,$8::jsonb) RETURNING id,version`,
-          [input.actor.tenantId, input.actor.userId, input.dietDraft.totalCalories, input.dietDraft.proteinGrams, input.dietDraft.carbsGrams, input.dietDraft.fatGrams, input.dietDraft.calculationMethod, JSON.stringify(input.dietDraft.generatedFrom)],
-        );
-        for (const meal of input.dietDraft.meals) {
-          const insertedMeal = await client.query<{ id: string }>(
-            `INSERT INTO guto_v3.diet_meals (tenant_id,plan_id,name,position,calories) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-            [input.actor.tenantId, plan.rows[0]!.id, meal.name, meal.position, meal.calories],
-          );
-          for (const item of meal.items) {
-            await client.query(
-              `INSERT INTO guto_v3.diet_items
-                 (tenant_id,meal_id,food_id,name,quantity_grams,calories,protein_grams,carbs_grams,fat_grams,position)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-              [input.actor.tenantId, insertedMeal.rows[0]!.id, item.foodId, item.name, item.quantityGrams, item.calories, item.proteinGrams, item.carbsGrams, item.fatGrams, item.position],
-            );
-          }
-        }
-        await client.query(
-          `INSERT INTO guto_v3.active_plan_versions (tenant_id,user_id,diet_plan_id,diet_plan_version)
-           VALUES ($1,$2,$3,$4)
-           ON CONFLICT (user_id) DO UPDATE SET diet_plan_id=EXCLUDED.diet_plan_id,diet_plan_version=EXCLUDED.diet_plan_version,version=guto_v3.active_plan_versions.version+1`,
-          [input.actor.tenantId, input.actor.userId, plan.rows[0]!.id, plan.rows[0]!.version],
-        );
-      }
-
       await client.query(
         `INSERT INTO guto_v3.xp_ledger (tenant_id,user_id,request_id,amount,reason_code,source_key)
          VALUES ($1,$2,$3,100,'grant_initial_xp','lifetime')
@@ -607,8 +848,9 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         [input.displayName.trim(), input.actor.tenantId, input.actor.userId],
       );
       await this.appendMutationEvent(client, input.actor, input.requestId, "pact.completed", {
-        workoutReady: true,
-        dietReady: true,
+        workoutReady: false,
+        dietReady: false,
+        firstContactRequired: true,
         initialXp: 100,
       });
     });
@@ -662,8 +904,9 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     });
   }
 
-  async replaceWorkoutPlan(input: { actor: ActorContext; requestId: string; draft: WorkoutPlanDraft }): Promise<WorkoutPlan> {
+  async replaceWorkoutPlan(input: { actor: ActorContext; requestId: string; context: ConfirmedUserContext; draft: WorkoutPlanDraft }): Promise<WorkoutPlan> {
     return this.withActorTransaction(input.actor, async (client) => {
+      await this.assertContextCurrent(client, input.actor, input.context);
       const existing = await client.query<{ payload: Record<string, unknown> }>(
         `SELECT payload FROM guto_v3.guto_events WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND event_type='workout.generated'`,
         [input.actor.tenantId, input.actor.userId, input.requestId],
@@ -675,9 +918,9 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       }
       await client.query(`UPDATE guto_v3.workout_plans SET status='superseded' WHERE tenant_id=$1 AND user_id=$2 AND status='active'`, [input.actor.tenantId, input.actor.userId]);
       const planResult = await client.query<QueryResultRow>(
-        `INSERT INTO guto_v3.workout_plans (tenant_id,user_id,title,status,generated_from)
-         VALUES ($1,$2,$3,'active',$4::jsonb) RETURNING *`,
-        [input.actor.tenantId, input.actor.userId, input.draft.title, JSON.stringify(input.draft.generatedFrom)],
+        `INSERT INTO guto_v3.workout_plans (tenant_id,user_id,title,status,generated_from,confirmed_context_id,confirmed_context_version)
+         VALUES ($1,$2,$3,'active',$4::jsonb,$5,$6) RETURNING *`,
+        [input.actor.tenantId, input.actor.userId, input.draft.title, JSON.stringify(input.draft.generatedFrom), input.context.id, input.context.version],
       );
       const planRow = planResult.rows[0]!;
       for (const item of input.draft.items) {
@@ -689,18 +932,19 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         );
       }
       await client.query(
-        `INSERT INTO guto_v3.active_plan_versions (tenant_id,user_id,workout_plan_id,workout_plan_version)
-         VALUES ($1,$2,$3,$4) ON CONFLICT (user_id) DO UPDATE SET workout_plan_id=EXCLUDED.workout_plan_id,
-           workout_plan_version=EXCLUDED.workout_plan_version, version=guto_v3.active_plan_versions.version+1`,
-        [input.actor.tenantId, input.actor.userId, planRow.id, planRow.version],
+        `INSERT INTO guto_v3.active_plan_versions (tenant_id,user_id,workout_plan_id,workout_plan_version,confirmed_context_id,confirmed_context_version)
+         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (user_id) DO UPDATE SET workout_plan_id=EXCLUDED.workout_plan_id,
+           workout_plan_version=EXCLUDED.workout_plan_version,confirmed_context_id=EXCLUDED.confirmed_context_id,confirmed_context_version=EXCLUDED.confirmed_context_version,version=guto_v3.active_plan_versions.version+1`,
+        [input.actor.tenantId, input.actor.userId, planRow.id, planRow.version, input.context.id, input.context.version],
       );
       await this.appendMutationEvent(client, input.actor, input.requestId, "workout.generated", { planId: planRow.id, planVersion: asNumber(planRow.version) });
       return this.loadWorkout(client, planRow);
     });
   }
 
-  async replaceDietPlan(input: { actor: ActorContext; requestId: string; draft: DietPlanDraft }): Promise<DietPlan> {
+  async replaceDietPlan(input: { actor: ActorContext; requestId: string; context: ConfirmedUserContext; draft: DietPlanDraft }): Promise<DietPlan> {
     return this.withActorTransaction(input.actor, async (client) => {
+      await this.assertContextCurrent(client, input.actor, input.context);
       const existing = await client.query<{ payload: Record<string, unknown> }>(
         `SELECT payload FROM guto_v3.guto_events WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND event_type='diet.generated'`,
         [input.actor.tenantId, input.actor.userId, input.requestId],
@@ -713,9 +957,9 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       await client.query(`UPDATE guto_v3.diet_plans SET status='superseded' WHERE tenant_id=$1 AND user_id=$2 AND status='active'`, [input.actor.tenantId, input.actor.userId]);
       const planResult = await client.query<QueryResultRow>(
         `INSERT INTO guto_v3.diet_plans
-           (tenant_id,user_id,status,total_calories,protein_grams,carbs_grams,fat_grams,calculation_method,generated_from)
-         VALUES ($1,$2,'active',$3,$4,$5,$6,$7,$8::jsonb) RETURNING *`,
-        [input.actor.tenantId, input.actor.userId, input.draft.totalCalories, input.draft.proteinGrams, input.draft.carbsGrams, input.draft.fatGrams, input.draft.calculationMethod, JSON.stringify(input.draft.generatedFrom)],
+           (tenant_id,user_id,status,total_calories,protein_grams,carbs_grams,fat_grams,calculation_method,generated_from,confirmed_context_id,confirmed_context_version)
+         VALUES ($1,$2,'active',$3,$4,$5,$6,$7,$8::jsonb,$9,$10) RETURNING *`,
+        [input.actor.tenantId, input.actor.userId, input.draft.totalCalories, input.draft.proteinGrams, input.draft.carbsGrams, input.draft.fatGrams, input.draft.calculationMethod, JSON.stringify(input.draft.generatedFrom), input.context.id, input.context.version],
       );
       const planRow = planResult.rows[0]!;
       for (const meal of input.draft.meals) {
@@ -733,10 +977,10 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         }
       }
       await client.query(
-        `INSERT INTO guto_v3.active_plan_versions (tenant_id,user_id,diet_plan_id,diet_plan_version)
-         VALUES ($1,$2,$3,$4) ON CONFLICT (user_id) DO UPDATE SET diet_plan_id=EXCLUDED.diet_plan_id,
-           diet_plan_version=EXCLUDED.diet_plan_version, version=guto_v3.active_plan_versions.version+1`,
-        [input.actor.tenantId, input.actor.userId, planRow.id, planRow.version],
+        `INSERT INTO guto_v3.active_plan_versions (tenant_id,user_id,diet_plan_id,diet_plan_version,confirmed_context_id,confirmed_context_version)
+         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (user_id) DO UPDATE SET diet_plan_id=EXCLUDED.diet_plan_id,
+           diet_plan_version=EXCLUDED.diet_plan_version,confirmed_context_id=EXCLUDED.confirmed_context_id,confirmed_context_version=EXCLUDED.confirmed_context_version,version=guto_v3.active_plan_versions.version+1`,
+        [input.actor.tenantId, input.actor.userId, planRow.id, planRow.version, input.context.id, input.context.version],
       );
       await this.appendMutationEvent(client, input.actor, input.requestId, "diet.generated", { planId: planRow.id, planVersion: asNumber(planRow.version) });
       return this.loadDiet(client, planRow);
@@ -881,6 +1125,44 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     });
   }
 
+  async recordWorkoutExerciseEvent(input: { actor: ActorContext; requestId: string; event: import("./types.js").WorkoutExerciseSessionEvent }): Promise<import("./types.js").WorkoutEvolutionDecision> {
+    return this.withActorTransaction(input.actor, async (client) => {
+      const plan = await client.query<{ id: string }>(
+        `SELECT id FROM guto_v3.workout_plans WHERE tenant_id=$1 AND user_id=$2 AND status='active' FOR UPDATE`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      if (!plan.rows[0]) throw new V3Error("V3_WORKOUT_NOT_FOUND", "Treino oficial ativo não encontrado.", 409);
+      const exercise = await client.query(
+        `SELECT 1 FROM guto_v3.workout_plan_items WHERE tenant_id=$1 AND plan_id=$2 AND exercise_id=$3`,
+        [input.actor.tenantId, plan.rows[0].id, input.event.exerciseId],
+      );
+      if (!exercise.rows[0]) throw new V3Error("V3_WORKOUT_EXERCISE_NOT_ACTIVE", "Exercício não pertence ao treino oficial ativo.", 409);
+      const session = await client.query<{ id: string }>(
+        `INSERT INTO guto_v3.workout_sessions (tenant_id,user_id,plan_id,status,started_at,completed_at)
+         VALUES ($1,$2,$3,'completed',now(),now()) RETURNING id`,
+        [input.actor.tenantId, input.actor.userId, plan.rows[0].id],
+      );
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO guto_v3.workout_session_exercises
+          (tenant_id,user_id,session_id,exercise_id,load_value,repetitions,sets_completed,completed,perceived_difficulty,substituted_from_exercise_id,substitution_reason,context_snapshot)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb) RETURNING id`,
+        [input.actor.tenantId, input.actor.userId, session.rows[0]!.id, input.event.exerciseId,
+          input.event.loadValue ?? null, input.event.repetitions ?? null, input.event.setsCompleted ?? null, input.event.completed,
+          input.event.perceivedDifficulty ?? null, input.event.substitutedFromExerciseId ?? null, input.event.substitutionReason ?? null,
+          JSON.stringify(input.event.context || {})],
+      );
+      const decision = decideWorkoutEvolution(input.event);
+      await client.query(
+        `INSERT INTO guto_v3.workout_evolution_decisions
+          (tenant_id,user_id,exercise_id,decision,reason_code,source_session_exercise_id,context_snapshot)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`,
+        [input.actor.tenantId, input.actor.userId, decision.exerciseId, decision.decision, decision.reasonCode, inserted.rows[0]!.id, JSON.stringify(input.event.context || {})],
+      );
+      await this.appendMutationEvent(client, input.actor, input.requestId, "workout.evolution_decided", { ...decision });
+      return decision;
+    });
+  }
+
   async recordTurn(input: { actor: ActorContext; requestId: string; action: string; resultCode: string }): Promise<void> {
     await this.withActorTransaction(input.actor, async (client) => {
       await client.query(
@@ -889,6 +1171,135 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
          ON CONFLICT (tenant_id,user_id,request_id,event_type) DO NOTHING`,
         [input.actor.tenantId, input.actor.userId, input.requestId, JSON.stringify({ action: input.action, resultCode: input.resultCode })],
       );
+    });
+  }
+
+  async listFactHistory(actor: ActorContext): Promise<RecordedFact[]> {
+    return this.withActorTransaction(actor, async (client) => {
+      const result = await client.query<QueryResultRow>(
+        `SELECT user_fact_id,fact_type,value_json,source,confirmation_status,valid_from,valid_to,recorded_at,superseded_at,superseded_by
+           FROM guto_v3.user_facts
+          WHERE tenant_id=$1 AND user_id=$2
+          ORDER BY recorded_at,user_fact_id`,
+        [actor.tenantId, actor.userId],
+      );
+      return result.rows.map((row): RecordedFact => {
+        const value = jsonObject(row.value_json);
+        return {
+          id: String(row.user_fact_id),
+          factType: String(row.fact_type).toUpperCase() as RecordedFact["factType"],
+          canonicalValue: typeof value.code === "string" ? value.code : typeof value.declaration === "string" ? value.declaration : JSON.stringify(value),
+          value,
+          source: row.source === "system" ? "system" : "user_declared",
+          confirmationStatus: row.confirmation_status,
+          validFrom: new Date(row.valid_from).toISOString(),
+          validTo: row.valid_to ? new Date(row.valid_to).toISOString() : null,
+          recordedAt: new Date(row.recorded_at).toISOString(),
+          supersededAt: row.superseded_at ? new Date(row.superseded_at).toISOString() : null,
+          supersededBy: row.superseded_by ? String(row.superseded_by) : null,
+        };
+      });
+    });
+  }
+
+  async applyFactChanges(input: {
+    actor: ActorContext;
+    requestId: string;
+    changes: FactChange[];
+    expectedContextVersion: number;
+  }): Promise<{ context: ConfirmedUserContext; facts: RecordedFact[]; affectedDomains: string[] }> {
+    return this.withActorTransaction(input.actor, async (client) => {
+      if (!input.changes.length) throw new V3Error("V3_FACT_CHANGE_REQUIRED", "Nenhum fato operacional foi informado.", 400);
+      for (const change of input.changes) assertFactChange(change);
+      await client.query("SET CONSTRAINTS ALL DEFERRED");
+      const currentResult = await client.query<QueryResultRow>(
+        `SELECT * FROM guto_v3.confirmed_user_contexts WHERE tenant_id=$1 AND user_id=$2 ORDER BY version DESC LIMIT 1 FOR UPDATE`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      const currentRow = currentResult.rows[0];
+      if (!currentRow || asNumber(currentRow.version) !== input.expectedContextVersion) {
+        throw new V3Error("V3_CONTEXT_VERSION_CONFLICT", "O contexto mudou; recarregue antes de registrar o fato.", 409);
+      }
+      const current = this.mapConfirmedContext(currentRow);
+      const recorded: RecordedFact[] = [];
+      let foodDeclaration = current.foodDeclaration;
+      let limitationDeclaration = current.limitationDeclaration;
+      for (const change of input.changes) {
+        const fact = await this.persistFact(client, input.actor, {
+          factType: change.factType,
+          value: { canonicalValue: change.canonicalValue, ...change.value, scope: change.scope || "profile" },
+          canonicalValue: change.canonicalValue,
+          scope: change.scope,
+          source: change.source,
+          confirmationStatus: change.confirmationStatus,
+          supersedeCurrent: true,
+        });
+        if (fact) recorded.push(fact);
+        if (change.factType === "GOAL") {
+          await client.query(`UPDATE guto_v3.user_goals SET goal_code=$1,version=version+1 WHERE tenant_id=$2 AND user_id=$3`, [change.canonicalValue, input.actor.tenantId, input.actor.userId]);
+        } else if (change.factType === "BODY_WEIGHT") {
+          await client.query(`UPDATE guto_v3.user_profile SET weight_kg=$1,version=version+1 WHERE tenant_id=$2 AND user_id=$3`, [Number(change.value.weightKg), input.actor.tenantId, input.actor.userId]);
+        } else if (change.factType === "TRAINING_FREQUENCY") {
+          await client.query(`UPDATE guto_v3.user_profile SET weekly_frequency=$1,version=version+1 WHERE tenant_id=$2 AND user_id=$3`, [Number(change.value.daysPerWeek), input.actor.tenantId, input.actor.userId]);
+        } else if (change.factType === "EXPERIENCE_LEVEL") {
+          await client.query(`UPDATE guto_v3.user_profile SET training_status=$1,version=version+1 WHERE tenant_id=$2 AND user_id=$3`, [change.canonicalValue, input.actor.tenantId, input.actor.userId]);
+        } else if (change.factType === "FOOD_CONSTRAINT" || change.factType === "FOOD_EXCLUSION") {
+          foodDeclaration = String(change.value.declaration || foodDeclaration);
+        } else if (change.factType === "PHYSICAL_CONSTRAINT") {
+          limitationDeclaration = String(change.value.declaration || limitationDeclaration);
+        }
+      }
+      const sources = await client.query<QueryResultRow>(
+        `SELECT p.version AS profile_version,p.weekly_frequency,g.version AS goal_version,
+                jsonb_build_object('version',p.version,'language',p.language,'biologicalSex',p.biological_sex,'age',p.age,'weightKg',p.weight_kg,'heightCm',p.height_cm,'trainingStatus',p.training_status,'weeklyFrequencyDaysPerWeek',p.weekly_frequency,'trainingLocation','gym') AS profile_snapshot,
+                jsonb_build_object('version',g.version,'code',g.goal_code) AS goal_snapshot
+           FROM guto_v3.user_profile p JOIN guto_v3.user_goals g ON g.tenant_id=p.tenant_id AND g.user_id=p.user_id
+          WHERE p.tenant_id=$1 AND p.user_id=$2 FOR UPDATE OF p,g`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      const source = sources.rows[0];
+      if (!source || source.weekly_frequency == null) throw new V3Error("V3_CALIBRATION_REQUIRED", "Calibragem objetiva completa necessária.", 409);
+      const nextVersion = asNumber(currentRow.version) + 1;
+      const contextId = randomUUID();
+      const currentFacts = await client.query<{ user_fact_id: string }>(
+        `SELECT user_fact_id FROM guto_v3.user_facts WHERE tenant_id=$1 AND user_id=$2 AND superseded_at IS NULL ORDER BY recorded_at,user_fact_id`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      const contextSnapshot = {
+        profile: source.profile_snapshot,
+        goal: source.goal_snapshot,
+        factIds: currentFacts.rows.map((row) => row.user_fact_id),
+        factChangeRequestId: input.requestId,
+      };
+      const contextResult = await client.query<QueryResultRow>(
+        `INSERT INTO guto_v3.confirmed_user_contexts
+          (id,tenant_id,user_id,version,profile_version,goal_version,food_declaration,limitation_declaration,training_location,weekly_frequency,context_snapshot)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'gym',$9,$10::jsonb) RETURNING *`,
+        [contextId, input.actor.tenantId, input.actor.userId, nextVersion, source.profile_version, source.goal_version, foodDeclaration, limitationDeclaration, source.weekly_frequency, JSON.stringify(contextSnapshot)],
+      );
+      const context = this.mapConfirmedContext(contextResult.rows[0]!);
+      await client.query(
+        `UPDATE guto_v3.first_contact_state SET confirmed_context_id=$1,confirmed_context_version=$2,version=version+1
+          WHERE tenant_id=$3 AND user_id=$4 AND status='COMPLETED'`,
+        [context.id, context.version, input.actor.tenantId, input.actor.userId],
+      );
+      // Rebinds preserve one common context version. The executor decides
+      // which engine is actually regenerated from the deterministic map.
+      for (const table of ["workout_plans", "diet_plans"]) {
+        await client.query(`UPDATE guto_v3.${table} SET confirmed_context_id=$1,confirmed_context_version=$2 WHERE tenant_id=$3 AND user_id=$4 AND status='active'`, [context.id, context.version, input.actor.tenantId, input.actor.userId]);
+      }
+      await client.query(
+        `UPDATE guto_v3.active_plan_versions SET confirmed_context_id=$1,confirmed_context_version=$2,version=version+1 WHERE tenant_id=$3 AND user_id=$4`,
+        [context.id, context.version, input.actor.tenantId, input.actor.userId],
+      );
+      const impacted = [...impactsFor(input.changes)];
+      await this.appendMutationEvent(client, input.actor, input.requestId, "facts.confirmed", {
+        contextId: context.id,
+        contextVersion: context.version,
+        factIds: recorded.map((fact) => fact.id),
+        affectedDomains: impacted,
+      });
+      return { context, facts: recorded, affectedDomains: impacted };
     });
   }
 
@@ -1016,11 +1427,13 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     input: {
       factType: string;
       value: unknown;
+      canonicalValue?: string;
+      scope?: "profile" | "session";
       source: "user_declared" | "derived" | "system";
       confirmationStatus: "FACT_CONFIRMED" | "FACT_UNKNOWN";
       supersedeCurrent: boolean;
     },
-  ): Promise<void> {
+  ): Promise<RecordedFact | null> {
     const valueJson = JSON.stringify(input.value);
     const existing = await client.query<{ user_fact_id: string; value_json: unknown }>(
       `SELECT user_fact_id,value_json FROM guto_v3.user_facts
@@ -1028,12 +1441,30 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         ORDER BY recorded_at DESC FOR UPDATE`,
       [actor.tenantId, actor.userId, input.factType],
     );
-    if (existing.rows.some((row) => JSON.stringify(row.value_json) === valueJson)) return;
-    const inserted = await client.query<{ user_fact_id: string }>(
+    const duplicate = existing.rows.find((row) => JSON.stringify(row.value_json) === valueJson);
+    if (duplicate) {
+      const existingRow = await client.query<QueryResultRow>(
+        `SELECT user_fact_id,fact_type,value_json,source,confirmation_status,valid_from,valid_to,recorded_at,superseded_at,superseded_by FROM guto_v3.user_facts WHERE user_fact_id=$1`,
+        [duplicate.user_fact_id],
+      );
+      const row = existingRow.rows[0];
+      if (!row) return null;
+      const value = jsonObject(row.value_json);
+      return {
+        id: String(row.user_fact_id), factType: String(row.fact_type).toUpperCase() as RecordedFact["factType"],
+        canonicalValue: typeof value.canonicalValue === "string" ? value.canonicalValue : JSON.stringify(value), value,
+        source: row.source === "system" ? "system" : "user_declared", confirmationStatus: row.confirmation_status,
+        validFrom: new Date(row.valid_from).toISOString(), validTo: row.valid_to ? new Date(row.valid_to).toISOString() : null,
+        recordedAt: new Date(row.recorded_at).toISOString(), supersededAt: row.superseded_at ? new Date(row.superseded_at).toISOString() : null,
+        supersededBy: row.superseded_by ? String(row.superseded_by) : null,
+      };
+    }
+    const inserted = await client.query<QueryResultRow>(
       `INSERT INTO guto_v3.user_facts
-        (tenant_id,user_id,fact_type,value_json,source,confirmation_status,created_by)
-       VALUES ($1,$2,$3,$4::jsonb,$5,$6,'guto-v3.1') RETURNING user_fact_id`,
-      [actor.tenantId, actor.userId, input.factType, valueJson, input.source, input.confirmationStatus],
+        (tenant_id,user_id,fact_type,canonical_value,fact_scope,value_json,source,confirmation_status,created_by)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,'guto-v3.3')
+       RETURNING user_fact_id,fact_type,value_json,source,confirmation_status,valid_from,valid_to,recorded_at,superseded_at,superseded_by`,
+      [actor.tenantId, actor.userId, input.factType, input.canonicalValue || JSON.stringify(input.value), input.scope || "profile", valueJson, input.source, input.confirmationStatus],
     );
     if (input.supersedeCurrent && existing.rows.length) {
       await client.query(
@@ -1042,6 +1473,15 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         [inserted.rows[0]!.user_fact_id, actor.tenantId, actor.userId, input.factType],
       );
     }
+    const row = inserted.rows[0]!;
+    const value = jsonObject(row.value_json);
+    return {
+      id: String(row.user_fact_id), factType: String(row.fact_type).toUpperCase() as RecordedFact["factType"],
+      canonicalValue: typeof value.canonicalValue === "string" ? value.canonicalValue : JSON.stringify(value), value,
+      source: row.source === "system" ? "system" : "user_declared", confirmationStatus: row.confirmation_status,
+      validFrom: new Date(row.valid_from).toISOString(), validTo: null,
+      recordedAt: new Date(row.recorded_at).toISOString(), supersededAt: null, supersededBy: null,
+    };
   }
 
   private async appendMutationEvent(

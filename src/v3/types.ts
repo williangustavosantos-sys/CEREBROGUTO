@@ -1,5 +1,6 @@
 import type { DecisionEnvelope } from "./contracts.js";
 import type { ConversationDecisionState } from "./conversation-state.js";
+import type { FactImpactDomain, RecordedFact } from "./facts.js";
 
 export type ActorRole = "student" | "coach" | "admin" | "super_admin";
 
@@ -14,14 +15,44 @@ export interface OfficialProfile {
   version: number;
   displayName?: string;
   language: "pt-BR" | "en-US" | "it-IT";
-  city: string;
-  country: string;
+  city?: string;
+  country?: string;
   biologicalSex: string;
   age: number;
   weightKg: number;
   heightCm: number;
   trainingStatus: string;
   trainingLocation: string;
+  weeklyFrequencyDaysPerWeek: number | null;
+}
+
+export type FirstContactStatus = "NOT_STARTED" | "IN_PROGRESS" | "COMPLETED";
+export type FirstContactStep = "food_restrictions" | "training_limitations" | "confirmation" | "completed";
+
+export interface FirstContactState {
+  status: FirstContactStatus;
+  step: FirstContactStep;
+  foodDeclaration: string | null;
+  limitationDeclaration: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  currentPrompt: string | null;
+  summary: string | null;
+  confirmedContextVersion: number | null;
+}
+
+export interface ConfirmedUserContext {
+  id: string;
+  version: number;
+  confirmedAt: string;
+  foodDeclaration: string;
+  limitationDeclaration: string;
+  profileVersion: number;
+  goalVersion: number;
+  weeklyFrequencyDaysPerWeek: number;
+  trainingLocation: "gym";
+  /** Immutable operational facts included when this context was confirmed. */
+  factIds?: string[];
 }
 
 export interface OfficialGoal {
@@ -65,6 +96,7 @@ export interface WorkoutPlan {
   version: number;
   title: string;
   status: "draft" | "active" | "completed" | "superseded";
+  confirmedContextVersion?: number | null;
   items: WorkoutItem[];
 }
 
@@ -92,6 +124,7 @@ export interface DietPlan {
   id: string;
   version: number;
   status: "draft" | "active" | "completed" | "superseded";
+  confirmedContextVersion?: number | null;
   totalCalories: number;
   proteinGrams: number;
   carbsGrams: number;
@@ -118,6 +151,10 @@ export interface OfficialSnapshot {
   goal: OfficialGoal;
   preferences: OfficialPreferences;
   healthConstraints: HealthConstraint[];
+  /** Current official operational facts. Relationship memory is not included. */
+  currentFacts?: RecordedFact[];
+  firstContact: FirstContactState;
+  confirmedContext: ConfirmedUserContext | null;
   workout: WorkoutPlan | null;
   diet: DietPlan | null;
 }
@@ -153,6 +190,25 @@ export interface ProgressionState {
   xpEvents: XpLedgerEntry[];
 }
 
+export interface WorkoutExerciseSessionEvent {
+  exerciseId: string;
+  loadValue?: number;
+  repetitions?: number;
+  setsCompleted?: number;
+  completed: boolean;
+  perceivedDifficulty?: number;
+  substitutedFromExerciseId?: string;
+  substitutionReason?: string;
+  context?: Record<string, unknown>;
+}
+
+export type WorkoutEvolutionDecisionCode = "MAINTAIN" | "PROGRESS" | "REGRESS" | "SUBSTITUTE" | "REVIEW";
+export interface WorkoutEvolutionDecision {
+  exerciseId: string;
+  decision: WorkoutEvolutionDecisionCode;
+  reasonCode: string;
+}
+
 export interface V3AppState {
   actor: ActorContext;
   memoryVersion: number;
@@ -162,6 +218,9 @@ export interface V3AppState {
   goal: OfficialGoal | null;
   preferences: OfficialPreferences;
   healthConstraints: HealthConstraint[];
+  firstContact: FirstContactState;
+  confirmedContext: Pick<ConfirmedUserContext, "id" | "version" | "confirmedAt"> | null;
+  currentFacts: RecordedFact[];
   workout: WorkoutPlan | null;
   diet: DietPlan | null;
   progression: ProgressionState;
@@ -191,6 +250,7 @@ export interface TurnEnvelope {
     goal: OfficialGoal;
     preferences: OfficialPreferences;
     healthConstraints: HealthConstraint[];
+    confirmedContext: Pick<ConfirmedUserContext, "id" | "version" | "confirmedAt" | "foodDeclaration" | "limitationDeclaration">;
     workout?: Pick<WorkoutPlan, "id" | "version" | "title">;
     diet?: Pick<DietPlan, "id" | "version" | "totalCalories" | "proteinGrams" | "carbsGrams" | "fatGrams">;
   };
@@ -212,6 +272,8 @@ export interface ExecutorResult {
   message: string;
   planVersion?: number;
   activeContextVersion?: number;
+  factContextVersion?: number;
+  affectedDomains?: FactImpactDomain[];
 }
 
 export interface V3TurnResponse {

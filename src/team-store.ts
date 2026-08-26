@@ -218,8 +218,10 @@ function persistMutation(mutate: (store: TeamStore) => void): Promise<void> {
     return writeChain;
 }
 
-// Bootstrap: hidrata o memCache do Redis no init (e trava writes até completar)
-void ensureHydration();
+// O Preview V3-only não participa dos stores de acesso/time legados.
+if (process.env.GUTO_V3_ONLY !== "true") {
+    void ensureHydration();
+}
 
 export function getTeam(teamId: string): GutoTeam | undefined {
     return readTeamsSync().teams[teamId];

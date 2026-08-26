@@ -111,6 +111,7 @@ import {
   saveCustomExerciseRequest,
   type CustomExerciseRequest,
 } from "./custom-exercise-store.js";
+import { provisionV3CredentialForStudent } from "./v3/panel-provisioning.js";
 
 export const adminRouter = express.Router();
 
@@ -1546,6 +1547,16 @@ adminRouter.post(["/students", "/users"], asyncHandler(async (req, res) => {
 
   await updateMemoryFromStudentPatch(userId, { ...body, firstName, lastName, name: fullName, email, phone });
 
+  if (passwordHash) {
+    await provisionV3CredentialForStudent({
+      userId,
+      email,
+      passwordHash,
+      displayName: fullName,
+      teamId,
+    });
+  }
+
   let inviteLink = "";
   if (!passwordHash) {
     const { rawToken } = await createInvite({ userId, name: fullName, coachId: resolvedCoachId });
@@ -1738,6 +1749,13 @@ adminRouter.post("/students/:userId/reset-password", requireAdmin, asyncHandler(
     subscriptionStatus: "active",
     paymentStatus: "active",
     subscriptionEndsAt,
+  });
+  await provisionV3CredentialForStudent({
+    userId: student.userId,
+    email: student.email,
+    passwordHash,
+    displayName: student.name,
+    teamId: student.teamId,
   });
   addLog({ action: "password_reset", actorUserId: caller.userId, actorRole: caller.role, targetUserId: student.userId });
   res.json({ user: updated, temporaryPassword: body.password ? undefined : temporaryPassword });
