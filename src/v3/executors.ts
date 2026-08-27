@@ -13,6 +13,7 @@ import type {
 import { withV3Span } from "./observability/tracing.js";
 import { generateDietDraft, generateWorkoutDraft } from "./generation-engines.js";
 import { impactsFor, type FactChange } from "./facts.js";
+import { deriveChildRequestId } from "./legacy-identity.js";
 
 export class ProfileServiceV3 {
   constructor(private readonly repository: OfficialStateRepository) {}
@@ -107,11 +108,27 @@ export class DeterministicExecutorV3 {
     const impacts = impactsFor(changes);
     let planVersion: number | undefined;
     if (impacts.has("WORKOUT")) {
-      const workout = await this.workout.generate({ actor: next.actor, requestId: `${envelope.requestId}-workout`, context: applied.context, draft: generateWorkoutDraft(next) });
+      const workout = await this.workout.generate({
+        actor: next.actor,
+        requestId: deriveChildRequestId(envelope.requestId, "workout-regeneration"),
+        context: applied.context,
+        draft: generateWorkoutDraft(next),
+      });
+      if (workout.confirmedContextVersion !== applied.context.version) {
+        throw new V3Error("V3_PLAN_CONTEXT_MISMATCH", "O treino regenerado não corresponde ao contexto confirmado.", 500);
+      }
       planVersion = workout.version;
     }
     if (impacts.has("NUTRITION")) {
-      const diet = await this.diet.generate({ actor: next.actor, requestId: `${envelope.requestId}-diet`, context: applied.context, draft: generateDietDraft(next) });
+      const diet = await this.diet.generate({
+        actor: next.actor,
+        requestId: deriveChildRequestId(envelope.requestId, "diet-regeneration"),
+        context: applied.context,
+        draft: generateDietDraft(next),
+      });
+      if (diet.confirmedContextVersion !== applied.context.version) {
+        throw new V3Error("V3_PLAN_CONTEXT_MISMATCH", "A dieta regenerada não corresponde ao contexto confirmado.", 500);
+      }
       planVersion = diet.version;
     }
     return {

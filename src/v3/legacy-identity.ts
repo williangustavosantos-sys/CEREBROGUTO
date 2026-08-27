@@ -15,6 +15,18 @@ export function deterministicUuid(value: string): string {
   return `${joined.slice(0, 8)}-${joined.slice(8, 12)}-${joined.slice(12, 16)}-${joined.slice(16, 20)}-${joined.slice(20)}`;
 }
 
+export type ChildRequestOperation = "workout-regeneration" | "diet-regeneration";
+
+/**
+ * Keeps a child mutation retryable without breaking the UUID persistence
+ * contract. The parent request remains the turn/Langfuse correlation id; the
+ * operation name only namespaces the stable idempotency key used by the plan
+ * repository.
+ */
+export function deriveChildRequestId(parentRequestId: string, operation: ChildRequestOperation): string {
+  return deterministicUuid(`guto-v3:child-request:${parentRequestId}:${operation}`);
+}
+
 // Espelha exatamente o slug usado pela migração legada: o teamId bruto
 // (trimado), com fallback "guto-core". Não slugifica — a consistência com o
 // tenantId determinístico depende de manter a MESMA string de origem.

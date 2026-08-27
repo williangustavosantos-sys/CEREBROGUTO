@@ -2,10 +2,17 @@ import "./test-env.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
+import { genkit } from "genkit";
 import { V3CutoverService } from "../src/v3/cutover-service.js";
 import { InMemoryOfficialStateRepository } from "../src/v3/in-memory-repository.js";
 import { InMemoryOperationalState } from "../src/v3/operational-state.js";
 import { DeterministicExecutorV3 } from "../src/v3/executors.js";
+import { InMemoryRelationshipMemoryStore } from "../src/v3/relationship-memory.js";
+import { GutoContextBuilderV3 } from "../src/v3/context-builder.js";
+import { createGutoTurnFlow } from "../src/v3/flow.js";
+import { deriveChildRequestId } from "../src/v3/legacy-identity.js";
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 async function founder() {
   const repository = new InMemoryOfficialStateRepository();
@@ -15,7 +22,7 @@ async function founder() {
   await service.acceptConsent(actor, id());
   await service.saveMemory(actor, { requestId: id(), name: "Will", confirmedName: true, language: "pt-BR" });
   await service.saveMemory(actor, {
-    requestId: id(), biologicalSex: "male", userAge: 33, weightKg: 82, heightCm: 181,
+    requestId: id(), biologicalSex: "male", userAge: 33, weightKg: 80, heightCm: 181,
     trainingLevel: "consistent", trainingGoal: "muscle_gain", trainingFrequency: 4,
   });
   await service.saveMemory(actor, { requestId: id(), name: "Will", xpEvent: "grant_initial_xp" });
@@ -25,6 +32,62 @@ async function founder() {
   await service.confirmFirstContact(actor, { requestId: id(), confirmed: true });
   return { repository, actor };
 }
+
+test("V3.3 weight 80 -> 82 regenerates diet with a deterministic UUID and is idempotent on HTTP retry", async () => {
+  const { repository, actor } = await founder();
+  const operational = new InMemoryOperationalState();
+  const relationshipMemory = new InMemoryRelationshipMemoryStore();
+  const contextBuilder = new GutoContextBuilderV3(repository, operational, relationshipMemory, {
+    async getCandidates() { return []; },
+  });
+  const flow = createGutoTurnFlow({
+    ai: genkit({}),
+    repository,
+    operational,
+    relationshipMemory,
+    contextBuilder,
+    decisionModel: { async decide() { return { speech: "Entendi.", action: "acknowledge", reasonCode: "acknowledged" }; } },
+  });
+  const before = await repository.loadAppState(actor);
+  const requestId = randomUUID();
+  const childRequestId = deriveChildRequestId(requestId, "diet-regeneration");
+
+  assert.match(childRequestId, UUID_PATTERN);
+  assert.equal(childRequestId, deriveChildRequestId(requestId, "diet-regeneration"));
+  assert.notEqual(childRequestId, deriveChildRequestId(requestId, "workout-regeneration"));
+
+  const first = await flow({
+    externalSubject: actor.externalSubject,
+    role: "student",
+    message: "Meu peso é 82 kg",
+    requestId,
+  });
+  const after = await repository.loadAppState(actor);
+
+  assert.equal(first.action, "updateFacts");
+  assert.equal(first.execution.status, "confirmed");
+  assert.equal(first.execution.code, "FACTS_CONFIRMED");
+  assert.equal(first.execution.factContextVersion, before.confirmedContext!.version + 1);
+  assert.equal(after.profile?.weightKg, 82);
+  assert.equal(after.confirmedContext?.version, before.confirmedContext!.version + 1);
+  assert.notEqual(after.diet?.id, before.diet?.id);
+  assert.equal(after.diet?.confirmedContextVersion, after.confirmedContext?.version);
+  assert.ok(repository.events.some((event) => event.action === "generateDiet" && event.requestId === childRequestId));
+  assert.ok(repository.events.every((event) => UUID_PATTERN.test(event.requestId)), "no persisted request id may violate the UUID contract");
+
+  const retry = await flow({
+    externalSubject: actor.externalSubject,
+    role: "student",
+    message: "Meu peso é 82 kg",
+    requestId,
+  });
+  const afterRetry = await repository.loadAppState(actor);
+
+  assert.deepEqual(retry, first);
+  assert.equal(afterRetry.confirmedContext?.version, after.confirmedContext?.version);
+  assert.equal(afterRetry.diet?.id, after.diet?.id);
+  assert.equal(afterRetry.diet?.version, after.diet?.version);
+});
 
 test("V3.3 stores bitemporal facts and preserves one confirmed context for both plans", async () => {
   const { repository, actor } = await founder();

@@ -7,6 +7,7 @@ import { generateDietDraft, generateWorkoutDraft } from "./generation-engines.js
 import { decideWorkoutEvolution } from "./workout-evolution.js";
 import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
 import { emptyConversationDecisionState, type ConversationDecisionState, type ConversationKnownFact } from "./conversation-state.js";
+import { deriveChildRequestId } from "./legacy-identity.js";
 import type {
   ActorContext,
   CalibrationResult,
@@ -457,15 +458,25 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       recorded.push(structuredClone(next));
     }
     this.facts.set(key(input.actor), history);
+    const persisted = this.snapshots.get(key(input.actor));
+    const weightChange = input.changes.find((change) => change.factType === "BODY_WEIGHT");
+    if (persisted && weightChange) {
+      persisted.profile = {
+        ...persisted.profile,
+        version: persisted.profile.version + 1,
+        weightKg: Number(weightChange.value.weightKg),
+      };
+      this.snapshots.set(key(input.actor), persisted);
+    }
     const nextContext: ConfirmedUserContext = {
       ...current,
       id: randomUUID(),
       version: current.version + 1,
       confirmedAt: now,
+      profileVersion: persisted?.profile.version ?? current.profileVersion,
       factIds: history.filter((fact) => !fact.supersededAt).map((fact) => fact.id),
     };
     this.confirmedContexts.set(key(input.actor), nextContext);
-    const persisted = this.snapshots.get(key(input.actor));
     if (persisted) {
       persisted.confirmedContext = nextContext;
       persisted.firstContact = { ...persisted.firstContact, confirmedContextVersion: nextContext.version };
@@ -476,12 +487,12 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     // Plans always refer to one context version. Unaffected content is simply
     // reissued against the new context; its engine is not regenerated.
     if (impacts.has("WORKOUT")) {
-      await this.replaceWorkoutPlan({ actor: input.actor, requestId: `${input.requestId}-workout`, context: nextContext, draft: generateWorkoutDraft(snapshot) });
+      await this.replaceWorkoutPlan({ actor: input.actor, requestId: deriveChildRequestId(input.requestId, "workout-regeneration"), context: nextContext, draft: generateWorkoutDraft(snapshot) });
     } else if (snapshot.workout) {
       snapshot.workout.confirmedContextVersion = nextContext.version;
     }
     if (impacts.has("NUTRITION")) {
-      await this.replaceDietPlan({ actor: input.actor, requestId: `${input.requestId}-diet`, context: nextContext, draft: generateDietDraft(snapshot) });
+      await this.replaceDietPlan({ actor: input.actor, requestId: deriveChildRequestId(input.requestId, "diet-regeneration"), context: nextContext, draft: generateDietDraft(snapshot) });
     } else if (snapshot.diet) {
       snapshot.diet.confirmedContextVersion = nextContext.version;
     }
