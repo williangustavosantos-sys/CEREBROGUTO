@@ -42,6 +42,7 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "genkit": "^1.40.1",
+    "highs": "1.15.2",
     "inngest": "^4.18.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.2.0",

@@ -10,6 +10,7 @@ import {
 import { getFoodById, type FoodLanguage } from "../food-catalog.js";
 import { V3_FOOD_NUTRITION } from "./candidate-provider.js";
 import { V3Error } from "./errors.js";
+import { generateOfficialDietDraft } from "./nutrition/official-engine.js";
 import { conflictsWithFoodDeclaration } from "./food-declaration-policy.js";
 import type { DietPlanDraft, WorkoutPlanDraft } from "./repository.js";
 import type { OfficialSnapshot } from "./types.js";
@@ -140,6 +141,10 @@ export function generateDietDraft(snapshot: OfficialSnapshot): DietPlanDraft {
   const lunchCarb = pick(["rice", "potato", "sweet_potato"], "o carboidrato do almoço");
   const dinnerCarb = pick(["potato", "rice", "sweet_potato"], "o carboidrato do jantar");
   const plantProtein = proteinFood !== "eggs";
+  const officialDraft = generateOfficialDietDraft(snapshot);
+  if (snapshot.profile.country || snapshot.profile.city) officialDraft.generatedFrom = { ...officialDraft.generatedFrom, country: snapshot.profile.country ?? null, city: snapshot.profile.city ?? null };
+  return officialDraft;
+  /*
   const seeds: Array<{ name: string; items: FoodSeed[] }> = [
     { name: language === "pt-BR" ? "Café da manhã" : language === "it-IT" ? "Colazione" : "Breakfast", items: [{ foodId: breakfastCarb, grams: 80 }, { foodId: breakfastFruit, grams: 100 }] },
     { name: language === "pt-BR" ? "Almoço" : language === "it-IT" ? "Pranzo" : "Lunch", items: [{ foodId: lunchCarb, grams: 220 }, { foodId: proteinFood, grams: plantProtein ? 220 : 180 }] },
@@ -171,4 +176,5 @@ export function generateDietDraft(snapshot: OfficialSnapshot): DietPlanDraft {
     fatGrams: sum(items.map((item) => item.fatGrams)),
     meals,
   };
+  */
 }
