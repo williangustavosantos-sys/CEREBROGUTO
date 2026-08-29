@@ -146,10 +146,13 @@ export function createGutoTurnFlow(deps: GutoTurnFlowDependencies) {
           "guto.action": effectiveDecision.action,
         }, async () => policyGate.authorize(effectiveDecision, envelope, snapshot)));
 
-        const execution = gate.authorized
-          ? await deps.ai.run("EXECUTOR", () => withV3Span("EXECUTOR", { "guto.action": gate.decision.action }, () =>
-              executor.execute(gate.decision, envelope, snapshot)))
-          : { status: "rejected" as const, code: gate.code, message: "A política determinística bloqueou a mutação." };
+        const effectiveGate = !gate.authorized && gate.code === "SESSION_ADAPTATION_REQUIRED" && sessionAdaptation
+          ? { authorized: true as const, code: "SESSION_ADAPTATION_REQUIRED", decision: { ...gate.decision, action: "buildSessionWorkout" as const } }
+          : gate;
+        const execution = effectiveGate.authorized
+          ? await deps.ai.run("EXECUTOR", () => withV3Span("EXECUTOR", { "guto.action": effectiveGate.decision.action }, () =>
+              executor.execute(effectiveGate.decision, envelope, snapshot)))
+          : { status: "rejected" as const, code: effectiveGate.code, message: "A política determinística bloqueou a mutação." };
 
         await withV3Span("POSTGRES_TRANSACTION", { "guto.operation": "record_turn" }, () => deps.repository.recordTurn({
           actor,

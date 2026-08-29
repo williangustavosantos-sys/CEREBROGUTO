@@ -1,6 +1,7 @@
 import type { DecisionEnvelope } from "./contracts.js";
 import type { OfficialSnapshot, PolicyGateResult, TurnEnvelope } from "./types.js";
 import { assertFactChange } from "./facts.js";
+import { resolveSessionAdaptation } from "./session-workout.js";
 
 function detectsAcuteRisk(message: string): boolean {
   return /dor (forte|aguda)|machuquei|les[aã]o|desmaio|falta de ar|peito doendo|doente|febre|vomit|injur|sharp pain|chest pain|sick|fever/iu.test(message);
@@ -14,6 +15,22 @@ function safetySpeech(language: string): string {
 
 export class PolicyGateV3 {
   authorize(decision: DecisionEnvelope, envelope: TurnEnvelope, snapshot: OfficialSnapshot): PolicyGateResult {
+    // Defense in depth: session-scoped location/time hints can never reach a
+    // permanent workout/diet generator, even if the model bypasses the flow
+    // override and proposes generateWorkout/generateDiet directly.
+    const sessionHint = resolveSessionAdaptation(envelope.message);
+    if (sessionHint && (decision.action === "generateWorkout" || decision.action === "generateDiet")) {
+      return {
+        authorized: false,
+        code: "SESSION_ADAPTATION_REQUIRED",
+        decision: {
+          ...decision,
+          action: "buildSessionWorkout",
+          reasonCode: "session_adaptation_preserves_base",
+        },
+      };
+    }
+
     if (detectsAcuteRisk(envelope.message) && decision.action !== "callSafetyPath" && decision.action !== "askClarification") {
       return {
         authorized: false,

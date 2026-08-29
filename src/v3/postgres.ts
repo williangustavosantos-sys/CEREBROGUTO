@@ -1124,6 +1124,27 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
 
   async recordWorkoutExerciseEvent(input: { actor: ActorContext; requestId: string; event: import("./types.js").WorkoutExerciseSessionEvent }): Promise<import("./types.js").WorkoutEvolutionDecision> {
     return this.withActorTransaction(input.actor, async (client) => {
+      // requestId is the public event identity for this endpoint. Deduplicate
+      // before creating a workout session so network retries cannot become a
+      // second historical execution or a false progression signal.
+      const prior = await client.query<{ payload: Record<string, unknown> }>(
+        `SELECT payload FROM guto_v3.guto_events
+          WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND event_type='workout.evolution_decided'
+          LIMIT 1`,
+        [input.actor.tenantId, input.actor.userId, input.requestId],
+      );
+      const priorPayload = prior.rows[0]?.payload;
+      if (priorPayload && typeof priorPayload === "object") {
+        const cached = priorPayload as Partial<import("./types.js").WorkoutEvolutionDecision>;
+        if (typeof cached.exerciseId === "string" && typeof cached.decision === "string" && typeof cached.reasonCode === "string") {
+          return {
+            exerciseId: cached.exerciseId,
+            decision: cached.decision as import("./types.js").WorkoutEvolutionDecisionCode,
+            reasonCode: cached.reasonCode,
+            nextPrescription: cached.nextPrescription as import("./types.js").WorkoutNextPrescription | undefined,
+          };
+        }
+      }
       const plan = await client.query<{ id: string }>(
         `SELECT id FROM guto_v3.workout_plans WHERE tenant_id=$1 AND user_id=$2 AND status='active' FOR UPDATE`,
         [input.actor.tenantId, input.actor.userId],
@@ -1269,7 +1290,14 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         } else if (change.factType === "EXPERIENCE_LEVEL") {
           await client.query(`UPDATE guto_v3.user_profile SET training_status=$1,version=version+1 WHERE tenant_id=$2 AND user_id=$3`, [change.canonicalValue, input.actor.tenantId, input.actor.userId]);
         } else if (change.factType === "FOOD_CONSTRAINT" || change.factType === "FOOD_EXCLUSION") {
-          foodDeclaration = String(change.value.declaration || foodDeclaration);
+          // Exclusions are ADDITIVE, never a silent replacement: a later
+          // declaration must not erase an earlier, still-valid one. Each
+          // declared exclusion is appended to the running declaration so the
+          // confirmed context (forbidden set) is the union of ALL of them.
+          const declared = String(change.value.declaration || change.canonicalValue || "");
+          if (declared && !foodDeclaration.includes(declared)) {
+            foodDeclaration = foodDeclaration ? `${foodDeclaration} ${declared}` : declared;
+          }
         } else if (change.factType === "PHYSICAL_CONSTRAINT") {
           limitationDeclaration = String(change.value.declaration || limitationDeclaration);
         }
@@ -1308,15 +1336,13 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
           WHERE tenant_id=$3 AND user_id=$4 AND status='COMPLETED'`,
         [context.id, context.version, input.actor.tenantId, input.actor.userId],
       );
-      // Rebinds preserve one common context version. The executor decides
-      // which engine is actually regenerated from the deterministic map.
-      for (const table of ["workout_plans", "diet_plans"]) {
-        await client.query(`UPDATE guto_v3.${table} SET confirmed_context_id=$1,confirmed_context_version=$2 WHERE tenant_id=$3 AND user_id=$4 AND status='active'`, [context.id, context.version, input.actor.tenantId, input.actor.userId]);
-      }
-      await client.query(
-        `UPDATE guto_v3.active_plan_versions SET confirmed_context_id=$1,confirmed_context_version=$2,version=version+1 WHERE tenant_id=$3 AND user_id=$4`,
-        [context.id, context.version, input.actor.tenantId, input.actor.userId],
-      );
+      // Do NOT rebind active plans here. Regeneration runs after this
+      // transaction returns, in the executor. Binding an old plan to the new
+      // context before the new plan is successfully committed would make a
+      // regeneration failure appear as a valid new-context plan. The existing
+      // plans remain attached to the previous context until replaceWorkoutPlan
+      // / replaceDietPlan commits the replacement; this is the safe atomicity
+      // boundary without a schema migration.
       const impacted = [...impactsFor(input.changes)];
       await this.appendMutationEvent(client, input.actor, input.requestId, "facts.confirmed", {
         contextId: context.id,

@@ -100,8 +100,11 @@ export function resolveDeclaredOperationalFacts(message: string): FactChange[] {
   if (/\b(nao como|nao consumo|non mangio|avoid|evito)\b/u.test(text)) {
     changes.push(declared("FOOD_EXCLUSION", text, { declaration: message.trim() }));
   }
-  const region = /(joelho|knee|lombar|lower back|schiena bassa|ombro|shoulder|spalla|tornozelo|ankle|caviglia)/u.exec(text)?.[1];
-  if (region && /(dor|incomod|nao consigo|limita|pain|fastidio)/u.test(text)) {
+  const region = /(joelho|knee|lombar|lower back|schiena bassa|ombro|shoulder|spalla|tornozelo|ankle|caviglia|punho|wrist|polso|coluna|neck|collo)/u.exec(text)?.[1];
+  // Pain detection covers common inflections across PT/IT/EN (dor, dói, doendo,
+  // doer, dolore, dolor, hurts, hurting, istighfare), so a literal "está doendo
+  // minha lombar" enters the safety path just like "dor na lombar".
+  if (region && /(do[ée]|doendo|doer|doendo|dolor|dolore|male|facendo male|fastidio|hurts?|hurt(ing)?|pain|istighfare|incomod|nao consigo|limita)\b/u.test(text)) {
     changes.push(declared("PHYSICAL_CONSTRAINT", region, { bodyRegion: region, declaration: message.trim() }));
   }
   const sessionLocation = /(hoje|today|oggi).{0,36}\b(casa|home|park|parque|gym|academia)\b/u.exec(text)?.[2];

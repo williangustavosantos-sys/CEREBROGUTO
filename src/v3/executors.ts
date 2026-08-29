@@ -4,6 +4,7 @@ import { V3Error } from "./errors.js";
 import { assertNutritionPlanValid, calculateNutritionPlan } from "./nutrition-engine.js";
 import { calculateNutritionTarget } from "./nutrition/target-policy.js";
 import { filterFoodsByDeclaration } from "./nutrition/restrictions.js";
+import { conflictsWithFoodDeclaration } from "./food-declaration-policy.js";
 import { selectCandidateFoods } from "./nutrition/catalog.js";
 import { reoptimizeOfficialNutrition, nutritionTargetFromProfile } from "./nutrition/optimizer.js";
 import { validateOfficialNutrition } from "./nutrition/validator.js";
@@ -272,6 +273,14 @@ export class DeterministicExecutorV3 {
     const candidateCatalog = selectCandidateFoods().find((food) => food.id === candidate.id);
     if (role && candidateCatalog && candidateCatalog.role !== role) {
       throw new V3Error("V3_FOOD_ROLE_MISMATCH", "O candidato não pertence à mesma categoria culinária do alimento original.", 409);
+    }
+    // Final safety boundary: an officially excluded food can never be re-
+    // admitted into the plan by any path, even if the model or the provider
+    // somehow supplied it. The optimizer input below deliberately un-excludes
+    // only the SELECTED candidate, so that fast-path must not be allowed to
+    // resurrect a food the user officially forbids.
+    if (conflictsWithFoodDeclaration(candidate.id, declaration)) {
+      throw new V3Error("V3_FOOD_EXCLUSION_VIOLATION", "O candidato pertence a uma restrição alimentar oficial ainda válida.", 409);
     }
     // Only ineligible foods and the replaced (unavailable) item are excluded.
     // Every other food stays free so the LP may adjust quantities elsewhere;

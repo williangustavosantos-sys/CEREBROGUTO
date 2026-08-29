@@ -98,12 +98,20 @@ export async function provisionV3CredentialOnClient(
     [derived.userId, derived.tenantId, derived.identityId, displayName],
   );
 
-  const existing = await client.query<{ password_hash: string }>(
-    `SELECT password_hash FROM guto_v3.auth_credentials WHERE login_identifier=$1`,
+  const existing = await client.query<{ password_hash: string; tenant_id: string; user_id: string; identity_id: string }>(
+    `SELECT password_hash,tenant_id,user_id,identity_id
+       FROM guto_v3.auth_credentials
+      WHERE login_identifier=$1
+      FOR UPDATE`,
     [loginIdentifier],
   );
   const row = existing.rows[0];
   if (row) {
+    // login_identifier is a lookup key, never the identity authority. A
+    // collision must fail closed before any credential/session mutation.
+    if (row.tenant_id !== derived.tenantId || row.user_id !== derived.userId || row.identity_id !== derived.identityId) {
+      throw new Error("login identifier already belongs to another V3 identity");
+    }
     const authorityChanged = row.password_hash !== input.passwordHash;
     await client.query(
       `UPDATE guto_v3.auth_credentials

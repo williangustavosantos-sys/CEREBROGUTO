@@ -19,9 +19,14 @@ class RecordingClient {
   async query(sql: string, values: unknown[] = []): Promise<any> {
     const normalized = sql.replace(/\s+/g, " ").trim();
     this.calls.push({ sql: normalized, values });
-    if (normalized.includes("FROM guto_v3.auth_credentials WHERE login_identifier=$1")) {
+    if (normalized.includes("FROM guto_v3.auth_credentials") && normalized.includes("login_identifier=$1")) {
       return this.existingHash
-        ? { rows: [{ password_hash: this.existingHash }], rowCount: 1 }
+        ? { rows: [{
+            password_hash: this.existingHash,
+            tenant_id: "0662ab60-eb32-4d59-b008-49b1daabefea",
+            user_id: "26495df3-5002-49f5-8f26-57b5f2ce4479",
+            identity_id: "26bddbf3-0ce4-4b7a-b0a7-3685749cd3ae",
+          }], rowCount: 1 }
         : { rows: [], rowCount: 0 };
     }
     return { rows: [], rowCount: 1 };

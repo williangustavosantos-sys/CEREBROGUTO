@@ -34,25 +34,55 @@ export interface BuildSessionWorkoutInput {
 
 /**
  * Deterministic session-adaptation detection from a user message. Recognises
- * session time budgets ("só tenho 20 minutos") and session locations ("hoje
- * vou treinar em casa") WITHOUT trusting the model to pick the action. The
- * base plan must never be regenerated for a session-scoped hint.
+ * session time budgets ("só tenho 20 minutos", "20 minutos é tudo que tenho") and
+ * session locations ("hoje vou treinar em casa", "vou treinar em casa hoje") in
+ * an ORDER-INDEPENDENT way WITHOUT trusting the model to pick the action. The
+ * base plan must never be regenerated for a session-scoped hint. Detection is
+ * keyword-and-number based rather than relying on a fixed word order, so
+ * natural PT/IT/EN phrasings are recognised regardless of how the user phrases
+ * them. It intentionally only fires on session-scoped meanings (a day/time
+ * marker or a training verb co-occurring with the location / time budget) to
+ * avoid false positives on unrelated mentions.
  */
 export interface SessionAdaptationHint {
   availableMinutes?: number;
   effectiveLocation?: CatalogLocation;
 }
 
+function normalizeForClassifier(message: string): string {
+  return message.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("pt-BR");
+}
+
+// A location word only counts as a SESSION override when co-occurs with a
+// session-day marker and/or a training intent word, so "casa"/"home" are kept
+// order-independent but never fire on an unrelated mention.
+const LOCATION_WORD = /\b(casa|home|domicilio)\b/u;
+const PARK_WORD = /\b(parque|park)\b/u;
+const SESSION_DAY = /\b(hoje|today|oggi)\b/u;
+const TRAINING_INTENT = /\b(treina|treino|vou|bora|ramo|allen(are|o)|workout|training?|eserciz)/u;
+
+// A time budget fires when a minutes value co-occurs with a bounded-time
+// signal word (independent of order): "só tenho 20", "20 minutos é tudo que
+// tenho", "só 15 min hoje", "only 20 minutes today".
+const MINUTES_VALUE = /\b(\d{1,3})\s*(?:min|minutos?|minuti|minutes?)\b/u;
+const BOUNDED_TIME_SIGNAL = /\b(s[oó]|somente|apenas|solo|only|just|tenho|tenemos|tutto|all|pouco|little|poco|rapido|rapidamente|quick|veloce)\b/u;
+
 export function resolveSessionAdaptation(message: string): SessionAdaptationHint | null {
-  const text = message.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("pt-BR");
+  const text = normalizeForClassifier(message);
   const hint: SessionAdaptationHint = {};
-  const budget = /(?:s[oó] tenho|so tenho|tenho (?:apenas |s[oó] |somente )?|apenas|only)\s*(\d{1,3})\s*(?:min|minutos|minutes?)/u.exec(text);
+
+  const budget = MINUTES_VALUE.exec(text);
   if (budget) {
     const minutes = Number(budget[1]);
-    if (minutes >= 5 && minutes <= 240) hint.availableMinutes = minutes;
+    if (minutes >= 5 && minutes <= 240 && BOUNDED_TIME_SIGNAL.test(text)) hint.availableMinutes = minutes;
   }
-  const location = /(?:hoje|today).{0,36}\b(casa|home|parque|park)\b/u.exec(text)?.[1];
-  if (location) hint.effectiveLocation = location === "parque" || location === "park" ? "park" : "home";
+
+  const homeHit = LOCATION_WORD.test(text);
+  const parkHit = PARK_WORD.test(text);
+  const sessionScoped = SESSION_DAY.test(text) || TRAINING_INTENT.test(text);
+  if (parkHit && sessionScoped) hint.effectiveLocation = "park";
+  else if (homeHit && sessionScoped) hint.effectiveLocation = "home";
+
   if (hint.availableMinutes === undefined && hint.effectiveLocation === undefined) return null;
   return hint;
 }

@@ -70,12 +70,21 @@ export class ConservativeCatalogCandidateProviderV3 implements CandidateProvider
     if (activeContext.kind === "diet" && snapshot.diet?.id === activeContext.planId) {
       const current = snapshot.diet.meals.flatMap((meal) => meal.items).find((item) => item.id === activeContext.itemId);
       if (!current) return [];
+      // Forbidden set = confirmed-context declaration UNION any active
+      // FOOD_CONSTRAINT / FOOD_EXCLUSION facts. Every official exclusion must
+      // gate candidates shown to the model BEFORE any solver/adjudication.
+      const forbiddenDeclaration = [
+        snapshot.confirmedContext?.foodDeclaration || "",
+        ...(snapshot.currentFacts || [])
+          .filter((fact) => fact.factType === "FOOD_CONSTRAINT" || fact.factType === "FOOD_EXCLUSION")
+          .map((fact) => String(fact.value.declaration || fact.canonicalValue)),
+      ].join(" ");
       const explicitlyProposed = resolveFoodIdByName(message);
       const suggested = suggestFoodSubstitutes({ originalFoodId: current.foodId, useContext: "meal_substitution" });
       const ids = [explicitlyProposed, ...suggested.map((food) => food.id)]
         .filter((id): id is string => Boolean(id))
         .filter((id, index, all) => all.indexOf(id) === index && !rejected.has(id))
-        .filter((id) => !conflictsWithFoodDeclaration(id, snapshot.confirmedContext?.foodDeclaration || ""));
+        .filter((id) => !conflictsWithFoodDeclaration(id, forbiddenDeclaration));
       const candidates = ids.map((id) => foodCandidate(id, locale)).filter((item): item is CandidateOption => item !== null).slice(0, 8);
       return decideFoodSubstitution({ snapshot, current, message, candidates }).candidates;
     }
