@@ -14,6 +14,8 @@ import { InMemoryOperationalState } from "../src/v3/operational-state.js";
 import { InMemoryRelationshipMemoryStore } from "../src/v3/relationship-memory.js";
 import type { ActiveContext, CandidateOption, OfficialSnapshot, TurnEnvelope } from "../src/v3/types.js";
 import { generateDietDraft, generateWorkoutDraft } from "../src/v3/generation-engines.js";
+import { selectCandidateFoods } from "../src/v3/nutrition/catalog.js";
+import { filterFoodsByDeclaration } from "../src/v3/nutrition/restrictions.js";
 import { getCatalogById, getExerciseRiskTags } from "../exercise-catalog.js";
 import { V3CutoverService } from "../src/v3/cutover-service.js";
 
@@ -120,6 +122,26 @@ class FounderCandidateProvider implements CandidateProvider {
     { id: "supino_inclinado_halter", label: "Supino inclinado halter" },
     { id: "flexao", label: "Flexão" },
   ];
+  private readonly sameRoleFoods: Record<string, Array<{ id: string; label: string }>> = {
+    fruit: [
+      { id: "apple", label: "Maçã" },
+      { id: "orange", label: "Laranja" },
+    ],
+    carb_primary: [
+      { id: "wholegrain_bread", label: "Pão integral" },
+      { id: "rice", label: "Arroz" },
+    ],
+    protein_primary: [
+      { id: "tuna", label: "Atum" },
+      { id: "eggs", label: "Ovos" },
+    ],
+    legume: [
+      { id: "lentils", label: "Lentilhas" },
+      { id: "beans", label: "Feijão" },
+    ],
+    dairy: [{ id: "yogurt", label: "Iogurte grego" }],
+    fat: [{ id: "olive_oil", label: "Azeite" }],
+  };
   async getCandidates(state: OfficialSnapshot, context: ActiveContext | null, message: string): Promise<CandidateOption[]> {
     if (context?.kind === "workout") {
       const rejected = new Set(context.rejectedCandidateIds || []);
@@ -133,19 +155,38 @@ class FounderCandidateProvider implements CandidateProvider {
           metadata: { purpose: "horizontal_push", muscleGroup: "peito", movementPattern: "push" },
         }));
     }
-    if (context?.kind === "diet" && /p[aã]o/iu.test(message)) {
+    if (context?.kind === "diet") {
+      const current = state.diet?.meals.flatMap((meal) => meal.items).find((item) => item.id === context.itemId);
+      const currentFood = selectCandidateFoods().find((food) => food.id === current?.foodId);
+      const role = currentFood?.role;
+      const rejected = new Set(context.rejectedCandidateIds || []);
+      const declaration = [state.confirmedContext?.foodDeclaration || "", ...(state.currentFacts || []).map((fact) => String(fact.value.declaration || fact.canonicalValue))].join(" ");
+      const candidates = (this.sameRoleFoods[role || ""] || [])
+        .filter((candidate) => candidate.id !== current?.foodId && !rejected.has(candidate.id))
+        .filter((candidate) => filterFoodsByDeclaration(selectCandidateFoods(), declaration).some((food) => food.id === candidate.id))
+        .map((candidate) => ({
+          ...candidate,
+          kind: "food" as const,
+          purpose: role || "food",
+          metadata: { category: role || "food", caloriesPer100g: 0, proteinPer100g: 0, carbsPer100g: 0, fatPer100g: 0 },
+        }));
+      return candidates;
+    }
+    return [];
+  }
+}
+
+// Deliberately proposes a cross-role candidate (fruit -> carb_primary) to prove
+// the runtime rejects incompatible swaps before the solver runs.
+class RoleMismatchCandidateProvider implements CandidateProvider {
+  async getCandidates(state: OfficialSnapshot, context: ActiveContext | null, message: string): Promise<CandidateOption[]> {
+    if (context?.kind === "diet") {
       return [{
         id: "wholegrain_bread",
-        label: "pão integral",
+        label: "Pão integral",
         kind: "food",
         purpose: "carb",
-        metadata: {
-          category: "carb",
-          caloriesPer100g: 247,
-          proteinPer100g: 13,
-          carbsPer100g: 41,
-          fatPer100g: 4.2,
-        },
+        metadata: { category: "carb", caloriesPer100g: 247, proteinPer100g: 13, carbsPer100g: 41, fatPer100g: 4.2 },
       }];
     }
     return [];
@@ -275,7 +316,7 @@ test("V3 provisions a backend-derived identity before the first idempotent calib
   assert.equal(reloaded.profile.language, "pt-BR");
 });
 
-test("V3 generation engines create safe catalog workouts and one-truth vegetarian diets", () => {
+test("V3 generation engines create safe catalog workouts and one-truth vegetarian diets", async () => {
   const state = snapshot("founder-generation", "10000000-0000-4000-8000-000000000012");
   const workout = generateWorkoutDraft(state);
   assert.ok(workout.items.length >= 4);
@@ -286,7 +327,7 @@ test("V3 generation engines create safe catalog workouts and one-truth vegetaria
     assert.equal(getExerciseRiskTags(exercise!).includes("knee"), false);
   }
 
-  const diet = generateDietDraft(state);
+  const diet = await generateDietDraft(state);
   const validation = validateNutritionPlan({
     id: "draft", version: 1, status: "draft",
     totalCalories: diet.totalCalories, proteinGrams: diet.proteinGrams,
@@ -329,11 +370,108 @@ test("V3 workout substitutions persist, update active context, and never repeat 
   assert.deepEqual(used, ["supino_reto_halter", "supino_inclinado_halter", "flexao"]);
 });
 
-test("V3 food substitution recalculates bread quantity and preserves one deterministic nutrition truth", async () => {
+test("V3 food substitution reoptimizes a real official diet with a same-role candidate and preserves one deterministic nutrition truth", async () => {
   const state = snapshot("founder-diet", "10000000-0000-4000-8000-000000000030");
+  const draft = await generateDietDraft(state);
+  const items = draft.meals.flatMap((meal) => meal.items);
+  state.diet = {
+    id: "40000000-0000-4000-8000-000000000030",
+    version: 1,
+    status: "active",
+    confirmedContextVersion: state.confirmedContext!.version,
+    totalCalories: draft.totalCalories,
+    proteinGrams: draft.proteinGrams,
+    carbsGrams: draft.carbsGrams,
+    fatGrams: draft.fatGrams,
+    meals: draft.meals.map((meal, mealIndex) => ({
+      id: `meal-${mealIndex}`,
+      name: meal.name,
+      position: meal.position,
+      calories: meal.calories,
+      items: meal.items.map((item, itemIndex) => ({ ...item, id: `item-${itemIndex}` })),
+    })),
+  };
+  const fruitItem = items.find((item) => selectCandidateFoods().find((food) => food.id === item.foodId)?.role === "fruit");
+  assert.ok(fruitItem, "official diet must include a fruit item");
+  const fruitId = fruitItem.foodId;
+  const sameRoleCandidates = filterFoodsByDeclaration(selectCandidateFoods(), state.confirmedContext!.foodDeclaration)
+    .filter((food) => food.role === "fruit" && food.id !== fruitId);
+  assert.ok(sameRoleCandidates.length > 0, "a same-role fruit candidate must be eligible");
   const { repository, operational, flow, actor } = harness(state);
   await operational.compareAndSetActiveContext(actor, null, {
     id: "80000000-0000-4000-8000-000000000002",
+    version: 1,
+    kind: "diet",
+    planId: state.diet!.id,
+    planVersion: 1,
+    itemId: state.diet!.meals[0].items.find((item) => item.foodId === fruitId)!.id,
+    itemLabel: "Banana",
+    rejectedCandidateIds: [],
+    updatedAt: new Date().toISOString(),
+  });
+  const response = await flow({
+    externalSubject: actor.externalSubject,
+    role: "student",
+    message: "Não tenho banana.",
+    requestId: "90000000-0000-4000-8000-000000000004",
+  });
+  assert.equal(response.execution.status, "confirmed");
+  const reloaded = await repository.loadOfficialSnapshot(actor);
+  const foods = reloaded.diet!.meals.flatMap((meal) => meal.items);
+  assert.equal(foods.some((item) => item.foodId === fruitId), false, "unavailable food must be gone");
+  assert.equal(foods.some((item) => item.foodId === sameRoleCandidates[0].id), true, "same-role candidate must enter the plan");
+  assert.equal(reloaded.diet!.version, 2, "plan version must bump N -> N+1");
+  assert.equal(reloaded.diet!.meals[0].calories, reloaded.diet!.totalCalories);
+  assert.equal(validateNutritionPlan(reloaded.diet!).valid, true);
+});
+
+test("V3 food swap rejects a candidate from a different culinary role before the solver", async () => {
+  const state = snapshot("founder-diet-role", "10000000-0000-4000-8000-000000000031");
+  state.diet = {
+    id: "40000000-0000-4000-8000-000000000031",
+    version: 1,
+    status: "active",
+    confirmedContextVersion: state.confirmedContext!.version,
+    totalCalories: 89,
+    proteinGrams: 1.1,
+    carbsGrams: 22.8,
+    fatGrams: 0.3,
+    meals: [{
+      id: "meal-role-0",
+      name: "Café",
+      position: 0,
+      calories: 89,
+      items: [{
+        id: "item-role-banana",
+        foodId: "banana",
+        name: "Banana",
+        quantityGrams: 100,
+        calories: 89,
+        proteinGrams: 1.1,
+        carbsGrams: 22.8,
+        fatGrams: 0.3,
+        position: 0,
+      }],
+    }],
+  };
+  const ai = genkit({});
+  const repository = new InMemoryOfficialStateRepository();
+  repository.seed(state);
+  const operational = new InMemoryOperationalState();
+  const relationshipMemory = new InMemoryRelationshipMemoryStore();
+  const candidates = new RoleMismatchCandidateProvider();
+  const contextBuilder = new GutoContextBuilderV3(repository, operational, relationshipMemory, candidates);
+  const flow = createGutoTurnFlow({
+    ai,
+    repository,
+    operational,
+    relationshipMemory,
+    contextBuilder,
+    decisionModel: new FounderDecisionModel(),
+  });
+  const actor = state.actor;
+  await operational.compareAndSetActiveContext(actor, null, {
+    id: "80000000-0000-4000-8000-000000000012",
     version: 1,
     kind: "diet",
     planId: state.diet!.id,
@@ -343,19 +481,15 @@ test("V3 food substitution recalculates bread quantity and preserves one determi
     rejectedCandidateIds: [],
     updatedAt: new Date().toISOString(),
   });
-  const response = await flow({
-    externalSubject: actor.externalSubject,
-    role: "student",
-    message: "Não tenho banana. Tenho pão.",
-    requestId: "90000000-0000-4000-8000-000000000004",
-  });
-  assert.equal(response.execution.status, "confirmed");
-  const reloaded = await repository.loadOfficialSnapshot(actor);
-  const item = reloaded.diet!.meals[0].items[0];
-  assert.equal(item.foodId, "wholegrain_bread");
-  assert.equal(item.quantityGrams, 36);
-  assert.equal(reloaded.diet!.meals[0].calories, reloaded.diet!.totalCalories);
-  assert.equal(validateNutritionPlan(reloaded.diet!).valid, true);
+  await assert.rejects(
+    flow({
+      externalSubject: actor.externalSubject,
+      role: "student",
+      message: "Não tenho banana. Tenho pão.",
+      requestId: "90000000-0000-4000-8000-000000000005",
+    }),
+    /categoria culinária|culinary role|V3_FOOD_ROLE_MISMATCH/iu,
+  );
 });
 
 test("V3 nutrition engine rejects a published plan with divergent meal totals", () => {

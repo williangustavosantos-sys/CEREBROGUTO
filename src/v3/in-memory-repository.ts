@@ -492,7 +492,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       snapshot.workout.confirmedContextVersion = nextContext.version;
     }
     if (impacts.has("NUTRITION")) {
-      await this.replaceDietPlan({ actor: input.actor, requestId: deriveChildRequestId(input.requestId, "diet-regeneration"), context: nextContext, draft: generateDietDraft(snapshot) });
+      await this.replaceDietPlan({ actor: input.actor, requestId: deriveChildRequestId(input.requestId, "diet-regeneration"), context: nextContext, draft: await generateDietDraft(snapshot) });
     } else if (snapshot.diet) {
       snapshot.diet.confirmedContextVersion = nextContext.version;
     }
@@ -540,30 +540,37 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     actor: ActorContext;
     requestId: string;
     plan: DietPlan;
-    itemId: string;
-    replacement: FoodReplacement;
+    mutation: import("./repository.js").FullDietPlanMutation;
   }): Promise<{ planVersion: number }> {
     const snapshot = await this.loadOfficialSnapshot(input.actor);
     const plan = snapshot.diet;
     if (!plan || plan.id !== input.plan.id) throw new V3Error("V3_DIET_NOT_FOUND", "Dieta não encontrada.", 409);
     if (plan.version !== input.plan.version) throw new V3Error("V3_STALE_DIET_VERSION", "Dieta desatualizada.", 409);
-    const item = plan.meals.flatMap((meal) => meal.items).find((entry) => entry.id === input.itemId);
-    if (!item) throw new V3Error("V3_DIET_ITEM_NOT_FOUND", "Alimento não encontrado.", 409);
-    Object.assign(item, {
-      foodId: input.replacement.candidate.id,
-      name: input.replacement.candidate.label,
-      quantityGrams: input.replacement.quantityGrams,
-      calories: input.replacement.calories,
-      proteinGrams: input.replacement.proteinGrams,
-      carbsGrams: input.replacement.carbsGrams,
-      fatGrams: input.replacement.fatGrams,
-    });
-    for (const meal of plan.meals) meal.calories = meal.items.reduce((sum, entry) => sum + entry.calories, 0);
-    const items = plan.meals.flatMap((meal) => meal.items);
-    plan.totalCalories = items.reduce((sum, entry) => sum + entry.calories, 0);
-    plan.proteinGrams = items.reduce((sum, entry) => sum + entry.proteinGrams, 0);
-    plan.carbsGrams = items.reduce((sum, entry) => sum + entry.carbsGrams, 0);
-    plan.fatGrams = items.reduce((sum, entry) => sum + entry.fatGrams, 0);
+    if (input.mutation.planId !== plan.id || input.mutation.expectedPlanVersion !== plan.version || input.mutation.contextVersion !== (plan.confirmedContextVersion ?? input.mutation.contextVersion)) throw new V3Error("V3_STALE_DIET_VERSION", "Dieta desatualizada.", 409);
+    const mutationIds = new Set(input.mutation.items.map((entry) => entry.id));
+    for (const entry of input.mutation.items) {
+      if (!Number.isFinite(entry.quantityGrams) || entry.quantityGrams <= 0 || [entry.calories, entry.proteinGrams, entry.carbsGrams, entry.fatGrams].some((value) => !Number.isFinite(value))) throw new V3Error("NUTRITION_VALIDATION_FAILED", "Mutação de dieta inválida.", 409);
+    }
+    for (const meal of plan.meals) {
+      const nextIds = new Set(mutationIds);
+      meal.items = meal.items.filter((entry) => nextIds.has(entry.id));
+    }
+    const byId = new Map(input.mutation.items.map((entry) => [entry.id, entry]));
+    const meal = plan.meals[0];
+    if (!meal) throw new V3Error("V3_DIET_ITEM_NOT_FOUND", "Alimento oficial não encontrado.", 409);
+    for (const entry of meal.items) {
+      const next = byId.get(entry.id);
+      if (next) Object.assign(entry, next);
+    }
+    const existingIds = new Set(meal.items.map((entry) => entry.id));
+    const added = input.mutation.items.filter((entry) => !existingIds.has(entry.id));
+    for (const entry of added) meal.items.push({ ...entry });
+    meal.items.sort((a, b) => a.position - b.position);
+    meal.calories = Number(meal.items.reduce((sum, entry) => sum + entry.calories, 0).toFixed(2));
+    plan.totalCalories = input.mutation.totals.calories;
+    plan.proteinGrams = input.mutation.totals.proteinGrams;
+    plan.carbsGrams = input.mutation.totals.carbsGrams;
+    plan.fatGrams = input.mutation.totals.fatGrams;
     plan.version += 1;
     this.snapshots.set(key(input.actor), snapshot);
     return { planVersion: plan.version };

@@ -119,7 +119,7 @@ function foodItem(foodId: string, grams: number, position: number, language: Foo
   };
 }
 
-export function generateDietDraft(snapshot: OfficialSnapshot): DietPlanDraft {
+export async function generateDietDraft(snapshot: OfficialSnapshot): Promise<DietPlanDraft> {
   if (!snapshot.confirmedContext) throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Contexto confirmado necessário para gerar dieta.", 409);
   const language = locale(snapshot.profile.language);
   const declaration = [
@@ -141,7 +141,7 @@ export function generateDietDraft(snapshot: OfficialSnapshot): DietPlanDraft {
   const lunchCarb = pick(["rice", "potato", "sweet_potato"], "o carboidrato do almoço");
   const dinnerCarb = pick(["potato", "rice", "sweet_potato"], "o carboidrato do jantar");
   const plantProtein = proteinFood !== "eggs";
-  const officialDraft = generateOfficialDietDraft(snapshot);
+  const officialDraft = await generateOfficialDietDraft(snapshot);
   if (snapshot.profile.country || snapshot.profile.city) officialDraft.generatedFrom = { ...officialDraft.generatedFrom, country: snapshot.profile.country ?? null, city: snapshot.profile.city ?? null };
   return officialDraft;
   /*

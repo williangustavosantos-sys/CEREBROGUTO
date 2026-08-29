@@ -1049,8 +1049,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     actor: ActorContext;
     requestId: string;
     plan: DietPlan;
-    itemId: string;
-    replacement: FoodReplacement;
+    mutation: import("./repository.js").FullDietPlanMutation;
   }): Promise<{ planVersion: number }> {
     return this.withActorTransaction(input.actor, async (client) => {
       const planResult = await client.query<{ version: string }>(
@@ -1062,32 +1061,19 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       if (asNumber(planResult.rows[0].version) !== input.plan.version) {
         throw new V3Error("V3_STALE_DIET_VERSION", "A dieta mudou; recarregue o estado oficial.", 409);
       }
-      const updated = await client.query<{ meal_id: string }>(
-        `UPDATE guto_v3.diet_items SET
-           food_id=$1, name=$2, quantity_grams=$3, calories=$4,
-           protein_grams=$5, carbs_grams=$6, fat_grams=$7, version=version+1
-         WHERE tenant_id=$8 AND id=$9
-         RETURNING meal_id`,
-        [
-          input.replacement.candidate.id,
-          input.replacement.candidate.label,
-          input.replacement.quantityGrams,
-          input.replacement.calories,
-          input.replacement.proteinGrams,
-          input.replacement.carbsGrams,
-          input.replacement.fatGrams,
-          input.actor.tenantId,
-          input.itemId,
-        ],
-      );
-      const mealId = updated.rows[0]?.meal_id;
+      if (input.mutation.planId !== input.plan.id || input.mutation.expectedPlanVersion !== input.plan.version) throw new V3Error("V3_STALE_DIET_VERSION", "A dieta mudou; recarregue o estado oficial.", 409);
+      const currentItems = await client.query<{ id: string; meal_id: string }>(`SELECT id, meal_id FROM guto_v3.diet_items WHERE tenant_id=$1 AND plan_id=$2 FOR UPDATE`, [input.actor.tenantId, input.plan.id]);
+      const currentIds = new Set(currentItems.rows.map((row) => row.id));
+      const mutationIds = new Set(input.mutation.items.map((item) => item.id));
+      for (const id of currentIds) if (!mutationIds.has(id)) await client.query(`DELETE FROM guto_v3.diet_items WHERE tenant_id=$1 AND id=$2`, [input.actor.tenantId, id]);
+      const mealId = currentItems.rows[0]?.meal_id;
       if (!mealId) throw new V3Error("V3_DIET_ITEM_NOT_FOUND", "Alimento oficial não encontrado.", 409);
-      await client.query(
-        `UPDATE guto_v3.diet_meals m SET calories = totals.calories, version = m.version + 1
-           FROM (SELECT meal_id, round(sum(calories),2) AS calories FROM guto_v3.diet_items WHERE meal_id=$1 GROUP BY meal_id) totals
-          WHERE m.id = totals.meal_id`,
-        [mealId],
-      );
+      for (const item of input.mutation.items) {
+        if (!Number.isFinite(item.quantityGrams) || item.quantityGrams <= 0 || [item.calories, item.proteinGrams, item.carbsGrams, item.fatGrams].some((value) => !Number.isFinite(value))) throw new V3Error("NUTRITION_VALIDATION_FAILED", "Mutação de dieta inválida.", 409);
+        if (currentIds.has(item.id)) await client.query(`UPDATE guto_v3.diet_items SET food_id=$1,name=$2,quantity_grams=$3,calories=$4,protein_grams=$5,carbs_grams=$6,fat_grams=$7,version=version+1 WHERE tenant_id=$8 AND id=$9`, [item.foodId,item.name,item.quantityGrams,item.calories,item.proteinGrams,item.carbsGrams,item.fatGrams,input.actor.tenantId,item.id]);
+        else await client.query(`INSERT INTO guto_v3.diet_items (id,tenant_id,meal_id,food_id,name,quantity_grams,calories,protein_grams,carbs_grams,fat_grams,position,version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1)`, [item.id,input.actor.tenantId,item.mealId || mealId,item.foodId,item.name,item.quantityGrams,item.calories,item.proteinGrams,item.carbsGrams,item.fatGrams,item.position]);
+      }
+      await client.query(`UPDATE guto_v3.diet_meals SET calories=$1, version=version+1 WHERE id=$2 AND tenant_id=$3`, [input.mutation.totals.calories, mealId, input.actor.tenantId]);
       const totals = await client.query<{
         calories: string;
         protein: string;
@@ -1107,7 +1093,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       const versionResult = await client.query<{ version: string }>(
         `UPDATE guto_v3.diet_plans SET total_calories=$1, protein_grams=$2, carbs_grams=$3,
            fat_grams=$4, version=version+1 WHERE tenant_id=$5 AND id=$6 RETURNING version`,
-        [row.calories, row.protein, row.carbs, row.fat, input.actor.tenantId, input.plan.id],
+        [input.mutation.totals.calories, input.mutation.totals.proteinGrams, input.mutation.totals.carbsGrams, input.mutation.totals.fatGrams, input.actor.tenantId, input.plan.id],
       );
       const planVersion = asNumber(versionResult.rows[0]?.version);
       await client.query(
@@ -1117,8 +1103,8 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       );
       await this.appendMutationEvent(client, input.actor, input.requestId, "diet.food_swapped", {
         planId: input.plan.id,
-        itemId: input.itemId,
-        candidateId: input.replacement.candidate.id,
+        itemId: input.mutation.items.find((item) => item.foodId === input.mutation.replacement.candidateId)?.id,
+        candidateId: input.mutation.replacement.candidateId,
         planVersion,
       });
       return { planVersion };

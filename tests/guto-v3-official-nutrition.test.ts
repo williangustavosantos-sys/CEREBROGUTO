@@ -31,9 +31,9 @@ test("RESTRICTION_FILTER maps semantic dietary restrictions deterministically", 
   for (const id of ["rice", "potato", "banana"]) assert.equal(eligible.has(id), true, id);
 });
 
-test("DIET_PROFILE_COherence no longer returns the legacy fixed 1719/80 result", () => {
+test("DIET_PROFILE_COherence no longer returns the legacy fixed 1719/80 result", async () => {
   const snapshot = { actor: { tenantId: "t", userId: "u", externalSubject: "u", role: "student" }, memoryVersion: 1, profile: { version: 1, language: "pt-BR", country: "South Africa", biologicalSex: "male", age: 34, weightKg: 74.8, heightCm: 188, trainingStatus: "returning", trainingLocation: "gym", weeklyFrequencyDaysPerWeek: 6 }, goal: { version: 1, code: "hypertrophy" }, preferences: { version: 1, dietStyle: "vegetarian" }, healthConstraints: [], firstContact: { status: "COMPLETED", step: "completed", foodDeclaration: "sou vegetariano", limitationDeclaration: "nenhuma", startedAt: null, completedAt: null, currentPrompt: null, summary: null, confirmedContextVersion: 1 }, confirmedContext: { id: "ctx", version: 1, confirmedAt: new Date().toISOString(), foodDeclaration: "sou vegetariano", limitationDeclaration: "nenhuma", profileVersion: 1, goalVersion: 1, weeklyFrequencyDaysPerWeek: 6, trainingLocation: "gym" }, workout: null, diet: null } as OfficialSnapshot;
-  const draft = generateOfficialDietDraft(snapshot);
+  const draft = await generateOfficialDietDraft(snapshot);
   assert.ok(draft.totalCalories > 0);
   assert.ok(draft.proteinGrams > 80);
   assert.equal(draft.generatedFrom.language, "pt-BR");

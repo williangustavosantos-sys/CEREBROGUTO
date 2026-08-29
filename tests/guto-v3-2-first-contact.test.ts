@@ -101,11 +101,11 @@ test("V3.2 First Contact resumes after reload and never repeats after COMPLETED"
   const afterFood = await service.respondFirstContact(actor, {
     requestId: ids.food,
     expectedStep: "food_restrictions",
-    answer: "Não como carne, ovo nem glúten e tenho intolerância à lactose.",
+    answer: "Não como carne, ovo nem glúten.",
   });
   assert.equal(afterFood.firstContact.status, "IN_PROGRESS");
   assert.equal(afterFood.firstContact.step, "training_limitations");
-  assert.equal(afterFood.firstContact.foodDeclaration, "Não como carne, ovo nem glúten e tenho intolerância à lactose.");
+  assert.equal(afterFood.firstContact.foodDeclaration, "Não como carne, ovo nem glúten.");
 
   const reloadAtLimitations = await service.load(actor);
   assert.deepEqual(reloadAtLimitations.firstContact, afterFood.firstContact);
@@ -113,7 +113,7 @@ test("V3.2 First Contact resumes after reload and never repeats after COMPLETED"
   const retriedFood = await service.respondFirstContact(actor, {
     requestId: ids.food,
     expectedStep: "food_restrictions",
-    answer: "Não como carne, ovo nem glúten e tenho intolerância à lactose.",
+    answer: "Não como carne, ovo nem glúten.",
   });
   assert.deepEqual(retriedFood.firstContact, afterFood.firstContact);
 

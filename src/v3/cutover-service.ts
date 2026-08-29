@@ -172,7 +172,7 @@ export class V3CutoverService {
         weeklyFrequencyDaysPerWeek: context.weeklyFrequencyDaysPerWeek,
       },
       workoutDraft: generateWorkoutDraft(snapshot),
-      dietDraft: generateDietDraft(snapshot),
+      dietDraft: await generateDietDraft(snapshot),
     });
     return this.load(actor);
   }
@@ -191,7 +191,7 @@ export class V3CutoverService {
     if (!snapshot.confirmedContext || snapshot.firstContact.status !== "COMPLETED") {
       throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Confirme o contexto do usuário antes de gerar a dieta.", 409);
     }
-    await this.repository.replaceDietPlan({ actor, requestId, context: snapshot.confirmedContext, draft: generateDietDraft(snapshot) });
+    await this.repository.replaceDietPlan({ actor, requestId, context: snapshot.confirmedContext, draft: await generateDietDraft(snapshot) });
     return this.load(actor);
   }
 }

@@ -1,6 +1,11 @@
 import type { DecisionEnvelope } from "./contracts.js";
 import { V3Error } from "./errors.js";
-import { applyFoodReplacement, assertNutritionPlanValid, calculateFoodReplacement } from "./nutrition-engine.js";
+import { assertNutritionPlanValid, calculateNutritionPlan } from "./nutrition-engine.js";
+import { calculateNutritionTarget } from "./nutrition/target-policy.js";
+import { filterFoodsByDeclaration } from "./nutrition/restrictions.js";
+import { selectCandidateFoods } from "./nutrition/catalog.js";
+import { reoptimizeOfficialNutrition, nutritionTargetFromProfile } from "./nutrition/optimizer.js";
+import { validateOfficialNutrition } from "./nutrition/validator.js";
 import type { OperationalStateStore } from "./operational-state.js";
 import type { RelationshipMemoryStore } from "./relationship-memory.js";
 import type { OfficialStateRepository } from "./repository.js";
@@ -124,7 +129,7 @@ export class DeterministicExecutorV3 {
         actor: next.actor,
         requestId: deriveChildRequestId(envelope.requestId, "diet-regeneration"),
         context: applied.context,
-        draft: generateDietDraft(next),
+        draft: await generateDietDraft(next),
       });
       if (diet.confirmedContextVersion !== applied.context.version) {
         throw new V3Error("V3_PLAN_CONTEXT_MISMATCH", "A dieta regenerada não corresponde ao contexto confirmado.", 500);
@@ -156,7 +161,7 @@ export class DeterministicExecutorV3 {
 
   private async generateDiet(envelope: TurnEnvelope, snapshot: OfficialSnapshot): Promise<ExecutorResult> {
     if (!snapshot.confirmedContext) throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Contexto confirmado necessário.", 409);
-    const draft = generateDietDraft(snapshot);
+    const draft = await generateDietDraft(snapshot);
     const validationPlan = {
       id: "draft",
       version: 1,
@@ -224,15 +229,60 @@ export class DeterministicExecutorV3 {
     if (!context || !plan || !candidate) throw new V3Error("V3_EXECUTOR_INPUT_MISSING", "Contexto de dieta incompleto.", 409);
     const current = plan.meals.flatMap((meal) => meal.items).find((item) => item.id === context.itemId);
     if (!current) throw new V3Error("V3_DIET_ITEM_NOT_FOUND", "Alimento oficial não encontrado.", 409);
-    const replacement = calculateFoodReplacement(current, candidate);
-    const nextPlan = applyFoodReplacement(plan, current.id, replacement);
-    assertNutritionPlanValid(nextPlan);
-    const result = await withV3Span("POSTGRES_TRANSACTION", { "guto.operation": "swap_food" }, () =>
-      this.diet.swapFood({ actor: snapshot.actor, requestId: envelope.requestId, plan, itemId: current.id, replacement }));
+    if (candidate.kind !== "food") throw new V3Error("V3_INVALID_FOOD_CANDIDATE", "Candidato não é alimento.", 409);
+    const target = nutritionTargetFromProfile(calculateNutritionTarget(snapshot.profile, snapshot.goal));
+    const declaration = [snapshot.confirmedContext?.foodDeclaration || "", ...(snapshot.currentFacts || []).map((fact) => String(fact.value.declaration || fact.canonicalValue))].join(" ");
+    const eligible = filterFoodsByDeclaration(selectCandidateFoods(), declaration);
+    const excludedIds = selectCandidateFoods().filter((food) => !eligible.some((allowed) => allowed.id === food.id) || food.id === current.foodId).map((food) => food.id);
+    const previous = {
+      status: "OPTIMAL" as const,
+      foods: plan.meals.flatMap((meal) => meal.items).map((item) => ({ foodId: item.foodId, grams: item.quantityGrams })),
+      totals: { calories: plan.totalCalories, proteinGrams: plan.proteinGrams, carbsGrams: plan.carbsGrams, fatGrams: plan.fatGrams, fiberGrams: plan.meals.flatMap((meal) => meal.items).reduce((sum, item) => sum + (selectCandidateFoods().find((food) => food.id === item.foodId)?.nutritionPer100g.fiber || 0) * item.quantityGrams / 100, 0) },
+      solverMetadata: { durationMs: 0, formulation: "weighted_absolute_deviation_lp" as const },
+    };
+    const currentFood = selectCandidateFoods().find((food) => food.id === current.foodId);
+    const role = currentFood?.role;
+    const candidateCatalog = selectCandidateFoods().find((food) => food.id === candidate.id);
+    if (role && candidateCatalog && candidateCatalog.role !== role) {
+      throw new V3Error("V3_FOOD_ROLE_MISMATCH", "O candidato não pertence à mesma categoria culinária do alimento original.", 409);
+    }
+    // Only ineligible foods and the replaced (unavailable) item are excluded.
+    // Every other food stays free so the LP may adjust quantities elsewhere;
+    // role preservation is enforced on the candidate itself, not by freezing
+    // the rest of the plan.
+    const swapExcludedIds = selectCandidateFoods().filter((food) =>
+      !eligible.some((allowed) => allowed.id === food.id) || food.id === current.foodId
+    ).map((food) => food.id);
+    // The replaced item stays excluded (hard-zeroed) so the unavailable food
+    // disappears; only the candidate remains eligible inside the pool.
+    const optimized = await reoptimizeOfficialNutrition(previous, target, [...new Set(swapExcludedIds.filter((id) => id !== candidate.id))]);
+    validateOfficialNutrition(optimized, target);
+    const replacement = optimized.foods.find((food) => food.foodId === candidate.id);
+    if (!replacement) throw new V3Error("NUTRITION_PLAN_INFEASIBLE", "O candidato não pertence a uma solução válida.", 409);
+    const optimizedItems = optimized.foods.map((food, position) => {
+      const existing = plan.meals.flatMap((meal) => meal.items).find((entry) => entry.foodId === food.foodId);
+      const catalogFood = selectCandidateFoods().find((entry) => entry.id === food.foodId);
+      if (!catalogFood) throw new V3Error("NUTRITION_VALIDATION_FAILED", "Alimento otimizado ausente do catálogo.", 409);
+      const factor = food.grams / 100;
+      const proteinGrams = Number((catalogFood.nutritionPer100g.protein * factor).toFixed(2));
+      const carbsGrams = Number((catalogFood.nutritionPer100g.carbs * factor).toFixed(2));
+      const fatGrams = Number((catalogFood.nutritionPer100g.fat * factor).toFixed(2));
+      return { id: existing?.id || `item-${food.foodId}`, foodId: food.foodId, name: candidate.id === food.foodId ? candidate.label : catalogFood.canonicalName, quantityGrams: food.grams, calories: Number((proteinGrams * 4 + carbsGrams * 4 + fatGrams * 9).toFixed(2)), proteinGrams, carbsGrams, fatGrams, position };
+    });
+    const persistedPlan = structuredClone(plan);
+    persistedPlan.meals = [{ ...persistedPlan.meals[0], items: optimizedItems.map((entry) => ({ ...entry, id: entry.id })), calories: optimizedItems.reduce((sum, entry) => sum + entry.calories, 0) }];
+    const computed = calculateNutritionPlan(persistedPlan);
+    persistedPlan.totalCalories = computed.calories;
+    persistedPlan.proteinGrams = computed.proteinGrams;
+    persistedPlan.carbsGrams = computed.carbsGrams;
+    persistedPlan.fatGrams = computed.fatGrams;
+    assertNutritionPlanValid(persistedPlan);
+    const persisted = await this.diet.swapFood({ actor: snapshot.actor, requestId: envelope.requestId, plan, mutation: { planId: plan.id, expectedPlanVersion: plan.version, contextVersion: snapshot.confirmedContext?.version || 0, items: optimizedItems, totals: { calories: computed.calories, proteinGrams: computed.proteinGrams, carbsGrams: computed.carbsGrams, fatGrams: computed.fatGrams }, replacement: { previousFoodId: current.foodId, candidateId: candidate.id } } });
+    const planVersion = persisted.planVersion;
     const nextContext: ActiveContext = {
       ...context,
       version: context.version + 1,
-      planVersion: result.planVersion,
+      planVersion,
       itemLabel: candidate.label,
       rejectedCandidateIds: [...new Set([...(context.rejectedCandidateIds || []), current.foodId])],
       updatedAt: new Date().toISOString(),
@@ -242,8 +292,8 @@ export class DeterministicExecutorV3 {
     return {
       status: "confirmed",
       code: "FOOD_SWAPPED",
-      message: `Troca confirmada para ${replacement.quantityGrams} g de ${candidate.label}.`,
-      planVersion: result.planVersion,
+      message: `Troca confirmada para ${replacement.grams} g de ${candidate.label}.`,
+      planVersion,
       activeContextVersion: nextContext.version,
     };
   }

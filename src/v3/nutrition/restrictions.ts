@@ -27,3 +27,28 @@ export function isFoodEligibleForRestrictions(food: OfficialFoodCatalogItem, res
 export function filterFoodsByRestrictions(foods: readonly OfficialFoodCatalogItem[], declaration: string): OfficialFoodCatalogItem[] {
   return foods.filter((food) => isFoodEligibleForRestrictions(food, normalizeDietaryRestrictions(declaration)));
 }
+
+/**
+ * Named-food exclusion over the official catalog. A declaration that literally
+ * names a food (e.g. "não como batata") must remove it, even when no macro
+ * restriction is implied, so FOOD_EXCLUSION facts keep their authority.
+ * ID, canonical name and aliases are normalized and matched against the
+ * declaration. Only declarations with an explicit exclusion/avoidance signal
+ * trigger the named check (a bare mention never does).
+ */
+export function declarationExcludesFood(food: OfficialFoodCatalogItem, declaration: string): boolean {
+  const declared = normalize(declaration);
+  if (!declared) return false;
+  const isExclusion = /\b(nao como|nao consumo|nao[ -]?posso|sem|evito|evita|excluo|intoler|alerg|evitar)\b/u.test(declared);
+  if (!isExclusion) return false;
+  const mentions = [food.id, food.canonicalName, ...Object.values(food.aliases)]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => normalize(value))
+    .filter((value) => value.length >= 3);
+  return mentions.some((name) => new RegExp(`\\b${name}s?\\b`, "u").test(declared));
+}
+
+export function filterFoodsByDeclaration(foods: readonly OfficialFoodCatalogItem[], declaration: string): OfficialFoodCatalogItem[] {
+  const restricted = filterFoodsByRestrictions(foods, declaration);
+  return restricted.filter((food) => !declarationExcludesFood(food, declaration));
+}

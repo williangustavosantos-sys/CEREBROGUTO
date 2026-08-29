@@ -21,6 +21,15 @@ export interface FoodReplacement {
   fatGrams: number;
 }
 
+export interface FullDietPlanMutation {
+  planId: string;
+  expectedPlanVersion: number;
+  contextVersion: number;
+  items: Array<{ id: string; foodId: string; name: string; quantityGrams: number; calories: number; proteinGrams: number; carbsGrams: number; fatGrams: number; position: number; mealId?: string }>;
+  totals: { calories: number; proteinGrams: number; carbsGrams: number; fatGrams: number };
+  replacement: { previousFoodId: string; candidateId: string };
+}
+
 export interface WorkoutPlanDraft {
   title: string;
   generatedFrom: Record<string, unknown>;
@@ -114,8 +123,7 @@ export interface OfficialStateRepository {
     actor: ActorContext;
     requestId: string;
     plan: DietPlan;
-    itemId: string;
-    replacement: FoodReplacement;
+    mutation: FullDietPlanMutation;
   }): Promise<{ planVersion: number }>;
   recordTurn(input: {
     actor: ActorContext;
