@@ -5,6 +5,7 @@ import { materializeFirstContact } from "./first-contact.js";
 import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from "./facts.js";
 import { generateDietDraft, generateWorkoutDraft } from "./generation-engines.js";
 import { decideWorkoutEvolution } from "./workout-evolution.js";
+import { assertValidAdaptedExecution } from "./session-execution-policy.js";
 import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
 import { emptyConversationDecisionState, type ConversationDecisionState, type ConversationKnownFact } from "./conversation-state.js";
 import { deriveChildRequestId } from "./legacy-identity.js";
@@ -37,6 +38,8 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
   private readonly facts = new Map<string, RecordedFact[]>();
   private readonly conversationStates = new Map<string, ConversationDecisionState>();
   private readonly workoutSessionEvents = new Map<string, import("./types.js").WorkoutExerciseSessionEvent[]>();
+  private readonly requestIdDecisions = new Map<string, import("./types.js").WorkoutEvolutionDecision>();
+  private readonly requestIdInflight = new Map<string, Promise<import("./types.js").WorkoutEvolutionDecision>>();
   readonly events: Array<{ requestId: string; action: string; resultCode: string }> = [];
 
   seed(snapshot: OfficialSnapshot): void {
@@ -507,8 +510,40 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     return structuredClone(this.facts.get(key(actor)) || []);
   }
   async recordWorkoutExerciseEvent(input: { actor: ActorContext; requestId: string; event: import("./types.js").WorkoutExerciseSessionEvent }): Promise<import("./types.js").WorkoutEvolutionDecision> {
+    // P0 (concurrent idempotency): mirror the durable barrier — dedupe on
+    // requestId BEFORE recording, so a duplicated request never becomes a
+    // second logical execution or a false progression signal. The reservation
+    // below happens SYNCHRONOUSLY (before the first await), closing the
+    // check-then-act window: two concurrent requests with the same requestId
+    // can no longer both pass the dedupe read.
+    const dedupeKey = `${key(input.actor)}::${input.requestId}::workout.evolution_decided`;
+    const cached = this.requestIdDecisions.get(dedupeKey);
+    if (cached) return structuredClone(cached);
+    const inflight = this.requestIdInflight.get(dedupeKey);
+    if (inflight) return inflight;
+    const execution = this.recordWorkoutExerciseEventReserved(input);
+    this.requestIdInflight.set(dedupeKey, execution);
+    try {
+      const decision = await execution;
+      this.requestIdDecisions.set(dedupeKey, structuredClone(decision));
+      return decision;
+    } finally {
+      this.requestIdInflight.delete(dedupeKey);
+    }
+  }
+
+  private async recordWorkoutExerciseEventReserved(
+    input: { actor: ActorContext; requestId: string; event: import("./types.js").WorkoutExerciseSessionEvent },
+  ): Promise<import("./types.js").WorkoutEvolutionDecision> {
     const state = await this.loadAppState(input.actor);
-    if (!state.workout?.items.some((item) => item.exerciseId === input.event.exerciseId)) {
+    const basePlan = state.workout;
+    if (!basePlan) throw new V3Error("V3_WORKOUT_NOT_FOUND", "Treino oficial ativo não encontrado.", 409);
+    if (input.event.substitutedFromExerciseId) {
+      // P0 (adapted execution): validate adapted exercises deterministically
+      // (source in base plan; catalog + video + safety + location for the
+      // adapted exercise) instead of rejecting every adapted execution.
+      assertValidAdaptedExecution({ event: input.event, basePlan, snapshot: await this.loadOfficialSnapshot(input.actor) });
+    } else if (!basePlan.items.some((item) => item.exerciseId === input.event.exerciseId)) {
       throw new V3Error("V3_WORKOUT_EXERCISE_NOT_ACTIVE", "Exercício não pertence ao treino oficial ativo.", 409);
     }
     // P0#4: decide from the current event plus the recent history of the SAME

@@ -7,6 +7,7 @@ import { V3Error } from "./errors.js";
 import { materializeFirstContact } from "./first-contact.js";
 import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from "./facts.js";
 import { decideWorkoutEvolution } from "./workout-evolution.js";
+import { assertValidAdaptedExecution } from "./session-execution-policy.js";
 import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
 import type {
   ActorContext,
@@ -1124,6 +1125,18 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
 
   async recordWorkoutExerciseEvent(input: { actor: ActorContext; requestId: string; event: import("./types.js").WorkoutExerciseSessionEvent }): Promise<import("./types.js").WorkoutEvolutionDecision> {
     return this.withActorTransaction(input.actor, async (client) => {
+      // P0 (concurrent idempotency): serialize concurrent requests with the
+      // SAME requestId across serverless instances BEFORE the dedup read.
+      // Without this, two transactions can both SELECT-nothing, both insert a
+      // session, and duplicate history into a false progression signal. The
+      // transaction-scoped advisory lock releases automatically at COMMIT/
+      // ROLLBACK and works across instances (it is a database barrier, not an
+      // in-process mutex).
+      await client.query(
+        `SELECT pg_advisory_xact_lock(
+           hashtextextended($1 || ':' || $2 || ':' || $3, 0))`,
+        [input.actor.tenantId, input.actor.userId, input.requestId],
+      );
       // requestId is the public event identity for this endpoint. Deduplicate
       // before creating a workout session so network retries cannot become a
       // second historical execution or a false progression signal.
@@ -1150,11 +1163,24 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         [input.actor.tenantId, input.actor.userId],
       );
       if (!plan.rows[0]) throw new V3Error("V3_WORKOUT_NOT_FOUND", "Treino oficial ativo não encontrado.", 409);
-      const exercise = await client.query(
-        `SELECT 1 FROM guto_v3.workout_plan_items WHERE tenant_id=$1 AND plan_id=$2 AND exercise_id=$3`,
-        [input.actor.tenantId, plan.rows[0].id, input.event.exerciseId],
-      );
-      if (!exercise.rows[0]) throw new V3Error("V3_WORKOUT_EXERCISE_NOT_ACTIVE", "Exercício não pertence ao treino oficial ativo.", 409);
+      if (input.event.substitutedFromExerciseId) {
+        // P0 (adapted execution): SessionWorkout derives temporary adapted
+        // exercises WITHOUT mutating the base plan, so the adapted exerciseId
+        // is intentionally absent from workout_plan_items. Validate the
+        // adaptation deterministically (base membership of the source,
+        // catalog + video + safety + location of the adapted exercise)
+        // instead of rejecting every adapted execution. The base plan is
+        // never mutated by this path.
+        const basePlan = await this.loadWorkout(client, plan.rows[0]);
+        const snapshot = await this.loadOfficialSnapshot(input.actor);
+        assertValidAdaptedExecution({ event: input.event, basePlan, snapshot });
+      } else {
+        const exercise = await client.query(
+          `SELECT 1 FROM guto_v3.workout_plan_items WHERE tenant_id=$1 AND plan_id=$2 AND exercise_id=$3`,
+          [input.actor.tenantId, plan.rows[0].id, input.event.exerciseId],
+        );
+        if (!exercise.rows[0]) throw new V3Error("V3_WORKOUT_EXERCISE_NOT_ACTIVE", "Exercício não pertence ao treino oficial ativo.", 409);
+      }
       // P0#4: decide from the current event plus the recent history of the SAME
       // exercise, so PROGRESS requires 2+ consecutive easy completed sessions.
       const recent = await client.query<{
