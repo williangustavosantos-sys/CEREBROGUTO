@@ -1062,15 +1062,26 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         throw new V3Error("V3_STALE_DIET_VERSION", "A dieta mudou; recarregue o estado oficial.", 409);
       }
       if (input.mutation.planId !== input.plan.id || input.mutation.expectedPlanVersion !== input.plan.version) throw new V3Error("V3_STALE_DIET_VERSION", "A dieta mudou; recarregue o estado oficial.", 409);
-      const currentItems = await client.query<{ id: string; meal_id: string }>(`SELECT id, meal_id FROM guto_v3.diet_items WHERE tenant_id=$1 AND plan_id=$2 FOR UPDATE`, [input.actor.tenantId, input.plan.id]);
+      const currentItems = await client.query<{ id: string; meal_id: string }>(`SELECT i.id, i.meal_id FROM guto_v3.diet_items i JOIN guto_v3.diet_meals m ON m.id = i.meal_id WHERE i.tenant_id=$1 AND m.plan_id=$2 FOR UPDATE OF i`, [input.actor.tenantId, input.plan.id]);
       const currentIds = new Set(currentItems.rows.map((row) => row.id));
       const mutationIds = new Set(input.mutation.items.map((item) => item.id));
-      for (const id of currentIds) if (!mutationIds.has(id)) await client.query(`DELETE FROM guto_v3.diet_items WHERE tenant_id=$1 AND id=$2`, [input.actor.tenantId, id]);
       const mealId = currentItems.rows[0]?.meal_id;
       if (!mealId) throw new V3Error("V3_DIET_ITEM_NOT_FOUND", "Alimento oficial não encontrado.", 409);
+      // Move every retained item to a guaranteed collision-free temporary range
+      // (above any realistic plan position) BEFORE writing final positions, so
+      // the (meal_id, position) unique key can never be violated mid-transaction
+      // when a later row still occupies a destination position.
+      const positionOffset = 1000000;
+      let positionCursor = 0;
+      for (const row of currentItems.rows) {
+        if (!mutationIds.has(row.id)) continue;
+        await client.query(`UPDATE guto_v3.diet_items SET position=$1 WHERE tenant_id=$2 AND id=$3`, [positionCursor + positionOffset, input.actor.tenantId, row.id]);
+        positionCursor += 1;
+      }
+      for (const id of currentIds) if (!mutationIds.has(id)) await client.query(`DELETE FROM guto_v3.diet_items WHERE tenant_id=$1 AND id=$2`, [input.actor.tenantId, id]);
       for (const item of input.mutation.items) {
         if (!Number.isFinite(item.quantityGrams) || item.quantityGrams <= 0 || [item.calories, item.proteinGrams, item.carbsGrams, item.fatGrams].some((value) => !Number.isFinite(value))) throw new V3Error("NUTRITION_VALIDATION_FAILED", "Mutação de dieta inválida.", 409);
-        if (currentIds.has(item.id)) await client.query(`UPDATE guto_v3.diet_items SET food_id=$1,name=$2,quantity_grams=$3,calories=$4,protein_grams=$5,carbs_grams=$6,fat_grams=$7,version=version+1 WHERE tenant_id=$8 AND id=$9`, [item.foodId,item.name,item.quantityGrams,item.calories,item.proteinGrams,item.carbsGrams,item.fatGrams,input.actor.tenantId,item.id]);
+        if (currentIds.has(item.id)) await client.query(`UPDATE guto_v3.diet_items SET food_id=$1,name=$2,quantity_grams=$3,calories=$4,protein_grams=$5,carbs_grams=$6,fat_grams=$7,position=$8,version=version+1 WHERE tenant_id=$9 AND id=$10`, [item.foodId,item.name,item.quantityGrams,item.calories,item.proteinGrams,item.carbsGrams,item.fatGrams,item.position,input.actor.tenantId,item.id]);
         else await client.query(`INSERT INTO guto_v3.diet_items (id,tenant_id,meal_id,food_id,name,quantity_grams,calories,protein_grams,carbs_grams,fat_grams,position,version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1)`, [item.id,input.actor.tenantId,item.mealId || mealId,item.foodId,item.name,item.quantityGrams,item.calories,item.proteinGrams,item.carbsGrams,item.fatGrams,item.position]);
       }
       await client.query(`UPDATE guto_v3.diet_meals SET calories=$1, version=version+1 WHERE id=$2 AND tenant_id=$3`, [input.mutation.totals.calories, mealId, input.actor.tenantId]);

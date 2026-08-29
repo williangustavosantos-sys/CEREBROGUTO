@@ -3,6 +3,7 @@ import { getFoodById, resolveFoodIdByName, type FoodLanguage } from "../food-cat
 import { suggestFoodSubstitutes } from "../food-availability.js";
 import { conflictsWithFoodDeclaration } from "./food-declaration-policy.js";
 import { decideExerciseSubstitution, decideFoodSubstitution } from "./substitution-engine.js";
+import { selectCandidateFoods } from "./nutrition/catalog.js";
 import type { ActiveContext, CandidateOption, OfficialSnapshot } from "./types.js";
 
 export interface CandidateProvider {
@@ -38,7 +39,11 @@ function language(value: string): CatalogLanguage & FoodLanguage {
 function foodCandidate(foodId: string, locale: FoodLanguage): CandidateOption | null {
   const food = getFoodById(foodId);
   const nutrition = V3_FOOD_NUTRITION[foodId];
-  if (!food || !nutrition) return null;
+  // Only candidates the shared LP solver can actually place may be offered:
+  // the solver pool is the V3 official catalog, which is a strict subset of
+  // the legacy availability catalog. Offering a food absent from it makes the
+  // solver report a false INFEASIBLE for a candidate it can never select.
+  if (!food || !nutrition || !selectCandidateFoods().some((item) => item.id === foodId)) return null;
   return {
     id: food.id,
     label: food.names[locale] || food.names["en-US"],

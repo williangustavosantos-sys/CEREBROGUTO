@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { DecisionEnvelope } from "./contracts.js";
 import { V3Error } from "./errors.js";
 import { assertNutritionPlanValid, calculateNutritionPlan } from "./nutrition-engine.js";
@@ -255,7 +256,10 @@ export class DeterministicExecutorV3 {
     ).map((food) => food.id);
     // The replaced item stays excluded (hard-zeroed) so the unavailable food
     // disappears; only the candidate remains eligible inside the pool.
-    const optimized = await reoptimizeOfficialNutrition(previous, target, [...new Set(swapExcludedIds.filter((id) => id !== candidate.id))]);
+    // Foods the user already rejected in this conversation also stay out, so
+    // the LP cannot silently re-add an item the user swapped away.
+    const previouslyRejected = new Set(context.rejectedCandidateIds || []);
+    const optimized = await reoptimizeOfficialNutrition(previous, target, [...new Set(swapExcludedIds.filter((id) => id !== candidate.id && !previouslyRejected.has(id)))]);
     validateOfficialNutrition(optimized, target);
     const replacement = optimized.foods.find((food) => food.foodId === candidate.id);
     if (!replacement) throw new V3Error("NUTRITION_PLAN_INFEASIBLE", "O candidato não pertence a uma solução válida.", 409);
@@ -267,7 +271,7 @@ export class DeterministicExecutorV3 {
       const proteinGrams = Number((catalogFood.nutritionPer100g.protein * factor).toFixed(2));
       const carbsGrams = Number((catalogFood.nutritionPer100g.carbs * factor).toFixed(2));
       const fatGrams = Number((catalogFood.nutritionPer100g.fat * factor).toFixed(2));
-      return { id: existing?.id || `item-${food.foodId}`, foodId: food.foodId, name: candidate.id === food.foodId ? candidate.label : catalogFood.canonicalName, quantityGrams: food.grams, calories: Number((proteinGrams * 4 + carbsGrams * 4 + fatGrams * 9).toFixed(2)), proteinGrams, carbsGrams, fatGrams, position };
+      return { id: existing?.id || randomUUID(), foodId: food.foodId, name: candidate.id === food.foodId ? candidate.label : catalogFood.canonicalName, quantityGrams: food.grams, calories: Number((proteinGrams * 4 + carbsGrams * 4 + fatGrams * 9).toFixed(2)), proteinGrams, carbsGrams, fatGrams, position };
     });
     const persistedPlan = structuredClone(plan);
     persistedPlan.meals = [{ ...persistedPlan.meals[0], items: optimizedItems.map((entry) => ({ ...entry, id: entry.id })), calories: optimizedItems.reduce((sum, entry) => sum + entry.calories, 0) }];
