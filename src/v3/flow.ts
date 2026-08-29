@@ -2,6 +2,7 @@ import { z, type Genkit } from "genkit";
 import type { DecisionModel } from "./ai.js";
 import { BrainVersion } from "./contracts.js";
 import { resolveDeclaredOperationalFacts } from "./facts.js";
+import { resolveSessionAdaptation } from "./session-workout.js";
 import { GutoContextBuilderV3 } from "./context-builder.js";
 import { V3Error } from "./errors.js";
 import { DeterministicExecutorV3 } from "./executors.js";
@@ -46,15 +47,17 @@ const ExecutorResultSchema = z.object({
   activeContextVersion: z.number().optional(),
   factContextVersion: z.number().optional(),
   affectedDomains: z.array(z.enum(["WORKOUT", "NUTRITION", "PROGRESS", "PROACTIVITY", "SESSION"])).optional(),
+  sessionWorkout: z.any().optional(),
 });
 
 const V3TurnResponseSchema = z.object({
   speech: z.string(),
-  action: z.enum(["none", "askClarification", "swapExercise", "swapFood", "generateWorkout", "generateDiet", "updateFacts", "startMinimumMission", "acknowledge", "callSafetyPath"]),
+  action: z.enum(["none", "askClarification", "swapExercise", "swapFood", "generateWorkout", "generateDiet", "buildSessionWorkout", "updateFacts", "startMinimumMission", "acknowledge", "callSafetyPath"]),
   requestId: z.string().uuid(),
   traceId: z.string(),
   brainVersion: z.literal("guto-cerebro-v3"),
   execution: ExecutorResultSchema,
+  sessionWorkout: z.any().optional(),
   versions: z.object({
     memoryVersion: z.number(),
     activeContextVersion: z.number().nullable(),
@@ -76,7 +79,7 @@ export interface GutoTurnFlowDependencies {
 
 function finalSpeech(action: string, modelSpeech: string, clarification: string | undefined, executorMessage: string, confirmed: boolean): string {
   if (action === "askClarification") return clarification || modelSpeech;
-  if ((action === "swapExercise" || action === "swapFood" || action === "updateFacts") && confirmed) return executorMessage;
+  if ((action === "swapExercise" || action === "swapFood" || action === "updateFacts" || action === "buildSessionWorkout") && confirmed) return executorMessage;
   if ((action === "swapExercise" || action === "swapFood" || action === "updateFacts") && !confirmed) return `Não alterei nada. ${executorMessage}`;
   return modelSpeech;
 }
@@ -126,9 +129,22 @@ export function createGutoTurnFlow(deps: GutoTurnFlowDependencies) {
         const decision = detectedFacts.length && !["callSafetyPath", "askClarification"].includes(modelResult.decision.action)
           ? { ...modelResult.decision, action: "updateFacts" as const, reasonCode: "user_declared_operational_fact", operationalFacts: detectedFacts }
           : modelResult.decision;
+        // Session hints ("só tenho 20 minutos", "hoje vou treinar em casa") are
+        // temporary adaptations. A deterministic guard forces buildSessionWorkout
+        // so the BASE plan is never regenerated/replaced by a session-scoped
+        // message, regardless of what the model proposed — even when the fact
+        // resolver would otherwise route a session-location hint to updateFacts.
+        const sessionAdaptation = resolveSessionAdaptation(input.message);
+        const sessionOnlyFacts = detectedFacts.length > 0 && detectedFacts.every((fact) => fact.scope === "session");
+        const sessionOverride = sessionAdaptation && (
+          ["generateWorkout", "generateDiet"].includes(decision.action) || sessionOnlyFacts
+        )
+          ? { ...decision, action: "buildSessionWorkout" as const, reasonCode: "session_adaptation_preserves_base", operationalFacts: undefined }
+          : null;
+        const effectiveDecision = sessionOverride ?? decision;
         const gate = await deps.ai.run("POLICY_GATE", () => withV3Span("POLICY_GATE", {
-          "guto.action": decision.action,
-        }, async () => policyGate.authorize(decision, envelope, snapshot)));
+          "guto.action": effectiveDecision.action,
+        }, async () => policyGate.authorize(effectiveDecision, envelope, snapshot)));
 
         const execution = gate.authorized
           ? await deps.ai.run("EXECUTOR", () => withV3Span("EXECUTOR", { "guto.action": gate.decision.action }, () =>
@@ -182,6 +198,7 @@ export function createGutoTurnFlow(deps: GutoTurnFlowDependencies) {
           traceId: currentTraceId(),
           brainVersion: BrainVersion,
           execution,
+          sessionWorkout: execution.sessionWorkout as V3TurnResponse["sessionWorkout"],
           versions: {
             memoryVersion: snapshot.memoryVersion,
             activeContextVersion: execution.activeContextVersion ?? envelope.activeContext?.version ?? null,

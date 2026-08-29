@@ -10,6 +10,7 @@ export const V3ActionSchema = z.enum([
   "swapFood",
   "generateWorkout",
   "generateDiet",
+  "buildSessionWorkout",
   "updateFacts",
   "startMinimumMission",
   "acknowledge",

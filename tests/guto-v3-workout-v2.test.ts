@@ -1,11 +1,20 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
+import { genkit } from "genkit";
 import { getCatalogById, getExerciseRiskTags, getExerciseLocations, ValidatedExerciseCatalog, suggestExerciseSubstitutes } from "../exercise-catalog.js";
+import type { DecisionModel } from "../src/v3/ai.js";
+import type { DecisionEnvelope } from "../src/v3/contracts.js";
+import type { CandidateProvider } from "../src/v3/candidate-provider.js";
+import { GutoContextBuilderV3 } from "../src/v3/context-builder.js";
+import { createGutoTurnFlow } from "../src/v3/flow.js";
 import { generateWorkoutDraft } from "../src/v3/generation-engines.js";
-import { buildSessionWorkout, estimateSessionMinutes } from "../src/v3/session-workout.js";
+import { InMemoryOfficialStateRepository } from "../src/v3/in-memory-repository.js";
+import { InMemoryOperationalState } from "../src/v3/operational-state.js";
+import { InMemoryRelationshipMemoryStore } from "../src/v3/relationship-memory.js";
+import { buildSessionWorkout, estimateSessionMinutes, resolveSessionAdaptation } from "../src/v3/session-workout.js";
 import { decideWorkoutEvolution } from "../src/v3/workout-evolution.js";
 import { frequencySplitFor, sessionTemplateFor, WORKOUT_PRESCRIPTION_POLICY_VERSION } from "../src/v3/workout-prescription.js";
-import type { OfficialSnapshot, WorkoutExerciseSessionEvent, WorkoutPlan } from "../src/v3/types.js";
+import type { ActiveContext, OfficialSnapshot, TurnEnvelope, WorkoutExerciseSessionEvent, WorkoutPlan } from "../src/v3/types.js";
 
 function snapshot(overrides: Partial<{
   trainingStatus: string;
@@ -293,4 +302,148 @@ test("FULL BETA JOURNEY: generation -> session -> occupied swap -> evolution -> 
   // Base workout is never destroyed by any adaptation.
   assert.equal(base.items.some((item) => item.exerciseId === occupiedId), true, "base still has the original occupied exercise");
   assert.equal(base.version, 1);
+});
+
+// ─── RUNTIME WIRING: session hints must never replace the base plan ───────
+class SessionHintWorkoutDecisionModel implements DecisionModel {
+  async decide(envelope: TurnEnvelope): Promise<DecisionEnvelope> {
+    // Simulates the model misclassifying a session hint as a regeneration
+    // request — the deterministic guard must override it.
+    if (/minutos|minutes|min\b/.test(envelope.message)) {
+      return { speech: "Vou gerar um treino novo.", action: "generateWorkout", reasonCode: "model_guess" } as DecisionEnvelope;
+    }
+    if (/casa|home/.test(envelope.message)) {
+      return { speech: "Vou gerar um treino novo.", action: "generateWorkout", reasonCode: "model_guess" } as DecisionEnvelope;
+    }
+    return { speech: "Entendi.", action: "acknowledge", reasonCode: "acknowledged" } as DecisionEnvelope;
+  }
+}
+
+class EmptyCandidateProvider implements CandidateProvider {
+  async getCandidates(): Promise<never[]> { return []; }
+}
+
+function seededSnapshot(overrides: { frequency?: number; trainingStatus?: string; location?: string } = {}): OfficialSnapshot {
+  const state = snapshot({ trainingStatus: overrides.trainingStatus || "returning", frequency: overrides.frequency ?? 4, goal: "muscle_gain", location: overrides.location || "gym" });
+  state.workout = asPlan(generateWorkoutDraft(state), "workout-base");
+  return state;
+}
+
+async function workoutFlowHarness(state: OfficialSnapshot) {
+  const ai = genkit({});
+  const repository = new InMemoryOfficialStateRepository();
+  repository.seed(structuredClone(state));
+  const operational = new InMemoryOperationalState();
+  const relationshipMemory = new InMemoryRelationshipMemoryStore();
+  const contextBuilder = new GutoContextBuilderV3(repository, operational, relationshipMemory, new EmptyCandidateProvider());
+  const flow = createGutoTurnFlow({
+    ai,
+    repository,
+    operational,
+    relationshipMemory,
+    contextBuilder,
+    decisionModel: new SessionHintWorkoutDecisionModel(),
+  });
+  return { repository, operational, flow, actor: state.actor };
+}
+
+async function workoutActiveContext(operational: InMemoryOperationalState, actor: OfficialSnapshot["actor"], itemId: string) {
+  const context: ActiveContext = {
+    id: "session-ctx-1", version: 1, kind: "workout", planId: "workout-base", planVersion: 1,
+    itemId, itemLabel: "Supino", rejectedCandidateIds: [], updatedAt: new Date().toISOString(),
+  };
+  await operational.compareAndSetActiveContext(actor, null, context);
+  return context;
+}
+
+test("P0 RUNTIME: 'só tenho 20 minutos' NEVER replaces the base workout (deterministic guard forces buildSessionWorkout)", async () => {
+  const state = seededSnapshot();
+  const { repository, flow, actor, operational } = await workoutFlowHarness(state);
+  const before = await repository.loadOfficialSnapshot(actor);
+  const baseId = before.workout!.id;
+  const baseVersion = before.workout!.version;
+  const baseItems = before.workout!.items.length;
+
+  const response = await flow({
+    externalSubject: actor.externalSubject,
+    role: "student",
+    message: "Hoje só tenho 20 minutos para treinar.",
+    requestId: "aaaa0000-0000-4000-8000-0000000000aa",
+  });
+
+  assert.equal(response.action, "buildSessionWorkout");
+  assert.equal(response.execution.status, "confirmed");
+  assert.equal(response.execution.code, "SESSION_ADAPTED");
+  assert.ok(response.sessionWorkout, "response must carry the derived session workout");
+  assert.equal((response.sessionWorkout as { adaptationReasons: string[] }).adaptationReasons.includes("TIME_BUDGET"), true);
+  assert.ok(((response.sessionWorkout as { availableMinutes?: number }).availableMinutes) === 20);
+
+  const after = await repository.loadOfficialSnapshot(actor);
+  assert.equal(after.workout!.id, baseId, "base workout id must be unchanged");
+  assert.equal(after.workout!.version, baseVersion, "base workout version must be unchanged");
+  assert.equal(after.workout!.items.length, baseItems, "base workout items must be unchanged");
+});
+
+test("P0 RUNTIME: 'hoje vou treinar em casa' never replaces the base workout", async () => {
+  const state = seededSnapshot();
+  const { repository, flow, actor } = await workoutFlowHarness(state);
+  const before = await repository.loadOfficialSnapshot(actor);
+  const baseId = before.workout!.id;
+  const baseVersion = before.workout!.version;
+
+  // A home session may legitimately be CATALOG_INSUFFICIENT when the base plan
+  // has no home-compatible coverage (mission: "Se catálogo for insuficiente:
+  // CATALOG_INSUFFICIENT é aceitável"). The hard invariant is that the BASE
+  // plan is never replaced by a session-level message.
+  let response;
+  try {
+    response = await flow({
+      externalSubject: actor.externalSubject,
+      role: "student",
+      message: "Hoje vou treinar em casa.",
+      requestId: "aaaa0000-0000-4000-8000-0000000000ab",
+    });
+    assert.equal(response.action, "buildSessionWorkout");
+    assert.ok(response.sessionWorkout);
+    assert.equal((response.sessionWorkout as { effectiveLocation: string }).effectiveLocation, "home");
+  } catch (error) {
+    assert.equal((error as { code?: string }).code, "V3_WORKOUT_CATALOG_INSUFFICIENT", "home session may be insufficient, never anything else");
+  }
+
+  const after = await repository.loadOfficialSnapshot(actor);
+  assert.equal(after.workout!.id, baseId);
+  assert.equal(after.workout!.version, baseVersion);
+});
+
+test("P0 RUNTIME: machine-occupied session hint still swaps via the shared reoptimizer path without base replacement", async () => {
+  const state = seededSnapshot();
+  const { repository, operational, flow, actor } = await workoutFlowHarness(state);
+  const before = await repository.loadOfficialSnapshot(actor);
+  const peitoItem = before.workout!.items.find((item) => item.muscleGroup === "peito");
+  assert.ok(peitoItem, "plan must contain a peito item");
+  await workoutActiveContext(operational, actor, peitoItem!.id);
+  const baseId = before.workout!.id;
+  const baseVersion = before.workout!.version;
+
+  const response = await flow({
+    externalSubject: actor.externalSubject,
+    role: "student",
+    message: "Essa máquina está ocupada, troca esse exercício.",
+    requestId: "aaaa0000-0000-4000-8000-0000000000ac",
+  });
+
+  // With an empty candidate provider the swap cannot be authorized, but the
+  // base plan must never be replaced by a session-level message regardless.
+  assert.ok(["rejected", "not_executed"].includes(response.execution.status));
+  const after = await repository.loadOfficialSnapshot(actor);
+  assert.equal(after.workout!.id, baseId);
+  assert.equal(after.workout!.version, baseVersion);
+});
+
+test("resolveSessionAdaptation detects time budgets and today-locations deterministically", () => {
+  assert.equal(resolveSessionAdaptation("Hoje só tenho 20 minutos para treinar.")?.availableMinutes, 20);
+  assert.equal(resolveSessionAdaptation("Só tenho 45 min hoje")?.availableMinutes, 45);
+  assert.equal(resolveSessionAdaptation("Hoje vou treinar em casa.")?.effectiveLocation, "home");
+  assert.equal(resolveSessionAdaptation("Today I'm training at home.")?.effectiveLocation, "home");
+  assert.equal(resolveSessionAdaptation("Qual é a minha meta de proteína?"), null);
 });

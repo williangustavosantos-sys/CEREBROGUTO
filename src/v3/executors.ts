@@ -18,6 +18,7 @@ import type {
 } from "./types.js";
 import { withV3Span } from "./observability/tracing.js";
 import { generateDietDraft, generateWorkoutDraft } from "./generation-engines.js";
+import { buildSessionWorkout, resolveSessionAdaptation } from "./session-workout.js";
 import { impactsFor, type FactChange } from "./facts.js";
 import { deriveChildRequestId } from "./legacy-identity.js";
 
@@ -85,6 +86,7 @@ export class DeterministicExecutorV3 {
     if (decision.action === "swapFood") return this.swapFood(decision, envelope, snapshot);
     if (decision.action === "generateWorkout") return this.generateWorkout(envelope, snapshot);
     if (decision.action === "generateDiet") return this.generateDiet(envelope, snapshot);
+    if (decision.action === "buildSessionWorkout") return this.buildSessionWorkout(envelope, snapshot);
     if (decision.action === "updateFacts") return this.updateFacts(decision, envelope, snapshot);
     return {
       status: "rejected",
@@ -186,6 +188,30 @@ export class DeterministicExecutorV3 {
       code: "DIET_GENERATED",
       message: "Dieta oficial gerada, validada e confirmada.",
       planVersion: plan.version,
+    };
+  }
+
+  /**
+   * Session adaptation is a DERIVATION, never a base mutation: the session
+   * workout is computed from the current official base plan and returned in
+   * the response. The repository is never called, so the base plan (id and
+   * version) stays untouched and session history/versioning is preserved.
+   */
+  private async buildSessionWorkout(envelope: TurnEnvelope, snapshot: OfficialSnapshot): Promise<ExecutorResult> {
+    if (!snapshot.workout) throw new V3Error("V3_BASE_WORKOUT_REQUIRED", "Treino oficial necessário para adaptar a sessão.", 409);
+    const hint = resolveSessionAdaptation(envelope.message);
+    const sessionWorkout = buildSessionWorkout({
+      baseWorkout: snapshot.workout,
+      snapshot,
+      availableMinutes: hint?.availableMinutes,
+      effectiveLocation: hint?.effectiveLocation,
+    });
+    return {
+      status: "confirmed",
+      code: "SESSION_ADAPTED",
+      message: "Sessão de hoje adaptada; o plano oficial não foi alterado.",
+      planVersion: snapshot.workout.version,
+      sessionWorkout,
     };
   }
 

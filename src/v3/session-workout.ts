@@ -32,6 +32,31 @@ export interface BuildSessionWorkoutInput {
   rejectedCandidateIds?: string[];
 }
 
+/**
+ * Deterministic session-adaptation detection from a user message. Recognises
+ * session time budgets ("só tenho 20 minutos") and session locations ("hoje
+ * vou treinar em casa") WITHOUT trusting the model to pick the action. The
+ * base plan must never be regenerated for a session-scoped hint.
+ */
+export interface SessionAdaptationHint {
+  availableMinutes?: number;
+  effectiveLocation?: CatalogLocation;
+}
+
+export function resolveSessionAdaptation(message: string): SessionAdaptationHint | null {
+  const text = message.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("pt-BR");
+  const hint: SessionAdaptationHint = {};
+  const budget = /(?:s[oó] tenho|so tenho|tenho (?:apenas |s[oó] |somente )?|apenas|only)\s*(\d{1,3})\s*(?:min|minutos|minutes?)/u.exec(text);
+  if (budget) {
+    const minutes = Number(budget[1]);
+    if (minutes >= 5 && minutes <= 240) hint.availableMinutes = minutes;
+  }
+  const location = /(?:hoje|today).{0,36}\b(casa|home|parque|park)\b/u.exec(text)?.[1];
+  if (location) hint.effectiveLocation = location === "parque" || location === "park" ? "park" : "home";
+  if (hint.availableMinutes === undefined && hint.effectiveLocation === undefined) return null;
+  return hint;
+}
+
 /** Movement patterns considered "main" for a 20-minute priority cut. */
 const MAIN_MOVEMENT_PATTERNS = new Set(["empurrar", "puxar", "agachamento", "extensao", "extensao-quadril", "elevacao", "unilateral"]);
 const ACCESSORY_GROUPS = new Set(["bracos", "abdomen", "aquecimento"]);

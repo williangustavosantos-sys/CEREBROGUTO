@@ -293,6 +293,7 @@ export interface ExecutorResult {
   activeContextVersion?: number;
   factContextVersion?: number;
   affectedDomains?: FactImpactDomain[];
+  sessionWorkout?: unknown;
 }
 
 export interface V3TurnResponse {
@@ -302,6 +303,7 @@ export interface V3TurnResponse {
   traceId: string;
   brainVersion: "guto-cerebro-v3";
   execution: ExecutorResult;
+  sessionWorkout?: unknown;
   versions: {
     memoryVersion: number;
     activeContextVersion: number | null;

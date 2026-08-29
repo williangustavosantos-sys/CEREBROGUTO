@@ -104,7 +104,7 @@ export function resolveDeclaredOperationalFacts(message: string): FactChange[] {
   if (region && /(dor|incomod|nao consigo|limita|pain|fastidio)/u.test(text)) {
     changes.push(declared("PHYSICAL_CONSTRAINT", region, { bodyRegion: region, declaration: message.trim() }));
   }
-  const sessionLocation = /(hoje|today|oggi).{0,36}\b(casa|home|park|parque|gym|academia)\b/u.exec(text)?.[1];
+  const sessionLocation = /(hoje|today|oggi).{0,36}\b(casa|home|park|parque|gym|academia)\b/u.exec(text)?.[2];
   if (sessionLocation) changes.push(declared("LOCATION", sessionLocation, { location: sessionLocation }, "session"));
   if (/\b(prefiro|preferisco|i prefer)\b/u.test(text)) changes.push(declared("BEHAVIORAL_PREFERENCE", text, { declaration: message.trim() }));
   return changes;
