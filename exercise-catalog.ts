@@ -2347,11 +2347,23 @@ export function suggestExerciseSubstitutes(
   const filtered = candidates.filter((c) => {
     if (!validateExerciseSubstitute(ex, c).valid) return false;
     if (options.location && !getExerciseLocations(c).includes(options.location)) return false;
+    // Video is mandatory: every official candidate must carry validated media.
+    if (!c.videoUrl) return false;
     return true;
   });
 
+  // Stimulus preservation (P0#2): rank candidates so the SAME movement
+  // pattern comes first, then same muscle group. Never just take the first
+  // exercise of the muscle group (e.g. supino empurrar -> crucifixo adducao).
+  const ranked = [...filtered].sort((a, b) => {
+    const aSameMovement = a.movementPattern === ex.movementPattern ? 0 : 1;
+    const bSameMovement = b.movementPattern === ex.movementPattern ? 0 : 1;
+    if (aSameMovement !== bSameMovement) return aSameMovement - bSameMovement;
+    return a.id.localeCompare(b.id);
+  });
+
   return filterExercisesBySafety(
-    filtered.map((c) => c.id),
+    ranked.map((c) => c.id),
     { userRiskTags: options.userRiskTags, userBodyRegion: options.userBodyRegion }
   );
 }

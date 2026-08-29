@@ -36,6 +36,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
   private readonly firstContactResponseRequests = new Set<string>();
   private readonly facts = new Map<string, RecordedFact[]>();
   private readonly conversationStates = new Map<string, ConversationDecisionState>();
+  private readonly workoutSessionEvents = new Map<string, import("./types.js").WorkoutExerciseSessionEvent[]>();
   readonly events: Array<{ requestId: string; action: string; resultCode: string }> = [];
 
   seed(snapshot: OfficialSnapshot): void {
@@ -510,7 +511,13 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     if (!state.workout?.items.some((item) => item.exerciseId === input.event.exerciseId)) {
       throw new V3Error("V3_WORKOUT_EXERCISE_NOT_ACTIVE", "Exercício não pertence ao treino oficial ativo.", 409);
     }
-    const decision = decideWorkoutEvolution(input.event);
+    // P0#4: decide from the current event plus the recent history of the SAME
+    // exercise, so PROGRESS requires 2+ consecutive easy completed sessions.
+    const keyed = key(input.actor);
+    const prior = this.workoutSessionEvents.get(keyed) || [];
+    const history = prior.filter((event) => event.exerciseId === input.event.exerciseId).slice(-4);
+    const decision = decideWorkoutEvolution(input.event, history);
+    this.workoutSessionEvents.set(keyed, [...prior, input.event]);
     this.events.push({ requestId: input.requestId, action: "workoutEvolution", resultCode: decision.decision });
     return decision;
   }

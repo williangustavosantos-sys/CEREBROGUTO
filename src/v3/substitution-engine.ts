@@ -24,11 +24,15 @@ function locale(language: string): CatalogLanguage & FoodLanguage {
 }
 
 /** A deterministic domain decision. Gemini may select/explain a listed item only. */
-export function decideExerciseSubstitution(input: { snapshot: OfficialSnapshot; current: WorkoutItem; rejectedIds?: string[] }): ExerciseSubstitutionDecision {
+export function decideExerciseSubstitution(input: { snapshot: OfficialSnapshot; current: WorkoutItem; rejectedIds?: string[]; location?: "gym" | "home" | "park" }): ExerciseSubstitutionDecision {
   const language = locale(input.snapshot.profile.language);
   const rejected = new Set(input.rejectedIds || []);
+  // P0#2: the effective session location drives the candidate pool. Defaults to
+  // the confirmed context / profile location, never a hardcoded gym.
+  const effectiveLocation = input.location ??
+    (input.snapshot.confirmedContext?.trainingLocation || input.snapshot.profile.trainingLocation || "gym") as "gym" | "home" | "park";
   const candidates: CandidateOption[] = suggestExerciseSubstitutes(input.current.exerciseId, {
-    location: "gym",
+    location: effectiveLocation,
     userBodyRegion: [input.snapshot.confirmedContext?.limitationDeclaration, ...(input.snapshot.currentFacts || [])
       .filter((fact) => fact.factType === "PHYSICAL_CONSTRAINT")
       .map((fact) => String(fact.value.bodyRegion || fact.value.declaration || ""))].join(" "),

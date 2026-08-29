@@ -12,6 +12,7 @@ import { V3_FOOD_NUTRITION } from "./candidate-provider.js";
 import { V3Error } from "./errors.js";
 import { generateOfficialDietDraft } from "./nutrition/official-engine.js";
 import { conflictsWithFoodDeclaration } from "./food-declaration-policy.js";
+import { WORKOUT_PRESCRIPTION_POLICY_VERSION, frequencySplitFor, prescriptionContext, sessionTemplateFor, templateFocus } from "./workout-prescription.js";
 import type { DietPlanDraft, WorkoutPlanDraft } from "./repository.js";
 import type { OfficialSnapshot } from "./types.js";
 
@@ -45,28 +46,70 @@ function riskTokens(snapshot: OfficialSnapshot): Set<string> {
     .filter((value): value is string => Boolean(value)));
 }
 
-export function generateWorkoutDraft(snapshot: OfficialSnapshot): WorkoutPlanDraft {
+export function generateWorkoutDraft(snapshot: OfficialSnapshot, options: { sessionIndex?: number } = {}): WorkoutPlanDraft {
   if (!snapshot.confirmedContext) throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Contexto confirmado necessário para gerar treino.", 409);
   const language = locale(snapshot.profile.language);
   const location = trainingLocation(snapshot.profile.trainingLocation);
   const risks = riskTokens(snapshot);
-  const desiredGroups: CatalogMuscleGroup[] = snapshot.goal.code === "conditioning"
-    ? ["aquecimento", "pernas", "peito", "costas", "abdomen"]
-    : ["aquecimento", "peito", "costas", "pernas", "ombro", "bracos", "abdomen"];
-  const selected = desiredGroups.map((group) => {
-    const eligible = (exercise: (typeof ValidatedExerciseCatalog)[number]) =>
+  const frequency = snapshot.profile.weeklyFrequencyDaysPerWeek ?? snapshot.confirmedContext.weeklyFrequencyDaysPerWeek ?? 3;
+  const ctx = prescriptionContext({
+    trainingStatus: snapshot.profile.trainingStatus,
+    goalCode: snapshot.goal.code,
+    frequency,
+    sessionIndex: options.sessionIndex ?? 0,
+  });
+  const template = sessionTemplateFor(ctx.frequency, ctx.sessionIndex);
+  const focusGroups = templateFocus(template, ctx.experience);
+  const eligibleFor = (group: CatalogMuscleGroup): (typeof ValidatedExerciseCatalog)[number][] =>
+    ValidatedExerciseCatalog.filter((exercise) =>
       exercise.muscleGroup === group &&
       getExerciseLocations(exercise).includes(location) &&
-      !getExerciseRiskTags(exercise).some((risk) => risks.has(risk));
-    const preferredId = location === "gym" && group === "peito" ? "supino_reto_maquina" : null;
-    return (preferredId
-      ? ValidatedExerciseCatalog.find((exercise) => exercise.id === preferredId && eligible(exercise))
-      : undefined) || ValidatedExerciseCatalog.find(eligible);
-  }).filter((exercise): exercise is (typeof ValidatedExerciseCatalog)[number] => Boolean(exercise));
+      !getExerciseRiskTags(exercise).some((risk) => risks.has(risk)));
+  const preferredId = location === "gym" && focusGroups.includes("peito") ? "supino_reto_maquina" : null;
+  // Session variety for repeated templates (e.g. Upper x2 on 4x): rotate the
+  // selection index per session so the same focus group picks a different
+  // eligible exercise on the second occurrence.
+  const pick = (group: CatalogMuscleGroup, occurrence: number): (typeof ValidatedExerciseCatalog)[number] | undefined => {
+    const pool = eligibleFor(group);
+    if (pool.length === 0) return undefined;
+    return pool[occurrence % pool.length];
+  };
+  const selected: (typeof ValidatedExerciseCatalog)[number][] = [];
+  // Aquecimento is always first; focus groups follow, respecting experience volume.
+  const warmup = pick("aquecimento", 0);
+  if (warmup) selected.push(warmup);
+  for (let i = 0; i < focusGroups.length; i += 1) {
+    const group = focusGroups[i];
+    if (group === "aquecimento") continue;
+    // Preferred exercise for the peito group on gym (keeps the canonical first
+    // peito move stable); otherwise rotate within the eligible pool.
+    if (group === "peito" && preferredId) {
+      const preferred = ValidatedExerciseCatalog.find((exercise) => exercise.id === preferredId && eligibleFor("peito").some((candidate) => candidate.id === exercise.id));
+      if (preferred && !selected.some((entry) => entry.id === preferred.id)) {
+        selected.push(preferred);
+        continue;
+      }
+    }
+    const exercise = pick(group, ctx.sessionIndex + i);
+    if (exercise && !selected.some((entry) => entry.id === exercise.id)) selected.push(exercise);
+  }
+  // Accessories: extra exercises for the largest focus group when the
+  // experience tier allows them (deterministic, catalog-only).
+  const accessoryCount = ctx.experience.accessoryCount;
+  if (accessoryCount > 0) {
+    const primary = focusGroups.find((group) => group !== "aquecimento");
+    if (primary) {
+      const pool = eligibleFor(primary);
+      for (let i = 0; i < accessoryCount; i += 1) {
+        const candidate = pool[i % pool.length];
+        if (candidate && !selected.some((entry) => entry.id === candidate.id)) selected.push(candidate);
+      }
+    }
+  }
   if (selected.length < 4) {
     throw new V3Error("V3_WORKOUT_CATALOG_INSUFFICIENT", "Catálogo seguro insuficiente para gerar o treino.", 409);
   }
-  const returning = snapshot.profile.trainingStatus === "beginner" || snapshot.profile.trainingStatus === "returning";
+  const sets = ctx.experience.sets;
   return {
     title: snapshot.goal.code === "hypertrophy" ? "Treino de hipertrofia" : "Treino oficial GUTO",
     generatedFrom: {
@@ -74,7 +117,14 @@ export function generateWorkoutDraft(snapshot: OfficialSnapshot): WorkoutPlanDra
       profileVersion: snapshot.profile.version,
       location,
       healthConstraintIds: snapshot.healthConstraints.map((constraint) => constraint.id),
-      method: "catalog_rules_v1",
+      method: WORKOUT_PRESCRIPTION_POLICY_VERSION,
+      policyVersion: WORKOUT_PRESCRIPTION_POLICY_VERSION,
+      frequency: ctx.frequency,
+      splitName: ctx.splitName,
+      sessionIndex: ctx.sessionIndex,
+      sessionCount: frequencySplitFor(ctx.frequency).sessions.length,
+      sessionLabel: ctx.sessionLabel,
+      experience: ctx.experience.label,
       confirmedContextId: snapshot.confirmedContext.id,
       confirmedContextVersion: snapshot.confirmedContext.version,
     },
@@ -84,8 +134,8 @@ export function generateWorkoutDraft(snapshot: OfficialSnapshot): WorkoutPlanDra
       purpose: exercise.movementPattern || exercise.muscleGroup,
       muscleGroup: exercise.muscleGroup,
       position,
-      sets: position === 0 ? 1 : returning ? 3 : 4,
-      reps: position === 0 ? "5-8 min" : snapshot.goal.code === "hypertrophy" ? "8-12" : "10-15",
+      sets: position === 0 ? 1 : sets,
+      reps: position === 0 ? "5-8 min" : ctx.repRange,
       canonicalNamePt: exercise.canonicalNamePt,
       rest: position === 0 ? "0:30min" : "1:30min",
       cue: exercise.movementPattern ? `Executa ${exercise.movementPattern} com controle e sem dor.` : "Execução controlada e sem dor.",

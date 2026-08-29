@@ -157,14 +157,24 @@ test("V3.3 session location is a fact but never changes the base gym profile", a
   assert.equal(state.confirmedContext?.version, before.confirmedContext!.version + 1);
 });
 
-test("V3.3 workout evolution is deterministic and records a conservative review path", async () => {
+test("V3.3 workout evolution is deterministic: PROGRESS needs 2 consecutive easy sessions and failures review", async () => {
   const { repository, actor } = await founder();
   const state = await repository.loadAppState(actor);
   const exerciseId = state.workout!.items[0]!.exerciseId;
-  const progress = await repository.recordWorkoutExerciseEvent({
+  // A single easy session is NOT enough to progress (P0#4).
+  const first = await repository.recordWorkoutExerciseEvent({
     actor, requestId: randomUUID(), event: { exerciseId, completed: true, repetitions: 12, setsCompleted: 3, perceivedDifficulty: 5 },
   });
-  assert.equal(progress.decision, "PROGRESS");
+  assert.equal(first.decision, "MAINTAIN");
+  assert.equal(first.reasonCode, "SINGLE_EASY_SESSION_NOT_ENOUGH");
+  // The second consecutive easy session triggers PROGRESS with a concrete next prescription.
+  const second = await repository.recordWorkoutExerciseEvent({
+    actor, requestId: randomUUID(), event: { exerciseId, completed: true, repetitions: 13, setsCompleted: 3, perceivedDifficulty: 5 },
+  });
+  assert.equal(second.decision, "PROGRESS");
+  assert.equal(second.nextPrescription?.action, "add_reps");
+  assert.ok((second.nextPrescription?.targetReps || 0) > 13);
+  // An incomplete execution always reviews and never progresses.
   const review = await repository.recordWorkoutExerciseEvent({
     actor, requestId: randomUUID(), event: { exerciseId, completed: false },
   });

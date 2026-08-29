@@ -1134,6 +1134,33 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         [input.actor.tenantId, plan.rows[0].id, input.event.exerciseId],
       );
       if (!exercise.rows[0]) throw new V3Error("V3_WORKOUT_EXERCISE_NOT_ACTIVE", "Exercício não pertence ao treino oficial ativo.", 409);
+      // P0#4: decide from the current event plus the recent history of the SAME
+      // exercise, so PROGRESS requires 2+ consecutive easy completed sessions.
+      const recent = await client.query<{
+        load_value: string | null;
+        repetitions: string | null;
+        sets_completed: string | null;
+        completed: boolean;
+        perceived_difficulty: string | null;
+        substituted_from_exercise_id: string | null;
+        substitution_reason: string | null;
+      }>(
+        `SELECT load_value,repetitions,sets_completed,completed,perceived_difficulty,substituted_from_exercise_id,substitution_reason
+           FROM guto_v3.workout_session_exercises
+          WHERE tenant_id=$1 AND user_id=$2 AND exercise_id=$3
+          ORDER BY created_at DESC, id DESC LIMIT 4`,
+        [input.actor.tenantId, input.actor.userId, input.event.exerciseId],
+      );
+      const history = recent.rows.reverse().map((row) => ({
+        exerciseId: input.event.exerciseId,
+        loadValue: row.load_value == null ? undefined : Number(row.load_value),
+        repetitions: row.repetitions == null ? undefined : Number(row.repetitions),
+        setsCompleted: row.sets_completed == null ? undefined : Number(row.sets_completed),
+        completed: row.completed,
+        perceivedDifficulty: row.perceived_difficulty == null ? undefined : Number(row.perceived_difficulty),
+        substitutedFromExerciseId: row.substituted_from_exercise_id || undefined,
+        substitutionReason: row.substitution_reason || undefined,
+      }));
       const session = await client.query<{ id: string }>(
         `INSERT INTO guto_v3.workout_sessions (tenant_id,user_id,plan_id,status,started_at,completed_at)
          VALUES ($1,$2,$3,'completed',now(),now()) RETURNING id`,
@@ -1148,12 +1175,13 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
           input.event.perceivedDifficulty ?? null, input.event.substitutedFromExerciseId ?? null, input.event.substitutionReason ?? null,
           JSON.stringify(input.event.context || {})],
       );
-      const decision = decideWorkoutEvolution(input.event);
+      const decision = decideWorkoutEvolution(input.event, history);
       await client.query(
         `INSERT INTO guto_v3.workout_evolution_decisions
           (tenant_id,user_id,exercise_id,decision,reason_code,source_session_exercise_id,context_snapshot)
          VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`,
-        [input.actor.tenantId, input.actor.userId, decision.exerciseId, decision.decision, decision.reasonCode, inserted.rows[0]!.id, JSON.stringify(input.event.context || {})],
+        [input.actor.tenantId, input.actor.userId, decision.exerciseId, decision.decision, decision.reasonCode, inserted.rows[0]!.id,
+          JSON.stringify({ ...(input.event.context || {}), nextPrescription: decision.nextPrescription || null })],
       );
       await this.appendMutationEvent(client, input.actor, input.requestId, "workout.evolution_decided", { ...decision });
       return decision;

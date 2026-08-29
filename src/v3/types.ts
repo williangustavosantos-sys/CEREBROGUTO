@@ -203,10 +203,29 @@ export interface WorkoutExerciseSessionEvent {
 }
 
 export type WorkoutEvolutionDecisionCode = "MAINTAIN" | "PROGRESS" | "REGRESS" | "SUBSTITUTE" | "REVIEW";
+
+export type WorkoutNextPrescriptionAction =
+  | "add_reps"
+  | "increase_load"
+  | "reduce_reps"
+  | "reduce_load"
+  | "review"
+  | "maintain";
+
+export interface WorkoutNextPrescription {
+  exerciseId: string;
+  action: WorkoutNextPrescriptionAction;
+  targetReps?: number;
+  loadDeltaKg?: number;
+  reason: string;
+}
+
 export interface WorkoutEvolutionDecision {
   exerciseId: string;
   decision: WorkoutEvolutionDecisionCode;
   reasonCode: string;
+  /** Concrete next-session dose produced by the decision (P0#4). */
+  nextPrescription?: WorkoutNextPrescription;
 }
 
 export interface V3AppState {
