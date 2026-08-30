@@ -248,6 +248,9 @@ export interface V3AppState {
   workout: WorkoutPlan | null;
   diet: DietPlan | null;
   progression: ProgressionState;
+  /** P0 (session rotation): next logical session index derived from durable
+   * state (count of completed sessions). */
+  nextSessionIndex?: number;
 }
 
 export interface CandidateOption {
