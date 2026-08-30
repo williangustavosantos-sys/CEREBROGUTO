@@ -56,7 +56,11 @@ export function generateWorkoutDraft(snapshot: OfficialSnapshot, options: { sess
     trainingStatus: snapshot.profile.trainingStatus,
     goalCode: snapshot.goal.code,
     frequency,
-    sessionIndex: options.sessionIndex ?? 0,
+    // P0 (session rotation): the next logical session index is derived from
+    // durable state (count of completed sessions) by the repository and
+    // surfaced on the snapshot. Explicit options.sessionIndex (used by tests
+    // and callers that already know the index) takes precedence.
+    sessionIndex: options.sessionIndex ?? (snapshot as { nextSessionIndex?: number }).nextSessionIndex ?? 0,
   });
   const template = sessionTemplateFor(ctx.frequency, ctx.sessionIndex);
   const focusGroups = templateFocus(template, ctx.experience);

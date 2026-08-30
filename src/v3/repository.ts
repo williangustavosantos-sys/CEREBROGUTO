@@ -111,6 +111,9 @@ export interface OfficialStateRepository {
   }): Promise<{ context: ConfirmedUserContext; facts: RecordedFact[]; affectedDomains: string[] }>;
   listFactHistory(actor: ActorContext): Promise<RecordedFact[]>;
   recordWorkoutExerciseEvent(input: { actor: ActorContext; requestId: string; event: import("./types.js").WorkoutExerciseSessionEvent }): Promise<import("./types.js").WorkoutEvolutionDecision>;
+  /** Counts officially completed workout sessions for rotation (durable, derived
+   * from workout_sessions — the "session really happened" source of truth). */
+  countCompletedWorkoutSessions(actor: ActorContext): Promise<number>;
   swapExercise(input: {
     actor: ActorContext;
     requestId: string;

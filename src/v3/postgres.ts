@@ -282,6 +282,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       confirmedContext,
       workout: state.workout,
       diet: state.diet,
+      nextSessionIndex: await this.countCompletedWorkoutSessions(actor),
     };
   }
 
@@ -1332,6 +1333,25 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       );
       await this.appendMutationEvent(client, input.actor, input.requestId, "workout.evolution_decided", { ...decision });
       return decision;
+    });
+  }
+
+  /**
+   * P0 (session rotation): durable session counter. The next session index is
+   * derived from the number of COMPLETED sessions already recorded in
+   * workout_sessions — the official "this session really happened" event —
+   * so it survives reload, logout/login, fresh serverless instances and empty
+   * Redis. Idempotent replays never advance it (a duplicate requestId reuses
+   * the cached decision instead of inserting a second session row).
+   */
+  async countCompletedWorkoutSessions(actor: ActorContext): Promise<number> {
+    return this.withActorTransaction(actor, async (client) => {
+      const result = await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM guto_v3.workout_sessions
+          WHERE tenant_id=$1 AND user_id=$2 AND status='completed'`,
+        [actor.tenantId, actor.userId],
+      );
+      return asNumber(result.rows[0]?.count) || 0;
     });
   }
 

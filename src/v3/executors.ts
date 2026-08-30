@@ -204,6 +204,10 @@ export class DeterministicExecutorV3 {
     const sessionWorkout = buildSessionWorkout({
       baseWorkout: snapshot.workout,
       snapshot,
+      // P0 (session rotation): derive from the durable session counter so a
+      // 20-minute or home adaptation adapts the CURRENT logical session
+      // (e.g. PULL), never session 0 of the split.
+      sessionIndex: (snapshot as { nextSessionIndex?: number }).nextSessionIndex ?? 0,
       availableMinutes: hint?.availableMinutes,
       effectiveLocation: hint?.effectiveLocation,
     });

@@ -88,6 +88,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       firstContact: state.firstContact,
       confirmedContext: structuredClone(this.confirmedContexts.get(key(actor)) || null),
       currentFacts: state.currentFacts,
+      nextSessionIndex: this.workoutSessionEvents.get(key(actor))?.length ?? 0,
     };
   }
   async loadAppState(actor: ActorContext): Promise<V3AppState> {
@@ -122,6 +123,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       currentFacts: structuredClone((this.facts.get(key(actor)) || []).filter((fact) => fact.supersededAt === null)),
       workout: snapshot?.workout ? structuredClone(snapshot.workout) : null,
       diet: snapshot?.diet ? structuredClone(snapshot.diet) : null,
+      nextSessionIndex: this.workoutSessionEvents.get(key(actor))?.length ?? 0,
       progression: {
         totalXp,
         evolutionStage: totalXp >= 12_000 ? "elite" : totalXp >= 5_000 ? "adult" : totalXp >= 1_500 ? "teen" : "baby",
@@ -627,6 +629,15 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     if (!this.events.some((event) => event.requestId === input.requestId)) {
       this.events.push({ requestId: input.requestId, action: input.action, resultCode: input.resultCode });
     }
+  }
+  /**
+   * P0 (session rotation): durable session counter, mirroring the Postgres
+   * implementation — derived from recorded session executions (each
+   * recordWorkoutExerciseEvent call is one completed logical session), so the
+   * index survives reload/restart and never advances on duplicate requestIds.
+   */
+  async countCompletedWorkoutSessions(actor: ActorContext): Promise<number> {
+    return this.workoutSessionEvents.get(key(actor))?.length ?? 0;
   }
   async loadConversationDecisionState(actor: ActorContext, threadKey = "companion"): Promise<ConversationDecisionState> {
     return structuredClone(this.conversationStates.get(`${key(actor)}:${threadKey}`) || emptyConversationDecisionState(threadKey));

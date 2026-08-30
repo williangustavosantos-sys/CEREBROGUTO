@@ -157,6 +157,11 @@ export interface OfficialSnapshot {
   confirmedContext: ConfirmedUserContext | null;
   workout: WorkoutPlan | null;
   diet: DietPlan | null;
+  /** P0 (session rotation): next logical session index derived from durable
+   * state (count of completed sessions). 0 for a brand-new user; advances only
+   * when a real session completion is recorded. Optional: repositories that
+   * don't populate it leave rotation falling back to index 0. */
+  nextSessionIndex?: number;
 }
 
 export interface JourneyState {
