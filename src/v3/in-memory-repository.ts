@@ -5,7 +5,7 @@ import { materializeFirstContact } from "./first-contact.js";
 import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from "./facts.js";
 import { generateDietDraft, generateWorkoutDraft } from "./generation-engines.js";
 import { decideWorkoutEvolution } from "./workout-evolution.js";
-import { assertValidAdaptedExecution } from "./session-execution-policy.js";
+import { assertValidAdaptedExecution, resolveSessionEffectiveLocation } from "./session-execution-policy.js";
 import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
 import { emptyConversationDecisionState, type ConversationDecisionState, type ConversationKnownFact } from "./conversation-state.js";
 import { deriveChildRequestId } from "./legacy-identity.js";
@@ -542,7 +542,13 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       // P0 (adapted execution): validate adapted exercises deterministically
       // (source in base plan; catalog + video + safety + location for the
       // adapted exercise) instead of rejecting every adapted execution.
-      assertValidAdaptedExecution({ event: input.event, basePlan, snapshot: await this.loadOfficialSnapshot(input.actor) });
+      // P0 (session location authority): the session's effectiveLocation takes
+      // precedence over the profile default — resolve it from the event
+      // context (canonical values only) via the policy helper.
+      const snapshot = await this.loadOfficialSnapshot(input.actor);
+      const profileLocation = snapshot.confirmedContext?.trainingLocation || snapshot.profile.trainingLocation;
+      const effectiveLocation = resolveSessionEffectiveLocation(input.event, undefined, profileLocation);
+      assertValidAdaptedExecution({ event: input.event, basePlan, snapshot, effectiveLocation });
     } else if (!basePlan.items.some((item) => item.exerciseId === input.event.exerciseId)) {
       throw new V3Error("V3_WORKOUT_EXERCISE_NOT_ACTIVE", "Exercício não pertence ao treino oficial ativo.", 409);
     }

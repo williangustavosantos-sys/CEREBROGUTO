@@ -7,7 +7,7 @@ import { V3Error } from "./errors.js";
 import { materializeFirstContact } from "./first-contact.js";
 import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from "./facts.js";
 import { decideWorkoutEvolution } from "./workout-evolution.js";
-import { assertValidAdaptedExecution } from "./session-execution-policy.js";
+import { assertValidAdaptedExecution, resolveSessionEffectiveLocation } from "./session-execution-policy.js";
 import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
 import type {
   ActorContext,
@@ -282,6 +282,93 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       confirmedContext,
       workout: state.workout,
       diet: state.diet,
+    };
+  }
+
+  /**
+   * P0 (pool max=1 safety): variant of loadOfficialSnapshot that runs on the
+   * CURRENT transaction client instead of acquiring a second pool connection.
+   * recordWorkoutExerciseEvent holds a transaction while validating adapted
+   * executions; loading the snapshot through the same client guarantees the
+   * operation never deadlocks waiting for a second connection when the pool
+   * is exhausted (e.g. GUTO_V3_PG_POOL_MAX=1).
+   *
+   * Loads only what the session-execution policy needs: profile, confirmed
+   * context and current physical-constraint facts.
+   */
+  private async loadOfficialSnapshotWithinTransaction(client: PoolClient, actor: ActorContext): Promise<OfficialSnapshot> {
+    const [profileResult, goalResult, factResult, contextResult] = await Promise.all([
+      client.query(`SELECT * FROM guto_v3.user_profile WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
+      client.query(`SELECT * FROM guto_v3.user_goals WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
+      client.query(`SELECT user_fact_id, fact_type, value_json, source, confirmation_status, valid_from, valid_to, recorded_at, superseded_at, superseded_by
+                      FROM guto_v3.user_facts
+                     WHERE tenant_id = $1 AND user_id = $2 AND superseded_at IS NULL
+                       AND fact_type IN ('physical_constraint','food_restriction','PHYSICAL_CONSTRAINT','FOOD_CONSTRAINT','FOOD_EXCLUSION')
+                     ORDER BY recorded_at`, [actor.tenantId, actor.userId]),
+      client.query(
+        `SELECT c.*,p.version AS current_profile_version,g.version AS current_goal_version
+           FROM guto_v3.confirmed_user_contexts c
+           JOIN guto_v3.user_profile p ON p.tenant_id=c.tenant_id AND p.user_id=c.user_id
+           JOIN guto_v3.user_goals g ON g.tenant_id=c.tenant_id AND g.user_id=c.user_id
+          WHERE c.tenant_id=$1 AND c.user_id=$2 ORDER BY c.version DESC LIMIT 1`,
+        [actor.tenantId, actor.userId],
+      ),
+    ]);
+    const row = contextResult.rows[0];
+    const confirmedContext = row ? this.mapConfirmedContext(row) : null;
+    const storedSnapshot = row?.context_snapshot ? jsonObject(row.context_snapshot) : {};
+    const storedProfile = jsonObject(storedSnapshot.profile);
+    const storedGoal = jsonObject(storedSnapshot.goal);
+    const profileRow = profileResult.rows[0];
+    const baseProfile: OfficialProfile | null = profileRow ? {
+      version: asNumber(profileRow.version),
+      language: profileRow.language,
+      biologicalSex: profileRow.biological_sex,
+      age: asNumber(profileRow.age),
+      weightKg: asNumber(profileRow.weight_kg),
+      heightCm: asNumber(profileRow.height_cm),
+      trainingStatus: profileRow.training_status,
+      trainingLocation: profileRow.training_location,
+      weeklyFrequencyDaysPerWeek: profileRow.weekly_frequency == null ? null : asNumber(profileRow.weekly_frequency),
+    } : null;
+    const profile = confirmedContext && baseProfile ? {
+      ...baseProfile,
+      ...storedProfile,
+      version: confirmedContext.profileVersion,
+      weeklyFrequencyDaysPerWeek: confirmedContext.weeklyFrequencyDaysPerWeek,
+      trainingLocation: "gym",
+    } as OfficialProfile : baseProfile;
+    const goalRow = goalResult.rows[0];
+    const baseGoal: OfficialGoal | null = goalRow ? { version: asNumber(goalRow.version), code: goalRow.goal_code } : null;
+    const goal = confirmedContext && baseGoal ? { ...baseGoal, ...storedGoal, version: confirmedContext.goalVersion } as OfficialGoal : baseGoal;
+    const currentFacts: RecordedFact[] = factResult.rows.map((row) => {
+      const value = jsonObject(row.value_json);
+      return {
+        id: String(row.user_fact_id),
+        factType: String(row.fact_type).toUpperCase() as RecordedFact["factType"],
+        canonicalValue: typeof value.code === "string" ? value.code : typeof value.declaration === "string" ? value.declaration : JSON.stringify(value),
+        value,
+        source: row.source === "system" ? "system" : "user_declared",
+        confirmationStatus: row.confirmation_status,
+        validFrom: new Date(row.valid_from).toISOString(),
+        validTo: row.valid_to ? new Date(row.valid_to).toISOString() : null,
+        recordedAt: new Date(row.recorded_at).toISOString(),
+        supersededAt: row.superseded_at ? new Date(row.superseded_at).toISOString() : null,
+        supersededBy: row.superseded_by ? String(row.superseded_by) : null,
+      };
+    });
+    return {
+      actor,
+      memoryVersion: 0,
+      profile: profile as OfficialProfile,
+      goal: goal as OfficialGoal,
+      preferences: {} as OfficialPreferences,
+      healthConstraints: [],
+      currentFacts,
+      firstContact: { status: "COMPLETED", step: "completed", foodDeclaration: "", limitationDeclaration: "", startedAt: null, completedAt: null, currentPrompt: null, summary: null, confirmedContextVersion: confirmedContext?.version ?? 0 },
+      confirmedContext,
+      workout: null,
+      diet: null,
     };
   }
 
@@ -1158,8 +1245,12 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
           };
         }
       }
-      const plan = await client.query<{ id: string }>(
-        `SELECT id FROM guto_v3.workout_plans WHERE tenant_id=$1 AND user_id=$2 AND status='active' FOR UPDATE`,
+      // P0 (adapted execution): SELECT * — loadWorkout needs version, title,
+      // status and confirmed_context_version, not just the id (a bare
+      // `SELECT id` made every adapted-event validation crash with
+      // V3_INVALID_DATABASE_NUMBER before the policy could even run).
+      const plan = await client.query<QueryResultRow>(
+        `SELECT * FROM guto_v3.workout_plans WHERE tenant_id=$1 AND user_id=$2 AND status='active' FOR UPDATE`,
         [input.actor.tenantId, input.actor.userId],
       );
       if (!plan.rows[0]) throw new V3Error("V3_WORKOUT_NOT_FOUND", "Treino oficial ativo não encontrado.", 409);
@@ -1171,9 +1262,18 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         // catalog + video + safety + location of the adapted exercise)
         // instead of rejecting every adapted execution. The base plan is
         // never mutated by this path.
+        // P0 (session location authority): the session's effectiveLocation
+        // takes precedence over the profile default — resolve it from the
+        // event context (canonical values only) via the policy helper.
+        // P0 (pool max=1 safety): the snapshot is loaded from the CURRENT
+        // transaction client (loadOfficialSnapshotWithinTransaction), never
+        // from a second pool connection, so holding this transaction cannot
+        // deadlock waiting for another connection of the same pool.
         const basePlan = await this.loadWorkout(client, plan.rows[0]);
-        const snapshot = await this.loadOfficialSnapshot(input.actor);
-        assertValidAdaptedExecution({ event: input.event, basePlan, snapshot });
+        const snapshot = await this.loadOfficialSnapshotWithinTransaction(client, input.actor);
+        const profileLocation = snapshot.confirmedContext?.trainingLocation || snapshot.profile.trainingLocation;
+        const effectiveLocation = resolveSessionEffectiveLocation(input.event, undefined, profileLocation);
+        assertValidAdaptedExecution({ event: input.event, basePlan, snapshot, effectiveLocation });
       } else {
         const exercise = await client.query(
           `SELECT 1 FROM guto_v3.workout_plan_items WHERE tenant_id=$1 AND plan_id=$2 AND exercise_id=$3`,

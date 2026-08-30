@@ -197,3 +197,127 @@ test("CONCURRENT_IDEMPOTENCY: duplicate does not create false PROGRESS; a NEW re
   const second = await repository.recordWorkoutExerciseEvent({ actor, requestId: randomUUID(), event: { ...event, repetitions: 13 } });
   assert.equal(second.decision, "PROGRESS");
 });
+
+// ─── P0 A bis — SESSION EFFECTIVE LOCATION AUTHORITY ─────────────────────
+
+// The founder plan contains bike_academia (gym-only, cardio/aquecimento).
+// Valid substitutes: caminhada_esteira_inclinada (gym-only) and burpee
+// (bodyweight, playable everywhere). Profile default location: gym.
+
+test("LOCATION_AUTHORITY CASE 1: session home + gym-only candidate is REJECTED even though profile says gym", async () => {
+  const { repository, actor } = await founder();
+  const state = await repository.loadAppState(actor);
+  const baseExerciseId = "bike_academia";
+  assert.ok(state.workout!.items.some((item) => item.exerciseId === baseExerciseId), "bike_academia in base plan");
+  await assert.rejects(
+    () => repository.recordWorkoutExerciseEvent({
+      actor,
+      requestId: randomUUID(),
+      event: {
+        exerciseId: "caminhada_esteira_inclinada", // gym-only (esteira)
+        completed: true,
+        repetitions: 12,
+        setsCompleted: 3,
+        perceivedDifficulty: 5,
+        substitutedFromExerciseId: baseExerciseId,
+        substitutionReason: "HOME_LOCATION",
+        context: { effectiveLocation: "home" },
+      },
+    }),
+    (error: unknown) => error instanceof V3Error && error.code === "V3_WORKOUT_LOCATION_INCOMPATIBLE",
+  );
+});
+
+test("LOCATION_AUTHORITY CASE 2: session home + home-compatible candidate is ACCEPTED; base plan untouched", async () => {
+  const { repository, actor } = await founder();
+  const state = await repository.loadAppState(actor);
+  const before = JSON.stringify(state.workout);
+  const decision = await repository.recordWorkoutExerciseEvent({
+    actor,
+    requestId: randomUUID(),
+    event: {
+      exerciseId: "burpee", // bodyweight, playable at home
+      completed: true,
+      repetitions: 12,
+      setsCompleted: 3,
+      perceivedDifficulty: 5,
+      substitutedFromExerciseId: "bike_academia",
+      substitutionReason: "HOME_LOCATION",
+      context: { effectiveLocation: "home" },
+    },
+  });
+  assert.equal(decision.decision, "SUBSTITUTE");
+  const after = await repository.loadAppState(actor);
+  assert.equal(after.workout!.id, state.workout!.id);
+  assert.equal(after.workout!.version, state.workout!.version);
+  assert.equal(JSON.stringify(after.workout!.items), JSON.stringify(state.workout!.items), "base plan unchanged");
+  void before;
+});
+
+test("LOCATION_AUTHORITY CASE 3: session gym + gym-compatible candidate is ACCEPTED", async () => {
+  const { repository, actor } = await founder();
+  const state = await repository.loadAppState(actor);
+  const baseExerciseId = "supino_reto_maquina";
+  assert.ok(state.workout!.items.some((item) => item.exerciseId === baseExerciseId), "supino_reto_maquina in base plan");
+  const decision = await repository.recordWorkoutExerciseEvent({
+    actor,
+    requestId: randomUUID(),
+    event: {
+      exerciseId: "supino_baixo_maquina", // gym-only, valid substitute
+      completed: true,
+      repetitions: 12,
+      setsCompleted: 3,
+      perceivedDifficulty: 5,
+      substitutedFromExerciseId: baseExerciseId,
+      substitutionReason: "MACHINE_OCCUPIED",
+      context: { effectiveLocation: "gym" },
+    },
+  });
+  assert.equal(decision.decision, "SUBSTITUTE");
+});
+
+test("LOCATION_AUTHORITY CASE 4: no session override falls back to profile/default location", async () => {
+  const { repository, actor } = await founder();
+  const state = await repository.loadAppState(actor);
+  // No context.effectiveLocation: fallback = profile trainingLocation (gym).
+  // A gym-only candidate is therefore accepted, a home session would not exist.
+  const decision = await repository.recordWorkoutExerciseEvent({
+    actor,
+    requestId: randomUUID(),
+    event: {
+      exerciseId: "supino_baixo_maquina", // gym-only
+      completed: true,
+      repetitions: 12,
+      setsCompleted: 3,
+      perceivedDifficulty: 5,
+      substitutedFromExerciseId: "supino_reto_maquina",
+      substitutionReason: "MACHINE_OCCUPIED",
+    },
+  });
+  assert.equal(decision.decision, "SUBSTITUTE");
+  void state;
+});
+
+test("LOCATION_AUTHORITY CASE 5: invalid location string is ignored (falls back to profile), never widens permissions", async () => {
+  const { repository, actor } = await founder();
+  const state = await repository.loadAppState(actor);
+  // "plage" is not canonical: ignored -> fallback to profile (gym).
+  // The gym-only candidate is accepted (fallback), but a HOME session would
+  // NOT be granted by an invalid string — no permission widening.
+  const decision = await repository.recordWorkoutExerciseEvent({
+    actor,
+    requestId: randomUUID(),
+    event: {
+      exerciseId: "supino_baixo_maquina", // gym-only
+      completed: true,
+      repetitions: 12,
+      setsCompleted: 3,
+      perceivedDifficulty: 5,
+      substitutedFromExerciseId: "supino_reto_maquina",
+      substitutionReason: "MACHINE_OCCUPIED",
+      context: { effectiveLocation: "plage" },
+    },
+  });
+  assert.equal(decision.decision, "SUBSTITUTE");
+  void state;
+});

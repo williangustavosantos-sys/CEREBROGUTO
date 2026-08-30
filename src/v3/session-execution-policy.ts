@@ -51,6 +51,37 @@ function userBodyRegionText(snapshot: OfficialSnapshot): string {
   ].join(" ");
 }
 
+/** Canonical session locations (matches CatalogLocation). */
+const CANONICAL_LOCATIONS: ReadonlySet<string> = new Set(["gym", "home", "park"]);
+
+/**
+ * Resolves the effective location for an adapted-execution event.
+ *
+ * Authority order (P0: session location authority):
+ *   1. `event.context.effectiveLocation` — explicit session override, but only
+ *      accepted when it is a canonical value (gym/home/park). Any arbitrary
+ *      string is IGNORED (never widens permissions), falling back to the next
+ *      authority level.
+ *   2. the session's effective location derived by the caller (SessionWorkout).
+ *   3. the base/default profile location (confirmed context, then profile).
+ */
+export function resolveSessionEffectiveLocation(
+  event: WorkoutExerciseSessionEvent,
+  sessionLocation?: CatalogLocation,
+  profileLocation?: string,
+): CatalogLocation {
+  const raw = event.context?.effectiveLocation;
+  if (typeof raw === "string") {
+    const normalized = raw.trim().toLowerCase();
+    if (CANONICAL_LOCATIONS.has(normalized)) return normalized as CatalogLocation;
+  }
+  if (sessionLocation) return sessionLocation;
+  const normalizedProfile = String(profileLocation || "").toLowerCase();
+  if (normalizedProfile.includes("home") || normalizedProfile.includes("casa")) return "home";
+  if (normalizedProfile.includes("park") || normalizedProfile.includes("parque")) return "park";
+  return "gym";
+}
+
 /**
  * Validates an ADAPTED execution event (the event declares
  * `substitutedFromExerciseId`). Throws a 4xx V3Error on any violation.
@@ -102,15 +133,11 @@ export function assertValidAdaptedExecution(input: SessionExecutionValidationInp
     );
   }
 
-  // 6. Effective session location (when the session overrides the base one).
+  // 6. Effective session location. Authority order: explicit session
+  //    override (event context, canonical values only) -> session location
+  //    derived by the caller -> base/default profile location.
   const baseLocationRaw = snapshot.confirmedContext?.trainingLocation || snapshot.profile.trainingLocation || "gym";
-  const normalized = String(baseLocationRaw).toLowerCase();
-  const baseLocation: CatalogLocation = normalized.includes("home") || normalized.includes("casa")
-    ? "home"
-    : normalized.includes("park") || normalized.includes("parque")
-      ? "park"
-      : "gym";
-  const effectiveLocation = input.effectiveLocation ?? baseLocation;
+  const effectiveLocation = resolveSessionEffectiveLocation(event, input.effectiveLocation, baseLocationRaw);
   if (!getExerciseLocations(adapted).includes(effectiveLocation)) {
     throw new V3Error(
       "V3_WORKOUT_LOCATION_INCOMPATIBLE",
