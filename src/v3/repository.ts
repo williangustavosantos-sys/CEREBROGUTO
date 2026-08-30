@@ -111,6 +111,11 @@ export interface OfficialStateRepository {
   }): Promise<{ context: ConfirmedUserContext; facts: RecordedFact[]; affectedDomains: string[] }>;
   listFactHistory(actor: ActorContext): Promise<RecordedFact[]>;
   recordWorkoutExerciseEvent(input: { actor: ActorContext; requestId: string; event: import("./types.js").WorkoutExerciseSessionEvent }): Promise<import("./types.js").WorkoutEvolutionDecision>;
+  /** P0 (session completion): the single authority that marks a logical
+   * workout session as COMPLETED. Exercise events only add history under a
+   * session (status 'started'); this call flips it to 'completed', which is
+   * what the rotation counter observes. Idempotent on requestId. */
+  completeWorkoutSession(input: { actor: ActorContext; requestId: string; workoutSessionId: string }): Promise<void>;
   /** Counts officially completed workout sessions for rotation (durable, derived
    * from workout_sessions — the "session really happened" source of truth). */
   countCompletedWorkoutSessions(actor: ActorContext): Promise<number>;

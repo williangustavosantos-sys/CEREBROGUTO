@@ -38,6 +38,8 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
   private readonly facts = new Map<string, RecordedFact[]>();
   private readonly conversationStates = new Map<string, ConversationDecisionState>();
   private readonly workoutSessionEvents = new Map<string, import("./types.js").WorkoutExerciseSessionEvent[]>();
+  private readonly completedSessionIds = new Map<string, Set<string>>();
+  private readonly completedSessionRequests = new Set<string>();
   private readonly requestIdDecisions = new Map<string, import("./types.js").WorkoutEvolutionDecision>();
   private readonly requestIdInflight = new Map<string, Promise<import("./types.js").WorkoutEvolutionDecision>>();
   readonly events: Array<{ requestId: string; action: string; resultCode: string }> = [];
@@ -88,7 +90,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       firstContact: state.firstContact,
       confirmedContext: structuredClone(this.confirmedContexts.get(key(actor)) || null),
       currentFacts: state.currentFacts,
-      nextSessionIndex: this.workoutSessionEvents.get(key(actor))?.length ?? 0,
+      nextSessionIndex: await this.countCompletedWorkoutSessions(actor),
     };
   }
   async loadAppState(actor: ActorContext): Promise<V3AppState> {
@@ -123,7 +125,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       currentFacts: structuredClone((this.facts.get(key(actor)) || []).filter((fact) => fact.supersededAt === null)),
       workout: snapshot?.workout ? structuredClone(snapshot.workout) : null,
       diet: snapshot?.diet ? structuredClone(snapshot.diet) : null,
-      nextSessionIndex: this.workoutSessionEvents.get(key(actor))?.length ?? 0,
+      nextSessionIndex: await this.countCompletedWorkoutSessions(actor),
       progression: {
         totalXp,
         evolutionStage: totalXp >= 12_000 ? "elite" : totalXp >= 5_000 ? "adult" : totalXp >= 1_500 ? "teen" : "baby",
@@ -631,13 +633,28 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     }
   }
   /**
-   * P0 (session rotation): durable session counter, mirroring the Postgres
-   * implementation — derived from recorded session executions (each
-   * recordWorkoutExerciseEvent call is one completed logical session), so the
-   * index survives reload/restart and never advances on duplicate requestIds.
+   * P0 (session completion): the SOLE authority that flips a logical workout
+   * session to completed — mirroring the Postgres semantics. Exercise events
+   * only add history under a session; this call is what the rotation counter
+   * observes, so the index advances exactly once per real session. Idempotent
+   * on requestId.
+   */
+  async completeWorkoutSession(input: { actor: ActorContext; requestId: string; workoutSessionId: string }): Promise<void> {
+    const dedupeKey = `${key(input.actor)}::${input.requestId}::workout.session_completed`;
+    if (this.completedSessionRequests.has(dedupeKey)) return;
+    this.completedSessionRequests.add(dedupeKey);
+    const set = this.completedSessionIds.get(key(input.actor)) || new Set<string>();
+    set.add(input.workoutSessionId);
+    this.completedSessionIds.set(key(input.actor), set);
+    this.events.push({ requestId: input.requestId, action: "workoutSessionCompleted", resultCode: "COMPLETED" });
+  }
+  /**
+   * P0 (session rotation): durable session counter — counts COMPLETED logical
+   * sessions (each advanced only by completeWorkoutSession), not exercise
+   * events. Mirrors the Postgres workout_sessions status='completed' count.
    */
   async countCompletedWorkoutSessions(actor: ActorContext): Promise<number> {
-    return this.workoutSessionEvents.get(key(actor))?.length ?? 0;
+    return this.completedSessionIds.get(key(actor))?.size ?? 0;
   }
   async loadConversationDecisionState(actor: ActorContext, threadKey = "companion"): Promise<ConversationDecisionState> {
     return structuredClone(this.conversationStates.get(`${key(actor)}:${threadKey}`) || emptyConversationDecisionState(threadKey));

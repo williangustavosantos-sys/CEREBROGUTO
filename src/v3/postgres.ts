@@ -1309,16 +1309,42 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         substitutedFromExerciseId: row.substituted_from_exercise_id || undefined,
         substitutionReason: row.substitution_reason || undefined,
       }));
-      const session = await client.query<{ id: string }>(
-        `INSERT INTO guto_v3.workout_sessions (tenant_id,user_id,plan_id,status,started_at,completed_at)
-         VALUES ($1,$2,$3,'completed',now(),now()) RETURNING id`,
-        [input.actor.tenantId, input.actor.userId, plan.rows[0].id],
-      );
+      // P0 (session completion): one workout_sessions row per LOGICAL session,
+      // not per exercise. When the event carries a workoutSessionId, group all
+      // exercises under a single 'started' session row; the rotation counter
+      // only observes 'completed' sessions (flipped by completeWorkoutSession).
+      // Legacy fallback (no workoutSessionId): one-exercise session as before.
+      let sessionId: string;
+      if (input.event.workoutSessionId) {
+        const existing = await client.query<{ id: string; status: string }>(
+          `SELECT id, status FROM guto_v3.workout_sessions
+            WHERE tenant_id=$1 AND user_id=$2 AND plan_id=$3 AND id::text=$4
+            LIMIT 1`,
+          [input.actor.tenantId, input.actor.userId, plan.rows[0].id, input.event.workoutSessionId],
+        );
+        if (existing.rows[0]) {
+          sessionId = existing.rows[0].id;
+        } else {
+          const created = await client.query<{ id: string }>(
+            `INSERT INTO guto_v3.workout_sessions (id,tenant_id,user_id,plan_id,status,started_at,completed_at)
+             VALUES (gen_random_uuid(),$1,$2,$3,'started',now(),null) RETURNING id::text AS id`,
+            [input.actor.tenantId, input.actor.userId, plan.rows[0].id],
+          );
+          sessionId = created.rows[0]!.id;
+        }
+      } else {
+        const created = await client.query<{ id: string }>(
+          `INSERT INTO guto_v3.workout_sessions (tenant_id,user_id,plan_id,status,started_at,completed_at)
+           VALUES ($1,$2,$3,'started',now(),null) RETURNING id::text AS id`,
+          [input.actor.tenantId, input.actor.userId, plan.rows[0].id],
+        );
+        sessionId = created.rows[0]!.id;
+      }
       const inserted = await client.query<{ id: string }>(
         `INSERT INTO guto_v3.workout_session_exercises
           (tenant_id,user_id,session_id,exercise_id,load_value,repetitions,sets_completed,completed,perceived_difficulty,substituted_from_exercise_id,substitution_reason,context_snapshot)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb) RETURNING id`,
-        [input.actor.tenantId, input.actor.userId, session.rows[0]!.id, input.event.exerciseId,
+         VALUES ($1,$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb) RETURNING id`,
+        [input.actor.tenantId, input.actor.userId, sessionId, input.event.exerciseId,
           input.event.loadValue ?? null, input.event.repetitions ?? null, input.event.setsCompleted ?? null, input.event.completed,
           input.event.perceivedDifficulty ?? null, input.event.substitutedFromExerciseId ?? null, input.event.substitutionReason ?? null,
           JSON.stringify(input.event.context || {})],
@@ -1333,6 +1359,47 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       );
       await this.appendMutationEvent(client, input.actor, input.requestId, "workout.evolution_decided", { ...decision });
       return decision;
+    });
+  }
+
+  /**
+   * P0 (session completion): the SOLE authority that flips a logical workout
+   * session from 'started' to 'completed'. Exercise events only add history
+   * under a session; this call is what the rotation counter observes, so the
+   * index advances exactly once per real session, regardless of how many
+   * exercises it contained. Idempotent on requestId (a replay is a no-op).
+   */
+  async completeWorkoutSession(input: { actor: ActorContext; requestId: string; workoutSessionId: string }): Promise<void> {
+    await this.withActorTransaction(input.actor, async (client) => {
+      await client.query(
+        `SELECT pg_advisory_xact_lock(
+           hashtextextended($1 || ':' || $2 || ':' || $3, 0))`,
+        [input.actor.tenantId, input.actor.userId, input.requestId],
+      );
+      const prior = await client.query<{ payload: Record<string, unknown> }>(
+        `SELECT payload FROM guto_v3.guto_events
+          WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND event_type='workout.session_completed'
+          LIMIT 1`,
+        [input.actor.tenantId, input.actor.userId, input.requestId],
+      );
+      if (prior.rows[0]) return; // idempotent replay
+      const result = await client.query<{ id: string; status: string }>(
+        `UPDATE guto_v3.workout_sessions
+            SET status='completed', completed_at=now(), updated_at=now()
+          WHERE tenant_id=$1 AND user_id=$2 AND id::text=$3 AND status IN ('started','planned')
+          RETURNING id, status`,
+        [input.actor.tenantId, input.actor.userId, input.workoutSessionId],
+      );
+      if (!result.rows[0]) {
+        const existing = await client.query<{ status: string }>(
+          `SELECT status FROM guto_v3.workout_sessions
+            WHERE tenant_id=$1 AND user_id=$2 AND id::text=$3 LIMIT 1`,
+          [input.actor.tenantId, input.actor.userId, input.workoutSessionId],
+        );
+        if (!existing.rows[0]) throw new V3Error("V3_WORKOUT_SESSION_NOT_FOUND", "Sessão de treino não encontrada.", 404);
+        return; // already completed — idempotent
+      }
+      await this.appendMutationEvent(client, input.actor, input.requestId, "workout.session_completed", { workoutSessionId: input.workoutSessionId });
     });
   }
 

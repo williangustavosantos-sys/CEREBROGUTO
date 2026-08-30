@@ -31,6 +31,7 @@ const V3LoginRequestSchema = z.object({
 const WorkoutExerciseEventSchema = z.object({
   requestId: z.string().uuid(),
   exerciseId: z.string().trim().min(1).max(160),
+  workoutSessionId: z.string().uuid().optional(),
   loadValue: z.number().nonnegative().max(2_000).optional(),
   repetitions: z.number().int().positive().max(200).optional(),
   setsCompleted: z.number().int().nonnegative().max(30).optional(),
@@ -39,6 +40,10 @@ const WorkoutExerciseEventSchema = z.object({
   substitutedFromExerciseId: z.string().trim().min(1).max(160).optional(),
   substitutionReason: z.string().trim().min(1).max(500).optional(),
   context: z.record(z.string(), z.unknown()).optional(),
+}).strict();
+const WorkoutSessionCompletionSchema = z.object({
+  requestId: z.string().uuid(),
+  workoutSessionId: z.string().uuid(),
 }).strict();
 
 function v3Enabled(): boolean { return process.env.GUTO_V3_ENABLED === "true"; }
@@ -263,6 +268,23 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
       const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "workout_evolution" } }, async () => {
         const decision = await withV3Span("WORKOUT_EVOLUTION", {}, () => getV3Runtime().repository.recordWorkoutExerciseEvent({ actor, requestId: input.requestId, event: input }));
         return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), decision };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  // P0 (session completion): the sole authority that marks a logical workout
+  // session as completed. Exercise events group under a 'started' session;
+  // this endpoint flips it to 'completed', which the rotation counter observes.
+  // Idempotent on requestId.
+  router.post("/guto/v3/workout/sessions/complete", async (req, res, next) => {
+    try {
+      const input = WorkoutSessionCompletionSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "workout_session_completion" } }, async () => {
+        await withV3Span("WORKOUT_SESSION_COMPLETE", {}, () => getV3Runtime().repository.completeWorkoutSession({ actor, requestId: input.requestId, workoutSessionId: input.workoutSessionId }));
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), status: "completed" };
       });
       res.setHeader("x-guto-trace-id", result.traceId);
       res.json(result);

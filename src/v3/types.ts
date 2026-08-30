@@ -197,6 +197,12 @@ export interface ProgressionState {
 
 export interface WorkoutExerciseSessionEvent {
   exerciseId: string;
+  /** P0 (session completion): identity of the LOGICAL session this exercise
+   * belongs to. All exercise events of the same workout session share this
+   * id; only an explicit session-completion advances the rotation counter.
+   * When absent, the repository treats each event as its own one-exercise
+   * session (legacy fallback). */
+  workoutSessionId?: string;
   loadValue?: number;
   repetitions?: number;
   setsCompleted?: number;
