@@ -39,9 +39,15 @@ async function startEmbeddedPostgres(): Promise<EmbeddedDb> {
   let PGLiteSocketServer: any;
   let pgcrypto: any;
   try {
-    ({ PGlite } = await import("@electric-sql/pglite"));
-    ({ pgcrypto } = await import("@electric-sql/pglite/contrib/pgcrypto"));
-    ({ PGLiteSocketServer } = await import("@electric-sql/pglite-socket"));
+    // Indirect specifiers: TypeScript (and therefore the Vercel build gate,
+    // where these optional dev packages are not installed) must NOT resolve
+    // them statically. At runtime the resolution happens normally.
+    const pgliteName = "@electric-sql" + "/pglite";
+    const pgcryptoName = "@electric-sql" + "/pglite/contrib/pgcrypto";
+    const socketName = "@electric-sql" + "/pglite-socket";
+    ({ PGlite } = await import(pgliteName));
+    ({ pgcrypto } = await import(pgcryptoName));
+    ({ PGLiteSocketServer } = await import(socketName));
   } catch {
     throw new PgLiteUnavailable(
       "PGlite not installed (optional dev dependency) — skipping real-Postgres tests. " +
