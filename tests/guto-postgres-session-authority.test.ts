@@ -18,7 +18,6 @@ import type { ActorContext } from "../src/v3/types.js";
 // id. Also proves XP events no longer create completed sessions.
 
 type EmbeddedDb = { port: number; stop: () => Promise<void> };
-class PgLiteUnavailable extends Error {}
 
 async function startEmbeddedPostgres(): Promise<EmbeddedDb> {
   let PGlite: any, PGLiteSocketServer: any, pgcrypto: any;
@@ -29,7 +28,12 @@ async function startEmbeddedPostgres(): Promise<EmbeddedDb> {
     ({ PGlite } = await import(pgliteName));
     ({ pgcrypto } = await import(pgcryptoName));
     ({ PGLiteSocketServer } = await import(socketName));
-  } catch { throw new PgLiteUnavailable("PGlite not installed — skipping."); }
+  } catch (error) {
+    throw new Error(
+      "CRITICAL GATE FAILED: PGlite infra unavailable for Postgres test. " +
+      "It is a declared devDependency — run `npm ci`/`npm install` first. Underlying: " + String(error),
+    );
+  }
   const dataDir = path.join(os.tmpdir(), `guto-pg-sess-${randomUUID()}`);
   const db = new PGlite({ dataDir, extensions: { pgcrypto } });
   const port = await new Promise<number>((resolve, reject) => {
@@ -89,10 +93,15 @@ async function cleanup(repo: PostgresOfficialStateRepository, actor: ActorContex
 }
 
 let dbHandle: { port: number; stop: () => Promise<void> } | null = null;
-let skipReason: string | null = null;
 
 async function getDb() {
-  if (!dbHandle) { try { const e = await startEmbeddedPostgres(); await applyMigrations(e.port); dbHandle = e; } catch (err) { if (err instanceof PgLiteUnavailable) { skipReason = err.message; return null; } throw err; } }
+  // CRITICAL GATE: PGlite is a DECLARED devDependency, so a missing engine is
+  // an infrastructure failure, NOT a reason to skip. This must FAIL loudly.
+  if (!dbHandle) {
+    const e = await startEmbeddedPostgres();
+    await applyMigrations(e.port);
+    dbHandle = e;
+  }
   return dbHandle;
 }
 
@@ -101,7 +110,7 @@ test.after(async () => { if (dbHandle) { await dbHandle.stop().catch(() => {}); 
 // ─── CASE 1: 5 exercise events → 1 session row, status=started; complete → 1 completed ─
 
 test("PG_SESSION_IDENTITY: 5 exercises with same workoutSessionId → 1 session row, started; complete → 1 completed", async (t) => {
-  const db = await getDb(); if (!db) { t.skip(skipReason || "PGlite unavailable"); return; }
+  const db = await getDb(); assert.ok(db, "Postgres engine must be available (declared devDependency)");
   const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
   const actor = await freshActor(repo);
   try {
@@ -127,7 +136,7 @@ test("PG_SESSION_IDENTITY: 5 exercises with same workoutSessionId → 1 session 
 // ─── CASE 2: same requestId completion = 1 ────────────────────────────────
 
 test("PG_SESSION_COMPLETION: same requestId → 1 completion", async (t) => {
-  const db = await getDb(); if (!db) { t.skip(skipReason || "PGlite unavailable"); return; }
+  const db = await getDb(); assert.ok(db, "Postgres engine must be available (declared devDependency)");
   const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
   const actor = await freshActor(repo);
   try {
@@ -144,7 +153,7 @@ test("PG_SESSION_COMPLETION: same requestId → 1 completion", async (t) => {
 // ─── CASE 3: different requestIds same session = 1 ───────────────────────
 
 test("PG_SESSION_COMPLETION: different requestIds same session → 1 completion", async (t) => {
-  const db = await getDb(); if (!db) { t.skip(skipReason || "PGlite unavailable"); return; }
+  const db = await getDb(); assert.ok(db, "Postgres engine must be available (declared devDependency)");
   const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
   const actor = await freshActor(repo);
   try {
@@ -160,7 +169,7 @@ test("PG_SESSION_COMPLETION: different requestIds same session → 1 completion"
 // ─── CASE 4: concurrent completion = 1 ────────────────────────────────────
 
 test("PG_SESSION_COMPLETION: concurrent different requestIds same session → 1", async (t) => {
-  const db = await getDb(); if (!db) { t.skip(skipReason || "PGlite unavailable"); return; }
+  const db = await getDb(); assert.ok(db, "Postgres engine must be available (declared devDependency)");
   const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
   const actor = await freshActor(repo);
   try {
@@ -178,7 +187,7 @@ test("PG_SESSION_COMPLETION: concurrent different requestIds same session → 1"
 // ─── CASE 5: concurrent exercise events same session = 1 session row ─────
 
 test("PG_SESSION_IDENTITY: concurrent exercise events same workoutSessionId → 1 session row", async (t) => {
-  const db = await getDb(); if (!db) { t.skip(skipReason || "PGlite unavailable"); return; }
+  const db = await getDb(); assert.ok(db, "Postgres engine must be available (declared devDependency)");
   const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
   const actor = await freshActor(repo);
   try {
@@ -194,7 +203,7 @@ test("PG_SESSION_IDENTITY: concurrent exercise events same workoutSessionId → 
 // ─── XP AUTHORITY: complete_daily_mission does NOT create workout session ─
 
 test("PG_XP_AUTHORITY: complete_daily_mission does not advance workout session rotation", async (t) => {
-  const db = await getDb(); if (!db) { t.skip(skipReason || "PGlite unavailable"); return; }
+  const db = await getDb(); assert.ok(db, "Postgres engine must be available (declared devDependency)");
   const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
   const actor = await freshActor(repo);
   try {
@@ -210,7 +219,7 @@ test("PG_XP_AUTHORITY: complete_daily_mission does not advance workout session r
 // ─── XP AUTHORITY: accept_adapted_mission does NOT create workout session ─
 
 test("PG_XP_AUTHORITY: accept_adapted_mission does not advance workout session rotation", async (t) => {
-  const db = await getDb(); if (!db) { t.skip(skipReason || "PGlite unavailable"); return; }
+  const db = await getDb(); assert.ok(db, "Postgres engine must be available (declared devDependency)");
   const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
   const actor = await freshActor(repo);
   try {
@@ -226,7 +235,7 @@ test("PG_XP_AUTHORITY: accept_adapted_mission does not advance workout session r
 // ─── CROSS-TENANT: cannot complete another user's session ─────────────────
 
 test("PG_CROSS_TENANT: cannot complete another user's session", async (t) => {
-  const db = await getDb(); if (!db) { t.skip(skipReason || "PGlite unavailable"); return; }
+  const db = await getDb(); assert.ok(db, "Postgres engine must be available (declared devDependency)");
   const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
   const actorA = await freshActor(repo);
   const actorB = await freshActor(repo);

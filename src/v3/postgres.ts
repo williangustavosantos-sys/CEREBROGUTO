@@ -1309,9 +1309,18 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       // all exercise events of the same session group under one row, and lets
       // completeWorkoutSession find the row by the same id. The INSERT uses
       // ON CONFLICT (id) DO NOTHING so concurrent exercise events with the same
-      // workoutSessionId never create duplicate rows. Tenant+user are always
-      // in the WHERE/VALUES so a client cannot attach exercises to another
-      // actor's session row.
+      // workoutSessionId never create duplicate rows.
+      //
+      // P0 (cross-tenant ownership): the ON CONFLICT (id) DO NOTHING can be a
+      // LITERAL no-op when the session id already belongs to ANOTHER actor.
+      // workout_session_exercises is only guaranteed isolated by its OWN
+      // tenant_id/user_id + session_id FK to workout_sessions(id) — it does NOT
+      // couple exercise rows to the session's tenant/user. So AFTER the
+      // upsert we must assert that session X -- whether it was just created by
+      // THIS actor or already existed -- is actually owned by THIS actor. The
+      // rule: session X exists for THIS actor OR was created atomically for
+      // THIS actor; a globally-existing session id must never be reusable by a
+      // foreign actor.
       let sessionId: string;
       if (input.event.workoutSessionId) {
         // ON CONFLICT: if a concurrent event already created the row, reuse it.
@@ -1322,6 +1331,23 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
           [input.event.workoutSessionId, input.actor.tenantId, input.actor.userId, plan.rows[0].id],
         );
         sessionId = input.event.workoutSessionId;
+        // P0 (cross-tenant ownership): the upsert above may have been a no-op
+        // because the id already existed. Verify it belongs to THIS actor
+        // before recording any exercise against it. If it belongs to a foreign
+        // tenant/user (possibly on a different tenant entirely), this request
+        // must be rejected WITHOUT leaving any side effect on the foreign
+        // session.
+        const owner = await client.query<{ tenant_id: string; user_id: string }>(
+          `SELECT tenant_id, user_id FROM guto_v3.workout_sessions
+            WHERE id=$1::uuid LIMIT 1`,
+          [input.event.workoutSessionId],
+        );
+        if (!owner.rows[0]) {
+          throw new V3Error("V3_WORKOUT_SESSION_NOT_FOUND", "Sessão de treino não encontrada dentro desta transação.", 404);
+        }
+        if (String(owner.rows[0]!.tenant_id) !== input.actor.tenantId || String(owner.rows[0]!.user_id) !== input.actor.userId) {
+          throw new V3Error("V3_FOREIGN_WORKOUT_SESSION", "Não é possível usar uma sessão de treino de outro usuário.", 409);
+        }
       } else {
         // Legacy fallback (no workoutSessionId): server-generated id.
         const created = await client.query<{ id: string }>(

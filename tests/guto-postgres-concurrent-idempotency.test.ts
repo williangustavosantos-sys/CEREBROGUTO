@@ -31,27 +31,23 @@ import type { ActorContext } from "../src/v3/types.js";
 
 type EmbeddedDb = { port: number; stop: () => Promise<void> };
 
-/** Internal signal: PGlite not installed — tests must SKIP, not fail. */
-class PgLiteUnavailable extends Error {}
-
 async function startEmbeddedPostgres(): Promise<EmbeddedDb> {
   let PGlite: any;
   let PGLiteSocketServer: any;
   let pgcrypto: any;
   try {
-    // Indirect specifiers: TypeScript (and therefore the Vercel build gate,
-    // where these optional dev packages are not installed) must NOT resolve
-    // them statically. At runtime the resolution happens normally.
+    // Indirect specifiers: TypeScript (and therefore the Vercel build gate)
+    // must NOT resolve these statically. At runtime they resolve normally.
     const pgliteName = "@electric-sql" + "/pglite";
     const pgcryptoName = "@electric-sql" + "/pglite/contrib/pgcrypto";
     const socketName = "@electric-sql" + "/pglite-socket";
     ({ PGlite } = await import(pgliteName));
     ({ pgcrypto } = await import(pgcryptoName));
     ({ PGLiteSocketServer } = await import(socketName));
-  } catch {
-    throw new PgLiteUnavailable(
-      "PGlite not installed (optional dev dependency) — skipping real-Postgres tests. " +
-      "Install with: npm install --no-save @electric-sql/pglite @electric-sql/pglite-socket",
+  } catch (error) {
+    throw new Error(
+      "CRITICAL GATE FAILED: PGlite infra unavailable for Postgres test. " +
+      "It is a declared devDependency — run `npm ci`/`npm install` first. Underlying: " + String(error),
     );
   }
   const dataDir = path.join(os.tmpdir(), `guto-pg-idem-${randomUUID()}`);
@@ -162,19 +158,12 @@ async function cleanup(repository: PostgresOfficialStateRepository, actor: Actor
 // ─── shared embedded instance ────────────────────────────────────────────
 
 let dbHandle: { port: number; stop: () => Promise<void> } | null = null;
-let skipReason: string | null = null;
 
 async function getDb(): Promise<{ port: number; stop: () => Promise<void> }> {
+  // CRITICAL GATE: PGlite is a DECLARED devDependency, so a missing engine is
+  // an infrastructure failure, NOT a reason to silently skip. It must FAIL.
   if (!dbHandle) {
-    try {
-      dbHandle = await startDb();
-    } catch (error) {
-      if (error instanceof PgLiteUnavailable) {
-        skipReason = error.message;
-        return null as unknown as { port: number; stop: () => Promise<void> };
-      }
-      throw error;
-    }
+    dbHandle = await startDb();
   }
   return dbHandle;
 }
@@ -187,7 +176,7 @@ test.after(async () => {
 
 test("PG_CONCURRENT_IDEMPOTENCY: two real connections, same requestId → one logical execution", async (t) => {
   const db = await getDb();
-  if (!db) t.skip(skipReason || "PGlite unavailable");
+  assert.ok(db, "Postgres engine must be available (declared devDependency)");
   const { port } = db;
   const repository = new PostgresOfficialStateRepository(createPool(port, 10));
   const actor = await freshActor(repository);
@@ -252,7 +241,7 @@ test("PG_CONCURRENT_IDEMPOTENCY: two real connections, same requestId → one lo
 
 test("PG_CONCURRENT_IDEMPOTENCY: duplicate does not create false PROGRESS; NEW requestId counts", async (t) => {
   const db = await getDb();
-  if (!db) t.skip(skipReason || "PGlite unavailable");
+  assert.ok(db, "Postgres engine must be available (declared devDependency)");
   const { port } = db;
   const repository = new PostgresOfficialStateRepository(createPool(port, 10));
   const actor = await freshActor(repository);
@@ -297,7 +286,7 @@ test("PG_POOL_MAX_1: recordWorkoutExerciseEvent does not deadlock with a single 
   // loadOfficialSnapshot), it would wait forever. The within-transaction
   // snapshot loader must prevent this.
   const db = await getDb();
-  if (!db) t.skip(skipReason || "PGlite unavailable");
+  assert.ok(db, "Postgres engine must be available (declared devDependency)");
   const { port } = db;
   const repository = new PostgresOfficialStateRepository(createPool(port, 1));
   const actor = await freshActor(repository);
