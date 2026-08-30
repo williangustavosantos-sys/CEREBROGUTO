@@ -972,18 +972,12 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         [input.actor.tenantId, input.actor.userId, input.requestId, amount, input.reasonCode, input.sourceKey],
       );
       if (!inserted.rows[0]) return;
-      if (input.reasonCode === "complete_daily_mission" || input.reasonCode === "accept_adapted_mission") {
-        const workout = await client.query<{ id: string }>(
-          `SELECT id FROM guto_v3.workout_plans WHERE tenant_id=$1 AND user_id=$2 AND status='active'`,
-          [input.actor.tenantId, input.actor.userId],
-        );
-        if (!workout.rows[0]) throw new V3Error("V3_WORKOUT_NOT_FOUND", "Missão oficial sem treino ativo.", 409);
-        await client.query(
-          `INSERT INTO guto_v3.workout_sessions (tenant_id,user_id,plan_id,status,started_at,completed_at)
-           VALUES ($1,$2,$3,'completed',now(),now())`,
-          [input.actor.tenantId, input.actor.userId, workout.rows[0].id],
-        );
-      }
+      // P0 (session completion authority): XP events (complete_daily_mission,
+      // accept_adapted_mission) NO LONGER create workout_sessions rows. XP is
+      // now cleanly separated from session-completion authority — only
+      // completeWorkoutSession() can flip a session to 'completed'. This was
+      // a second authority that inflated countCompletedWorkoutSessions and
+      // diverged Postgres from in-memory.
       await client.query(`UPDATE guto_v3.users SET version=version+1 WHERE tenant_id=$1 AND id=$2`, [input.actor.tenantId, input.actor.userId]);
       await this.appendMutationEvent(client, input.actor, input.requestId, "xp.recorded", {
         reasonCode: input.reasonCode,
@@ -1310,29 +1304,26 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         substitutionReason: row.substitution_reason || undefined,
       }));
       // P0 (session completion): one workout_sessions row per LOGICAL session,
-      // not per exercise. When the event carries a workoutSessionId, group all
-      // exercises under a single 'started' session row; the rotation counter
-      // only observes 'completed' sessions (flipped by completeWorkoutSession).
-      // Legacy fallback (no workoutSessionId): one-exercise session as before.
+      // not per exercise. MODELO B: the client/runtime-generated workoutSessionId
+      // is used LITERALLY as the PK (id) of the workout_sessions row. This lets
+      // all exercise events of the same session group under one row, and lets
+      // completeWorkoutSession find the row by the same id. The INSERT uses
+      // ON CONFLICT (id) DO NOTHING so concurrent exercise events with the same
+      // workoutSessionId never create duplicate rows. Tenant+user are always
+      // in the WHERE/VALUES so a client cannot attach exercises to another
+      // actor's session row.
       let sessionId: string;
       if (input.event.workoutSessionId) {
-        const existing = await client.query<{ id: string; status: string }>(
-          `SELECT id, status FROM guto_v3.workout_sessions
-            WHERE tenant_id=$1 AND user_id=$2 AND plan_id=$3 AND id::text=$4
-            LIMIT 1`,
-          [input.actor.tenantId, input.actor.userId, plan.rows[0].id, input.event.workoutSessionId],
+        // ON CONFLICT: if a concurrent event already created the row, reuse it.
+        await client.query(
+          `INSERT INTO guto_v3.workout_sessions (id,tenant_id,user_id,plan_id,status,started_at,completed_at)
+           VALUES ($1::uuid,$2,$3,$4,'started',now(),null)
+           ON CONFLICT (id) DO NOTHING`,
+          [input.event.workoutSessionId, input.actor.tenantId, input.actor.userId, plan.rows[0].id],
         );
-        if (existing.rows[0]) {
-          sessionId = existing.rows[0].id;
-        } else {
-          const created = await client.query<{ id: string }>(
-            `INSERT INTO guto_v3.workout_sessions (id,tenant_id,user_id,plan_id,status,started_at,completed_at)
-             VALUES (gen_random_uuid(),$1,$2,$3,'started',now(),null) RETURNING id::text AS id`,
-            [input.actor.tenantId, input.actor.userId, plan.rows[0].id],
-          );
-          sessionId = created.rows[0]!.id;
-        }
+        sessionId = input.event.workoutSessionId;
       } else {
+        // Legacy fallback (no workoutSessionId): server-generated id.
         const created = await client.query<{ id: string }>(
           `INSERT INTO guto_v3.workout_sessions (tenant_id,user_id,plan_id,status,started_at,completed_at)
            VALUES ($1,$2,$3,'started',now(),null) RETURNING id::text AS id`,
@@ -1371,33 +1362,32 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
    */
   async completeWorkoutSession(input: { actor: ActorContext; requestId: string; workoutSessionId: string }): Promise<void> {
     await this.withActorTransaction(input.actor, async (client) => {
+      // P0 (session completion): lock on the SESSION identity (not just
+      // requestId) so two different requestIds trying to complete the SAME
+      // session serialize. The conditional UPDATE (status IN
+      // 'started','planned') is the durable second barrier: only the first
+      // transaction to reach it flips started→completed; the second finds
+      // status='completed' and returns idempotently.
       await client.query(
         `SELECT pg_advisory_xact_lock(
            hashtextextended($1 || ':' || $2 || ':' || $3, 0))`,
-        [input.actor.tenantId, input.actor.userId, input.requestId],
+        [input.actor.tenantId, input.actor.userId, input.workoutSessionId],
       );
-      const prior = await client.query<{ payload: Record<string, unknown> }>(
-        `SELECT payload FROM guto_v3.guto_events
-          WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND event_type='workout.session_completed'
-          LIMIT 1`,
-        [input.actor.tenantId, input.actor.userId, input.requestId],
-      );
-      if (prior.rows[0]) return; // idempotent replay
       const result = await client.query<{ id: string; status: string }>(
         `UPDATE guto_v3.workout_sessions
             SET status='completed', completed_at=now(), updated_at=now()
-          WHERE tenant_id=$1 AND user_id=$2 AND id::text=$3 AND status IN ('started','planned')
+          WHERE tenant_id=$1 AND user_id=$2 AND id=$3::uuid AND status IN ('started','planned')
           RETURNING id, status`,
         [input.actor.tenantId, input.actor.userId, input.workoutSessionId],
       );
       if (!result.rows[0]) {
         const existing = await client.query<{ status: string }>(
           `SELECT status FROM guto_v3.workout_sessions
-            WHERE tenant_id=$1 AND user_id=$2 AND id::text=$3 LIMIT 1`,
+            WHERE tenant_id=$1 AND user_id=$2 AND id=$3::uuid LIMIT 1`,
           [input.actor.tenantId, input.actor.userId, input.workoutSessionId],
         );
         if (!existing.rows[0]) throw new V3Error("V3_WORKOUT_SESSION_NOT_FOUND", "Sessão de treino não encontrada.", 404);
-        return; // already completed — idempotent
+        return; // already completed — idempotent (different requestId is fine)
       }
       await this.appendMutationEvent(client, input.actor, input.requestId, "workout.session_completed", { workoutSessionId: input.workoutSessionId });
     });
