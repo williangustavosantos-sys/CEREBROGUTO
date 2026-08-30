@@ -6,9 +6,6 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import pg from "pg";
-import { PGlite } from "@electric-sql/pglite";
-import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
-import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { PostgresOfficialStateRepository } from "../src/v3/postgres.js";
 import { V3CutoverService } from "../src/v3/cutover-service.js";
 import type { ActorContext } from "../src/v3/types.js";
@@ -23,8 +20,34 @@ import type { ActorContext } from "../src/v3/types.js";
 // preview are used; a dedicated test user is created and cleaned up.
 
 // ─── embedded Postgres (PGlite over TCP) ─────────────────────────────────
+//
+// PGlite (@electric-sql/pglite) is an OPTIONAL dev-only dependency: the real
+// Postgres engine compiled to WASM, exposed over the wire protocol via
+// @electric-sql/pglite-socket so TWO INDEPENDENT pg connections can race.
+// It is not in package.json — install it with
+//   npm install --no-save @electric-sql/pglite @electric-sql/pglite-socket
+// before running this test locally. Without it, the tests skip (they are
+// additive proof, not required regressions).
 
-async function startEmbeddedPostgres(): Promise<{ port: number; stop: () => Promise<void> }> {
+type EmbeddedDb = { port: number; stop: () => Promise<void> };
+
+/** Internal signal: PGlite not installed — tests must SKIP, not fail. */
+class PgLiteUnavailable extends Error {}
+
+async function startEmbeddedPostgres(): Promise<EmbeddedDb> {
+  let PGlite: any;
+  let PGLiteSocketServer: any;
+  let pgcrypto: any;
+  try {
+    ({ PGlite } = await import("@electric-sql/pglite"));
+    ({ pgcrypto } = await import("@electric-sql/pglite/contrib/pgcrypto"));
+    ({ PGLiteSocketServer } = await import("@electric-sql/pglite-socket"));
+  } catch {
+    throw new PgLiteUnavailable(
+      "PGlite not installed (optional dev dependency) — skipping real-Postgres tests. " +
+      "Install with: npm install --no-save @electric-sql/pglite @electric-sql/pglite-socket",
+    );
+  }
   const dataDir = path.join(os.tmpdir(), `guto-pg-idem-${randomUUID()}`);
   // pgcrypto is required by migration 0001 (gen_random_uuid). PGlite ships it
   // as a contrib extension — load it explicitly.
@@ -133,9 +156,20 @@ async function cleanup(repository: PostgresOfficialStateRepository, actor: Actor
 // ─── shared embedded instance ────────────────────────────────────────────
 
 let dbHandle: { port: number; stop: () => Promise<void> } | null = null;
+let skipReason: string | null = null;
 
 async function getDb(): Promise<{ port: number; stop: () => Promise<void> }> {
-  if (!dbHandle) dbHandle = await startDb();
+  if (!dbHandle) {
+    try {
+      dbHandle = await startDb();
+    } catch (error) {
+      if (error instanceof PgLiteUnavailable) {
+        skipReason = error.message;
+        return null as unknown as { port: number; stop: () => Promise<void> };
+      }
+      throw error;
+    }
+  }
   return dbHandle;
 }
 
@@ -145,8 +179,10 @@ test.after(async () => {
 
 // ─── tests ───────────────────────────────────────────────────────────────
 
-test("PG_CONCURRENT_IDEMPOTENCY: two real connections, same requestId → one logical execution", async () => {
-  const { port } = await getDb();
+test("PG_CONCURRENT_IDEMPOTENCY: two real connections, same requestId → one logical execution", async (t) => {
+  const db = await getDb();
+  if (!db) t.skip(skipReason || "PGlite unavailable");
+  const { port } = db;
   const repository = new PostgresOfficialStateRepository(createPool(port, 10));
   const actor = await freshActor(repository);
   try {
@@ -208,8 +244,10 @@ test("PG_CONCURRENT_IDEMPOTENCY: two real connections, same requestId → one lo
   }
 });
 
-test("PG_CONCURRENT_IDEMPOTENCY: duplicate does not create false PROGRESS; NEW requestId counts", async () => {
-  const { port } = await getDb();
+test("PG_CONCURRENT_IDEMPOTENCY: duplicate does not create false PROGRESS; NEW requestId counts", async (t) => {
+  const db = await getDb();
+  if (!db) t.skip(skipReason || "PGlite unavailable");
+  const { port } = db;
   const repository = new PostgresOfficialStateRepository(createPool(port, 10));
   const actor = await freshActor(repository);
   try {
@@ -247,12 +285,14 @@ test("PG_CONCURRENT_IDEMPOTENCY: duplicate does not create false PROGRESS; NEW r
   }
 });
 
-test("PG_POOL_MAX_1: recordWorkoutExerciseEvent does not deadlock with a single pool connection", async () => {
+test("PG_POOL_MAX_1: recordWorkoutExerciseEvent does not deadlock with a single pool connection", async (t) => {
   // Pool deliberately limited to max=1: if recordWorkoutExerciseEvent (holding
   // the transaction) tried to acquire a SECOND connection (e.g. through
   // loadOfficialSnapshot), it would wait forever. The within-transaction
   // snapshot loader must prevent this.
-  const { port } = await getDb();
+  const db = await getDb();
+  if (!db) t.skip(skipReason || "PGlite unavailable");
+  const { port } = db;
   const repository = new PostgresOfficialStateRepository(createPool(port, 1));
   const actor = await freshActor(repository);
   try {
