@@ -6,6 +6,7 @@ import { emptyConversationDecisionState, type ConversationDecisionState, type Co
 import { V3Error } from "./errors.js";
 import { materializeFirstContact } from "./first-contact.js";
 import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from "./facts.js";
+import { assertRelationshipLifecycleState, evaluateRelationshipLifecycleState, shouldSuppressProactivity, type RelationshipLifecycleRecord } from "./relationship-lifecycle.js";
 import { decideWorkoutEvolution } from "./workout-evolution.js";
 import { assertValidAdaptedExecution, resolveSessionEffectiveLocation } from "./session-execution-policy.js";
 import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
@@ -282,6 +283,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       confirmedContext,
       workout: state.workout,
       diet: state.diet,
+      relationshipLifecycle: state.relationshipLifecycle,
       nextSessionIndex: await this.countCompletedWorkoutSessions(actor),
     };
   }
@@ -473,6 +475,13 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         }
       }
 
+      const lifecycleResult = await client.query<QueryResultRow>(
+        `SELECT state, entered_state_at, last_evaluated_at, last_presence_day, consecutive_absence_days, version
+           FROM guto_v3.relationship_lifecycle
+          WHERE tenant_id=$1 AND user_id=$2`,
+        [actor.tenantId, actor.userId],
+      );
+      const relationshipLifecycle = lifecycleResult.rows[0] ? this.mapLifecycleRow(lifecycleResult.rows[0], actor) : null;
       const journeyRow = journeyResult.rows[0];
       const firstContactRow = firstContactResult.rows[0];
       const fullContext = contextResult.rows[0] ? this.mapConfirmedContext(contextResult.rows[0]) : null;
@@ -519,6 +528,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         currentFacts,
         workout: confirmedWorkout,
         diet: confirmedDiet,
+        relationshipLifecycle,
         progression: {
           totalXp,
           evolutionStage: totalXp >= 12_000 ? "elite" : totalXp >= 5_000 ? "adult" : totalXp >= 1_500 ? "teen" : "baby",
@@ -989,6 +999,18 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     sourceKey: string;
   }): Promise<void> {
     await this.withActorTransaction(input.actor, async (client) => {
+      // Relationship lifecycle gate: a TERMINAL relationship must never keep
+      // accumulating miss penalties (no infinite charges). The daily miss
+      // penalty is the deterministic "charge"; TERMINAL suppresses it.
+      if (input.reasonCode === "apply_daily_miss_penalty") {
+        const lifecycle = await client.query<QueryResultRow>(
+          `SELECT state FROM guto_v3.relationship_lifecycle WHERE tenant_id=$1 AND user_id=$2`,
+          [input.actor.tenantId, input.actor.userId],
+        );
+        if (lifecycle.rows[0] && shouldSuppressProactivity(assertRelationshipLifecycleState(String(lifecycle.rows[0].state)))) {
+          throw new V3Error("V3_RELATIONSHIP_TERMINAL", "A relação está encerrada; penalidades de ausência não são mais aplicadas.", 409);
+        }
+      }
       let amount = input.reasonCode === "grant_initial_xp" || input.reasonCode === "complete_daily_mission"
         ? 100
         : input.reasonCode === "accept_adapted_mission"
@@ -1483,6 +1505,169 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
          ON CONFLICT (tenant_id,user_id,request_id,event_type) DO NOTHING`,
         [input.actor.tenantId, input.actor.userId, input.requestId, JSON.stringify({ action: input.action, resultCode: input.resultCode })],
       );
+    });
+  }
+
+  private async deriveLastPresenceDay(client: PoolClient, actor: ActorContext): Promise<string | null> {
+    const result = await client.query<{ day: string | null }>(
+      `SELECT COALESCE(
+         (SELECT MAX(source_key)::text FROM guto_v3.xp_ledger
+           WHERE tenant_id=$1 AND user_id=$2
+             AND reason_code IN ('complete_daily_mission','accept_adapted_mission')
+             AND source_key ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'),
+         (SELECT MAX(to_char(last_interaction_at, 'YYYY-MM-DD')) FROM guto_v3.conversation_threads
+           WHERE tenant_id=$1 AND user_id=$2 AND last_interaction_at IS NOT NULL)
+       ) AS day`,
+      [actor.tenantId, actor.userId, actor.tenantId, actor.userId],
+    );
+    return result.rows[0]?.day || null;
+  }
+
+  private mapLifecycleRow(row: QueryResultRow, actor: ActorContext): RelationshipLifecycleRecord {
+    return {
+      tenantId: actor.tenantId,
+      userId: actor.userId,
+      state: assertRelationshipLifecycleState(String(row.state)),
+      enteredStateAt: row.entered_state_at ? new Date(row.entered_state_at).toISOString() : null,
+      lastEvaluatedAt: new Date(row.last_evaluated_at).toISOString(),
+      lastPresenceDay: row.last_presence_day ? String(row.last_presence_day) : null,
+      consecutiveAbsenceDays: asNumber(row.consecutive_absence_days),
+      version: asNumber(row.version),
+    };
+  }
+
+  async getRelationshipLifecycle(actor: ActorContext): Promise<RelationshipLifecycleRecord | null> {
+    return this.withActorTransaction(actor, async (client) => {
+      const result = await client.query<QueryResultRow>(
+        `SELECT state, entered_state_at, last_evaluated_at, last_presence_day, consecutive_absence_days, version
+           FROM guto_v3.relationship_lifecycle
+          WHERE tenant_id=$1 AND user_id=$2`,
+        [actor.tenantId, actor.userId],
+      );
+      return result.rows[0] ? this.mapLifecycleRow(result.rows[0], actor) : null;
+    });
+  }
+
+  async evaluateRelationshipLifecycle(input: {
+    actor: ActorContext;
+    requestId: string;
+    asOf?: string;
+    lastPresenceDay?: string | null;
+  }): Promise<RelationshipLifecycleRecord> {
+    return this.withActorTransaction(input.actor, async (client) => {
+      // Serialize concurrent evaluations of the same actor on the lifecycle row.
+      let existing = await client.query<QueryResultRow>(
+        `SELECT state, entered_state_at, last_evaluated_at, last_presence_day, consecutive_absence_days, version
+           FROM guto_v3.relationship_lifecycle
+          WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      if (!existing.rows[0]) {
+        await client.query(
+          `INSERT INTO guto_v3.relationship_lifecycle (tenant_id,user_id,state,last_evaluated_at,last_presence_day,consecutive_absence_days)
+           VALUES ($1,$2,'ACTIVE',now(),NULL,0)
+           ON CONFLICT (tenant_id,user_id) DO NOTHING`,
+          [input.actor.tenantId, input.actor.userId],
+        );
+        existing = await client.query<QueryResultRow>(
+          `SELECT state, entered_state_at, last_evaluated_at, last_presence_day, consecutive_absence_days, version
+             FROM guto_v3.relationship_lifecycle
+            WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE`,
+          [input.actor.tenantId, input.actor.userId],
+        );
+      }
+      const row = existing.rows[0]!;
+      const current = assertRelationshipLifecycleState(String(row.state));
+      const currentAbsence = asNumber(row.consecutive_absence_days);
+      const currentPresenceDay = row.last_presence_day ? String(row.last_presence_day) : null;
+      // Official data is the authority for the anchor; an explicit override wins
+      // only for deterministic tests.
+      const presenceDay = input.lastPresenceDay !== undefined
+        ? (input.lastPresenceDay || null)
+        : await this.deriveLastPresenceDay(client, input.actor);
+      const asOf = input.asOf || this.todayKey();
+      const absenceDays = presenceDay
+        ? Math.max(0, Math.floor((new Date(`${asOf}T00:00:00.000Z`).getTime() - new Date(`${presenceDay}T00:00:00.000Z`).getTime()) / 86_400_000))
+        : 0;
+      const transition = evaluateRelationshipLifecycleState(current, absenceDays);
+      if (transition.transitioned) {
+        await client.query(
+          `UPDATE guto_v3.relationship_lifecycle
+              SET state=$3, entered_state_at=now(), last_evaluated_at=now(),
+                  last_presence_day=$4, consecutive_absence_days=$5, version=version+1
+            WHERE tenant_id=$1 AND user_id=$2`,
+          [input.actor.tenantId, input.actor.userId, transition.state, presenceDay, absenceDays],
+        );
+        await client.query(
+          `INSERT INTO guto_v3.relationship_lifecycle_events
+             (tenant_id,user_id,request_id,from_state,to_state,reason)
+           VALUES ($1,$2,$3,$4,$5,$6)
+           ON CONFLICT (tenant_id,user_id,request_id,from_state,to_state) DO NOTHING`,
+          [input.actor.tenantId, input.actor.userId, input.requestId, current, transition.state, transition.reason || "transition"],
+        );
+      } else if (presenceDay !== currentPresenceDay || absenceDays !== currentAbsence) {
+        await client.query(
+          `UPDATE guto_v3.relationship_lifecycle
+              SET last_evaluated_at=now(), last_presence_day=$3, consecutive_absence_days=$4
+            WHERE tenant_id=$1 AND user_id=$2`,
+          [input.actor.tenantId, input.actor.userId, presenceDay, absenceDays],
+        );
+      } else {
+        await client.query(
+          `UPDATE guto_v3.relationship_lifecycle SET last_evaluated_at=now()
+            WHERE tenant_id=$1 AND user_id=$2`,
+          [input.actor.tenantId, input.actor.userId],
+        );
+      }
+      const final = await client.query<QueryResultRow>(
+        `SELECT state, entered_state_at, last_evaluated_at, last_presence_day, consecutive_absence_days, version
+           FROM guto_v3.relationship_lifecycle
+          WHERE tenant_id=$1 AND user_id=$2`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      return this.mapLifecycleRow(final.rows[0]!, input.actor);
+    });
+  }
+
+  async reactivateRelationship(input: { actor: ActorContext; requestId: string }): Promise<RelationshipLifecycleRecord> {
+    return this.withActorTransaction(input.actor, async (client) => {
+      const existing = await client.query<QueryResultRow>(
+        `SELECT state, entered_state_at, last_evaluated_at, last_presence_day, consecutive_absence_days, version
+           FROM guto_v3.relationship_lifecycle
+          WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      if (!existing.rows[0]) {
+        throw new V3Error("V3_RELATIONSHIP_LIFECYCLE_NOT_EVALUATED", "Lifecycle ainda não avaliado; avalie antes de reativar.", 409);
+      }
+      const row = existing.rows[0]!;
+      const current = assertRelationshipLifecycleState(String(row.state));
+      if (current === "TERMINAL") {
+        await client.query(
+          `UPDATE guto_v3.relationship_lifecycle SET state='ACTIVE', entered_state_at=now(), last_evaluated_at=now(), version=version+1
+            WHERE tenant_id=$1 AND user_id=$2`,
+          [input.actor.tenantId, input.actor.userId],
+        );
+        await client.query(
+          `INSERT INTO guto_v3.relationship_lifecycle_events
+             (tenant_id,user_id,request_id,from_state,to_state,reason)
+           VALUES ($1,$2,$3,'TERMINAL','ACTIVE','explicit_reactivation')
+           ON CONFLICT (tenant_id,user_id,request_id,from_state,to_state) DO NOTHING`,
+          [input.actor.tenantId, input.actor.userId, input.requestId],
+        );
+      } else {
+        await client.query(
+          `UPDATE guto_v3.relationship_lifecycle SET last_evaluated_at=now() WHERE tenant_id=$1 AND user_id=$2`,
+          [input.actor.tenantId, input.actor.userId],
+        );
+      }
+      const final = await client.query<QueryResultRow>(
+        `SELECT state, entered_state_at, last_evaluated_at, last_presence_day, consecutive_absence_days, version
+           FROM guto_v3.relationship_lifecycle
+          WHERE tenant_id=$1 AND user_id=$2`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      return this.mapLifecycleRow(final.rows[0]!, input.actor);
     });
   }
 

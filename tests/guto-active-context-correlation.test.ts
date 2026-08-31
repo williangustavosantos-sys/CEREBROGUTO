@@ -17,6 +17,9 @@ let baseUrl = "";
 let originalFetch: typeof globalThis.fetch;
 let clearMemoryStoreCache: () => void = () => {};
 let brainCalls = 0;
+// Incremented the moment the mock Gemini endpoint is hit (before its 120ms
+// sleep) — the deterministic "turn is in-flight" signal for race tests.
+let brainRequestsStarted = 0;
 let brainPrompts: string[] = [];
 let forcedFoodQuantity: string | null = null;
 let forceInvalidFoodDecision = false;
@@ -127,6 +130,20 @@ async function post(path: string, body: unknown) {
   return response.json() as Promise<Record<string, any>>;
 }
 
+// Deterministic race helper: waits until the mock brain has STARTED handling a
+// turn (brainRequestsStarted >= target — incremented the moment the Gemini mock
+// is hit, before its 120ms sleep). Once this resolves the turn is guaranteed
+// in-flight, so the active-context switch that follows is a real mid-turn race,
+// independent of machine load. (The previous fixed 30ms sleep stretched past
+// 120ms under full-suite load, making the "stale_context" assertion flaky.)
+async function waitForBrainCall(target: number, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (brainRequestsStarted < target) {
+    if (Date.now() > deadline) throw new Error(`mock brain call #${target} never started (started=${brainRequestsStarted})`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 async function getAsFreshSession(path: string) {
   const freshToken = jwt.sign(
     { userId, role: "student", sessionNonce: crypto.randomUUID() },
@@ -150,6 +167,7 @@ describe("active context correlation", () => {
     originalFetch = globalThis.fetch.bind(globalThis);
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       if (String(input).includes("generativelanguage.googleapis.com")) {
+        brainRequestsStarted += 1;
         await new Promise((resolve) => setTimeout(resolve, 120));
         const requestBody = JSON.parse(String(init?.body || "{}")) as {
           contents?: Array<{ parts?: Array<{ text?: string }> }>;
@@ -303,6 +321,7 @@ describe("active context correlation", () => {
 
   beforeEach(() => {
     brainCalls = 0;
+    brainRequestsStarted = 0;
     brainPrompts = [];
     forcedFoodQuantity = null;
     forceInvalidFoodDecision = false;
@@ -336,6 +355,7 @@ describe("active context correlation", () => {
     const dietContext = context("ctx-diet", "diet", "lunch:rice", "Arroz");
     await post("/guto/active-context", { context: workoutContext });
 
+    const brainCallsBefore = brainCalls;
     const delayedTurn = post("/guto", {
       profile: { userId, name: "Will" },
       language: "pt-BR",
@@ -348,7 +368,8 @@ describe("active context correlation", () => {
       activeContextType: workoutContext.type,
       activeItemId: workoutContext.currentItem.id,
     });
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    // The delayed turn is in-flight only once the brain started handling it.
+    await waitForBrainCall(brainCallsBefore + 1);
     await post("/guto/active-context", { context: dietContext });
 
     const response = await delayedTurn;
@@ -1652,6 +1673,7 @@ describe("active context correlation", () => {
       contextId: workoutContext.id, contextVersion: 1, activeContextType: "workout", activeItemId: "eliptico",
     });
 
+    const brainCallsBefore = brainCalls;
     const delayedWorkoutTurn = post("/guto", {
       profile: { userId, name: "Will" }, language: "pt-BR", history: [], input: "Explique melhor.",
       turnId: "turn-concurrent-late", requestId: "request-concurrent-late",
@@ -1660,7 +1682,9 @@ describe("active context correlation", () => {
       activeContextType: "workout",
       activeItemId: workoutSwap.activeContext.currentItem.id,
     });
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    // The late workout turn must be in-flight (brain handling it) before the
+    // diet context switch, so the stale_context discard is deterministic.
+    await waitForBrainCall(brainCallsBefore + 1);
 
     const dietContext = context("ctx-concurrent-diet", "diet", "cafe:aveia em flocos", "Aveia em flocos");
     await post("/guto/active-context", { context: dietContext });

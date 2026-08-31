@@ -162,6 +162,10 @@ export interface OfficialSnapshot {
    * when a real session completion is recorded. Optional: repositories that
    * don't populate it leave rotation falling back to index 0. */
   nextSessionIndex?: number;
+  /** Official deterministic relationship lifecycle state (ACTIVE / AT_RISK /
+   * DECAYING / TERMINAL). The LLM only verbalizes it — it never decides it.
+   * Optional for repositories that don't populate it yet. */
+  relationshipLifecycle?: import("./relationship-lifecycle.js").RelationshipLifecycleRecord | null;
 }
 
 export interface JourneyState {
@@ -257,6 +261,8 @@ export interface V3AppState {
   /** P0 (session rotation): next logical session index derived from durable
    * state (count of completed sessions). */
   nextSessionIndex?: number;
+  /** Official deterministic relationship lifecycle state. */
+  relationshipLifecycle?: import("./relationship-lifecycle.js").RelationshipLifecycleRecord | null;
 }
 
 export interface CandidateOption {

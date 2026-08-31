@@ -147,6 +147,27 @@ export interface OfficialStateRepository {
     action: string;
     resultCode: string;
   }): Promise<void>;
+  /** Reads the current official relationship lifecycle record (null if never
+   * evaluated). Deterministic, tenant-scoped. */
+  getRelationshipLifecycle(actor: ActorContext): Promise<import("./relationship-lifecycle.js").RelationshipLifecycleRecord | null>;
+  /** Evaluates the relationship lifecycle deterministically from official data
+   * (last presence/interaction day) + time/absence + policy. Idempotent on
+   * requestId; concurrency-safe (row lock/CAS). Returns the persisted record. */
+  evaluateRelationshipLifecycle(input: {
+    actor: ActorContext;
+    requestId: string;
+    /** Evaluation day (YYYY-MM-DD). Defaults to the repository's "today". */
+    asOf?: string;
+    /** Override the anchor presence day (YYYY-MM-DD) for tests; when absent the
+     * repository derives it from official mission/interaction data. */
+    lastPresenceDay?: string | null;
+  }): Promise<import("./relationship-lifecycle.js").RelationshipLifecycleRecord>;
+  /** Explicit reactivation (commercial/admin release path): TERMINAL → ACTIVE,
+   * never a silent restore. Idempotent on requestId. Official data is kept. */
+  reactivateRelationship(input: {
+    actor: ActorContext;
+    requestId: string;
+  }): Promise<import("./relationship-lifecycle.js").RelationshipLifecycleRecord>;
 }
 
 export interface ConversationStateRepository {

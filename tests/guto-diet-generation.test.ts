@@ -18,6 +18,8 @@ let baseUrl = "";
 let originalFetch: typeof globalThis.fetch;
 let dietModelCalls = 0;
 let dietModelDelayMs = 0;
+let dietModelGate: Promise<void> | undefined;
+let resolveDietModelGate: (() => void) | undefined;
 let saveDietPlanForTest: (plan: any) => Promise<void>;
 let saveDietPlanIfUnchangedForTest: (plan: any, expectedToken: string) => Promise<void>;
 let getDietPlanConcurrencyTokenForTest: (plan: any) => string;
@@ -271,6 +273,16 @@ describe("diet generation contract", () => {
         return originalFetch(input as any, init);
       }
       dietModelCalls += 1;
+      if (dietModelGate) {
+        // Deterministic synchronization: the test resolves the gate only after
+        // the concurrent mutation has landed, so the generation is provably
+        // in-flight when the profile changes. A 5s failsafe turns any test
+        // mistake into a clean failure instead of a hang.
+        await Promise.race([
+          dietModelGate,
+          new Promise((resolve) => setTimeout(resolve, 5_000)),
+        ]);
+      }
       if (dietModelDelayMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, dietModelDelayMs));
       }
@@ -303,6 +315,8 @@ describe("diet generation contract", () => {
     dietModelResponse = defaultDietModelResponse;
     dietModelCalls = 0;
     dietModelDelayMs = 0;
+    dietModelGate = undefined;
+    resolveDietModelGate = undefined;
     writeFileSync(testMemoryFile, JSON.stringify({}, null, 2));
     rmSync(testDietFile, { force: true });
   });
@@ -1164,7 +1178,7 @@ describe("diet generation contract", () => {
       body: JSON.stringify({ language: "it-IT" }),
     });
     assert.equal(normalizeProfile.status, 200);
-    dietModelDelayMs = 180;
+    dietModelGate = new Promise<void>((resolve) => { resolveDietModelGate = resolve; });
 
     const generation = originalFetch(`${baseUrl}/guto/diet/generate`, {
       method: "POST",
@@ -1173,12 +1187,17 @@ describe("diet generation contract", () => {
     });
     await waitUntil(() => dietModelCalls >= 1);
 
-    const profileUpdate = await originalFetch(`${baseUrl}/guto/memory`, {
+    // O POST de memória grava o snapshot ANTES do resolver síncrono, então
+    // esperamos a gravação ser observável e só então liberamos o gate — o
+    // commit da geração relê a memória fresca e detecta a mudança.
+    const profileUpdate = originalFetch(`${baseUrl}/guto/memory`, {
       method: "POST",
       headers: authHeaders(userId),
       body: JSON.stringify({ language: "it-IT", weightKg: 91 }),
     });
-    assert.equal(profileUpdate.status, 200);
+    await waitUntil(() => readMemory(userId).weightKg === 91);
+    resolveDietModelGate!();
+    assert.equal((await profileUpdate).status, 200);
 
     const response = await generation;
     assert.equal(response.status, 409);
@@ -1218,7 +1237,7 @@ describe("diet generation contract", () => {
         foodRestriction: { rawValue: "none", status: "clear", normalizedValue: "none" },
       },
     });
-    dietModelDelayMs = 180;
+    dietModelGate = new Promise<void>((resolve) => { resolveDietModelGate = resolve; });
 
     const generation = originalFetch(`${baseUrl}/guto/diet/generate`, {
       method: "POST",
@@ -1227,12 +1246,14 @@ describe("diet generation contract", () => {
     });
     await waitUntil(() => dietModelCalls >= 1);
 
-    const languageUpdate = await originalFetch(`${baseUrl}/guto/memory`, {
+    const languageUpdate = originalFetch(`${baseUrl}/guto/memory`, {
       method: "POST",
       headers: authHeaders(userId),
       body: JSON.stringify({ language: "en-US" }),
     });
-    assert.equal(languageUpdate.status, 200);
+    await waitUntil(() => readMemory(userId).language === "en-US");
+    resolveDietModelGate!();
+    assert.equal((await languageUpdate).status, 200);
 
     const response = await generation;
     assert.equal(response.status, 409);
@@ -1273,7 +1294,7 @@ describe("diet generation contract", () => {
       body: JSON.stringify({ language: "it-IT" }),
     });
     assert.equal(normalizeProfile.status, 200);
-    dietModelDelayMs = 180;
+    dietModelGate = new Promise<void>((resolve) => { resolveDietModelGate = resolve; });
 
     const generation = originalFetch(`${baseUrl}/guto/diet/generate`, {
       method: "POST",
@@ -1282,7 +1303,7 @@ describe("diet generation contract", () => {
     });
     await waitUntil(() => dietModelCalls >= 1);
 
-    const profileUpdate = await originalFetch(`${baseUrl}/guto/memory`, {
+    const profileUpdate = originalFetch(`${baseUrl}/guto/memory`, {
       method: "POST",
       headers: authHeaders(userId),
       body: JSON.stringify({
@@ -1291,7 +1312,9 @@ describe("diet generation contract", () => {
         trainingLimitations: "dolore al ginocchio destro",
       }),
     });
-    assert.equal(profileUpdate.status, 200);
+    await waitUntil(() => readMemory(userId).trainingPathology === "dolore al ginocchio destro");
+    resolveDietModelGate!();
+    assert.equal((await profileUpdate).status, 200);
 
     const response = await generation;
     assert.equal(response.status, 200);
@@ -1323,7 +1346,7 @@ describe("diet generation contract", () => {
         foodRestriction: { rawValue: "none", status: "clear", normalizedValue: "none" },
       },
     });
-    dietModelDelayMs = 180;
+    dietModelGate = new Promise<void>((resolve) => { resolveDietModelGate = resolve; });
 
     const generation = originalFetch(`${baseUrl}/guto/diet/generate`, {
       method: "POST",
@@ -1333,6 +1356,7 @@ describe("diet generation contract", () => {
     await waitUntil(() => dietModelCalls >= 1);
     const coachPlan = makeCoachDietPlan(userId);
     await saveDietPlanForTest(coachPlan);
+    resolveDietModelGate!();
 
     const response = await generation;
     assert.equal(response.status, 409);

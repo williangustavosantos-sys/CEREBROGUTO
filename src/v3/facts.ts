@@ -84,8 +84,15 @@ export function resolveDeclaredOperationalFacts(message: string): FactChange[] {
     if (value >= 25 && value <= 500) changes.push(declared("BODY_WEIGHT", String(value), { weightKg: value }));
   }
 
-  const frequency = /(?:treino|train|allen[ao])\s*(\d)\s*(?:x|vez(?:es)?|days?|dias?)/u.exec(text);
-  if (frequency) changes.push(declared("TRAINING_FREQUENCY", frequency[1]!, { daysPerWeek: Number(frequency[1]) }));
+  // Full-number capture (\d{1,2}) with a non-digit boundary: "25 vezes" must
+  // be read as 25 (then rejected as out of domain), NEVER silently converted
+  // to its last digit 5. Only the valid domain 1..7 is emitted as a fact; an
+  // out-of-domain frequency is not persisted (the model still handles it).
+  const frequency = /(?:treino|treinar|train|allen[ao])\s*(\d{1,2})(?!\d)\s*(?:x|vez(?:es)?|days?|dias?)/u.exec(text);
+  if (frequency) {
+    const value = Number(frequency[1]);
+    if (value >= 1 && value <= 7) changes.push(declared("TRAINING_FREQUENCY", frequency[1]!, { daysPerWeek: value }));
+  }
 
   const level = /(?:sou |estou )?(iniciante|beginner|avancad[oa]|advanced|voltando|returning|ativo|active)/u.exec(text);
   if (level) {
@@ -132,6 +139,11 @@ export interface FirstContactCalibrationCorrection {
   trainingStatus?: "beginner" | "returning" | "active" | "advanced";
   weeklyFrequencyDaysPerWeek?: number;
   goalCode?: string;
+  /** Set when the user stated a training frequency outside the valid domain
+   * (1..7). The correction must be REJECTED (never persisted as a different
+   * value), so the service throws a clear domain error instead of silently
+   * dropping or corrupting the intent. */
+  rejectedFrequency?: number;
 }
 
 export function interpretFirstContactCalibrationCorrection(message: string): FirstContactCalibrationCorrection {
@@ -165,10 +177,15 @@ export function interpretFirstContactCalibrationCorrection(message: string): Fir
     if (value >= 25 && value <= 500) result.weightKg = value;
   }
 
-  const frequency = /(?:(?:treino|treinar|train|allenai)\D{0,16}?)?(\d)\s*(?:x|vez(?:es)?|days?\b|dias?\b)\s*(?:por semana|a settimana|per week|\/|)/u.exec(text);
+  // Full-number capture with a non-digit boundary. The prefix is optional so
+  // short phrases ("5 vezes") work, but "25 vezes" must be read as 25 — never
+  // as its last digit 5. Values outside 1..7 are surfaced as rejectedFrequency
+  // so the caller can reject with a clear domain error.
+  const frequency = /(?:(?:treino|treinar|train|allenai)\D{0,16}?)?(\d{1,2})(?!\d)\s*(?:x|vez(?:es)?|days?\b|dias?\b)\s*(?:por semana|a settimana|per week|\/|)/u.exec(text);
   if (frequency) {
     const value = Number(frequency[1]);
     if (value >= 1 && value <= 7) result.weeklyFrequencyDaysPerWeek = value;
+    else result.rejectedFrequency = value;
   }
 
   const experience = /(?:sou|estou|nivel|level|niveau)\D{0,14}?(?:na verdade\s*)?(iniciante|beginner|intermediari[oa]|intermediate|avancad[oa]|advanced|voltando|returning|ativo\b|active\b)/u.exec(text)?.[1];

@@ -26,6 +26,7 @@ const ids = {
   invalid: "20000000-0000-4000-8000-000000000019",
   repeatWeight: "20000000-0000-4000-8000-000000000020",
   postComplete: "20000000-0000-4000-8000-000000000021",
+  freq25: "20000000-0000-4000-8000-000000000022",
 };
 
 async function calibratedAwaitingConfirmation() {
@@ -245,4 +246,38 @@ test("FC correction: confirmed context + workout/diet use corrected weight (75, 
   assert.ok(confirmed.workout && confirmed.workout.items.length > 0);
   // confirmado refere a versão do perfil AUTOINCREMENTADA pela correção (2 => 3)
   assert.equal(confirmed.profile?.weightKg, 75);
+});
+
+test("FC correction: 'quero treinar 25 vezes por semana' is rejected (never becomes 5) and draft stays intact", async () => {
+  const { actor, service } = await calibratedAwaitingConfirmation();
+  const before = await service.load(actor);
+  assert.equal(before.profile?.weeklyFrequencyDaysPerWeek, 4);
+  const summaryBefore = await summaryOf(service, actor);
+  assert.match(summaryBefore, /4x|4 vezes/i);
+
+  await assert.rejects(
+    () => service.correctFirstContact(actor, { requestId: ids.freq25, answer: "Quero treinar 25 vezes por semana." }),
+    (error: unknown) => {
+      assert.ok(error instanceof V3Error);
+      assert.equal(error.code, "V3_TRAINING_FREQUENCY_OUT_OF_DOMAIN");
+      return true;
+    },
+  );
+
+  // Draft intacto: frequency continua 4; o summary não mente; o usuário segue
+  // em AWAITING_CONFIRMATION (nenhum contexto confirmado, nenhum plano gerado).
+  const after = await service.load(actor);
+  assert.equal(after.profile?.weeklyFrequencyDaysPerWeek, 4);
+  assert.equal(after.firstContact.status, "IN_PROGRESS");
+  assert.equal(after.firstContact.step, "confirmation");
+  assert.equal(after.confirmedContext, null);
+  assert.equal(after.workout, null);
+  assert.equal(after.diet, null);
+  const summaryAfter = await summaryOf(service, actor);
+  assert.match(summaryAfter, /4x|4 vezes/i);
+  assert.doesNotMatch(summaryAfter, /5x|5 vezes/i);
+
+  // E a correção válida continua funcionando depois da rejeição (5 é aceito).
+  const corrected = await service.correctFirstContact(actor, { requestId: ids.frequency, answer: "Quero treinar 5 vezes por semana." });
+  assert.equal(corrected.profile?.weeklyFrequencyDaysPerWeek, 5);
 });

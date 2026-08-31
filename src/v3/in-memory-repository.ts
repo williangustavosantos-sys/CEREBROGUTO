@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { V3Error } from "./errors.js";
 import { materializeFirstContact } from "./first-contact.js";
 import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from "./facts.js";
+import { evaluateRelationshipLifecycleState, shouldSuppressProactivity, type RelationshipLifecycleRecord } from "./relationship-lifecycle.js";
 import { generateDietDraft, generateWorkoutDraft } from "./generation-engines.js";
 import { decideWorkoutEvolution } from "./workout-evolution.js";
 import { assertValidAdaptedExecution, resolveSessionEffectiveLocation } from "./session-execution-policy.js";
@@ -42,6 +43,9 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
   private readonly completedSessionRequests = new Set<string>();
   private readonly requestIdDecisions = new Map<string, import("./types.js").WorkoutEvolutionDecision>();
   private readonly requestIdInflight = new Map<string, Promise<import("./types.js").WorkoutEvolutionDecision>>();
+  private readonly lifecycles = new Map<string, import("./relationship-lifecycle.js").RelationshipLifecycleRecord>();
+  private readonly lifecycleRequests = new Set<string>();
+  readonly lifecycleEvents: Array<{ requestId: string; fromState: string; toState: string; reason: string }> = [];
   readonly events: Array<{ requestId: string; action: string; resultCode: string }> = [];
 
   seed(snapshot: OfficialSnapshot): void {
@@ -90,6 +94,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       firstContact: state.firstContact,
       confirmedContext: structuredClone(this.confirmedContexts.get(key(actor)) || null),
       currentFacts: state.currentFacts,
+      relationshipLifecycle: state.relationshipLifecycle,
       nextSessionIndex: await this.countCompletedWorkoutSessions(actor),
     };
   }
@@ -140,6 +145,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       workout: snapshot?.workout ? structuredClone(snapshot.workout) : null,
       diet: snapshot?.diet ? structuredClone(snapshot.diet) : null,
       nextSessionIndex: await this.countCompletedWorkoutSessions(actor),
+      relationshipLifecycle: this.lifecycles.get(key(actor)) ? structuredClone(this.lifecycles.get(key(actor))!) : null,
       progression: {
         totalXp,
         evolutionStage: totalXp >= 12_000 ? "elite" : totalXp >= 5_000 ? "adult" : totalXp >= 1_500 ? "teen" : "baby",
@@ -436,6 +442,15 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     reasonCode: XpReasonCode;
     sourceKey: string;
   }): Promise<void> {
+    // Relationship lifecycle gate (parity with Postgres): a TERMINAL
+    // relationship never keeps accumulating miss penalties (no infinite
+    // charges).
+    if (input.reasonCode === "apply_daily_miss_penalty") {
+      const lifecycle = this.lifecycles.get(key(input.actor));
+      if (lifecycle && shouldSuppressProactivity(lifecycle.state)) {
+        throw new V3Error("V3_RELATIONSHIP_TERMINAL", "A relação está encerrada; penalidades de ausência não são mais aplicadas.", 409);
+      }
+    }
     const entries = this.xpLedger.get(key(input.actor)) || [];
     if (entries.some((entry) => entry.reasonCode === input.reasonCode && entry.sourceKey === input.sourceKey)) return;
     const amount = input.reasonCode === "grant_initial_xp" || input.reasonCode === "complete_daily_mission"
@@ -670,6 +685,88 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     this.snapshots.set(key(input.actor), snapshot);
     return { planVersion: plan.version };
   }
+  private deriveLastPresenceDayInMemory(actor: ActorContext): string | null {
+    const entries = this.xpLedger.get(key(actor)) || [];
+    const missionDays = entries
+      .filter((entry) => entry.reasonCode === "complete_daily_mission" || entry.reasonCode === "accept_adapted_mission")
+      .map((entry) => entry.sourceKey)
+      .filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day));
+    return missionDays.length ? missionDays.sort().at(-1)! : null;
+  }
+
+  async getRelationshipLifecycle(actor: ActorContext): Promise<RelationshipLifecycleRecord | null> {
+    const record = this.lifecycles.get(key(actor));
+    return record ? structuredClone(record) : null;
+  }
+
+  async evaluateRelationshipLifecycle(input: {
+    actor: ActorContext;
+    requestId: string;
+    asOf?: string;
+    lastPresenceDay?: string | null;
+  }): Promise<RelationshipLifecycleRecord> {
+    const k = key(input.actor);
+    const idempotencyKey = `${k}:${input.requestId}`;
+    if (this.lifecycleRequests.has(idempotencyKey) && this.lifecycles.has(k)) {
+      return structuredClone(this.lifecycles.get(k)!);
+    }
+    const current = this.lifecycles.get(k);
+    const state = current ? current.state : "ACTIVE";
+    const presenceDay = input.lastPresenceDay !== undefined
+      ? (input.lastPresenceDay || null)
+      : this.deriveLastPresenceDayInMemory(input.actor);
+    const asOf = input.asOf || new Date().toISOString().slice(0, 10);
+    const absenceDays = presenceDay
+      ? Math.max(0, Math.floor((new Date(`${asOf}T00:00:00.000Z`).getTime() - new Date(`${presenceDay}T00:00:00.000Z`).getTime()) / 86_400_000))
+      : 0;
+    const transition = evaluateRelationshipLifecycleState(state, absenceDays);
+    const now = new Date().toISOString();
+    if (current && transition.state === current.state && !input.lastPresenceDay && !input.asOf) {
+      const refreshed = { ...current, lastEvaluatedAt: now };
+      this.lifecycles.set(k, refreshed);
+      this.lifecycleRequests.add(idempotencyKey);
+      return structuredClone(refreshed);
+    }
+    const record: RelationshipLifecycleRecord = {
+      tenantId: input.actor.tenantId,
+      userId: input.actor.userId,
+      state: transition.state,
+      enteredStateAt: current && current.state === transition.state ? current.enteredStateAt : now,
+      lastEvaluatedAt: now,
+      lastPresenceDay: presenceDay,
+      consecutiveAbsenceDays: absenceDays,
+      version: (current?.version || 0) + 1,
+    };
+    this.lifecycles.set(k, record);
+    this.lifecycleRequests.add(idempotencyKey);
+    if (transition.transitioned) {
+      this.lifecycleEvents.push({ requestId: input.requestId, fromState: state, toState: transition.state, reason: transition.reason || "transition" });
+    }
+    return structuredClone(record);
+  }
+
+  async reactivateRelationship(input: { actor: ActorContext; requestId: string }): Promise<RelationshipLifecycleRecord> {
+    const k = key(input.actor);
+    const current = this.lifecycles.get(k);
+    if (!current) throw new V3Error("V3_RELATIONSHIP_LIFECYCLE_NOT_EVALUATED", "Lifecycle ainda não avaliado; avalie antes de reativar.", 409);
+    const now = new Date().toISOString();
+    if (current.state === "TERMINAL") {
+      const record: RelationshipLifecycleRecord = {
+        ...current,
+        state: "ACTIVE",
+        enteredStateAt: now,
+        lastEvaluatedAt: now,
+        version: current.version + 1,
+      };
+      this.lifecycles.set(k, record);
+      this.lifecycleEvents.push({ requestId: input.requestId, fromState: "TERMINAL", toState: "ACTIVE", reason: "explicit_reactivation" });
+      return structuredClone(record);
+    }
+    const refreshed = { ...current, lastEvaluatedAt: now };
+    this.lifecycles.set(k, refreshed);
+    return structuredClone(refreshed);
+  }
+
   async recordTurn(input: { actor: ActorContext; requestId: string; action: string; resultCode: string }): Promise<void> {
     if (!this.events.some((event) => event.requestId === input.requestId)) {
       this.events.push({ requestId: input.requestId, action: input.action, resultCode: input.resultCode });

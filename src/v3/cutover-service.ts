@@ -168,6 +168,19 @@ export class V3CutoverService {
     const trainingStatus = input.trainingStatus ?? interpreted.trainingStatus;
     const goalCode = input.trainingGoal ?? interpreted.goalCode;
 
+    // P0 (training frequency multi-digit): a frequency outside the valid domain
+    // (1..7) is REJECTED explicitly — it is never silently converted to another
+    // value ("25 vezes" must never become 5) and never persisted. The draft
+    // stays untouched so the user can restate a valid frequency.
+    if (interpreted.rejectedFrequency !== undefined) {
+      throw new V3Error(
+        "V3_TRAINING_FREQUENCY_OUT_OF_DOMAIN",
+        `A frequência de treino informada (${interpreted.rejectedFrequency}x por semana) está fora do domínio válido (1 a 7). Me diz um valor entre 1 e 7.`,
+        422,
+        { rejectedFrequency: interpreted.rejectedFrequency },
+      );
+    }
+
     const hasAnyChange = [age, weightKg, heightCm, biologicalSex, trainingFrequency, trainingStatus, goalCode,
       input.foodRestrictions, input.trainingPathology].some((value) => value !== undefined);
     if (!hasAnyChange) {
@@ -245,6 +258,23 @@ export class V3CutoverService {
       dietDraft: await generateDietDraft(snapshot),
     });
     return this.load(actor);
+  }
+
+  /** Relationship Lifecycle — deterministic evaluation. The LLM never decides
+   * the official state: it is computed from official presence/interaction data
+   * + time/absence + policy. Idempotent on requestId; concurrency-safe. */
+  async evaluateRelationshipLifecycle(actor: ActorContext, input: { requestId: string; asOf?: string; lastPresenceDay?: string | null }): Promise<import("./relationship-lifecycle.js").RelationshipLifecycleRecord> {
+    return this.repository.evaluateRelationshipLifecycle({ actor, ...input });
+  }
+
+  async getRelationshipLifecycle(actor: ActorContext): Promise<import("./relationship-lifecycle.js").RelationshipLifecycleRecord | null> {
+    return this.repository.getRelationshipLifecycle(actor);
+  }
+
+  /** Explicit reactivation (commercial/admin release path): TERMINAL → ACTIVE.
+   * Never a silent restore; official data (plans, facts, context) is kept. */
+  async reactivateRelationship(actor: ActorContext, input: { requestId: string }): Promise<import("./relationship-lifecycle.js").RelationshipLifecycleRecord> {
+    return this.repository.reactivateRelationship({ actor, requestId: input.requestId });
   }
 
   async generateWorkout(actor: ActorContext, requestId: string): Promise<V3AppState> {

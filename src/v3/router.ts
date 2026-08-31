@@ -492,6 +492,39 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
     } catch (error) { next(error); }
   });
 
+  const RelationshipLifecycleEvaluateSchema = z.object({
+    requestId: z.string().uuid(),
+    asOf: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    lastPresenceDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  });
+  router.post("/guto/v3/relationship/lifecycle/evaluate", async (req, res, next) => {
+    try {
+      const input = RelationshipLifecycleEvaluateSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "relationship_lifecycle_evaluate" } }, async () => {
+        const lifecycle = await getV3Runtime().operational.withLock(actor, "relationship-lifecycle", () =>
+          new V3CutoverService(getV3Runtime().repository).evaluateRelationshipLifecycle(actor, input));
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), lifecycle };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/relationship/lifecycle/reactivate", async (req, res, next) => {
+    try {
+      const input = RequestIdSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "relationship_lifecycle_reactivate" } }, async () => {
+        const lifecycle = await getV3Runtime().operational.withLock(actor, "relationship-lifecycle", () =>
+          new V3CutoverService(getV3Runtime().repository).reactivateRelationship(actor, input));
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), lifecycle };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
   // Em ambiente de cutover, uma rota legada não pode virar uma segunda fonte
   // de verdade por chamada direta, cliente antigo ou retry fora de versão.
   router.use((req, res, next) => {
