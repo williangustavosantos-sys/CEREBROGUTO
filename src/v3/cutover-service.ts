@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
-import type { FirstContactConfirmation, FirstContactResponse, V3MemoryMutation } from "./contracts.js";
+import { CalibrationMutationSchema, type FirstContactConfirmation, type FirstContactCorrection, type FirstContactResponse, type V3MemoryMutation } from "./contracts.js";
 import { V3Error } from "./errors.js";
+import { interpretFirstContactCalibrationCorrection } from "./facts.js";
 import { generateDietDraft, generateWorkoutDraft } from "./generation-engines.js";
 import type { OfficialStateRepository } from "./repository.js";
 import type { ActorContext, ConfirmedUserContext, OfficialSnapshot, V3AppState } from "./types.js";
+import type { CalibrationMutation } from "./contracts.js";
 
 function calibrationSnapshot(state: V3AppState, context: ConfirmedUserContext): OfficialSnapshot {
   if (!state.profile || !state.goal || state.profile.weeklyFrequencyDaysPerWeek == null) {
@@ -132,6 +134,74 @@ export class V3CutoverService {
 
   async respondFirstContact(actor: ActorContext, input: FirstContactResponse): Promise<V3AppState> {
     await this.repository.respondFirstContact({ actor, requestId: input.requestId, expectedStep: input.expectedStep, answer: input.answer });
+    return this.load(actor);
+  }
+
+  /**
+   * First Contact calibration correction.
+   *
+   * During First Contact (IN_PROGRESS, before COMPLETED) the user may correct
+   * any objective calibration field that forms the ConfirmedUserContext. This
+   * updates the DRAFT (the official calibration profile/goal) only:
+   * it never creates a confirmed context, never auto-generates workout/diet,
+   * and never advances the First Contact step, so the user stays in
+   * AWAITING_CONFIRMATION until an explicit confirmation.
+   */
+  async correctFirstContact(actor: ActorContext, input: FirstContactCorrection): Promise<V3AppState> {
+    const state = await this.load(actor);
+    if (state.firstContact.status === "COMPLETED") {
+      throw new V3Error("V3_FIRST_CONTACT_COMPLETED", "First Contact já concluído. Mudanças pós-conclusão usam a autoridade de perfil apropriada.", 409);
+    }
+    if (state.firstContact.status !== "IN_PROGRESS") {
+      throw new V3Error("V3_FIRST_CONTACT_NOT_STARTED", "First Contact ainda não iniciado.", 409);
+    }
+    if (!state.profile || !state.goal || state.profile.weeklyFrequencyDaysPerWeek == null) {
+      throw new V3Error("V3_CALIBRATION_REQUIRED", "Calibragem objetiva completa necessária.", 409);
+    }
+
+    const interpreted = input.answer ? interpretFirstContactCalibrationCorrection(input.answer) : {};
+    const age = input.userAge ?? interpreted.age;
+    const weightKg = input.weightKg ?? interpreted.weightKg;
+    const heightCm = input.heightCm ?? interpreted.heightCm;
+    const biologicalSex = input.biologicalSex ?? interpreted.biologicalSex;
+    const trainingFrequency = input.trainingFrequency ?? interpreted.weeklyFrequencyDaysPerWeek;
+    const trainingStatus = input.trainingStatus ?? interpreted.trainingStatus;
+    const goalCode = input.trainingGoal ?? interpreted.goalCode;
+
+    const hasAnyChange = [age, weightKg, heightCm, biologicalSex, trainingFrequency, trainingStatus, goalCode,
+      input.foodRestrictions, input.trainingPathology].some((value) => value !== undefined);
+    if (!hasAnyChange) {
+      throw new V3Error("V3_FIRST_CONTACT_CORRECTION_UNRECOGNIZED", "Não identifiquei uma correção clara. Ajuste a frase e tente de novo.", 422);
+    }
+
+    const profileChanged = [age, weightKg, heightCm, biologicalSex, trainingFrequency, trainingStatus, goalCode].some((value) => value !== undefined);
+    if (profileChanged) {
+      const mutation: CalibrationMutation = CalibrationMutationSchema.parse({
+        requestId: input.requestId,
+        profile: {
+          biologicalSex: (biologicalSex as CalibrationMutation["profile"]["biologicalSex"]) || state.profile.biologicalSex as CalibrationMutation["profile"]["biologicalSex"],
+          age: age ?? state.profile.age,
+          weightKg: weightKg ?? state.profile.weightKg,
+          heightCm: heightCm ?? state.profile.heightCm,
+          trainingStatus: (trainingStatus as CalibrationMutation["profile"]["trainingStatus"]) || state.profile.trainingStatus as CalibrationMutation["profile"]["trainingStatus"],
+          weeklyFrequencyDaysPerWeek: trainingFrequency ?? state.profile.weeklyFrequencyDaysPerWeek,
+        },
+        goal: { code: goalCode || state.goal.code },
+      });
+      // persistCalibration is the calibration authority: it updates the official
+      // draft profile/goal and operational facts but does NOT create a confirmed
+      // context or auto-generate plans.
+      await this.repository.persistCalibration(actor, mutation);
+    }
+
+    if (input.foodRestrictions !== undefined || input.trainingPathology !== undefined) {
+      await this.repository.updateFirstContactDeclarations({
+        actor,
+        requestId: input.requestId,
+        ...(input.foodRestrictions !== undefined ? { foodDeclaration: input.foodRestrictions } : {}),
+        ...(input.trainingPathology !== undefined ? { limitationDeclaration: input.trainingPathology } : {}),
+      });
+    }
     return this.load(actor);
   }
 

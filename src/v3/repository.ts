@@ -77,6 +77,14 @@ export interface OfficialStateRepository {
   persistProfileLocation(actor: ActorContext, input: { requestId: string; country?: string; city?: string }): Promise<void>;
   startFirstContact(input: { actor: ActorContext; requestId: string }): Promise<void>;
   respondFirstContact(input: { actor: ActorContext; requestId: string; expectedStep: "food_restrictions" | "training_limitations"; answer: string }): Promise<void>;
+  /** Updates food/limitation declarations during First Contact, before
+   * confirmation, without advancing the step. Idempotent on requestId. */
+  updateFirstContactDeclarations(input: {
+    actor: ActorContext;
+    requestId: string;
+    foodDeclaration?: string | null;
+    limitationDeclaration?: string | null;
+  }): Promise<void>;
   confirmFirstContact(input: {
     actor: ActorContext;
     requestId: string;

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import express, { type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import { z } from "zod";
-import { CalibrationMutationSchema, FirstContactConfirmationSchema, FirstContactResponseSchema, V3MemoryMutationSchema, V3TurnRequestSchema } from "./contracts.js";
+import { CalibrationMutationSchema, FirstContactConfirmationSchema, FirstContactCorrectionSchema, FirstContactResponseSchema, V3MemoryMutationSchema, V3TurnRequestSchema } from "./contracts.js";
 import { V3CutoverService } from "./cutover-service.js";
 import { asV3Error, V3Error } from "./errors.js";
 import { ProfileServiceV3 } from "./executors.js";
@@ -357,6 +357,21 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
       const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "first_contact_respond" } }, async () => {
         const runtime = getV3Runtime();
         const state = await runtime.operational.withLock(actor, "first-contact", () => new V3CutoverService(runtime.repository).respondFirstContact(actor, input));
+        const activeContext = await runtime.operational.getActiveContext(actor);
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/first-contact/correct", async (req, res, next) => {
+    try {
+      const input = FirstContactCorrectionSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "first_contact_correct" } }, async () => {
+        const runtime = getV3Runtime();
+        const state = await runtime.operational.withLock(actor, "first-contact", () => new V3CutoverService(runtime.repository).correctFirstContact(actor, input));
         const activeContext = await runtime.operational.getActiveContext(actor);
         return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext };
       });

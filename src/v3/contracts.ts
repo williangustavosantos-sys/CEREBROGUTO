@@ -163,6 +163,22 @@ export const FirstContactConfirmationSchema = z.object({
 export type FirstContactResponse = z.infer<typeof FirstContactResponseSchema>;
 export type FirstContactConfirmation = z.infer<typeof FirstContactConfirmationSchema>;
 
+export const FirstContactCorrectionSchema = z.object({
+  requestId: z.string().uuid(),
+  answer: z.string().trim().min(1).max(2_000).optional(),
+  biologicalSex: z.enum(["male", "female"]).optional(),
+  userAge: z.number().int().min(13).max(120).optional(),
+  weightKg: z.number().positive().max(500).optional(),
+  heightCm: z.number().min(100).max(250).optional(),
+  trainingStatus: z.enum(["beginner", "returning", "active", "advanced"]).optional(),
+  trainingFrequency: z.number().int().min(1).max(7).optional(),
+  trainingGoal: z.enum(["consistency", "fat_loss", "muscle_gain", "conditioning", "mobility_health"]).optional(),
+  foodRestrictions: z.string().trim().min(1).max(2_000).optional(),
+  trainingPathology: z.string().trim().min(1).max(2_000).optional(),
+}).strict();
+
+export type FirstContactCorrection = z.infer<typeof FirstContactCorrectionSchema>;
+
 export const NutritionToleranceSchema = z.object({
   mealToPlanKcal: z.number().nonnegative().default(2),
   macroToPlanKcal: z.number().nonnegative().default(20),

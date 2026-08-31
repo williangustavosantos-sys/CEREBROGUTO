@@ -113,6 +113,85 @@ export function resolveDeclaredOperationalFacts(message: string): FactChange[] {
   return changes;
 }
 
+/**
+ * First Contact calibration correction interpreter.
+ *
+ * During First Contact, before a context is CONFIRMED, the user may correct
+ * any objective calibration field used to build the ConfirmedUserContext
+ * (age, sex, weight, height, experience, goal, training frequency) as well as
+ * the food/limitation declarations. This deterministic interpreter turns a
+ * natural-language sentence ("Na verdade estou com 75 kg.") into the same
+ * profile/goal fields the calibration authority persists, so a correction is
+ * applied to the DRAFT and never silently accepted as-is.
+ */
+export interface FirstContactCalibrationCorrection {
+  biologicalSex?: "male" | "female";
+  age?: number;
+  weightKg?: number;
+  heightCm?: number;
+  trainingStatus?: "beginner" | "returning" | "active" | "advanced";
+  weeklyFrequencyDaysPerWeek?: number;
+  goalCode?: string;
+}
+
+export function interpretFirstContactCalibrationCorrection(message: string): FirstContactCalibrationCorrection {
+  const text = normalized(message);
+  const result: FirstContactCalibrationCorrection = {};
+
+  if (/\bmasculino|sou homem|sou homem|male|sexo masculino\b/u.test(text)) result.biologicalSex = "male";
+  else if (/\bfeminin[oa]|sou mulher|female|sexo feminino\b/u.test(text)) result.biologicalSex = "female";
+
+  const age = /(\d{1,3})\s*anos?/u.exec(text)?.[1];
+  if (age) {
+    const value = Number(age);
+    if (value >= 13 && value <= 120) result.age = value;
+  }
+
+  // Height first (cm suffix or metre decimal "1,81" without kg) so a height is
+  // never misread as a weight in the metres range.
+  const heightMetres = /(?:altura|height|statur)\D{0,14}(\d)[.,](\d{2})\s*(?:m|metros?|metri)?/u.exec(text);
+  const heightCm = /(\d{3})\s*cm/u.exec(text)?.[1];
+  if (heightCm) {
+    const value = Number(heightCm);
+    if (value >= 100 && value <= 250) result.heightCm = value;
+  } else if (heightMetres) {
+    const cm = Number(`${heightMetres[1]}${heightMetres[2]}`);
+    if (cm >= 100 && cm <= 250) result.heightCm = cm;
+  }
+
+  const weight = /(\d{2,3}(?:[.,]\d{1,2})?)\s*kg/u.exec(text)?.[1];
+  if (weight) {
+    const value = Number(weight.replace(",", "."));
+    if (value >= 25 && value <= 500) result.weightKg = value;
+  }
+
+  const frequency = /(?:(?:treino|treinar|train|allenai)\D{0,16}?)?(\d)\s*(?:x|vez(?:es)?|days?\b|dias?\b)\s*(?:por semana|a settimana|per week|\/|)/u.exec(text);
+  if (frequency) {
+    const value = Number(frequency[1]);
+    if (value >= 1 && value <= 7) result.weeklyFrequencyDaysPerWeek = value;
+  }
+
+  const experience = /(?:sou|estou|nivel|level|niveau)\D{0,14}?(?:na verdade\s*)?(iniciante|beginner|intermediari[oa]|intermediate|avancad[oa]|advanced|voltando|returning|ativo\b|active\b)/u.exec(text)?.[1];
+  if (experience) {
+    const mapping: Record<string, "beginner" | "returning" | "active" | "advanced"> = {
+      iniciante: "beginner", beginner: "beginner",
+      intermediario: "active", intermediaria: "active", intermediate: "active",
+      avancado: "advanced", avancada: "advanced", advanced: "advanced",
+      voltando: "returning", returning: "returning",
+      ativo: "active", active: "active",
+    };
+    result.trainingStatus = mapping[experience] || "active";
+  }
+
+  if (/(?:ganhar massa|hipertrofia|muscle (?:gain|building)|foco em volume|crescer\b)/u.test(text)) result.goalCode = "muscle_gain";
+  else if (/(?:perder gordura|emagrecer|fat loss|secar\b|recompor)/u.test(text)) result.goalCode = "fat_loss";
+  else if (/(?:condicionamento|conditioning|resistencia aerobica)/u.test(text)) result.goalCode = "conditioning";
+  else if (/(?:consistencia|consistency|regularidade)/u.test(text)) result.goalCode = "consistency";
+  else if (/(?:mobilidade|mobility|flexibilidade)/u.test(text)) result.goalCode = "mobility_health";
+
+  return result;
+}
+
 export function assertFactChange(change: FactChange): void {
   if (!OperationalFactTypes.includes(change.factType)) throw new V3Error("V3_FACT_TYPE_INVALID", "Tipo de fato operacional inválido.", 409);
   if (!change.canonicalValue.trim()) throw new V3Error("V3_FACT_VALUE_INVALID", "Valor de fato operacional inválido.", 409);

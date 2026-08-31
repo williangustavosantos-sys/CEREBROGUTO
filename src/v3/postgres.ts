@@ -810,6 +810,43 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     });
   }
 
+  async updateFirstContactDeclarations(input: {
+    actor: ActorContext;
+    requestId: string;
+    foodDeclaration?: string | null;
+    limitationDeclaration?: string | null;
+  }): Promise<void> {
+    await this.withActorTransaction(input.actor, async (client) => {
+      const prior = await client.query(`SELECT 1 FROM guto_v3.guto_events WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND event_type='first_contact.corrected'`, [input.actor.tenantId, input.actor.userId, input.requestId]);
+      if (prior.rows[0]) return;
+      const current = await client.query<{ status: string; step: string }>(
+        `SELECT status,step FROM guto_v3.first_contact_state WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      if (!current.rows[0] || current.rows[0].status !== "IN_PROGRESS") {
+        throw new V3Error("V3_FIRST_CONTACT_NOT_STARTED", "First Contact ainda não iniciado.", 409);
+      }
+      const parts: string[] = [];
+      const values: unknown[] = [];
+      if (input.foodDeclaration !== undefined) {
+        values.push(input.foodDeclaration);
+        parts.push(`food_declaration = $${values.length}`);
+      }
+      if (input.limitationDeclaration !== undefined) {
+        values.push(input.limitationDeclaration);
+        parts.push(`limitation_declaration = $${values.length}`);
+      }
+      if (parts.length) {
+        values.push(input.actor.tenantId, input.actor.userId);
+        await client.query(`UPDATE guto_v3.first_contact_state SET ${parts.join(",")}, version=version+1 WHERE tenant_id=$${values.length - 1} AND user_id=$${values.length}`, values);
+      }
+      await this.appendMutationEvent(client, input.actor, input.requestId, "first_contact.corrected", {
+        foodDeclaration: input.foodDeclaration ?? null,
+        limitationDeclaration: input.limitationDeclaration ?? null,
+      });
+    });
+  }
+
   async confirmFirstContact(input: {
     actor: ActorContext;
     requestId: string;

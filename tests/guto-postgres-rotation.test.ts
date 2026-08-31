@@ -259,6 +259,70 @@ test("PG_ROTATION_5EX_1ROW: 5 exercise events in one session → one workout_ses
   } finally { await cleanup(repo, actor); await repo["pool"].end(); }
 });
 
+// ─── FIRST CONTACT CORRECTION ON REAL POSTGRES (durability + parity) ─────
+
+async function provisionFreshAwaitingConfirmation(repo: PostgresOfficialStateRepository, tenantKey: string): Promise<{ actor: ActorContext; svc: V3CutoverService }> {
+  const actor = await repo.provisionActor({ externalSubject: `pg-fc-${randomUUID()}`, role: "student", tenantKey, tenantName: `Tenant ${tenantKey}` });
+  const svc = new V3CutoverService(repo);
+  await svc.acceptConsent(actor, randomUUID());
+  await svc.saveMemory(actor, { requestId: randomUUID(), name: "Will", confirmedName: true, language: "pt-BR" });
+  await svc.saveMemory(actor, { requestId: randomUUID(), biologicalSex: "male", userAge: 34, weightKg: 74, heightCm: 180, trainingLevel: "consistent", trainingGoal: "fat_loss", trainingFrequency: 4 });
+  await svc.saveMemory(actor, { requestId: randomUUID(), name: "Will", xpEvent: "grant_initial_xp" });
+  await svc.startFirstContact(actor, randomUUID());
+  await svc.respondFirstContact(actor, { requestId: randomUUID(), expectedStep: "food_restrictions", answer: "Sem restrições." });
+  await svc.respondFirstContact(actor, { requestId: randomUUID(), expectedStep: "training_limitations", answer: "Sem limitações." });
+  return { actor, svc };
+}
+
+test("PG_FC_CORRECTION: weight 74→75 persists in Postgres, keeps AWAITING_CONFIRMATION, confirm uses 75", async () => {
+  const db = await getDb();
+  const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
+  const { actor, svc } = await provisionFreshAwaitingConfirmation(repo, "tenant-fccorr");
+  try {
+    const before = await svc.load(actor);
+    assert.equal(before.profile?.weightKg, 74);
+    assert.equal(before.firstContact.step, "confirmation");
+
+    const corrected = await svc.correctFirstContact(actor, { requestId: randomUUID(), answer: "Na verdade estou com 75 kg." });
+    assert.equal(corrected.profile?.weightKg, 75, "Postgres profile persists corrected weight");
+    assert.equal(corrected.firstContact.status, "IN_PROGRESS");
+    assert.equal(corrected.firstContact.step, "confirmation", "still AWAITING_CONFIRMATION");
+    assert.equal(corrected.confirmedContext, null, "correction must NOT create a confirmed context");
+    assert.match(corrected.firstContact.summary || "", /75 kg/);
+    assert.doesNotMatch(corrected.firstContact.summary || "", /74 kg/);
+    assert.equal(corrected.profile?.heightCm, 180, "unmentioned fields preserved");
+
+    // Durability: the correction must survive a repository reload (new pool).
+    const repo2 = new PostgresOfficialStateRepository(createPool(db.port, 10));
+    try {
+      const reloaded = await repo2.loadAppState(actor);
+      assert.equal(reloaded.profile?.weightKg, 75, "reload after correction keeps 75");
+      assert.equal(reloaded.firstContact.step, "confirmation");
+
+      const confirmed = await new V3CutoverService(repo2).confirmFirstContact(actor, { requestId: randomUUID(), confirmed: true });
+      assert.equal(confirmed.firstContact.status, "COMPLETED");
+      assert.equal(confirmed.profile?.weightKg, 75, "confirmed context uses corrected weight, never 74");
+      assert.ok(confirmed.workout && confirmed.workout.items.length > 0);
+      assert.ok(confirmed.diet && confirmed.diet.totalCalories > 0);
+    } finally { await repo2["pool"].end(); }
+  } finally { await cleanup(repo, actor); await repo["pool"].end(); }
+});
+
+test("PG_FC_CORRECTION: foreign tenant B cannot correct A's First Contact draft", async () => {
+  const db = await getDb();
+  const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
+  const a = await provisionFreshAwaitingConfirmation(repo, "fcc-tenant-A");
+  const b = await provisionFreshAwaitingConfirmation(repo, "fcc-tenant-B");
+  try {
+    await new V3CutoverService(repo).correctFirstContact(a.actor, { requestId: randomUUID(), answer: "Na verdade estou com 75 kg." });
+    // B's own draft remains 74 and A's is 75 — no cross-tenant bleed through shared pool.
+    const aState = await repo.loadAppState(a.actor);
+    const bState = await repo.loadAppState(b.actor);
+    assert.equal(aState.profile?.weightKg, 75);
+    assert.equal(bState.profile?.weightKg, 74);
+  } finally { await cleanup(repo, a.actor); await cleanup(repo, b.actor); await repo["pool"].end(); }
+});
+
 // ─── IN-MEMORY PARITY: same contract semantics on the in-memory repo ──────
 
 async function inMemoryFounder(freq = 6) {

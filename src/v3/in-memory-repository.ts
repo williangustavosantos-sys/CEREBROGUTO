@@ -93,6 +93,24 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       nextSessionIndex: await this.countCompletedWorkoutSessions(actor),
     };
   }
+  private materializedFirstContact(snapshot: OfficialSnapshot | undefined, displayName: string, profile: OfficialSnapshot["profile"] | null, goal: OfficialSnapshot["goal"] | null): FirstContactState {
+    const stored = snapshot ? this.firstContacts.get(key(snapshot.actor)) : undefined;
+    return stored
+      ? materializeFirstContact({
+          status: stored.status,
+          step: stored.step,
+          foodDeclaration: stored.foodDeclaration,
+          limitationDeclaration: stored.limitationDeclaration,
+          startedAt: stored.startedAt,
+          completedAt: stored.completedAt,
+          confirmedContextVersion: stored.confirmedContextVersion,
+          displayName,
+          profile,
+          goal,
+        })
+      : materializeFirstContact({ displayName, profile, goal });
+  }
+
   async loadAppState(actor: ActorContext): Promise<V3AppState> {
     const snapshot = this.snapshots.get(key(actor));
     const journey = this.journeys.get(key(actor)) || {
@@ -114,11 +132,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       goal: snapshot ? structuredClone(snapshot.goal) : null,
       preferences: snapshot ? structuredClone(snapshot.preferences) : { version: 1 },
       healthConstraints: snapshot ? structuredClone(snapshot.healthConstraints) : [],
-      firstContact: structuredClone(this.firstContacts.get(key(actor)) || materializeFirstContact({
-        displayName: snapshot?.profile.displayName || "",
-        profile: snapshot?.profile || null,
-        goal: snapshot?.goal || null,
-      })),
+      firstContact: this.materializedFirstContact(snapshot, snapshot?.profile.displayName || "", snapshot?.profile || null, snapshot?.goal || null),
       confirmedContext: this.confirmedContexts.has(key(actor))
         ? (({ id, version, confirmedAt }) => ({ id, version, confirmedAt }))(this.confirmedContexts.get(key(actor))!)
         : null,
@@ -284,6 +298,35 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       foodDeclaration,
       limitationDeclaration,
       startedAt: state.firstContact.startedAt,
+      displayName: state.displayName,
+      profile: state.profile,
+      goal: state.goal,
+    }));
+    this.firstContactResponseRequests.add(requestKey);
+  }
+  async updateFirstContactDeclarations(input: {
+    actor: ActorContext;
+    requestId: string;
+    foodDeclaration?: string | null;
+    limitationDeclaration?: string | null;
+  }): Promise<void> {
+    const requestKey = `${key(input.actor)}:${input.requestId}`;
+    if (this.firstContactResponseRequests.has(requestKey)) return;
+    const state = await this.loadAppState(input.actor);
+    if (state.firstContact.status !== "IN_PROGRESS") {
+      throw new V3Error("V3_FIRST_CONTACT_NOT_STARTED", "First Contact ainda não iniciado.", 409);
+    }
+    const stored = this.firstContacts.get(key(input.actor));
+    const foodDeclaration = input.foodDeclaration ?? (stored?.foodDeclaration ?? null);
+    const limitationDeclaration = input.limitationDeclaration ?? (stored?.limitationDeclaration ?? null);
+    this.firstContacts.set(key(input.actor), materializeFirstContact({
+      status: stored?.status || "IN_PROGRESS",
+      step: stored?.step || "confirmation",
+      foodDeclaration,
+      limitationDeclaration,
+      startedAt: stored?.startedAt ?? state.firstContact.startedAt,
+      completedAt: stored?.completedAt ?? null,
+      confirmedContextVersion: stored?.confirmedContextVersion ?? null,
       displayName: state.displayName,
       profile: state.profile,
       goal: state.goal,
