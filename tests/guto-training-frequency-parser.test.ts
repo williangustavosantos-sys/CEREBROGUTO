@@ -1,13 +1,14 @@
 import "./test-env.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { interpretFirstContactCalibrationCorrection, resolveDeclaredOperationalFacts } from "../src/v3/facts.js";
+import { assertFactChange, interpretFirstContactCalibrationCorrection, resolveDeclaredOperationalFacts } from "../src/v3/facts.js";
+import { V3Error } from "../src/v3/errors.js";
 
 // ─── P0 (TRAINING_FREQUENCY_MULTI_DIGIT) — parser regressions ──────────────
 //
 // "quero treinar 25 vezes por semana" must NEVER be silently converted to 5
 // (the old `(\d)` regex captured the last digit). The parser must read the
-// FULL number, respect the valid domain (1..7), and reject out-of-domain
+// FULL number, respect the valid domain (2..6), and reject out-of-domain
 // values instead of persisting a different value.
 
 const VALID_PHRASES: Array<[string, number]> = [
@@ -16,7 +17,6 @@ const VALID_PHRASES: Array<[string, number]> = [
   ["quero treinar 4 vezes por semana", 4],
   ["quero treinar 5 vezes por semana", 5],
   ["quero treinar 6 vezes por semana", 6],
-  ["quero treinar 7 vezes por semana", 7],
   ["treino 5 vezes por semana", 5],
   ["treino 6 vezes", 6],
   ["quero treinar 5x", 5],
@@ -24,6 +24,8 @@ const VALID_PHRASES: Array<[string, number]> = [
 
 const INVALID_MULTI_DIGIT_PHRASES = [
   "quero treinar 0 vezes por semana",
+  "quero treinar 1 vez por semana",
+  "quero treinar 7 vezes por semana",
   "quero treinar 10 vezes por semana",
   "quero treinar 15 vezes por semana",
   "quero treinar 25 vezes por semana",
@@ -32,7 +34,7 @@ const INVALID_MULTI_DIGIT_PHRASES = [
   "treino 0 vezes",
 ];
 
-test("FC_FREQ: valid single frequencies 2..7 are recognized by the correction interpreter", () => {
+test("FC_FREQ: valid single frequencies 2..6 are recognized by the correction interpreter", () => {
   for (const [phrase, expected] of VALID_PHRASES) {
     const result = interpretFirstContactCalibrationCorrection(phrase);
     assert.equal(result.weeklyFrequencyDaysPerWeek, expected, `phrase: ${phrase}`);
@@ -65,6 +67,21 @@ test("FC_FREQ: turn-flow fact resolver never emits an out-of-domain frequency", 
     const facts = resolveDeclaredOperationalFacts(phrase);
     const freq = facts.find((fact) => fact.factType === "TRAINING_FREQUENCY");
     assert.equal(freq, undefined, `no out-of-domain fact for: ${phrase}`);
+  }
+});
+
+test("FC_FREQ: executor authority rejects an out-of-domain fact even if a model supplies it", () => {
+  for (const invalid of [0, 1, 7, 10, 15, 25, 99]) {
+    assert.throws(
+      () => assertFactChange({
+        factType: "TRAINING_FREQUENCY",
+        canonicalValue: String(invalid),
+        value: { daysPerWeek: invalid },
+        source: "user_declared",
+        confirmationStatus: "FACT_CONFIRMED",
+      }),
+      (error: unknown) => error instanceof V3Error && error.code === "V3_TRAINING_FREQUENCY_OUT_OF_DOMAIN",
+    );
   }
 });
 

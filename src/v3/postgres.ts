@@ -6,7 +6,7 @@ import { emptyConversationDecisionState, type ConversationDecisionState, type Co
 import { V3Error } from "./errors.js";
 import { materializeFirstContact } from "./first-contact.js";
 import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from "./facts.js";
-import { assertRelationshipLifecycleState, evaluateRelationshipLifecycleState, shouldSuppressProactivity, type RelationshipLifecycleRecord } from "./relationship-lifecycle.js";
+import { assertRelationshipLifecycleState, evaluateOfficialRelationshipReturn, evaluateRelationshipLifecycleState, shouldSuppressProactivity, type RelationshipLifecycleRecord } from "./relationship-lifecycle.js";
 import { decideWorkoutEvolution } from "./workout-evolution.js";
 import { assertValidAdaptedExecution, resolveSessionEffectiveLocation } from "./session-execution-policy.js";
 import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
@@ -57,7 +57,7 @@ export function createV3Pool(connectionString = process.env.DATABASE_URL || ""):
 }
 
 export class PostgresOfficialStateRepository implements OfficialStateRepository, ConversationStateRepository {
-  constructor(private readonly pool: pg.Pool) {}
+  constructor(private readonly pool: pg.Pool, private readonly clock: () => Date = () => new Date()) {}
 
   private async withActorTransaction<T>(actor: ActorContext, fn: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
@@ -91,16 +91,47 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     };
   }
 
-  private async assertContextCurrent(client: PoolClient, actor: ActorContext, context: ConfirmedUserContext): Promise<void> {
-    const result = await client.query(
-      `SELECT 1 FROM guto_v3.confirmed_user_contexts c
-        JOIN guto_v3.user_profile p ON p.tenant_id=c.tenant_id AND p.user_id=c.user_id AND p.version=c.profile_version
-        JOIN guto_v3.user_goals g ON g.tenant_id=c.tenant_id AND g.user_id=c.user_id AND g.version=c.goal_version
-       WHERE c.tenant_id=$1 AND c.user_id=$2 AND c.id=$3 AND c.version=$4
-       FOR UPDATE OF p,g`,
-      [actor.tenantId, actor.userId, context.id, context.version],
+  private async lockOfficialContextAuthority(client: PoolClient, actor: ActorContext): Promise<void> {
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':official-context-authority', 0))`,
+      [actor.tenantId, actor.userId],
     );
-    if (!result.rows[0]) throw new V3Error("V3_CONTEXT_RECONFIRMATION_REQUIRED", "O perfil mudou. Confirme novamente o contexto antes de gerar planos.", 409);
+  }
+
+  private async assertContextCurrent(client: PoolClient, actor: ActorContext, context: ConfirmedUserContext): Promise<{ language: string }> {
+    await this.lockOfficialContextAuthority(client, actor);
+    const result = await client.query<QueryResultRow>(
+      `SELECT c.id,c.version,c.profile_version,c.goal_version,
+              f.status AS first_contact_status,
+              f.confirmed_context_id,f.confirmed_context_version,
+              p.version AS current_profile_version,p.language,
+              g.version AS current_goal_version
+         FROM guto_v3.first_contact_state f
+         JOIN guto_v3.confirmed_user_contexts c
+           ON c.tenant_id=f.tenant_id AND c.user_id=f.user_id
+          AND c.id=f.confirmed_context_id AND c.version=f.confirmed_context_version
+         JOIN guto_v3.user_profile p ON p.tenant_id=f.tenant_id AND p.user_id=f.user_id
+         JOIN guto_v3.user_goals g ON g.tenant_id=f.tenant_id AND g.user_id=f.user_id
+        WHERE f.tenant_id=$1 AND f.user_id=$2
+        FOR UPDATE OF f,p,g`,
+      [actor.tenantId, actor.userId],
+    );
+    const row = result.rows[0];
+    if (
+      !row ||
+      row.first_contact_status !== "COMPLETED" ||
+      String(row.id) !== context.id ||
+      asNumber(row.version) !== context.version ||
+      String(row.confirmed_context_id) !== context.id ||
+      asNumber(row.confirmed_context_version) !== context.version ||
+      asNumber(row.profile_version) !== context.profileVersion ||
+      asNumber(row.current_profile_version) !== context.profileVersion ||
+      asNumber(row.goal_version) !== context.goalVersion ||
+      asNumber(row.current_goal_version) !== context.goalVersion
+    ) {
+      throw new V3Error("V3_STALE_GENERATION_CONTEXT", "O contexto oficial mudou durante a geração do plano.", 409);
+    }
+    return { language: String(row.language) };
   }
 
   async health(): Promise<{ ok: boolean; latencyMs: number; sessionUser: string; activeRole: string }> {
@@ -300,23 +331,23 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
    * context and current physical-constraint facts.
    */
   private async loadOfficialSnapshotWithinTransaction(client: PoolClient, actor: ActorContext): Promise<OfficialSnapshot> {
-    const [profileResult, goalResult, factResult, contextResult] = await Promise.all([
-      client.query(`SELECT * FROM guto_v3.user_profile WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
-      client.query(`SELECT * FROM guto_v3.user_goals WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
-      client.query(`SELECT user_fact_id, fact_type, value_json, source, confirmation_status, valid_from, valid_to, recorded_at, superseded_at, superseded_by
+    // PoolClient is a single transactional connection. Sequence these reads so
+    // the runtime never multiplexes concurrent queries on one socket.
+    const profileResult = await client.query(`SELECT * FROM guto_v3.user_profile WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]);
+    const goalResult = await client.query(`SELECT * FROM guto_v3.user_goals WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]);
+    const factResult = await client.query(`SELECT user_fact_id, fact_type, value_json, source, confirmation_status, valid_from, valid_to, recorded_at, superseded_at, superseded_by
                       FROM guto_v3.user_facts
                      WHERE tenant_id = $1 AND user_id = $2 AND superseded_at IS NULL
                        AND fact_type IN ('physical_constraint','food_restriction','PHYSICAL_CONSTRAINT','FOOD_CONSTRAINT','FOOD_EXCLUSION')
-                     ORDER BY recorded_at`, [actor.tenantId, actor.userId]),
-      client.query(
-        `SELECT c.*,p.version AS current_profile_version,g.version AS current_goal_version
+                     ORDER BY recorded_at`, [actor.tenantId, actor.userId]);
+    const contextResult = await client.query(
+      `SELECT c.*,p.version AS current_profile_version,g.version AS current_goal_version
            FROM guto_v3.confirmed_user_contexts c
            JOIN guto_v3.user_profile p ON p.tenant_id=c.tenant_id AND p.user_id=c.user_id
            JOIN guto_v3.user_goals g ON g.tenant_id=c.tenant_id AND g.user_id=c.user_id
           WHERE c.tenant_id=$1 AND c.user_id=$2 ORDER BY c.version DESC LIMIT 1`,
-        [actor.tenantId, actor.userId],
-      ),
-    ]);
+      [actor.tenantId, actor.userId],
+    );
     const row = contextResult.rows[0];
     const confirmedContext = row ? this.mapConfirmedContext(row) : null;
     const storedSnapshot = row?.context_snapshot ? jsonObject(row.context_snapshot) : {};
@@ -377,24 +408,25 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
 
   async loadAppState(actor: ActorContext): Promise<V3AppState> {
     return this.withActorTransaction(actor, async (client) => {
-      const [userResult, profileResult, goalResult, preferencesResult, healthResult, factHealthResult, workoutResult, dietResult, journeyResult, xpResult, firstContactResult, contextResult] = await Promise.all([
-        client.query(`SELECT version, display_name FROM guto_v3.users WHERE tenant_id = $1 AND id = $2`, [actor.tenantId, actor.userId]),
-        client.query(`SELECT * FROM guto_v3.user_profile WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
-        client.query(`SELECT * FROM guto_v3.user_goals WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
-        client.query(`SELECT * FROM guto_v3.user_preferences WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
-        client.query(`SELECT * FROM guto_v3.user_health_constraints WHERE tenant_id = $1 AND user_id = $2 AND confirmed = true ORDER BY created_at`, [actor.tenantId, actor.userId]),
-        client.query(`SELECT user_fact_id, fact_type, value_json, source, confirmation_status, valid_from, valid_to, recorded_at, superseded_at, superseded_by
+      // A PoolClient transacional executa uma query por vez. Manter a leitura
+      // sequencial evita concorrência não suportada no mesmo socket e preserva
+      // um único snapshot/escopo RLS para todo o estado oficial.
+      const userResult = await client.query(`SELECT version, display_name FROM guto_v3.users WHERE tenant_id = $1 AND id = $2`, [actor.tenantId, actor.userId]);
+      const profileResult = await client.query(`SELECT * FROM guto_v3.user_profile WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]);
+      const goalResult = await client.query(`SELECT * FROM guto_v3.user_goals WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]);
+      const preferencesResult = await client.query(`SELECT * FROM guto_v3.user_preferences WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]);
+      const healthResult = await client.query(`SELECT * FROM guto_v3.user_health_constraints WHERE tenant_id = $1 AND user_id = $2 AND confirmed = true ORDER BY created_at`, [actor.tenantId, actor.userId]);
+      const factHealthResult = await client.query(`SELECT user_fact_id, fact_type, value_json, source, confirmation_status, valid_from, valid_to, recorded_at, superseded_at, superseded_by
                         FROM guto_v3.user_facts
                        WHERE tenant_id = $1 AND user_id = $2 AND superseded_at IS NULL
                          AND fact_type IN ('physical_constraint','food_restriction','PHYSICAL_CONSTRAINT','FOOD_CONSTRAINT','FOOD_EXCLUSION')
-                       ORDER BY recorded_at`, [actor.tenantId, actor.userId]),
-        client.query(`SELECT * FROM guto_v3.workout_plans WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'`, [actor.tenantId, actor.userId]),
-        client.query(`SELECT * FROM guto_v3.diet_plans WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'`, [actor.tenantId, actor.userId]),
-        client.query(`SELECT * FROM guto_v3.user_journey_state WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]),
-        client.query(`SELECT id, reason_code, amount, source_key, created_at FROM guto_v3.xp_ledger WHERE tenant_id = $1 AND user_id = $2 ORDER BY created_at, id`, [actor.tenantId, actor.userId]),
-        client.query(`SELECT * FROM guto_v3.first_contact_state WHERE tenant_id=$1 AND user_id=$2`, [actor.tenantId, actor.userId]),
-        client.query(`SELECT * FROM guto_v3.confirmed_user_contexts WHERE tenant_id=$1 AND user_id=$2 ORDER BY version DESC LIMIT 1`, [actor.tenantId, actor.userId]),
-      ]);
+                       ORDER BY recorded_at`, [actor.tenantId, actor.userId]);
+      const workoutResult = await client.query(`SELECT * FROM guto_v3.workout_plans WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'`, [actor.tenantId, actor.userId]);
+      const dietResult = await client.query(`SELECT * FROM guto_v3.diet_plans WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'`, [actor.tenantId, actor.userId]);
+      const journeyResult = await client.query(`SELECT * FROM guto_v3.user_journey_state WHERE tenant_id = $1 AND user_id = $2`, [actor.tenantId, actor.userId]);
+      const xpResult = await client.query(`SELECT id, reason_code, amount, source_key, created_at FROM guto_v3.xp_ledger WHERE tenant_id = $1 AND user_id = $2 ORDER BY created_at, id`, [actor.tenantId, actor.userId]);
+      const firstContactResult = await client.query(`SELECT * FROM guto_v3.first_contact_state WHERE tenant_id=$1 AND user_id=$2`, [actor.tenantId, actor.userId]);
+      const contextResult = await client.query(`SELECT * FROM guto_v3.confirmed_user_contexts WHERE tenant_id=$1 AND user_id=$2 ORDER BY version DESC LIMIT 1`, [actor.tenantId, actor.userId]);
 
       const user = userResult.rows[0];
       const profileRow = profileResult.rows[0];
@@ -578,7 +610,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
-    }).format(new Date());
+    }).format(this.clock());
   }
 
   private async loadWorkout(client: PoolClient, row: QueryResultRow): Promise<WorkoutPlan> {
@@ -647,6 +679,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
 
   async persistCalibration(actor: ActorContext, input: CalibrationMutation): Promise<CalibrationResult> {
     return this.withActorTransaction(actor, async (client) => {
+      await this.lockOfficialContextAuthority(client, actor);
       const existing = await client.query<{ payload: Record<string, unknown> }>(
         `SELECT payload FROM guto_v3.guto_events
           WHERE tenant_id = $1 AND user_id = $2 AND request_id = $3 AND event_type = 'calibration.saved'`,
@@ -744,6 +777,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
 
   async persistProfileLocation(actor: ActorContext, input: { requestId: string; country?: string; city?: string }): Promise<void> {
     await this.withActorTransaction(actor, async (client) => {
+      await this.lockOfficialContextAuthority(client, actor);
       const prior = await client.query(
         `SELECT 1 FROM guto_v3.guto_events WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND event_type='profile.location_updated'`,
         [actor.tenantId, actor.userId, input.requestId],
@@ -869,6 +903,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     dietDraft: DietPlanDraft;
   }): Promise<ConfirmedUserContext> {
     return this.withActorTransaction(input.actor, async (client) => {
+      await this.lockOfficialContextAuthority(client, input.actor);
       const prior = await client.query(`SELECT c.* FROM guto_v3.guto_events e JOIN guto_v3.confirmed_user_contexts c ON c.tenant_id=e.tenant_id AND c.user_id=e.user_id AND c.id=(e.payload->>'contextId')::uuid WHERE e.tenant_id=$1 AND e.user_id=$2 AND e.request_id=$3 AND e.event_type='first_contact.completed'`, [input.actor.tenantId, input.actor.userId, input.requestId]);
       if (prior.rows[0]) return this.mapConfirmedContext(prior.rows[0]);
 
@@ -1086,7 +1121,14 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
 
   async replaceDietPlan(input: { actor: ActorContext; requestId: string; context: ConfirmedUserContext; draft: DietPlanDraft }): Promise<DietPlan> {
     return this.withActorTransaction(input.actor, async (client) => {
-      await this.assertContextCurrent(client, input.actor, input.context);
+      const authority = await this.assertContextCurrent(client, input.actor, input.context);
+      if (
+        String(input.draft.generatedFrom.confirmedContextId || "") !== input.context.id ||
+        Number(input.draft.generatedFrom.confirmedContextVersion) !== input.context.version ||
+        String(input.draft.generatedFrom.language || "") !== authority.language
+      ) {
+        throw new V3Error("V3_STALE_GENERATION_CONTEXT", "A autoridade da geração da dieta não corresponde ao contexto oficial.", 409);
+      }
       const existing = await client.query<{ payload: Record<string, unknown> }>(
         `SELECT payload FROM guto_v3.guto_events WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND event_type='diet.generated'`,
         [input.actor.tenantId, input.actor.userId, input.requestId],
@@ -1499,26 +1541,61 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
 
   async recordTurn(input: { actor: ActorContext; requestId: string; action: string; resultCode: string }): Promise<void> {
     await this.withActorTransaction(input.actor, async (client) => {
-      await client.query(
+      const presenceDay = this.todayKey();
+      const inserted = await client.query<{ event_id: string }>(
         `INSERT INTO guto_v3.guto_events (tenant_id,user_id,request_id,event_type,payload)
          VALUES ($1,$2,$3,'turn.completed',$4::jsonb)
-         ON CONFLICT (tenant_id,user_id,request_id,event_type) DO NOTHING`,
-        [input.actor.tenantId, input.actor.userId, input.requestId, JSON.stringify({ action: input.action, resultCode: input.resultCode })],
+         ON CONFLICT (tenant_id,user_id,request_id,event_type) DO NOTHING
+         RETURNING event_id`,
+        [input.actor.tenantId, input.actor.userId, input.requestId, JSON.stringify({ action: input.action, resultCode: input.resultCode, presenceDay })],
       );
+      if (!inserted.rows[0]) return;
+      const lifecycle = await client.query<QueryResultRow>(
+        `SELECT state,entered_state_at,last_evaluated_at,last_presence_day,consecutive_absence_days,version
+           FROM guto_v3.relationship_lifecycle
+          WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      if (!lifecycle.rows[0]) return;
+      const current = assertRelationshipLifecycleState(String(lifecycle.rows[0].state));
+      const transition = evaluateOfficialRelationshipReturn(current);
+      await client.query(
+        `UPDATE guto_v3.relationship_lifecycle
+            SET state=$3,
+                entered_state_at=CASE WHEN state<>$3 THEN now() ELSE entered_state_at END,
+                last_evaluated_at=now(),last_presence_day=$4::date,consecutive_absence_days=0,
+                version=version+CASE WHEN state<>$3 THEN 1 ELSE 0 END
+          WHERE tenant_id=$1 AND user_id=$2`,
+        [input.actor.tenantId, input.actor.userId, transition.state, presenceDay],
+      );
+      if (transition.transitioned) {
+        await client.query(
+          `INSERT INTO guto_v3.relationship_lifecycle_events
+             (tenant_id,user_id,request_id,from_state,to_state,reason)
+           VALUES ($1,$2,$3,$4,$5,$6)
+           ON CONFLICT (tenant_id,user_id,request_id,from_state,to_state) DO NOTHING`,
+          [input.actor.tenantId, input.actor.userId, input.requestId, current, transition.state, transition.reason],
+        );
+      }
     });
   }
 
   private async deriveLastPresenceDay(client: PoolClient, actor: ActorContext): Promise<string | null> {
     const result = await client.query<{ day: string | null }>(
-      `SELECT COALESCE(
-         (SELECT MAX(source_key)::text FROM guto_v3.xp_ledger
-           WHERE tenant_id=$1 AND user_id=$2
-             AND reason_code IN ('complete_daily_mission','accept_adapted_mission')
-             AND source_key ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'),
-         (SELECT MAX(to_char(last_interaction_at, 'YYYY-MM-DD')) FROM guto_v3.conversation_threads
-           WHERE tenant_id=$1 AND user_id=$2 AND last_interaction_at IS NOT NULL)
-       ) AS day`,
-      [actor.tenantId, actor.userId, actor.tenantId, actor.userId],
+      `SELECT MAX(day)::text AS day FROM (
+         SELECT source_key::date AS day FROM guto_v3.xp_ledger
+          WHERE tenant_id=$1 AND user_id=$2
+            AND reason_code IN ('complete_daily_mission','accept_adapted_mission')
+            AND source_key ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+         UNION ALL
+         SELECT last_interaction_at::date AS day FROM guto_v3.conversation_threads
+          WHERE tenant_id=$1 AND user_id=$2 AND last_interaction_at IS NOT NULL
+         UNION ALL
+         SELECT (payload->>'presenceDay')::date AS day FROM guto_v3.guto_events
+          WHERE tenant_id=$1 AND user_id=$2 AND event_type='turn.completed'
+            AND payload->>'presenceDay' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+       ) official_presence`,
+      [actor.tenantId, actor.userId],
     );
     return result.rows[0]?.day || null;
   }
@@ -1551,8 +1628,6 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
   async evaluateRelationshipLifecycle(input: {
     actor: ActorContext;
     requestId: string;
-    asOf?: string;
-    lastPresenceDay?: string | null;
   }): Promise<RelationshipLifecycleRecord> {
     return this.withActorTransaction(input.actor, async (client) => {
       // Serialize concurrent evaluations of the same actor on the lifecycle row.
@@ -1580,12 +1655,8 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       const current = assertRelationshipLifecycleState(String(row.state));
       const currentAbsence = asNumber(row.consecutive_absence_days);
       const currentPresenceDay = row.last_presence_day ? String(row.last_presence_day) : null;
-      // Official data is the authority for the anchor; an explicit override wins
-      // only for deterministic tests.
-      const presenceDay = input.lastPresenceDay !== undefined
-        ? (input.lastPresenceDay || null)
-        : await this.deriveLastPresenceDay(client, input.actor);
-      const asOf = input.asOf || this.todayKey();
+      const presenceDay = await this.deriveLastPresenceDay(client, input.actor);
+      const asOf = this.todayKey();
       const absenceDays = presenceDay
         ? Math.max(0, Math.floor((new Date(`${asOf}T00:00:00.000Z`).getTime() - new Date(`${presenceDay}T00:00:00.000Z`).getTime()) / 86_400_000))
         : 0;
@@ -1616,48 +1687,6 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         await client.query(
           `UPDATE guto_v3.relationship_lifecycle SET last_evaluated_at=now()
             WHERE tenant_id=$1 AND user_id=$2`,
-          [input.actor.tenantId, input.actor.userId],
-        );
-      }
-      const final = await client.query<QueryResultRow>(
-        `SELECT state, entered_state_at, last_evaluated_at, last_presence_day, consecutive_absence_days, version
-           FROM guto_v3.relationship_lifecycle
-          WHERE tenant_id=$1 AND user_id=$2`,
-        [input.actor.tenantId, input.actor.userId],
-      );
-      return this.mapLifecycleRow(final.rows[0]!, input.actor);
-    });
-  }
-
-  async reactivateRelationship(input: { actor: ActorContext; requestId: string }): Promise<RelationshipLifecycleRecord> {
-    return this.withActorTransaction(input.actor, async (client) => {
-      const existing = await client.query<QueryResultRow>(
-        `SELECT state, entered_state_at, last_evaluated_at, last_presence_day, consecutive_absence_days, version
-           FROM guto_v3.relationship_lifecycle
-          WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE`,
-        [input.actor.tenantId, input.actor.userId],
-      );
-      if (!existing.rows[0]) {
-        throw new V3Error("V3_RELATIONSHIP_LIFECYCLE_NOT_EVALUATED", "Lifecycle ainda não avaliado; avalie antes de reativar.", 409);
-      }
-      const row = existing.rows[0]!;
-      const current = assertRelationshipLifecycleState(String(row.state));
-      if (current === "TERMINAL") {
-        await client.query(
-          `UPDATE guto_v3.relationship_lifecycle SET state='ACTIVE', entered_state_at=now(), last_evaluated_at=now(), version=version+1
-            WHERE tenant_id=$1 AND user_id=$2`,
-          [input.actor.tenantId, input.actor.userId],
-        );
-        await client.query(
-          `INSERT INTO guto_v3.relationship_lifecycle_events
-             (tenant_id,user_id,request_id,from_state,to_state,reason)
-           VALUES ($1,$2,$3,'TERMINAL','ACTIVE','explicit_reactivation')
-           ON CONFLICT (tenant_id,user_id,request_id,from_state,to_state) DO NOTHING`,
-          [input.actor.tenantId, input.actor.userId, input.requestId],
-        );
-      } else {
-        await client.query(
-          `UPDATE guto_v3.relationship_lifecycle SET last_evaluated_at=now() WHERE tenant_id=$1 AND user_id=$2`,
           [input.actor.tenantId, input.actor.userId],
         );
       }
@@ -1706,16 +1735,20 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     expectedContextVersion: number;
   }): Promise<{ context: ConfirmedUserContext; facts: RecordedFact[]; affectedDomains: string[] }> {
     return this.withActorTransaction(input.actor, async (client) => {
+      await this.lockOfficialContextAuthority(client, input.actor);
       if (!input.changes.length) throw new V3Error("V3_FACT_CHANGE_REQUIRED", "Nenhum fato operacional foi informado.", 400);
       for (const change of input.changes) assertFactChange(change);
       await client.query("SET CONSTRAINTS ALL DEFERRED");
       const currentResult = await client.query<QueryResultRow>(
-        `SELECT * FROM guto_v3.confirmed_user_contexts WHERE tenant_id=$1 AND user_id=$2 ORDER BY version DESC LIMIT 1 FOR UPDATE`,
+        `SELECT * FROM guto_v3.confirmed_user_contexts WHERE tenant_id=$1 AND user_id=$2 ORDER BY version DESC LIMIT 1`,
         [input.actor.tenantId, input.actor.userId],
       );
       const currentRow = currentResult.rows[0];
       if (!currentRow || asNumber(currentRow.version) !== input.expectedContextVersion) {
-        throw new V3Error("V3_CONTEXT_VERSION_CONFLICT", "O contexto mudou; recarregue antes de registrar o fato.", 409);
+        throw new V3Error("V3_CONTEXT_VERSION_CONFLICT", "O contexto mudou; recarregue antes de registrar o fato.", 409, {
+          expectedContextVersion: input.expectedContextVersion,
+          officialContextVersion: currentRow ? asNumber(currentRow.version) : null,
+        });
       }
       const current = this.mapConfirmedContext(currentRow);
       const recorded: RecordedFact[] = [];
@@ -1787,14 +1820,36 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
           WHERE tenant_id=$3 AND user_id=$4 AND status='COMPLETED'`,
         [context.id, context.version, input.actor.tenantId, input.actor.userId],
       );
-      // Do NOT rebind active plans here. Regeneration runs after this
-      // transaction returns, in the executor. Binding an old plan to the new
-      // context before the new plan is successfully committed would make a
-      // regeneration failure appear as a valid new-context plan. The existing
-      // plans remain attached to the previous context until replaceWorkoutPlan
-      // / replaceDietPlan commits the replacement; this is the safe atomicity
-      // boundary without a schema migration.
-      const impacted = [...impactsFor(input.changes)];
+      const impactedSet = impactsFor(input.changes);
+      const impacted = [...impactedSet];
+      // Content from an unaffected engine remains authoritative, but its
+      // context binding must advance atomically. An affected engine stays on
+      // the previous context until its replacement commits, so a failed
+      // regeneration can never masquerade as a valid new-context plan.
+      if (!impactedSet.has("WORKOUT")) {
+        await client.query(
+          `UPDATE guto_v3.workout_plans
+              SET confirmed_context_id=$1,confirmed_context_version=$2
+            WHERE tenant_id=$3 AND user_id=$4 AND status='active'`,
+          [context.id, context.version, input.actor.tenantId, input.actor.userId],
+        );
+      }
+      if (!impactedSet.has("NUTRITION")) {
+        await client.query(
+          `UPDATE guto_v3.diet_plans
+              SET confirmed_context_id=$1,confirmed_context_version=$2
+            WHERE tenant_id=$3 AND user_id=$4 AND status='active'`,
+          [context.id, context.version, input.actor.tenantId, input.actor.userId],
+        );
+      }
+      if (!impactedSet.has("WORKOUT") && !impactedSet.has("NUTRITION")) {
+        await client.query(
+          `UPDATE guto_v3.active_plan_versions
+              SET confirmed_context_id=$1,confirmed_context_version=$2,version=version+1
+            WHERE tenant_id=$3 AND user_id=$4`,
+          [context.id, context.version, input.actor.tenantId, input.actor.userId],
+        );
+      }
       await this.appendMutationEvent(client, input.actor, input.requestId, "facts.confirmed", {
         contextId: context.id,
         contextVersion: context.version,

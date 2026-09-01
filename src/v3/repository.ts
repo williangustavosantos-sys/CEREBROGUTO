@@ -156,17 +156,6 @@ export interface OfficialStateRepository {
   evaluateRelationshipLifecycle(input: {
     actor: ActorContext;
     requestId: string;
-    /** Evaluation day (YYYY-MM-DD). Defaults to the repository's "today". */
-    asOf?: string;
-    /** Override the anchor presence day (YYYY-MM-DD) for tests; when absent the
-     * repository derives it from official mission/interaction data. */
-    lastPresenceDay?: string | null;
-  }): Promise<import("./relationship-lifecycle.js").RelationshipLifecycleRecord>;
-  /** Explicit reactivation (commercial/admin release path): TERMINAL → ACTIVE,
-   * never a silent restore. Idempotent on requestId. Official data is kept. */
-  reactivateRelationship(input: {
-    actor: ActorContext;
-    requestId: string;
   }): Promise<import("./relationship-lifecycle.js").RelationshipLifecycleRecord>;
 }
 

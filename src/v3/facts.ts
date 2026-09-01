@@ -86,12 +86,12 @@ export function resolveDeclaredOperationalFacts(message: string): FactChange[] {
 
   // Full-number capture (\d{1,2}) with a non-digit boundary: "25 vezes" must
   // be read as 25 (then rejected as out of domain), NEVER silently converted
-  // to its last digit 5. Only the valid domain 1..7 is emitted as a fact; an
+  // to its last digit 5. Only the valid product domain 2..6 is emitted as a fact; an
   // out-of-domain frequency is not persisted (the model still handles it).
   const frequency = /(?:treino|treinar|train|allen[ao])\s*(\d{1,2})(?!\d)\s*(?:x|vez(?:es)?|days?|dias?)/u.exec(text);
   if (frequency) {
     const value = Number(frequency[1]);
-    if (value >= 1 && value <= 7) changes.push(declared("TRAINING_FREQUENCY", frequency[1]!, { daysPerWeek: value }));
+    if (value >= 2 && value <= 6) changes.push(declared("TRAINING_FREQUENCY", frequency[1]!, { daysPerWeek: value }));
   }
 
   const level = /(?:sou |estou )?(iniciante|beginner|avancad[oa]|advanced|voltando|returning|ativo|active)/u.exec(text);
@@ -140,7 +140,7 @@ export interface FirstContactCalibrationCorrection {
   weeklyFrequencyDaysPerWeek?: number;
   goalCode?: string;
   /** Set when the user stated a training frequency outside the valid domain
-   * (1..7). The correction must be REJECTED (never persisted as a different
+   * (2..6). The correction must be REJECTED (never persisted as a different
    * value), so the service throws a clear domain error instead of silently
    * dropping or corrupting the intent. */
   rejectedFrequency?: number;
@@ -179,12 +179,12 @@ export function interpretFirstContactCalibrationCorrection(message: string): Fir
 
   // Full-number capture with a non-digit boundary. The prefix is optional so
   // short phrases ("5 vezes") work, but "25 vezes" must be read as 25 — never
-  // as its last digit 5. Values outside 1..7 are surfaced as rejectedFrequency
+  // as its last digit 5. Values outside 2..6 are surfaced as rejectedFrequency
   // so the caller can reject with a clear domain error.
   const frequency = /(?:(?:treino|treinar|train|allenai)\D{0,16}?)?(\d{1,2})(?!\d)\s*(?:x|vez(?:es)?|days?\b|dias?\b)\s*(?:por semana|a settimana|per week|\/|)/u.exec(text);
   if (frequency) {
     const value = Number(frequency[1]);
-    if (value >= 1 && value <= 7) result.weeklyFrequencyDaysPerWeek = value;
+    if (value >= 2 && value <= 6) result.weeklyFrequencyDaysPerWeek = value;
     else result.rejectedFrequency = value;
   }
 
@@ -213,4 +213,10 @@ export function assertFactChange(change: FactChange): void {
   if (!OperationalFactTypes.includes(change.factType)) throw new V3Error("V3_FACT_TYPE_INVALID", "Tipo de fato operacional inválido.", 409);
   if (!change.canonicalValue.trim()) throw new V3Error("V3_FACT_VALUE_INVALID", "Valor de fato operacional inválido.", 409);
   if (!change.value || Array.isArray(change.value)) throw new V3Error("V3_FACT_VALUE_INVALID", "Estrutura de fato operacional inválida.", 409);
+  if (change.factType === "TRAINING_FREQUENCY") {
+    const daysPerWeek = Number(change.value.daysPerWeek);
+    if (!Number.isInteger(daysPerWeek) || daysPerWeek < 2 || daysPerWeek > 6) {
+      throw new V3Error("V3_TRAINING_FREQUENCY_OUT_OF_DOMAIN", "Frequência de treino fora do domínio válido (2 a 6).", 422);
+    }
+  }
 }

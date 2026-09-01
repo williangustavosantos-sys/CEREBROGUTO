@@ -376,7 +376,7 @@ describe("active context correlation", () => {
     assert.equal(response.turnId, "turn-workout");
     assert.equal(response.requestId, "request-workout");
     assert.equal(response.contextId, "ctx-workout");
-    assert.equal(response.discardedReason, "stale_context");
+    assert.equal(response.discardedReason, "stale_context", JSON.stringify(response));
     assert.match(response.fala || "", /contexto mudou/i);
     assert.equal(response.acao, "none");
     assert.deepEqual(response.memoryPatch, {});

@@ -1,4 +1,5 @@
 import type { PushSubscriptionRecord } from "./push-store.js";
+import { shouldSuppressProactivity, type RelationshipLifecycleState } from "./v3/relationship-lifecycle.js";
 
 export type PushSuppressionReason =
   | "no_memory"
@@ -6,6 +7,7 @@ export type PushSuppressionReason =
   | "outside_window"
   | "action_completed"
   | "context_suppressed"
+  | "relationship_terminal"
   | "recent_activity"
   | "duplicate"
   | "decision_unavailable";
@@ -20,6 +22,7 @@ export interface PushCandidate<TMemory extends PushEligibilityMemory, TContext =
   memory: TMemory | null;
   activeAccess: boolean;
   contextSuppressed: boolean;
+  relationshipLifecycleState?: RelationshipLifecycleState | null;
   context: TContext;
 }
 
@@ -103,6 +106,7 @@ export function evaluatePushEligibility(input: {
   memory: PushEligibilityMemory | null;
   activeAccess: boolean;
   contextSuppressed: boolean;
+  relationshipLifecycleState?: RelationshipLifecycleState | null;
   subscription: PushSubscriptionRecord;
   now: Date;
   timeZone: string;
@@ -111,6 +115,9 @@ export function evaluatePushEligibility(input: {
   const slot = getApprovedPushSlot(input.now, input.timeZone);
   if (!input.memory) return { eligible: false, reason: "no_memory", slot, day };
   if (!input.activeAccess) return { eligible: false, reason: "inactive_access", slot, day };
+  if (input.relationshipLifecycleState && shouldSuppressProactivity(input.relationshipLifecycleState)) {
+    return { eligible: false, reason: "relationship_terminal", slot, day };
+  }
   if (!slot) return { eligible: false, reason: "outside_window", slot, day };
 
   const completedDates = Array.isArray(input.memory.completedWorkoutDates)
@@ -181,6 +188,7 @@ export async function dispatchExternalPush<TMemory extends PushEligibilityMemory
         memory: candidate.memory,
         activeAccess: candidate.activeAccess,
         contextSuppressed: candidate.contextSuppressed,
+        relationshipLifecycleState: candidate.relationshipLifecycleState,
         subscription,
         now: deps.now,
         timeZone: deps.timeZone,

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { V3Error } from "./errors.js";
 import { materializeFirstContact } from "./first-contact.js";
 import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from "./facts.js";
-import { evaluateRelationshipLifecycleState, shouldSuppressProactivity, type RelationshipLifecycleRecord } from "./relationship-lifecycle.js";
+import { evaluateOfficialRelationshipReturn, evaluateRelationshipLifecycleState, shouldSuppressProactivity, type RelationshipLifecycleRecord } from "./relationship-lifecycle.js";
 import { generateDietDraft, generateWorkoutDraft } from "./generation-engines.js";
 import { decideWorkoutEvolution } from "./workout-evolution.js";
 import { assertValidAdaptedExecution, resolveSessionEffectiveLocation } from "./session-execution-policy.js";
@@ -45,8 +45,14 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
   private readonly requestIdInflight = new Map<string, Promise<import("./types.js").WorkoutEvolutionDecision>>();
   private readonly lifecycles = new Map<string, import("./relationship-lifecycle.js").RelationshipLifecycleRecord>();
   private readonly lifecycleRequests = new Set<string>();
+  private readonly officialPresenceDays = new Map<string, string>();
   readonly lifecycleEvents: Array<{ requestId: string; fromState: string; toState: string; reason: string }> = [];
-  readonly events: Array<{ requestId: string; action: string; resultCode: string }> = [];
+  /** Mirrors Postgres event uniqueness: request ids are scoped to tenant/user. */
+  readonly events: Array<{ actorKey: string; requestId: string; action: string; resultCode: string }> = [];
+
+  constructor(private readonly clock: () => Date = () => new Date()) {}
+
+  private todayKey(): string { return this.clock().toISOString().slice(0, 10); }
 
   seed(snapshot: OfficialSnapshot): void {
     this.snapshots.set(key(snapshot.actor), structuredClone(snapshot));
@@ -460,10 +466,17 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
         : -20;
     entries.push({ id: randomUUID(), reasonCode: input.reasonCode, sourceKey: input.sourceKey, amount, createdAt: new Date().toISOString() });
     this.xpLedger.set(key(input.actor), entries);
+    if (
+      (input.reasonCode === "complete_daily_mission" || input.reasonCode === "accept_adapted_mission") &&
+      /^\d{4}-\d{2}-\d{2}$/.test(input.sourceKey)
+    ) {
+      this.officialPresenceDays.set(key(input.actor), input.sourceKey);
+    }
   }
   async replaceWorkoutPlan(input: { actor: ActorContext; requestId: string; context: ConfirmedUserContext; draft: WorkoutPlanDraft }) {
     const snapshot = await this.loadOfficialSnapshot(input.actor);
-    const prior = this.events.find((event) => event.requestId === input.requestId && event.action === "generateWorkout");
+    const actorKey = key(input.actor);
+    const prior = this.events.find((event) => event.actorKey === actorKey && event.requestId === input.requestId && event.action === "generateWorkout");
     if (prior && snapshot.workout) return structuredClone(snapshot.workout);
     const plan = {
       id: randomUUID(), version: (snapshot.workout?.version || 0) + 1, title: input.draft.title,
@@ -472,12 +485,29 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     };
     snapshot.workout = plan;
     this.snapshots.set(key(input.actor), snapshot);
-    this.events.push({ requestId: input.requestId, action: "generateWorkout", resultCode: "WORKOUT_GENERATED" });
+    this.events.push({ actorKey, requestId: input.requestId, action: "generateWorkout", resultCode: "WORKOUT_GENERATED" });
     return structuredClone(plan);
   }
   async replaceDietPlan(input: { actor: ActorContext; requestId: string; context: ConfirmedUserContext; draft: DietPlanDraft }) {
     const snapshot = await this.loadOfficialSnapshot(input.actor);
-    const prior = this.events.find((event) => event.requestId === input.requestId && event.action === "generateDiet");
+    const generatedContextId = String(input.draft.generatedFrom.confirmedContextId || "");
+    const generatedContextVersion = Number(input.draft.generatedFrom.confirmedContextVersion);
+    const generatedLanguage = String(input.draft.generatedFrom.language || "");
+    if (
+      snapshot.firstContact.status !== "COMPLETED" ||
+      !snapshot.confirmedContext ||
+      snapshot.confirmedContext.id !== input.context.id ||
+      snapshot.confirmedContext.version !== input.context.version ||
+      snapshot.confirmedContext.profileVersion !== input.context.profileVersion ||
+      snapshot.confirmedContext.goalVersion !== input.context.goalVersion ||
+      generatedContextId !== input.context.id ||
+      generatedContextVersion !== input.context.version ||
+      generatedLanguage !== snapshot.profile.language
+    ) {
+      throw new V3Error("V3_STALE_GENERATION_CONTEXT", "O contexto oficial mudou durante a geração da dieta.", 409);
+    }
+    const actorKey = key(input.actor);
+    const prior = this.events.find((event) => event.actorKey === actorKey && event.requestId === input.requestId && event.action === "generateDiet");
     if (prior && snapshot.diet) return structuredClone(snapshot.diet);
     const plan = {
       id: randomUUID(), version: (snapshot.diet?.version || 0) + 1, status: "active" as const,
@@ -488,7 +518,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     };
     snapshot.diet = plan;
     this.snapshots.set(key(input.actor), snapshot);
-    this.events.push({ requestId: input.requestId, action: "generateDiet", resultCode: "DIET_GENERATED" });
+    this.events.push({ actorKey, requestId: input.requestId, action: "generateDiet", resultCode: "DIET_GENERATED" });
     return structuredClone(plan);
   }
   async applyFactChanges(input: {
@@ -621,7 +651,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     const history = prior.filter((event) => event.exerciseId === input.event.exerciseId).slice(-4);
     const decision = decideWorkoutEvolution(input.event, history);
     this.workoutSessionEvents.set(keyed, [...prior, input.event]);
-    this.events.push({ requestId: input.requestId, action: "workoutEvolution", resultCode: decision.decision });
+    this.events.push({ actorKey: key(input.actor), requestId: input.requestId, action: "workoutEvolution", resultCode: decision.decision });
     return decision;
   }
   async swapExercise(input: {
@@ -691,6 +721,8 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       .filter((entry) => entry.reasonCode === "complete_daily_mission" || entry.reasonCode === "accept_adapted_mission")
       .map((entry) => entry.sourceKey)
       .filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day));
+    const turnDay = this.officialPresenceDays.get(key(actor));
+    if (turnDay) missionDays.push(turnDay);
     return missionDays.length ? missionDays.sort().at(-1)! : null;
   }
 
@@ -702,8 +734,6 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
   async evaluateRelationshipLifecycle(input: {
     actor: ActorContext;
     requestId: string;
-    asOf?: string;
-    lastPresenceDay?: string | null;
   }): Promise<RelationshipLifecycleRecord> {
     const k = key(input.actor);
     const idempotencyKey = `${k}:${input.requestId}`;
@@ -712,16 +742,14 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     }
     const current = this.lifecycles.get(k);
     const state = current ? current.state : "ACTIVE";
-    const presenceDay = input.lastPresenceDay !== undefined
-      ? (input.lastPresenceDay || null)
-      : this.deriveLastPresenceDayInMemory(input.actor);
-    const asOf = input.asOf || new Date().toISOString().slice(0, 10);
+    const presenceDay = this.deriveLastPresenceDayInMemory(input.actor);
+    const asOf = this.todayKey();
     const absenceDays = presenceDay
       ? Math.max(0, Math.floor((new Date(`${asOf}T00:00:00.000Z`).getTime() - new Date(`${presenceDay}T00:00:00.000Z`).getTime()) / 86_400_000))
       : 0;
     const transition = evaluateRelationshipLifecycleState(state, absenceDays);
-    const now = new Date().toISOString();
-    if (current && transition.state === current.state && !input.lastPresenceDay && !input.asOf) {
+    const now = this.clock().toISOString();
+    if (current && transition.state === current.state && current.lastPresenceDay === presenceDay && current.consecutiveAbsenceDays === absenceDays) {
       const refreshed = { ...current, lastEvaluatedAt: now };
       this.lifecycles.set(k, refreshed);
       this.lifecycleRequests.add(idempotencyKey);
@@ -745,31 +773,29 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     return structuredClone(record);
   }
 
-  async reactivateRelationship(input: { actor: ActorContext; requestId: string }): Promise<RelationshipLifecycleRecord> {
-    const k = key(input.actor);
-    const current = this.lifecycles.get(k);
-    if (!current) throw new V3Error("V3_RELATIONSHIP_LIFECYCLE_NOT_EVALUATED", "Lifecycle ainda não avaliado; avalie antes de reativar.", 409);
-    const now = new Date().toISOString();
-    if (current.state === "TERMINAL") {
-      const record: RelationshipLifecycleRecord = {
-        ...current,
-        state: "ACTIVE",
-        enteredStateAt: now,
-        lastEvaluatedAt: now,
-        version: current.version + 1,
-      };
-      this.lifecycles.set(k, record);
-      this.lifecycleEvents.push({ requestId: input.requestId, fromState: "TERMINAL", toState: "ACTIVE", reason: "explicit_reactivation" });
-      return structuredClone(record);
-    }
-    const refreshed = { ...current, lastEvaluatedAt: now };
-    this.lifecycles.set(k, refreshed);
-    return structuredClone(refreshed);
-  }
-
   async recordTurn(input: { actor: ActorContext; requestId: string; action: string; resultCode: string }): Promise<void> {
-    if (!this.events.some((event) => event.requestId === input.requestId)) {
-      this.events.push({ requestId: input.requestId, action: input.action, resultCode: input.resultCode });
+    const actorKey = key(input.actor);
+    if (this.events.some((event) => event.actorKey === actorKey && event.requestId === input.requestId && event.action === input.action)) return;
+    this.events.push({ actorKey, requestId: input.requestId, action: input.action, resultCode: input.resultCode });
+    const k = key(input.actor);
+    const today = this.todayKey();
+    this.officialPresenceDays.set(k, today);
+    const current = this.lifecycles.get(k);
+    if (!current) return;
+    const transition = evaluateOfficialRelationshipReturn(current.state);
+    const now = this.clock().toISOString();
+    const record: RelationshipLifecycleRecord = {
+      ...current,
+      state: transition.state,
+      enteredStateAt: transition.transitioned ? now : current.enteredStateAt,
+      lastEvaluatedAt: now,
+      lastPresenceDay: today,
+      consecutiveAbsenceDays: 0,
+      version: transition.transitioned ? current.version + 1 : current.version,
+    };
+    this.lifecycles.set(k, record);
+    if (transition.transitioned) {
+      this.lifecycleEvents.push({ requestId: input.requestId, fromState: current.state, toState: transition.state, reason: transition.reason! });
     }
   }
   /**
@@ -786,7 +812,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     const set = this.completedSessionIds.get(key(input.actor)) || new Set<string>();
     set.add(input.workoutSessionId);
     this.completedSessionIds.set(key(input.actor), set);
-    this.events.push({ requestId: input.requestId, action: "workoutSessionCompleted", resultCode: "COMPLETED" });
+    this.events.push({ actorKey: key(input.actor), requestId: input.requestId, action: "workoutSessionCompleted", resultCode: "COMPLETED" });
   }
   /**
    * P0 (session rotation): durable session counter — counts COMPLETED logical

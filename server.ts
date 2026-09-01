@@ -64,6 +64,8 @@ import {
 import webpush from "web-push";
 import { parseAuth, requireActiveUser } from "./src/auth-middleware.js";
 import { createV3Router, isV3AdministrativePanelPath, isV3OnlyAllowedPath, v3OnlyEnabled } from "./src/v3/router.js";
+import { V3CutoverService } from "./src/v3/cutover-service.js";
+import { getV3Runtime } from "./src/v3/runtime.js";
 import { gutoV3Inngest, gutoV3InngestFunctions } from "./src/v3/durable-events.js";
 import { serve as serveInngest } from "inngest/express";
 import {
@@ -685,6 +687,33 @@ interface ActiveContext {
   acceptedItem: ActiveContextItem | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Correlation metadata supplied by a client that is acting on an already
+ * rendered operational context.  It is not an authority to select a context:
+ * it is a compare-and-swap precondition for mutations caused by that turn.
+ */
+interface ActiveContextRequestGuard {
+  contextId: string;
+  contextVersion: number;
+  activeContextType: ActiveContextType;
+  activeItemId: string;
+}
+
+function activeContextRequestIsCurrent(
+  memory: Pick<GutoMemory, "activeContext">,
+  guard?: ActiveContextRequestGuard | null,
+): boolean {
+  if (!guard) return true;
+  const active = normalizeActiveContext(memory.activeContext);
+  return Boolean(
+    active &&
+    active.id === guard.contextId &&
+    active.version === guard.contextVersion &&
+    active.type === guard.activeContextType &&
+    active.currentItem.id === guard.activeItemId,
+  );
 }
 
 interface GutoLastSuggestedItem {
@@ -4237,13 +4266,18 @@ function activateContext(memory: GutoMemory, context: ActiveContext): ActiveCont
   return context;
 }
 
-async function activateFirstWorkoutItem(memory: GutoMemory, plan: WorkoutPlan): Promise<boolean> {
+async function activateFirstWorkoutItem(
+  memory: GutoMemory,
+  plan: WorkoutPlan,
+  requestContext?: ActiveContextRequestGuard | null,
+): Promise<boolean> {
   const first = plan.exercises?.[0];
   if (!first) return false;
   let transitioned = false;
   const updated = await updateUserMemoryAtomically<GutoMemory>(memory.userId, (snapshot) => {
     if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
     const currentMemory: GutoMemory = { ...memory, ...(snapshot as GutoMemory) };
+    if (!activeContextRequestIsCurrent(currentMemory, requestContext)) return currentMemory;
     if (normalizeActiveContext(currentMemory.activeContext)?.type === "workout") return currentMemory;
     const now = new Date().toISOString();
     const item: ActiveContextItem = {
@@ -13418,6 +13452,16 @@ async function handlePushDispatch(req: ExpressRequest, res: ExpressResponse) {
         }
         const memory = getMemory(userId);
         const language = normalizeLanguage(memory.language);
+        let relationshipLifecycleState: import("./src/v3/relationship-lifecycle.js").RelationshipLifecycleState | null = null;
+        if (process.env.GUTO_V3_ENABLED === "true") {
+          const runtime = getV3Runtime();
+          const actor = await runtime.repository.resolveActor(userId, "student");
+          if (actor) {
+            relationshipLifecycleState = (await new V3CutoverService(runtime.repository).evaluateRelationshipLifecycle(actor, {
+              requestId: randomUUID(),
+            })).state;
+          }
+        }
         const dailyPresenceContext = await buildDailyPresenceContext(memory, {
           dateKey: day,
           language,
@@ -13432,6 +13476,7 @@ async function handlePushDispatch(req: ExpressRequest, res: ExpressResponse) {
           memory,
           activeAccess: Boolean(await requireActiveUserAccessAsync(userId)),
           contextSuppressed: shouldSuppressTrainingCharge(dailyPresenceContext),
+          relationshipLifecycleState,
           context: {
             dailyPresenceContext,
             proactivityContext,
@@ -15025,6 +15070,7 @@ async function generateAndCommitBrainWorkout(
     profileFingerprint: string;
     profileMutationRevision: number;
   },
+  requestContext?: ActiveContextRequestGuard | null,
 ): Promise<WorkoutPlan | null> {
   const profileMutationRevision = requestGuard?.profileMutationRevision
     ?? getWorkoutProfileMutationRevision(memory.userId);
@@ -15151,6 +15197,7 @@ async function generateAndCommitBrainWorkout(
     if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
     const persisted = snapshot as GutoMemory;
     const current: GutoMemory = { ...memory, ...persisted };
+    if (!activeContextRequestIsCurrent(current, requestContext)) return current;
     if (
       hasWorkoutProfileMutationInFlight(memory.userId) ||
       getWorkoutProfileMutationRevision(memory.userId) !== profileMutationRevision
@@ -17622,8 +17669,21 @@ async function dispatchSovereignBrainAction(params: {
     profileFingerprint: string;
     profileMutationRevision: number;
   };
+  requestContext?: ActiveContextRequestGuard | null;
 }): Promise<GutoModelResponse> {
   const { response, memory, language } = params;
+  const staleContextResponse = (): GutoModelResponse => ({
+    fala: buildConversationalTurnFallback(language, "stale_context"),
+    acao: "none",
+    expectedResponse: null,
+    avatarEmotion: "default",
+    workoutPlan: null,
+    memoryPatch: {},
+    discardedReason: "stale_context",
+  });
+  if (!activeContextRequestIsCurrent(getMemory(memory.userId), params.requestContext)) {
+    return staleContextResponse();
+  }
   const activeContext = normalizeActiveContext(memory.activeContext);
   const hasDietOperationalAction =
     activeContext?.type === "diet" &&
@@ -17779,9 +17839,16 @@ async function dispatchSovereignBrainAction(params: {
         language,
         focusHint,
         params.workoutGenerationGuard,
+        params.requestContext,
       );
+      if (!activeContextRequestIsCurrent(getMemory(memory.userId), params.requestContext)) {
+        return staleContextResponse();
+      }
       if (!plan) return buildSovereignSafeFallback(language, "Não consegui executar o treino com segurança agora.");
-      const contextTransitioned = await activateFirstWorkoutItem(memory, plan);
+      const contextTransitioned = await activateFirstWorkoutItem(memory, plan, params.requestContext);
+      if (!activeContextRequestIsCurrent(getMemory(memory.userId), params.requestContext) && !contextTransitioned) {
+        return staleContextResponse();
+      }
       return {
         ...response,
         contextTransition: contextTransitioned ? "intentional" : response.contextTransition,
@@ -17908,12 +17975,7 @@ async function runSovereignBrainTurn(params: {
   operationalContext: OperationalContext;
   resolverResult?: ResolverResult | null;
   turnId?: string;
-  requestContext?: {
-    contextId: string;
-    contextVersion: number;
-    activeContextType: ActiveContextType;
-    activeItemId: string;
-  } | null;
+  requestContext?: ActiveContextRequestGuard | null;
   lastSuggestedItem?: unknown;
   systemTrigger?: SovereignSystemTurnTrigger | null;
   decide?: typeof decideTurn;
@@ -17935,15 +17997,7 @@ async function runSovereignBrainTurn(params: {
     memory,
   );
   const requestContextIsCurrent = (): boolean => {
-    if (!params.requestContext) return true;
-    const active = normalizeActiveContext(getMemory(memory.userId).activeContext);
-    return Boolean(
-      active &&
-      active.id === params.requestContext.contextId &&
-      active.version === params.requestContext.contextVersion &&
-      active.type === params.requestContext.activeContextType &&
-      active.currentItem.id === params.requestContext.activeItemId
-    );
+    return activeContextRequestIsCurrent(getMemory(memory.userId), params.requestContext);
   };
   const staleContextResponse = (): GutoModelResponse => ({
     fala: buildConversationalTurnFallback(language, "stale_context"),
@@ -17998,6 +18052,7 @@ async function runSovereignBrainTurn(params: {
       worldState,
       resolverResult: params.resolverResult ?? null,
       turnId: params.turnId,
+      requestContext: params.requestContext,
     });
     return finalizeSovereignBrainResponse(dispatched, input, language);
   };
@@ -18086,6 +18141,7 @@ async function runSovereignBrainTurn(params: {
       resolverResult: params.resolverResult ?? null,
       turnId: params.turnId,
       workoutGenerationGuard,
+      requestContext: params.requestContext,
     });
     return finalizeSovereignBrainResponse(workoutResult, input, language);
   }
@@ -18226,8 +18282,8 @@ async function runSovereignBrainTurn(params: {
     resolverResult: params.resolverResult ?? null,
     turnId: params.turnId,
     workoutGenerationGuard,
+    requestContext: params.requestContext,
   });
-
   return finalizeSovereignBrainResponse(dispatched, input, language);
 }
 

@@ -1,4 +1,5 @@
 import "./test-env.js";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import assert from "node:assert/strict";
@@ -15,6 +16,8 @@ import {
   resolvePushCronSecret,
 } from "../src/config.js";
 import type { PushSubscriptionRecord } from "../src/push-store.js";
+import { InMemoryOfficialStateRepository } from "../src/v3/in-memory-repository.js";
+import { V3CutoverService } from "../src/v3/cutover-service.js";
 
 const NOW = new Date("2026-07-26T16:30:00.000Z");
 const TIME_ZONE = "Europe/Rome";
@@ -76,6 +79,8 @@ describe("configuração de push e cron", () => {
     }]);
     const serverSource = readFileSync(join(process.cwd(), "server.ts"), "utf8");
     assert.match(serverSource, /app\.get\("\/guto\/push\/dispatch", handlePushDispatch\)/);
+    assert.match(serverSource, /evaluateRelationshipLifecycle\(actor,/);
+    assert.match(serverSource, /relationshipLifecycleState,/);
   });
 });
 
@@ -126,6 +131,24 @@ describe("elegibilidade e supressão", () => {
       contextSuppressed: false,
     }) as { reason: string }).reason, "recent_activity");
   });
+
+  it("suprime TERMINAL antes da decisão de proatividade", () => {
+    const result = evaluatePushEligibility({
+      memory: eligibleMemory(),
+      activeAccess: true,
+      contextSuppressed: false,
+      relationshipLifecycleState: "TERMINAL",
+      subscription: subscription("https://push.test/terminal"),
+      now: NOW,
+      timeZone: TIME_ZONE,
+    });
+    assert.deepEqual(result, {
+      eligible: false,
+      reason: "relationship_terminal",
+      slot: "18",
+      day: "2026-07-26",
+    });
+  });
 });
 
 function dependencies(
@@ -160,7 +183,71 @@ function dependencies(
 }
 
 describe("deduplicação e falha isolada", () => {
-  it("a segunda execução no mesmo dia não envia de novo", async () => {
+  it("dispatcher real bloqueia TERMINAL em retry/concorrência e volta após retorno oficial", async () => {
+    let officialNow = new Date("2026-06-01T12:00:00.000Z");
+    const repository = new InMemoryOfficialStateRepository(() => new Date(officialNow));
+    const actor = await repository.provisionActor({
+      externalSubject: "push-lifecycle-user",
+      role: "student",
+      tenantKey: "push-lifecycle-tenant",
+      tenantName: "Push Lifecycle Tenant",
+    });
+    const lifecycle = new V3CutoverService(repository);
+    await repository.recordTurn({
+      actor,
+      requestId: randomUUID(),
+      action: "acknowledge",
+      resultCode: "OK",
+    });
+    assert.equal((await lifecycle.evaluateRelationshipLifecycle(actor, { requestId: randomUUID() })).state, "ACTIVE");
+
+    const sub = subscription("https://push.test/lifecycle", actor.externalSubject);
+    let sends = 0;
+    const lifecycleDependencies = () => dependencies([sub], {
+      dispatchId: randomUUID(),
+      loadCandidate: async () => ({
+        memory: eligibleMemory(),
+        activeAccess: true,
+        contextSuppressed: false,
+        relationshipLifecycleState: (await lifecycle.evaluateRelationshipLifecycle(actor, {
+          requestId: randomUUID(),
+        })).state,
+        context: null,
+      }),
+      send: async () => { sends += 1; },
+    });
+
+    const active = await dispatchExternalPush(lifecycleDependencies());
+    assert.equal(active.sent, 1);
+
+    officialNow = new Date("2026-06-15T12:00:00.000Z");
+    assert.equal((await lifecycle.evaluateRelationshipLifecycle(actor, { requestId: randomUUID() })).state, "TERMINAL");
+    sends = 0;
+    const firstTerminal = await dispatchExternalPush(lifecycleDependencies());
+    const retryTerminal = await dispatchExternalPush(lifecycleDependencies());
+    const concurrentTerminal = await Promise.all(Array.from({ length: 100 }, () =>
+      dispatchExternalPush(lifecycleDependencies())
+    ));
+    assert.equal(firstTerminal.sent, 0);
+    assert.equal(retryTerminal.sent, 0);
+    assert.equal(firstTerminal.suppressions.relationship_terminal, 1);
+    assert.equal(retryTerminal.suppressions.relationship_terminal, 1);
+    assert.equal(concurrentTerminal.filter((result) => result.sent === 0).length, 100);
+    assert.equal(sends, 0);
+
+    await repository.recordTurn({
+      actor,
+      requestId: randomUUID(),
+      action: "acknowledge",
+      resultCode: "OK",
+    });
+    assert.equal((await lifecycle.getRelationshipLifecycle(actor))?.state, "ACTIVE");
+    const afterReturn = await dispatchExternalPush(lifecycleDependencies());
+    assert.equal(afterReturn.sent, 1);
+    assert.equal(sends, 1);
+  });
+
+  it("dedupe stress: 100/100 retries no mesmo dia não enviam de novo", async () => {
     const sub = subscription("https://push.test/dedup");
     let sends = 0;
     const deps = dependencies([sub], {
@@ -174,10 +261,12 @@ describe("deduplicação e falha isolada", () => {
     });
 
     const first = await dispatchExternalPush(deps);
-    const second = await dispatchExternalPush(deps);
+    const retries = [];
+    for (let iteration = 0; iteration < 100; iteration += 1) {
+      retries.push(await dispatchExternalPush(deps));
+    }
     assert.equal(first.sent, 1);
-    assert.equal(second.sent, 0);
-    assert.equal(second.suppressions.duplicate, 1);
+    assert.equal(retries.filter((result) => result.sent === 0 && result.suppressions.duplicate === 1).length, 100);
     assert.equal(sends, 1);
   });
 

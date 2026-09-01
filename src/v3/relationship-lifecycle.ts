@@ -20,9 +20,9 @@ import { V3Error } from "./errors.js";
  *   AT_RISK  — first absence threshold crossed (consecutive days without
  *              mission completed / interaction).
  *   DECAYING — sustained absence; GUTO is visibly weakening.
- *   TERMINAL — terminal/inactive. No auto-revive: return from TERMINAL is an
- *              EXPLICIT reactivation (commercial/admin release path), never a
- *              silent restore.
+ *   TERMINAL — terminal/inactive. No public setter and no silent restore:
+ *              re-entry only follows a successfully persisted official user
+ *              turn evaluated by the deterministic return policy.
  */
 
 export const RELATIONSHIP_LIFECYCLE_STATES = ["ACTIVE", "AT_RISK", "DECAYING", "TERMINAL"] as const;
@@ -66,8 +66,9 @@ export function absenceDaysBetween(anchorDay: string | null, asOf: string): numb
 }
 
 /**
- * Deterministic transition. TERMINAL is terminal: presence alone never restores
- * it (no silent restore) — only an explicit reactivation operation does.
+ * Deterministic absence transition. TERMINAL is terminal here: an arbitrary
+ * lifecycle evaluation never restores it. Re-entry is handled separately only
+ * after a successful official user turn has been durably persisted.
  * From any non-terminal state, a fresh presence (absenceDays === 0) recovers to
  * ACTIVE; growing absence degrades ACTIVE → AT_RISK → DECAYING → TERMINAL.
  */
@@ -98,6 +99,16 @@ export function evaluateRelationshipLifecycleState(
           ? "absence_at_risk"
           : "presence_recovery";
   return { state: target, transitioned, reason };
+}
+
+/** A successful authenticated turn is the official return event. This is not
+ * a public setter: callers must first durably record the turn. */
+export function evaluateOfficialRelationshipReturn(
+  current: RelationshipLifecycleState,
+): RelationshipLifecycleTransition {
+  return current === "ACTIVE"
+    ? { state: "ACTIVE", transitioned: false }
+    : { state: "ACTIVE", transitioned: true, reason: "official_user_return" };
 }
 
 /**

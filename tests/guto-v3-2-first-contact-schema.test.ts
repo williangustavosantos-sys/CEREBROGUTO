@@ -6,6 +6,7 @@ import test from "node:test";
 import { CalibrationMutationSchema } from "../src/v3/contracts.js";
 
 const migration = readFileSync(join(process.cwd(), "migrations/v3/0008_first_contact_confirmed_context.sql"), "utf8");
+const frequencyDomainMigration = readFileSync(join(process.cwd(), "migrations/v3/0012_training_frequency_domain.sql"), "utf8");
 const verifier = readFileSync(join(process.cwd(), "scripts/verify-v3-real-integrations.ts"), "utf8");
 
 test("V3.2 migration is fail-closed, tenant isolated and keeps confirmed contexts append-only", () => {
@@ -42,8 +43,27 @@ test("V3.2 objective calibration rejects removed legacy questionnaire fields", (
     goal: { code: "muscle_gain" },
   };
   assert.equal(CalibrationMutationSchema.safeParse(base).success, true);
+  for (const valid of [2, 3, 4, 5, 6]) {
+    assert.equal(CalibrationMutationSchema.safeParse({
+      ...base,
+      profile: { ...base.profile, weeklyFrequencyDaysPerWeek: valid },
+    }).success, true);
+  }
+  for (const invalid of [0, 1, 7, 10, 15, 25, 99]) {
+    assert.equal(CalibrationMutationSchema.safeParse({
+      ...base,
+      profile: { ...base.profile, weeklyFrequencyDaysPerWeek: invalid },
+    }).success, false);
+  }
   assert.equal(CalibrationMutationSchema.safeParse({ ...base, trainingLocation: "home" }).success, false);
   assert.equal(CalibrationMutationSchema.safeParse({ ...base, profile: { ...base.profile, city: "Roma" } }).success, false);
+});
+
+test("training frequency authority is constrained to 2..6 in PostgreSQL", () => {
+  assert.match(frequencyDomainMigration, /user_profile[\s\S]*weekly_frequency NOT BETWEEN 2 AND 6/);
+  assert.match(frequencyDomainMigration, /confirmed_user_contexts[\s\S]*weekly_frequency NOT BETWEEN 2 AND 6/);
+  assert.match(frequencyDomainMigration, /CHECK \(weekly_frequency IS NULL OR weekly_frequency BETWEEN 2 AND 6\)/);
+  assert.match(frequencyDomainMigration, /CHECK \(weekly_frequency BETWEEN 2 AND 6\)/);
 });
 
 test("real verifier completes First Contact and proves shared plan context plus RLS", () => {
