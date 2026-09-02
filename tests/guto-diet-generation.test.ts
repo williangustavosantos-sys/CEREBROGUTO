@@ -1178,6 +1178,7 @@ describe("diet generation contract", () => {
       body: JSON.stringify({ language: "it-IT" }),
     });
     assert.equal(normalizeProfile.status, 200);
+    const modelCallsBeforeGeneration = dietModelCalls;
     dietModelGate = new Promise<void>((resolve) => { resolveDietModelGate = resolve; });
 
     const generation = originalFetch(`${baseUrl}/guto/diet/generate`, {
@@ -1185,7 +1186,7 @@ describe("diet generation contract", () => {
       headers: authHeaders(userId),
       body: JSON.stringify({ language: "it-IT" }),
     });
-    await waitUntil(() => dietModelCalls >= 1);
+    await waitUntil(() => dietModelCalls > modelCallsBeforeGeneration);
 
     // O POST de memória grava o snapshot ANTES do resolver síncrono, então
     // esperamos a gravação ser observável e só então liberamos o gate — o
@@ -1294,6 +1295,7 @@ describe("diet generation contract", () => {
       body: JSON.stringify({ language: "it-IT" }),
     });
     assert.equal(normalizeProfile.status, 200);
+    const modelCallsBeforeGeneration = dietModelCalls;
     dietModelGate = new Promise<void>((resolve) => { resolveDietModelGate = resolve; });
 
     const generation = originalFetch(`${baseUrl}/guto/diet/generate`, {
@@ -1301,7 +1303,7 @@ describe("diet generation contract", () => {
       headers: authHeaders(userId),
       body: JSON.stringify({ language: "it-IT" }),
     });
-    await waitUntil(() => dietModelCalls >= 1);
+    await waitUntil(() => dietModelCalls > modelCallsBeforeGeneration);
 
     const profileUpdate = originalFetch(`${baseUrl}/guto/memory`, {
       method: "POST",
