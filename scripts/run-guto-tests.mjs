@@ -22,7 +22,14 @@ for (const file of files) {
     {
       cwd: backendDir,
       stdio: "inherit",
-      env: process.env,
+      // The official backend suite must not inherit an engineer's Preview
+      // smoke mode. Tests that exercise V3-only behavior opt in explicitly;
+      // the legacy regressions otherwise need the legacy route chain alive.
+      env: {
+        ...process.env,
+        GUTO_V3_ENABLED: "false",
+        GUTO_V3_ONLY: "false",
+      },
     }
   );
 

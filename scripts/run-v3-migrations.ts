@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import pg from "pg";
+import { relaxLegacyFactCanonicalValue } from "../src/v3/migration-compat.js";
 
 const connectionString = process.env.GUTO_V3_ADMIN_DATABASE_URL || "";
 if (!connectionString) throw new Error("GUTO_V3_ADMIN_DATABASE_URL is required for V3 migrations.");
@@ -62,6 +63,9 @@ try {
     }
     await client.query("BEGIN");
     try {
+      if (filename === "0003_conversation_facts_v3_1.sql") {
+        await relaxLegacyFactCanonicalValue(client);
+      }
       await client.query(sql);
       await client.query("INSERT INTO guto_v3.schema_migrations (filename, checksum) VALUES ($1,$2)", [filename, checksum]);
       await client.query("COMMIT");
