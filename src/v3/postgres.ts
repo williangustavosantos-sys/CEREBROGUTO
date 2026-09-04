@@ -556,7 +556,17 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         preferences,
         healthConstraints,
         firstContact,
-        confirmedContext: fullContext ? { id: fullContext.id, version: fullContext.version, confirmedAt: fullContext.confirmedAt } : null,
+        confirmedContext: fullContext
+          ? {
+              id: fullContext.id,
+              version: fullContext.version,
+              confirmedAt: fullContext.confirmedAt,
+              profileVersion: fullContext.profileVersion,
+              goalVersion: fullContext.goalVersion,
+              foodDeclaration: fullContext.foodDeclaration,
+              limitationDeclaration: fullContext.limitationDeclaration,
+            }
+          : null,
         currentFacts,
         workout: confirmedWorkout,
         diet: confirmedDiet,
@@ -972,6 +982,114 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       );
       await client.query(`UPDATE guto_v3.first_contact_state SET status='COMPLETED',step='completed',completed_at=now(),confirmed_context_id=$1,confirmed_context_version=$2,version=version+1 WHERE tenant_id=$3 AND user_id=$4`, [context.id, context.version, input.actor.tenantId, input.actor.userId]);
       await this.appendMutationEvent(client, input.actor, input.requestId, "first_contact.completed", { contextId: context.id, contextVersion: context.version, workoutPlanId: workout.rows[0]!.id, dietPlanId: diet.rows[0]!.id });
+      return context;
+    });
+  }
+
+  async reconfirmContext(input: {
+    actor: ActorContext;
+    requestId: string;
+    contextId: string;
+    contextVersion: number;
+    expectedProfileVersion: number;
+    expectedGoalVersion: number;
+    workoutDraft: WorkoutPlanDraft;
+    dietDraft: DietPlanDraft;
+  }): Promise<ConfirmedUserContext> {
+    return this.withActorTransaction(input.actor, async (client) => {
+      await this.lockOfficialContextAuthority(client, input.actor);
+      const prior = await client.query(`SELECT c.* FROM guto_v3.guto_events e JOIN guto_v3.confirmed_user_contexts c ON c.tenant_id=e.tenant_id AND c.user_id=e.user_id AND c.id=(e.payload->>'contextId')::uuid WHERE e.tenant_id=$1 AND e.user_id=$2 AND e.request_id=$3 AND e.event_type='context.reconfirmed'`, [input.actor.tenantId, input.actor.userId, input.requestId]);
+      if (prior.rows[0]) return this.mapConfirmedContext(prior.rows[0]);
+
+      const contact = await client.query<{ status: string }>(
+        `SELECT status FROM guto_v3.first_contact_state WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      if (!contact.rows[0] || contact.rows[0].status !== "COMPLETED") {
+        throw new V3Error("V3_FIRST_CONTACT_NOT_COMPLETED", "Conclua e confirme o First Contact antes de re-confirmar o contexto.", 409);
+      }
+      const previous = await client.query(`SELECT * FROM guto_v3.confirmed_user_contexts WHERE tenant_id=$1 AND user_id=$2 ORDER BY version DESC LIMIT 1 FOR UPDATE`, [input.actor.tenantId, input.actor.userId]);
+      const previousRow = previous.rows[0];
+      if (!previousRow) {
+        throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Nenhum contexto confirmado para re-confirmar.", 409);
+      }
+      const previousContext = this.mapConfirmedContext(previousRow);
+      const sources = await client.query<QueryResultRow>(
+        `SELECT p.version AS profile_version,p.weekly_frequency,g.version AS goal_version,
+                jsonb_build_object('version',p.version,'language',p.language,'biologicalSex',p.biological_sex,'age',p.age,'weightKg',p.weight_kg,'heightCm',p.height_cm,'trainingStatus',p.training_status,'weeklyFrequencyDaysPerWeek',p.weekly_frequency,'trainingLocation','gym') AS profile_snapshot,
+                jsonb_build_object('version',g.version,'code',g.goal_code) AS goal_snapshot
+           FROM guto_v3.user_profile p JOIN guto_v3.user_goals g ON g.tenant_id=p.tenant_id AND g.user_id=p.user_id
+          WHERE p.tenant_id=$1 AND p.user_id=$2 FOR UPDATE OF p,g`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      const source = sources.rows[0];
+      if (!source || source.weekly_frequency == null) throw new V3Error("V3_CALIBRATION_REQUIRED", "Calibragem objetiva completa necessária.", 409);
+      const currentProfileVersion = asNumber(source.profile_version);
+      const currentGoalVersion = asNumber(source.goal_version);
+      if (currentProfileVersion === previousContext.profileVersion && currentGoalVersion === previousContext.goalVersion) {
+        throw new V3Error("V3_CONTEXT_ALREADY_CURRENT", "O contexto já está na versão oficial atual. Nada a re-confirmar.", 409);
+      }
+      if (currentProfileVersion !== input.expectedProfileVersion || currentGoalVersion !== input.expectedGoalVersion) {
+        throw new V3Error("V3_CONTEXT_SOURCE_CHANGED", "O perfil mudou antes da re-confirmação. Revise o resumo novamente.", 409);
+      }
+      const versionResult = await client.query<{ next_version: string }>(`SELECT COALESCE(max(version),0)+1 AS next_version FROM guto_v3.confirmed_user_contexts WHERE tenant_id=$1 AND user_id=$2`, [input.actor.tenantId, input.actor.userId]);
+      const nextVersion = asNumber(versionResult.rows[0]?.next_version);
+      if (nextVersion !== input.contextVersion) throw new V3Error("V3_CONTEXT_VERSION_CONFLICT", "A versão do contexto mudou.", 409);
+      const contextFacts = await client.query<{ user_fact_id: string }>(
+        `SELECT user_fact_id FROM guto_v3.user_facts WHERE tenant_id=$1 AND user_id=$2 AND superseded_at IS NULL ORDER BY recorded_at,user_fact_id`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      const contextSnapshot = {
+        profile: source.profile_snapshot,
+        goal: source.goal_snapshot,
+        foodDeclaration: previousContext.foodDeclaration,
+        limitationDeclaration: previousContext.limitationDeclaration,
+        trainingLocation: "gym" as const,
+        weeklyFrequencyDaysPerWeek: asNumber(source.weekly_frequency),
+        factIds: contextFacts.rows.map((row) => row.user_fact_id),
+        previousContextId: previousContext.id,
+        previousContextVersion: previousContext.version,
+        reconfirmationRequestId: input.requestId,
+      };
+      const contextResult = await client.query(
+        `INSERT INTO guto_v3.confirmed_user_contexts
+          (id,tenant_id,user_id,version,profile_version,goal_version,food_declaration,limitation_declaration,training_location,weekly_frequency,context_snapshot)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'gym',$9,$10::jsonb) RETURNING *`,
+        [input.contextId, input.actor.tenantId, input.actor.userId, nextVersion, currentProfileVersion, currentGoalVersion, previousContext.foodDeclaration, previousContext.limitationDeclaration, source.weekly_frequency, JSON.stringify(contextSnapshot)],
+      );
+      const context = this.mapConfirmedContext(contextResult.rows[0]!);
+      // Declarações são carregadas do contexto anterior — nenhum fato novo é
+      // registrado: re-confirmar o perfil NÃO inventa restrição nova.
+      await client.query(`UPDATE guto_v3.workout_plans SET status='superseded' WHERE tenant_id=$1 AND user_id=$2 AND status='active'`, [input.actor.tenantId, input.actor.userId]);
+      await client.query(`UPDATE guto_v3.diet_plans SET status='superseded' WHERE tenant_id=$1 AND user_id=$2 AND status='active'`, [input.actor.tenantId, input.actor.userId]);
+
+      const workout = await client.query<{ id: string; version: string }>(
+        `INSERT INTO guto_v3.workout_plans (tenant_id,user_id,title,status,generated_from,confirmed_context_id,confirmed_context_version)
+         VALUES ($1,$2,$3,'active',$4::jsonb,$5,$6) RETURNING id,version`,
+        [input.actor.tenantId, input.actor.userId, input.workoutDraft.title, JSON.stringify(input.workoutDraft.generatedFrom), context.id, context.version],
+      );
+      for (const item of input.workoutDraft.items) {
+        await client.query(`INSERT INTO guto_v3.workout_plan_items (tenant_id,plan_id,exercise_id,name,purpose,muscle_group,position,sets,reps,canonical_name_pt,rest_text,cue,note,video_url,source_file_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, [input.actor.tenantId, workout.rows[0]!.id, item.exerciseId, item.name, item.purpose, item.muscleGroup, item.position, item.sets || null, item.reps || null, item.canonicalNamePt || null, item.rest || null, item.cue || null, item.note || null, item.videoUrl || null, item.sourceFileName || null]);
+      }
+      const diet = await client.query<{ id: string; version: string }>(
+        `INSERT INTO guto_v3.diet_plans (tenant_id,user_id,status,total_calories,protein_grams,carbs_grams,fat_grams,calculation_method,generated_from,confirmed_context_id,confirmed_context_version)
+         VALUES ($1,$2,'active',$3,$4,$5,$6,$7,$8::jsonb,$9,$10) RETURNING id,version`,
+        [input.actor.tenantId, input.actor.userId, input.dietDraft.totalCalories, input.dietDraft.proteinGrams, input.dietDraft.carbsGrams, input.dietDraft.fatGrams, input.dietDraft.calculationMethod, JSON.stringify(input.dietDraft.generatedFrom), context.id, context.version],
+      );
+      for (const meal of input.dietDraft.meals) {
+        const insertedMeal = await client.query<{ id: string }>(`INSERT INTO guto_v3.diet_meals (tenant_id,plan_id,name,position,calories) VALUES ($1,$2,$3,$4,$5) RETURNING id`, [input.actor.tenantId, diet.rows[0]!.id, meal.name, meal.position, meal.calories]);
+        for (const item of meal.items) {
+          await client.query(`INSERT INTO guto_v3.diet_items (tenant_id,meal_id,food_id,name,quantity_grams,calories,protein_grams,carbs_grams,fat_grams,position) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [input.actor.tenantId, insertedMeal.rows[0]!.id, item.foodId, item.name, item.quantityGrams, item.calories, item.proteinGrams, item.carbsGrams, item.fatGrams, item.position]);
+        }
+      }
+      await client.query(
+        `INSERT INTO guto_v3.active_plan_versions (tenant_id,user_id,workout_plan_id,workout_plan_version,diet_plan_id,diet_plan_version,confirmed_context_id,confirmed_context_version)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (user_id) DO UPDATE SET workout_plan_id=EXCLUDED.workout_plan_id,workout_plan_version=EXCLUDED.workout_plan_version,diet_plan_id=EXCLUDED.diet_plan_id,diet_plan_version=EXCLUDED.diet_plan_version,confirmed_context_id=EXCLUDED.confirmed_context_id,confirmed_context_version=EXCLUDED.confirmed_context_version,version=guto_v3.active_plan_versions.version+1`,
+        [input.actor.tenantId, input.actor.userId, workout.rows[0]!.id, workout.rows[0]!.version, diet.rows[0]!.id, diet.rows[0]!.version, context.id, context.version],
+      );
+      await client.query(`UPDATE guto_v3.first_contact_state SET confirmed_context_id=$1,confirmed_context_version=$2,version=version+1 WHERE tenant_id=$3 AND user_id=$4 AND status='COMPLETED'`, [context.id, context.version, input.actor.tenantId, input.actor.userId]);
+      await this.appendMutationEvent(client, input.actor, input.requestId, "context.reconfirmed", { contextId: context.id, contextVersion: context.version, previousContextId: previousContext.id, previousContextVersion: previousContext.version, workoutPlanId: workout.rows[0]!.id, dietPlanId: diet.rows[0]!.id });
       return context;
     });
   }

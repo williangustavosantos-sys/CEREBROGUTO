@@ -96,6 +96,26 @@ export interface OfficialStateRepository {
     workoutDraft: WorkoutPlanDraft;
     dietDraft: DietPlanDraft;
   }): Promise<ConfirmedUserContext>;
+  /** P1 (post-completion calibration recovery): persistCalibration advances the
+   * official profile/goal of a COMPLETED user, which makes the confirmed
+   * context stale and makes every operational V3 surface reject with
+   * V3_CONTEXT_RECONFIRMATION_REQUIRED. This is the explicit authority that
+   * closes that loop: it mints the NEXT confirmed context bound to the CURRENT
+   * profile/goal (carrying the previous context's declarations forward, without
+   * re-recording declaration facts) and atomically supersedes/regenerates
+   * workout + diet at the new profile. Guarded: COMPLETED users only; rejects
+   * when the context is already current (V3_CONTEXT_ALREADY_CURRENT);
+   * idempotent on requestId. */
+  reconfirmContext(input: {
+    actor: ActorContext;
+    requestId: string;
+    contextId: string;
+    contextVersion: number;
+    expectedProfileVersion: number;
+    expectedGoalVersion: number;
+    workoutDraft: WorkoutPlanDraft;
+    dietDraft: DietPlanDraft;
+  }): Promise<ConfirmedUserContext>;
   completePact(input: {
     actor: ActorContext;
     requestId: string;

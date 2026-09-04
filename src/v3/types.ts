@@ -253,7 +253,15 @@ export interface V3AppState {
   preferences: OfficialPreferences;
   healthConstraints: HealthConstraint[];
   firstContact: FirstContactState;
-  confirmedContext: Pick<ConfirmedUserContext, "id" | "version" | "confirmedAt"> | null;
+  /** Latest confirmed context. Also exposes the versions and declarations it
+   * froze so clients/authorities can detect a STALE context (profile/goal
+   * moved ahead via persistCalibration) without an extra round-trip: when
+   * profile.version/goal.version no longer match, the context must be
+   * re-confirmed before any operational V3 surface accepts it. */
+  confirmedContext: (Pick<
+    ConfirmedUserContext,
+    "id" | "version" | "confirmedAt" | "profileVersion" | "goalVersion" | "foodDeclaration" | "limitationDeclaration"
+  >) | null;
   currentFacts: RecordedFact[];
   workout: WorkoutPlan | null;
   diet: DietPlan | null;

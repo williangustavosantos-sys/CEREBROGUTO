@@ -35,6 +35,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
   private readonly pactRequests = new Set<string>();
   private readonly firstContacts = new Map<string, FirstContactState>();
   private readonly confirmedContexts = new Map<string, ConfirmedUserContext>();
+  private readonly reconfirmContexts = new Map<string, ConfirmedUserContext>();
   private readonly firstContactResponseRequests = new Set<string>();
   private readonly facts = new Map<string, RecordedFact[]>();
   private readonly conversationStates = new Map<string, ConversationDecisionState>();
@@ -145,7 +146,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       healthConstraints: snapshot ? structuredClone(snapshot.healthConstraints) : [],
       firstContact: this.materializedFirstContact(snapshot, snapshot?.profile.displayName || "", snapshot?.profile || null, snapshot?.goal || null),
       confirmedContext: this.confirmedContexts.has(key(actor))
-        ? (({ id, version, confirmedAt }) => ({ id, version, confirmedAt }))(this.confirmedContexts.get(key(actor))!)
+        ? (({ id, version, confirmedAt, profileVersion, goalVersion, foodDeclaration, limitationDeclaration }) => ({ id, version, confirmedAt, profileVersion, goalVersion, foodDeclaration, limitationDeclaration }))(this.confirmedContexts.get(key(actor))!)
         : null,
       currentFacts: structuredClone((this.facts.get(key(actor)) || []).filter((fact) => fact.supersededAt === null)),
       workout: snapshot?.workout ? structuredClone(snapshot.workout) : null,
@@ -420,6 +421,70 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     }));
     await this.replaceWorkoutPlan({ actor: input.actor, requestId: input.requestId, context, draft: input.workoutDraft });
     await this.replaceDietPlan({ actor: input.actor, requestId: input.requestId, context, draft: input.dietDraft });
+    return structuredClone(context);
+  }
+  async reconfirmContext(input: {
+    actor: ActorContext;
+    requestId: string;
+    contextId: string;
+    contextVersion: number;
+    expectedProfileVersion: number;
+    expectedGoalVersion: number;
+    workoutDraft: WorkoutPlanDraft;
+    dietDraft: DietPlanDraft;
+  }): Promise<ConfirmedUserContext> {
+    const actorKey = key(input.actor);
+    const idempotencyKey = `${actorKey}:${input.requestId}`;
+    const prior = this.reconfirmContexts.get(idempotencyKey);
+    if (prior) return structuredClone(prior);
+    const state = await this.loadAppState(input.actor);
+    const previous = this.confirmedContexts.get(actorKey);
+    if (state.firstContact.status !== "COMPLETED") {
+      throw new V3Error("V3_FIRST_CONTACT_NOT_COMPLETED", "Conclua e confirme o First Contact antes de re-confirmar o contexto.", 409);
+    }
+    if (!previous) {
+      throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Nenhum contexto confirmado para re-confirmar.", 409);
+    }
+    if (!state.profile || !state.goal || state.profile.weeklyFrequencyDaysPerWeek == null) {
+      throw new V3Error("V3_CALIBRATION_REQUIRED", "Calibragem objetiva completa necessária.", 409);
+    }
+    if (state.profile.version === previous.profileVersion && state.goal.version === previous.goalVersion) {
+      throw new V3Error("V3_CONTEXT_ALREADY_CURRENT", "O contexto já está na versão oficial atual. Nada a re-confirmar.", 409);
+    }
+    if (state.profile.version !== input.expectedProfileVersion || state.goal.version !== input.expectedGoalVersion) {
+      throw new V3Error("V3_CONTEXT_SOURCE_CHANGED", "O perfil mudou antes da re-confirmação. Revise o resumo novamente.", 409);
+    }
+    if (previous.version + 1 !== input.contextVersion) {
+      throw new V3Error("V3_CONTEXT_VERSION_CONFLICT", "A versão do contexto mudou.", 409);
+    }
+    const confirmedAt = new Date().toISOString();
+    const context: ConfirmedUserContext = {
+      id: input.contextId,
+      version: input.contextVersion,
+      confirmedAt,
+      foodDeclaration: previous.foodDeclaration,
+      limitationDeclaration: previous.limitationDeclaration,
+      profileVersion: state.profile.version,
+      goalVersion: state.goal.version,
+      weeklyFrequencyDaysPerWeek: state.profile.weeklyFrequencyDaysPerWeek,
+      trainingLocation: "gym",
+    };
+    this.confirmedContexts.set(actorKey, context);
+    this.firstContacts.set(actorKey, materializeFirstContact({
+      status: "COMPLETED",
+      step: "completed",
+      foodDeclaration: context.foodDeclaration,
+      limitationDeclaration: context.limitationDeclaration,
+      startedAt: state.firstContact.startedAt,
+      completedAt: state.firstContact.completedAt,
+      confirmedContextVersion: context.version,
+      displayName: state.displayName,
+      profile: state.profile,
+      goal: state.goal,
+    }));
+    await this.replaceWorkoutPlan({ actor: input.actor, requestId: input.requestId, context, draft: input.workoutDraft });
+    await this.replaceDietPlan({ actor: input.actor, requestId: input.requestId, context, draft: input.dietDraft });
+    this.reconfirmContexts.set(idempotencyKey, structuredClone(context));
     return structuredClone(context);
   }
   async completePact(input: {

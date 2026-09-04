@@ -260,6 +260,64 @@ export class V3CutoverService {
     return this.load(actor);
   }
 
+  /**
+   * Post-completion context re-confirmation (P1 recovery flow).
+   *
+   * persistCalibration advances the official profile/goal of a COMPLETED user
+   * on every calibration save, which makes the confirmed context stale: chat,
+   * workout/diet generation and active-context then reject with
+   * V3_CONTEXT_RECONFIRMATION_REQUIRED. This is the single authority the
+   * frontend calls after the user reviews and CONFIRMS the updated
+   * calibration: it re-confirms a NEW context version bound to the CURRENT
+   * profile/goal (the repository carries the previous context's declarations
+   * forward — no new facts are invented) and atomically regenerates workout +
+   * diet at the new profile. Never invoked when the context is already
+   * current: it rejects with V3_CONTEXT_ALREADY_CURRENT.
+   */
+  async reconfirmContext(actor: ActorContext, requestId: string): Promise<V3AppState> {
+    const state = await this.load(actor);
+    if (state.firstContact.status !== "COMPLETED") {
+      throw new V3Error("V3_FIRST_CONTACT_NOT_COMPLETED", "Conclua e confirme o First Contact antes de re-confirmar o contexto.", 409);
+    }
+    if (!state.profile || !state.goal || state.profile.weeklyFrequencyDaysPerWeek == null) {
+      throw new V3Error("V3_CALIBRATION_REQUIRED", "Calibragem objetiva completa necessária.", 409);
+    }
+    const confirmed = state.confirmedContext;
+    if (!confirmed) {
+      throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Nenhum contexto confirmado para re-confirmar.", 409);
+    }
+    const stale = confirmed.profileVersion != null && confirmed.goalVersion != null &&
+      (state.profile.version !== confirmed.profileVersion || state.goal.version !== confirmed.goalVersion);
+    if (!stale) {
+      throw new V3Error("V3_CONTEXT_ALREADY_CURRENT", "O contexto já está na versão oficial atual. Nada a re-confirmar.", 409);
+    }
+    const context: ConfirmedUserContext = {
+      id: randomUUID(),
+      version: confirmed.version + 1,
+      confirmedAt: new Date().toISOString(),
+      // O repositório carrega as declarações do contexto anterior (autoridade);
+      // aqui elas só alimentam os drafts no perfil novo.
+      foodDeclaration: confirmed.foodDeclaration || "",
+      limitationDeclaration: confirmed.limitationDeclaration || "",
+      profileVersion: state.profile.version,
+      goalVersion: state.goal.version,
+      weeklyFrequencyDaysPerWeek: state.profile.weeklyFrequencyDaysPerWeek,
+      trainingLocation: "gym",
+    };
+    const snapshot = calibrationSnapshot(state, context);
+    await this.repository.reconfirmContext({
+      actor,
+      requestId,
+      contextId: context.id,
+      contextVersion: context.version,
+      expectedProfileVersion: state.profile.version,
+      expectedGoalVersion: state.goal.version,
+      workoutDraft: generateWorkoutDraft(snapshot),
+      dietDraft: await generateDietDraft(snapshot),
+    });
+    return this.load(actor);
+  }
+
   /** Relationship Lifecycle — deterministic evaluation. The LLM never decides
    * the official state: it is computed from official presence/interaction data
    * + time/absence + policy. Idempotent on requestId; concurrency-safe. */

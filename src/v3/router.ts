@@ -403,6 +403,21 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
     } catch (error) { next(error); }
   });
 
+  router.post("/guto/v3/context/reconfirm", async (req, res, next) => {
+    try {
+      const input = RequestIdSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "context_reconfirm" } }, async () => {
+        const runtime = getV3Runtime();
+        const state = await runtime.operational.withLock(actor, "first-contact", () => new V3CutoverService(runtime.repository).reconfirmContext(actor, input.requestId));
+        const activeContext = await runtime.operational.getActiveContext(actor);
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), state, activeContext };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
   router.post("/guto/v3/workout/generate", async (req, res, next) => {
     try {
       const input = RequestIdSchema.parse(req.body);
