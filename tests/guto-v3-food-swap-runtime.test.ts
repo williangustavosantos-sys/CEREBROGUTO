@@ -293,7 +293,9 @@ test("GATE1J IDEMPOTENCY: repeating the same requestId returns the same response
 });
 
 test("GATE1J FOOD SWAPS: potato, rice, banana and chicken each swap through the shared reoptimizer and validate", async () => {
-  const state = baseState("e2e-named-swaps", "10000000-0000-4000-8000-000000000097", "Vegetariana.");
+  // Perfil sem restrição: frango é elegível no plano oficial. (Dieta de perfil
+  // vegetariano NÃO pode conter frango/atum — ver RESTRICTION_FILTER veg*.)
+  const state = baseState("e2e-named-swaps", "10000000-0000-4000-8000-000000000097", "Sem restrições alimentares.");
   const { repository, operational, flow, actor } = await harness(state);
   const cases: Array<{ foodId: string; role: string }> = [
     { foodId: "potato", role: "carb_primary" },

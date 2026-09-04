@@ -1,18 +1,26 @@
 import type { OfficialFoodCatalogItem } from "./catalog.js";
 
-export type DietaryRestriction = "gluten_free" | "lactose_free" | "no_egg" | "no_meat";
+export type DietaryRestriction = "gluten_free" | "lactose_free" | "no_egg" | "no_meat" | "no_fish";
 
 function normalize(value: string): string {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
+/** Official catalog flesh foods (per food-declaration-policy semantics). */
+const FLESH_FOOD_IDS = new Set(["chicken", "tuna"]);
+
 export function normalizeDietaryRestrictions(declaration: string): Set<DietaryRestriction> {
   const text = normalize(declaration);
   const restrictions = new Set<DietaryRestriction>();
+  const vegan = /\b(vegan|vegano|vegana)\b/u.test(text);
+  // Veg* explícito: exclui carne E peixe (mesma semântica do
+  // conflictsWithFoodDeclaration usado pelo substitution engine).
+  const vegetarian = vegan || /\b(vegetarian|vegetariano|vegetariana)\b/u.test(text);
   if (/\b(gluten|glúten|celiac|celiaco|celiaca)\b/u.test(text)) restrictions.add("gluten_free");
-  if (/\b(lactose|lattosio|intolerancia a lactose|leite|latte|milk|dairy)\b/u.test(text)) restrictions.add("lactose_free");
-  if (/\b(ovo|ovos|egg|eggs|uovo|uova)\b/u.test(text)) restrictions.add("no_egg");
-  if (/\b(carne|meat|carne vermelha|frango|pollo|chicken|turkey|peru)\b/u.test(text)) restrictions.add("no_meat");
+  if (/\b(lactose|lattosio|intolerancia a lactose|leite|latte|milk|dairy)\b/u.test(text) || vegan) restrictions.add("lactose_free");
+  if (/\b(ovo|ovos|egg|eggs|uovo|uova)\b/u.test(text) || vegan) restrictions.add("no_egg");
+  if (/\b(carne|meat|carne vermelha|frango|pollo|chicken|turkey|peru)\b/u.test(text) || vegetarian) restrictions.add("no_meat");
+  if (vegetarian) restrictions.add("no_fish");
   return restrictions;
 }
 
@@ -21,6 +29,7 @@ export function isFoodEligibleForRestrictions(food: OfficialFoodCatalogItem, res
   if (restrictions.has("lactose_free") && food.dietaryProperties.containsLactose) return false;
   if (restrictions.has("no_egg") && food.dietaryProperties.containsEgg) return false;
   if (restrictions.has("no_meat") && food.dietaryProperties.containsMeat) return false;
+  if (restrictions.has("no_fish") && FLESH_FOOD_IDS.has(food.id)) return false;
   return true;
 }
 
