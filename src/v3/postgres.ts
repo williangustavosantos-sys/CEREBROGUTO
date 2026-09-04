@@ -1008,7 +1008,12 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       if (!contact.rows[0] || contact.rows[0].status !== "COMPLETED") {
         throw new V3Error("V3_FIRST_CONTACT_NOT_COMPLETED", "Conclua e confirme o First Contact antes de re-confirmar o contexto.", 409);
       }
-      const previous = await client.query(`SELECT * FROM guto_v3.confirmed_user_contexts WHERE tenant_id=$1 AND user_id=$2 ORDER BY version DESC LIMIT 1 FOR UPDATE`, [input.actor.tenantId, input.actor.userId]);
+      // Serialização entre writers vem do advisory lock oficial (adquirido
+      // acima) — NÃO usar FOR UPDATE aqui: confirmed_user_contexts tem RLS
+      // FORCE com políticas apenas de SELECT/INSERT, e um FOR UPDATE nessa
+      // tabela é filtrado/erro sob a política. A leitura é segura porque o
+      // nextVersion é recalculado dentro da transação sob o mesmo lock.
+      const previous = await client.query(`SELECT * FROM guto_v3.confirmed_user_contexts WHERE tenant_id=$1 AND user_id=$2 ORDER BY version DESC LIMIT 1`, [input.actor.tenantId, input.actor.userId]);
       const previousRow = previous.rows[0];
       if (!previousRow) {
         throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Nenhum contexto confirmado para re-confirmar.", 409);
