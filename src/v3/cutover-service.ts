@@ -111,6 +111,15 @@ export class V3CutoverService {
         displayName,
       });
     } else if (input.xpEvent) {
+      // P0 (workout validation authority): complete_daily_mission can no longer
+      // be granted through a bare memory mutation. The ONLY path is the
+      // /workout/validate authority, which requires selfie evidence and
+      // completes the session + XP atomically. This closes the bypass where
+      // the user visually finished the workout (XP granted, session never
+      // completed, rotation never advanced).
+      if (input.xpEvent === "complete_daily_mission") {
+        throw new V3Error("V3_WORKOUT_VALIDATION_REQUIRED", "Conclusão de missão exige a validação oficial do treino com prova (selfie).", 409);
+      }
       const sourceKey = new Intl.DateTimeFormat("en-CA", {
         timeZone: process.env.GUTO_TIME_ZONE || "Europe/Rome",
         year: "numeric",

@@ -651,10 +651,37 @@ test("V3 simultaneous users keep progression, plans and reload state isolated", 
     await service.respondFirstContact(actor, { requestId: `92000000-0000-4000-8000-00000000006${index + 1}`, expectedStep: "training_limitations", answer: "Sem limitações." });
     await service.confirmFirstContact(actor, { requestId: `92000000-0000-4000-8000-00000000007${index + 1}`, confirmed: true });
   }));
-  await service.saveMemory(actors[0]!, {
-    requestId: "92000000-0000-4000-8000-000000000031",
-    xpEvent: "complete_daily_mission",
+  // P0 (workout validation authority): a real completion goes through
+  // exercise events + validateAndCompleteWorkoutSession (selfie proof) — the
+  // bare complete_daily_mission memory mutation is blocked.
+  const planA = (await service.load(actors[0]!)).workout!;
+  const wsid = "92000000-0000-4000-8000-000000000099";
+  await repository.recordWorkoutExerciseEvent({
+    actor: actors[0]!,
+    requestId: "92000000-0000-4000-8000-000000000098",
+    event: {
+      workoutSessionId: wsid,
+      exerciseId: planA.items[0]!.exerciseId,
+      setsCompleted: planA.items[0]!.sets ?? 3,
+      repetitions: 10,
+      completed: true,
+      context: { source: "authority-test" },
+    },
   });
+  await repository.validateAndCompleteWorkoutSession({
+    actor: actors[0]!,
+    requestId: "92000000-0000-4000-8000-000000000097",
+    workoutSessionId: wsid,
+    evidence: { sha256: "a".repeat(64), mime: "image/jpeg", byteLength: 16384 },
+  });
+  await assert.rejects(
+    () => service.saveMemory(actors[0]!, {
+      requestId: "92000000-0000-4000-8000-000000000096",
+      xpEvent: "complete_daily_mission",
+    }),
+    (error: unknown) => (error as { code?: string }).code === "V3_WORKOUT_VALIDATION_REQUIRED",
+    "bare complete_daily_mission memory mutation must be blocked",
+  );
   const [a, b] = await Promise.all(actors.map((actor) => service.load(actor)));
   assert.equal(a.displayName, "Alpha");
   assert.equal(b.displayName, "Beta");

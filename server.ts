@@ -939,7 +939,11 @@ app.use("/guto/v3/auth/login", createRateLimit({
   windowMs: config.rateLimitWindowMs,
   maxRequests: Number(process.env.GUTO_V3_LOGIN_RATE_LIMIT_MAX || 20),
 }));
-app.use(express.json({ limit: "1mb" }));
+// P0 (workout validation authority): the /workout/validate endpoint receives
+// the selfie evidence as a data URL (magic-bytes verified server-side, only a
+// sha256 persisted). Body limit raised 1mb → 6mb to fit a real camera JPEG;
+// the session-completion/XP authority never logs or stores the raw image.
+app.use(express.json({ limit: "6mb" }));
 app.use((error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
   const pathname = req.path;
   const isV3Request = pathname === "/guto/v3" || pathname.startsWith("/guto/v3/");

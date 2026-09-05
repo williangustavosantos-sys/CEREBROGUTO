@@ -40,6 +40,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
   private readonly facts = new Map<string, RecordedFact[]>();
   private readonly conversationStates = new Map<string, ConversationDecisionState>();
   private readonly workoutSessionEvents = new Map<string, import("./types.js").WorkoutExerciseSessionEvent[]>();
+  private readonly knownWorkoutSessionIds = new Map<string, Set<string>>();
   private readonly completedSessionIds = new Map<string, Set<string>>();
   private readonly completedSessionRequests = new Set<string>();
   private readonly requestIdDecisions = new Map<string, import("./types.js").WorkoutEvolutionDecision>();
@@ -712,6 +713,14 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     // P0#4: decide from the current event plus the recent history of the SAME
     // exercise, so PROGRESS requires 2+ consecutive easy completed sessions.
     const keyed = key(input.actor);
+    if (input.event.workoutSessionId) {
+      // P0 (session identity): register the LOGICAL session id so the
+      // validation authority can prove existence/ownership (parity with the
+      // Postgres workout_sessions row created on first event).
+      const ids = this.knownWorkoutSessionIds.get(keyed) || new Set<string>();
+      ids.add(input.event.workoutSessionId);
+      this.knownWorkoutSessionIds.set(keyed, ids);
+    }
     const prior = this.workoutSessionEvents.get(keyed) || [];
     const history = prior.filter((event) => event.exerciseId === input.event.exerciseId).slice(-4);
     const decision = decideWorkoutEvolution(input.event, history);
@@ -862,6 +871,61 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     if (transition.transitioned) {
       this.lifecycleEvents.push({ requestId: input.requestId, fromState: current.state, toState: transition.state, reason: transition.reason! });
     }
+  }
+  /**
+   * P0 (workout validation authority / founder gate): single authority that
+   * completes a session AND records its XP — mirroring the Postgres semantics
+   * (ownership + existence + context currency before mutation; idempotent on
+   * requestId and on the session identity; XP exactly once).
+   */
+  async validateAndCompleteWorkoutSession(input: {
+    actor: ActorContext;
+    requestId: string;
+    workoutSessionId: string;
+    evidence: import("./workout-validation-evidence.js").WorkoutValidationEvidence;
+  }): Promise<{ status: "completed"; xpGranted: boolean; nextSessionIndex: number }> {
+    const actorKey = key(input.actor);
+    const known = this.knownWorkoutSessionIds.get(actorKey);
+    if (!known || !known.has(input.workoutSessionId)) {
+      throw new V3Error("V3_WORKOUT_SESSION_NOT_FOUND", "Sessão de treino não encontrada.", 404);
+    }
+    const completed = this.completedSessionIds.get(actorKey) || new Set<string>();
+    if (completed.has(input.workoutSessionId)) {
+      return { status: "completed", xpGranted: false, nextSessionIndex: completed.size };
+    }
+    // Official context currency: profile/goal must match the confirmed
+    // context and the active workout plan must be bound to that context.
+    const snapshot = await this.loadOfficialSnapshot(input.actor);
+    const contextIsCurrent = snapshot.firstContact.status === "COMPLETED" &&
+      snapshot.confirmedContext != null &&
+      snapshot.profile.version === snapshot.confirmedContext.profileVersion &&
+      snapshot.goal.version === snapshot.confirmedContext.goalVersion &&
+      snapshot.workout != null &&
+      snapshot.workout.confirmedContextVersion === snapshot.confirmedContext.version;
+    if (!contextIsCurrent) {
+      throw new V3Error("V3_CONTEXT_RECONFIRMATION_REQUIRED", "O perfil mudou. Confirme novamente o contexto antes de validar o treino.", 409);
+    }
+    completed.add(input.workoutSessionId);
+    this.completedSessionIds.set(actorKey, completed);
+    // XP exactly-once: ledger dedupes on (reasonCode, sourceKey) — the first
+    // completion of the day inserts; any replay/concurrent duplicate skips.
+    const sourceKey = this.todayKey();
+    const entries = this.xpLedger.get(actorKey) || [];
+    const xpGranted = !entries.some((entry) => entry.reasonCode === "complete_daily_mission" && entry.sourceKey === sourceKey);
+    const adaptedToday = entries.some((entry) => entry.reasonCode === "accept_adapted_mission" && entry.sourceKey === sourceKey);
+    const amount = adaptedToday ? 50 : 100;
+    if (xpGranted) {
+      entries.push({ id: randomUUID(), reasonCode: "complete_daily_mission", sourceKey, amount, createdAt: new Date().toISOString() });
+      this.xpLedger.set(actorKey, entries);
+      this.officialPresenceDays.set(actorKey, sourceKey);
+    }
+    this.events.push({
+      actorKey,
+      requestId: input.requestId,
+      action: "workoutValidationCompleted",
+      resultCode: "COMPLETED",
+    });
+    return { status: "completed", xpGranted, nextSessionIndex: completed.size };
   }
   /**
    * P0 (session completion): the SOLE authority that flips a logical workout

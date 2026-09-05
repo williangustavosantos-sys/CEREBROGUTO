@@ -33,7 +33,7 @@ test("strict Preview gates legacy routes before legacy auth and webhook handlers
   const v3Router = server.indexOf("app.use(createV3Router({");
   const legacyAuth = server.indexOf("app.use(parseAuth)");
   const v3RequestLog = server.indexOf('app.use("/guto/v3", requestLog)');
-  const jsonParser = server.indexOf('app.use(express.json({ limit: "1mb" }))');
+  const jsonParser = server.indexOf('app.use(express.json({ limit: "6mb" }))');
 
   assert.ok(strictGate >= 0 && strictGate < webhook, "strict gate must run before the legacy webhook");
   const router = source("../src/v3/router.ts");

@@ -144,6 +144,19 @@ export interface OfficialStateRepository {
    * session (status 'started'); this call flips it to 'completed', which is
    * what the rotation counter observes. Idempotent on requestId. */
   completeWorkoutSession(input: { actor: ActorContext; requestId: string; workoutSessionId: string }): Promise<void>;
+  /** P0 (workout validation authority / founder gate): the SINGLE authority
+   * that completes a workout session AND records its XP atomically, requiring
+   * selfie evidence. It validates actor/tenant/session ownership, plan
+   * binding, official context currency and evidence; completes the session;
+   * grants complete_daily_mission XP exactly once; and returns the next
+   * session index. Idempotent on requestId AND on the session (a replay or a
+   * different requestId for the same completed session is a no-op). */
+  validateAndCompleteWorkoutSession(input: {
+    actor: ActorContext;
+    requestId: string;
+    workoutSessionId: string;
+    evidence: import("./workout-validation-evidence.js").WorkoutValidationEvidence;
+  }): Promise<{ status: "completed"; xpGranted: boolean; nextSessionIndex: number }>;
   /** Counts officially completed workout sessions for rotation (durable, derived
    * from workout_sessions — the "session really happened" source of truth). */
   countCompletedWorkoutSessions(actor: ActorContext): Promise<number>;

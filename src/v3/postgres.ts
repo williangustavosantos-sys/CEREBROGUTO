@@ -1644,6 +1644,135 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
   }
 
   /**
+   * P0 (workout validation authority / founder gate): the SINGLE authority
+   * that completes a session AND records its XP atomically. Runs in ONE
+   * transaction: ownership + existence + plan binding + context currency are
+   * asserted before any mutation; the session flip and the XP ledger insert
+   * commit together (never session=completed/XP=failed, never XP=recorded/
+   * session=not completed). Idempotent on requestId AND on the session
+   * identity — a replay or a different requestId for an already-completed
+   * session returns without granting XP again (advisory lock on the session
+   * serializes concurrent attempts). Selfie evidence is required (validated
+   * upstream); only its hash + metadata is persisted.
+   */
+  async validateAndCompleteWorkoutSession(input: {
+    actor: ActorContext;
+    requestId: string;
+    workoutSessionId: string;
+    evidence: import("./workout-validation-evidence.js").WorkoutValidationEvidence;
+  }): Promise<{ status: "completed"; xpGranted: boolean; nextSessionIndex: number }> {
+    return this.withActorTransaction(input.actor, async (client) => {
+      // Serialize concurrent completion attempts on the SAME session.
+      await client.query(
+        `SELECT pg_advisory_xact_lock(
+           hashtextextended($1 || ':' || $2 || ':' || $3, 0))`,
+        [input.actor.tenantId, input.actor.userId, input.workoutSessionId],
+      );
+      const session = await client.query<{ id: string; status: string; plan_id: string; tenant_id: string; user_id: string }>(
+        `SELECT id,status,plan_id,tenant_id,user_id FROM guto_v3.workout_sessions WHERE id=$1::uuid LIMIT 1`,
+        [input.workoutSessionId],
+      );
+      if (!session.rows[0]) throw new V3Error("V3_WORKOUT_SESSION_NOT_FOUND", "Sessão de treino não encontrada.", 404);
+      const row = session.rows[0];
+      if (String(row.tenant_id) !== input.actor.tenantId || String(row.user_id) !== input.actor.userId) {
+        throw new V3Error("V3_FOREIGN_WORKOUT_SESSION", "Não é possível validar uma sessão de treino de outro usuário.", 409);
+      }
+      const countCompleted = async (): Promise<number> => {
+        const counted = await client.query<{ count: string }>(
+          `SELECT COUNT(*)::text AS count FROM guto_v3.workout_sessions
+            WHERE tenant_id=$1 AND user_id=$2 AND status='completed'`,
+          [input.actor.tenantId, input.actor.userId],
+        );
+        return asNumber(counted.rows[0]?.count) || 0;
+      };
+      // Idempotent on the session: already completed → no mutation, no XP.
+      if (row.status === "completed") {
+        return { status: "completed", xpGranted: false, nextSessionIndex: await countCompleted() };
+      }
+      // Official context currency: the session's plan must be bound to the
+      // CURRENT confirmed context and the profile/goal must not have drifted.
+      const planResult = await client.query<{ confirmed_context_version: string | null }>(
+        `SELECT confirmed_context_version FROM guto_v3.workout_plans
+          WHERE tenant_id=$1 AND user_id=$2 AND id=$3::uuid AND status='active' LIMIT 1`,
+        [input.actor.tenantId, input.actor.userId, row.plan_id],
+      );
+      const planCtxVersion = planResult.rows[0]?.confirmed_context_version == null
+        ? null
+        : asNumber(planResult.rows[0].confirmed_context_version);
+      const current = await client.query<QueryResultRow>(
+        `SELECT f.status AS first_contact_status,
+                f.confirmed_context_version,
+                c.version AS context_version,
+                c.profile_version,
+                c.goal_version,
+                p.version AS current_profile_version,
+                g.version AS current_goal_version
+           FROM guto_v3.first_contact_state f
+           LEFT JOIN guto_v3.confirmed_user_contexts c
+             ON c.tenant_id=f.tenant_id AND c.user_id=f.user_id
+            AND c.id=f.confirmed_context_id AND c.version=f.confirmed_context_version
+           JOIN guto_v3.user_profile p ON p.tenant_id=f.tenant_id AND p.user_id=f.user_id
+           JOIN guto_v3.user_goals g ON g.tenant_id=f.tenant_id AND g.user_id=f.user_id
+          WHERE f.tenant_id=$1 AND f.user_id=$2`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      const ctxRow = current.rows[0];
+      const contextIsCurrent = Boolean(
+        ctxRow &&
+        ctxRow.first_contact_status === "COMPLETED" &&
+        ctxRow.confirmed_context_version != null &&
+        asNumber(ctxRow.context_version) === asNumber(ctxRow.confirmed_context_version) &&
+        asNumber(ctxRow.profile_version) === asNumber(ctxRow.current_profile_version) &&
+        asNumber(ctxRow.goal_version) === asNumber(ctxRow.current_goal_version) &&
+        planCtxVersion != null &&
+        asNumber(ctxRow.context_version) === planCtxVersion
+      );
+      if (!contextIsCurrent) {
+        throw new V3Error("V3_CONTEXT_RECONFIRMATION_REQUIRED", "O perfil mudou. Confirme novamente o contexto antes de validar o treino.", 409);
+      }
+      const flipped = await client.query<{ id: string }>(
+        `UPDATE guto_v3.workout_sessions
+            SET status='completed', completed_at=now(), updated_at=now()
+          WHERE tenant_id=$1 AND user_id=$2 AND id=$3::uuid AND status IN ('started','planned')
+          RETURNING id`,
+        [input.actor.tenantId, input.actor.userId, input.workoutSessionId],
+      );
+      if (!flipped.rows[0]) {
+        // Lost the race to a concurrent completion — idempotent no-op.
+        return { status: "completed", xpGranted: false, nextSessionIndex: await countCompleted() };
+      }
+      // XP exactly-once: complete_daily_mission per official presence day
+      // (ON CONFLICT). Same session replay / different requestId / concurrent
+      // duplicate → the ledger row already exists → xpGranted=false.
+      const sourceKey = this.todayKey();
+      const adapted = await client.query(
+        `SELECT 1 FROM guto_v3.xp_ledger WHERE tenant_id=$1 AND user_id=$2 AND reason_code='accept_adapted_mission' AND source_key=$3`,
+        [input.actor.tenantId, input.actor.userId, sourceKey],
+      );
+      const amount = adapted.rows[0] ? 50 : 100;
+      const xpInsert = await client.query<{ id: string }>(
+        `INSERT INTO guto_v3.xp_ledger (tenant_id,user_id,request_id,amount,reason_code,source_key)
+         VALUES ($1,$2,$3,$4,'complete_daily_mission',$5)
+         ON CONFLICT (tenant_id,user_id,reason_code,source_key) DO NOTHING
+         RETURNING id`,
+        [input.actor.tenantId, input.actor.userId, input.requestId, amount, sourceKey],
+      );
+      const xpGranted = Boolean(xpInsert.rows[0]);
+      await client.query(`UPDATE guto_v3.users SET version=version+1 WHERE tenant_id=$1 AND id=$2`, [input.actor.tenantId, input.actor.userId]);
+      await this.appendMutationEvent(client, input.actor, input.requestId, "workout.validation_completed", {
+        workoutSessionId: input.workoutSessionId,
+        evidenceSha256: input.evidence.sha256,
+        evidenceMime: input.evidence.mime,
+        evidenceByteLength: input.evidence.byteLength,
+        xpGranted,
+        reasonCode: "complete_daily_mission",
+        amount,
+      });
+      return { status: "completed", xpGranted, nextSessionIndex: await countCompleted() };
+    });
+  }
+
+  /**
    * P0 (session rotation): durable session counter. The next session index is
    * derived from the number of COMPLETED sessions already recorded in
    * workout_sessions — the official "this session really happened" event —

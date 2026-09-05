@@ -202,7 +202,7 @@ test("PG_SESSION_IDENTITY: concurrent exercise events same workoutSessionId → 
 
 // ─── XP AUTHORITY: complete_daily_mission does NOT create workout session ─
 
-test("PG_XP_AUTHORITY: complete_daily_mission does not advance workout session rotation", async (t) => {
+test("PG_XP_AUTHORITY: bare complete_daily_mission memory mutation is blocked; XP never rotates", async (t) => {
   const db = await getDb(); assert.ok(db, "Postgres engine must be available (declared devDependency)");
   const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
   const actor = await freshActor(repo);
@@ -210,9 +210,16 @@ test("PG_XP_AUTHORITY: complete_daily_mission does not advance workout session r
     const before = await repo.countCompletedWorkoutSessions(actor);
     assert.equal(before, 0);
     const svc = new V3CutoverService(repo);
-    await svc.saveMemory(actor, { requestId: randomUUID(), name: "Will", xpEvent: "complete_daily_mission" });
+    // P0 (workout validation authority): the bypass is closed — a bare memory
+    // mutation with complete_daily_mission is REJECTED; the only path to XP is
+    // validateAndCompleteWorkoutSession (selfie proof + session completion).
+    await assert.rejects(
+      () => svc.saveMemory(actor, { requestId: randomUUID(), name: "Will", xpEvent: "complete_daily_mission" }),
+      (error: unknown) => (error as { code?: string }).code === "V3_WORKOUT_VALIDATION_REQUIRED",
+      "bare complete_daily_mission mutation must be blocked",
+    );
     const after = await repo.countCompletedWorkoutSessions(actor);
-    assert.equal(after, 0, "complete_daily_mission XP event does NOT create a completed workout session");
+    assert.equal(after, 0, "blocked XP-only path does NOT create a completed workout session");
   } finally { await cleanup(repo, actor); await repo["pool"].end(); }
 });
 

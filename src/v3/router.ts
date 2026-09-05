@@ -4,6 +4,7 @@ import { z } from "zod";
 import { CalibrationMutationSchema, FirstContactConfirmationSchema, FirstContactCorrectionSchema, FirstContactResponseSchema, V3MemoryMutationSchema, V3TurnRequestSchema } from "./contracts.js";
 import { V3CutoverService } from "./cutover-service.js";
 import { asV3Error, V3Error } from "./errors.js";
+import { parseWorkoutValidationEvidence } from "./workout-validation-evidence.js";
 import { ProfileServiceV3 } from "./executors.js";
 import { isLangfuseConfigured } from "./observability/instrumentation.js";
 import { currentTraceId, withV3Span, withV3Trace } from "./observability/tracing.js";
@@ -52,6 +53,15 @@ const WorkoutExerciseEventSchema = z.object({
 const WorkoutSessionCompletionSchema = z.object({
   requestId: z.string().uuid(),
   workoutSessionId: z.string().uuid(),
+}).strict();
+const WorkoutValidationSchema = z.object({
+  requestId: z.string().uuid(),
+  workoutSessionId: z.string().uuid(),
+  /* P0 (selfie authority): camera-produced evidence as a data URL. The backend
+   * verifies format/magic bytes/size and persists ONLY a sha256 + metadata
+   * (never the raw image, never base64). */
+  evidence: z.string().min(1).max(12_000_000),
+  language: z.string().trim().min(2).max(10).optional(),
 }).strict();
 
 function v3Enabled(): boolean { return process.env.GUTO_V3_ENABLED === "true"; }
@@ -293,6 +303,32 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
       const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "workout_session_completion" } }, async () => {
         await withV3Span("WORKOUT_SESSION_COMPLETE", {}, () => getV3Runtime().repository.completeWorkoutSession({ actor, requestId: input.requestId, workoutSessionId: input.workoutSessionId }));
         return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), status: "completed" };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  // P0 (workout validation authority / founder gate): the SINGLE endpoint the
+  // frontend uses to close a real workout. Requires selfie evidence, then
+  // completes the session and records its XP atomically (exactly once).
+  router.post("/guto/v3/workout/validate", async (req, res, next) => {
+    try {
+      const input = WorkoutValidationSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "workout_validation" } }, async () => {
+        const evidence = parseWorkoutValidationEvidence(input.evidence);
+        const outcome = await withV3Span("WORKOUT_VALIDATE", { "guto.operation": "workout_validation" }, () =>
+          getV3Runtime().repository.validateAndCompleteWorkoutSession({ actor, requestId: input.requestId, workoutSessionId: input.workoutSessionId, evidence }));
+        return {
+          brainVersion: "guto-cerebro-v3",
+          requestId: input.requestId,
+          traceId: currentTraceId(),
+          status: outcome.status,
+          xpGranted: outcome.xpGranted,
+          nextSessionIndex: outcome.nextSessionIndex,
+          evidence: { sha256: evidence.sha256, mime: evidence.mime, byteLength: evidence.byteLength },
+        };
       });
       res.setHeader("x-guto-trace-id", result.traceId);
       res.json(result);
