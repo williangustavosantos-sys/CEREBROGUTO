@@ -32,6 +32,16 @@ export function rejectPublicRelationshipReactivationBody(value: unknown): never 
   RequestIdSchema.parse(value);
   throw new V3Error("V3_RELATIONSHIP_REACTIVATION_FORBIDDEN", "A relação só pode ser retomada por um retorno real do usuário.", 403);
 }
+/** P0 (public session-completion bypass CLOSED): this public route can no
+ * longer complete a session without the official /workout/validate authority
+ * (selfie evidence + session + XP + rotation atomic). completeWorkoutSession()
+ * stays an INTERNAL repository primitive for tests/internal logic, but the
+ * public HTTP path is closed. Called after the contract parse + actor
+ * resolution inside the route handler. */
+export function rejectPublicSessionCompletion(value: unknown): never {
+  WorkoutSessionCompletionSchema.parse(value);
+  throw new V3Error("V3_WORKOUT_VALIDATION_REQUIRED", "Conclusão de sessão só existe pela validação oficial /workout/validate com prova (selfie).", 409);
+}
 const NameValidationRequestSchema = z.object({ name: z.string().trim().min(1).max(80) });
 const V3LoginRequestSchema = z.object({
   emailOrId: z.string().trim().min(1).max(254),
@@ -292,20 +302,20 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
     } catch (error) { next(error); }
   });
 
-  // P0 (session completion): the sole authority that marks a logical workout
-  // session as completed. Exercise events group under a 'started' session;
-  // this endpoint flips it to 'completed', which the rotation counter observes.
-  // Idempotent on requestId.
+  // P0 (public session-completion bypass CLOSED): /workout/validate is the
+  // ONLY public authority that may complete a workout session. Sessions are
+  // completed inside its single atomic transaction (selfie evidence + session
+  // flip + XP + rotation). completeWorkoutSession() remains an INTERNAL
+  // repository primitive used by internal logic/tests, but this public route
+  // can no longer flip a session to 'completed' without the official
+  // validation — otherwise session-exercises + sessions/complete would bypass
+  // selfie/XP/rotation entirely (SEM SELFIE: XP=NÃO, COMPLETED=NÃO,
+  // ROTATION=NÃO).
   router.post("/guto/v3/workout/sessions/complete", async (req, res, next) => {
     try {
-      const input = WorkoutSessionCompletionSchema.parse(req.body);
-      const actor = await resolveActor(req);
-      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "workout_session_completion" } }, async () => {
-        await withV3Span("WORKOUT_SESSION_COMPLETE", {}, () => getV3Runtime().repository.completeWorkoutSession({ actor, requestId: input.requestId, workoutSessionId: input.workoutSessionId }));
-        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), status: "completed" };
-      });
-      res.setHeader("x-guto-trace-id", result.traceId);
-      res.json(result);
+      WorkoutSessionCompletionSchema.parse(req.body);
+      await resolveActor(req);
+      rejectPublicSessionCompletion(req.body);
     } catch (error) { next(error); }
   });
 
@@ -326,6 +336,7 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
           traceId: currentTraceId(),
           status: outcome.status,
           xpGranted: outcome.xpGranted,
+          xpAmount: outcome.xpAmount,
           nextSessionIndex: outcome.nextSessionIndex,
           evidence: { sha256: evidence.sha256, mime: evidence.mime, byteLength: evidence.byteLength },
         };

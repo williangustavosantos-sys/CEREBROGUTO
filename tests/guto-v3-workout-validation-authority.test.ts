@@ -1,10 +1,13 @@
 import "./test-env.js";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { V3CutoverService } from "../src/v3/cutover-service.js";
 import { InMemoryOfficialStateRepository } from "../src/v3/in-memory-repository.js";
 import { parseWorkoutValidationEvidence } from "../src/v3/workout-validation-evidence.js";
+import { V3Error } from "../src/v3/errors.js";
+import { rejectPublicSessionCompletion } from "../src/v3/router.js";
 import type { ActorContext } from "../src/v3/types.js";
 
 // ─── P0 WORKOUT VALIDATION AUTHORITY — FOUNDER GATE ───────────────────────
@@ -127,6 +130,7 @@ test("TEST1+TEST2: without evidence the authority rejects; with evidence session
   });
   assert.equal(outcome.status, "completed");
   assert.equal(outcome.xpGranted, true);
+  assert.equal(outcome.xpAmount, 100, "fresh validation grants the real 100 XP amount");
   assert.equal(outcome.nextSessionIndex, 1);
   const after = await h.repository.loadOfficialSnapshot(h.actor);
   assert.equal(after.nextSessionIndex, 1, "one completion = one rotation");
@@ -143,6 +147,7 @@ test("TEST3: same requestId replay → XP once, rotation once", async () => {
   await h.repository.validateAndCompleteWorkoutSession({ actor: h.actor, requestId: reqId, workoutSessionId: wsid, evidence: evidence() });
   const replay = await h.repository.validateAndCompleteWorkoutSession({ actor: h.actor, requestId: reqId, workoutSessionId: wsid, evidence: evidence() });
   assert.equal(replay.xpGranted, false);
+  assert.equal(replay.xpAmount, 0, "replay exposes xpAmount 0 — never an assumed 100");
   assert.equal((await h.repository.loadOfficialSnapshot(h.actor)).nextSessionIndex, 1);
   const xp = (await h.repository.loadAppState(h.actor)).progression.xpEvents.filter((event) => event.reasonCode === "complete_daily_mission");
   assert.equal(xp.length, 1, "replay does not grant a second XP");
@@ -154,6 +159,7 @@ test("TEST4: different requestId same session → XP once, rotation once", async
   await h.repository.validateAndCompleteWorkoutSession({ actor: h.actor, requestId: randomUUID(), workoutSessionId: wsid, evidence: evidence() });
   const second = await h.repository.validateAndCompleteWorkoutSession({ actor: h.actor, requestId: randomUUID(), workoutSessionId: wsid, evidence: evidence() });
   assert.equal(second.xpGranted, false);
+  assert.equal(second.xpAmount, 0, "different requestId replay exposes xpAmount 0");
   assert.equal((await h.repository.loadOfficialSnapshot(h.actor)).nextSessionIndex, 1);
   const xp = (await h.repository.loadAppState(h.actor)).progression.xpEvents.filter((event) => event.reasonCode === "complete_daily_mission");
   assert.equal(xp.length, 1, "second requestId does not grant a second XP");
@@ -231,4 +237,53 @@ test("AUTHORITY_SERVICE: bare complete_daily_mission memory mutation is blocked 
     () => h.service.saveMemory(h.actor, { requestId: randomUUID(), name: "Will", xpEvent: "complete_daily_mission" }),
     (error: unknown) => (error as { code?: string }).code === "V3_WORKOUT_VALIDATION_REQUIRED",
   );
+});
+
+// ─── PUBLIC SESSION-COMPLETE BYPASS: CLOSED (route level) ───────────────────
+
+test("PUBLIC_BYPASS: POST /workout/sessions/complete is rejected 409 and only /workout/validate completes", async () => {
+  const h = await harness();
+  const wsid = await openSession(h);
+  const body = { requestId: randomUUID(), workoutSessionId: wsid };
+  // The route handler parses the contract and then rejects — the public HTTP
+  // path never reaches completeWorkoutSession().
+  assert.throws(
+    () => rejectPublicSessionCompletion(body),
+    (error: unknown) => error instanceof V3Error && error.status === 409 && error.code === "V3_WORKOUT_VALIDATION_REQUIRED",
+  );
+  // Readback: the session stays open, XP unchanged, rotation unchanged.
+  const xpBefore = (await h.repository.loadAppState(h.actor)).progression.xpEvents.filter((e) => e.reasonCode === "complete_daily_mission");
+  assert.equal(xpBefore.length, 0);
+  assert.equal((await h.repository.loadOfficialSnapshot(h.actor)).nextSessionIndex, 0);
+  // The ONLY public authority that may complete it is /workout/validate.
+  const outcome = await h.repository.validateAndCompleteWorkoutSession({ actor: h.actor, requestId: randomUUID(), workoutSessionId: wsid, evidence: evidence() });
+  assert.equal(outcome.status, "completed");
+  assert.equal(outcome.xpGranted, true);
+  assert.equal(outcome.nextSessionIndex, 1);
+});
+
+test("PUBLIC_BYPASS: the sessions/complete route no longer invokes the repository completion primitive", () => {
+  const router = readFileSync(new URL("../src/v3/router.ts", import.meta.url), "utf8");
+  const route = router.slice(
+    router.indexOf('router.post("/guto/v3/workout/sessions/complete"'),
+    router.indexOf('router.post("/guto/v3/workout/validate"'),
+  );
+  assert.match(route, /rejectPublicSessionCompletion\(req\.body\)/);
+  assert.doesNotMatch(route, /\.completeWorkoutSession\(/);
+  assert.doesNotMatch(route, /getV3Runtime\(\)\.repository\.completeWorkoutSession/);
+});
+
+// ─── XP AMOUNT AUTHORITY (adapted mission day) ──────────────────────────────
+
+test("XP_AMOUNT: adapted mission day validates at +50 (not an assumed 100)", async () => {
+  const h = await harness();
+  // Accept the adapted mission on the SAME official day before validating.
+  await h.service.saveMemory(h.actor, { requestId: randomUUID(), xpEvent: "accept_adapted_mission" });
+  const wsid = await openSession(h);
+  const outcome = await h.repository.validateAndCompleteWorkoutSession({ actor: h.actor, requestId: randomUUID(), workoutSessionId: wsid, evidence: evidence() });
+  assert.equal(outcome.xpGranted, true);
+  assert.equal(outcome.xpAmount, 50, "adapted mission day grants 50, not 100");
+  const ledger = (await h.repository.loadAppState(h.actor)).progression.xpEvents.filter((e) => e.reasonCode === "complete_daily_mission");
+  assert.equal(ledger.length, 1);
+  assert.equal(ledger[0]!.amount, 50, "ledger row holds the real 50");
 });

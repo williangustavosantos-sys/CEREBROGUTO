@@ -133,6 +133,7 @@ test("PG_VALIDATE_ATOMIC: validation completes session + XP + rotation in one au
     const outcome = await repo.validateAndCompleteWorkoutSession({ actor, requestId: randomUUID(), workoutSessionId: wsid, evidence: evidence() });
     assert.equal(outcome.status, "completed");
     assert.equal(outcome.xpGranted, true);
+    assert.equal(outcome.xpAmount, 100, "fresh validation exposes the real 100 XP amount");
     assert.equal(outcome.nextSessionIndex, 1);
     assert.equal(await sessionStatus(repo, actor, wsid), "completed", "session completed");
     assert.equal(await xpCount(repo, actor), 1, "XP exactly once");
@@ -150,7 +151,9 @@ test("PG_VALIDATE_IDEMPOTENT: same requestId replay → completed ok, no second 
     const first = await repo.validateAndCompleteWorkoutSession({ actor, requestId: reqId, workoutSessionId: wsid, evidence: evidence() });
     const replay = await repo.validateAndCompleteWorkoutSession({ actor, requestId: reqId, workoutSessionId: wsid, evidence: evidence() });
     assert.equal(first.xpGranted, true);
+    assert.equal(first.xpAmount, 100);
     assert.equal(replay.xpGranted, false, "replay grants no XP");
+    assert.equal(replay.xpAmount, 0, "replay exposes xpAmount 0");
     assert.equal(await xpCount(repo, actor), 1);
     assert.equal(await repo.countCompletedWorkoutSessions(actor), 1);
   } finally { await cleanup(repo, actor); await repo["pool"].end(); }
@@ -165,6 +168,7 @@ test("PG_VALIDATE_DIFFERENT_REQUEST: different requestId same session → XP onc
     await repo.validateAndCompleteWorkoutSession({ actor, requestId: randomUUID(), workoutSessionId: wsid, evidence: evidence() });
     const second = await repo.validateAndCompleteWorkoutSession({ actor, requestId: randomUUID(), workoutSessionId: wsid, evidence: evidence() });
     assert.equal(second.xpGranted, false);
+    assert.equal(second.xpAmount, 0, "different requestId replay exposes xpAmount 0");
     assert.equal(await xpCount(repo, actor), 1);
     assert.equal(await repo.countCompletedWorkoutSessions(actor), 1);
   } finally { await cleanup(repo, actor); await repo["pool"].end(); }

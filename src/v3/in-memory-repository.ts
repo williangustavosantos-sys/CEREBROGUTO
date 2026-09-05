@@ -883,7 +883,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     requestId: string;
     workoutSessionId: string;
     evidence: import("./workout-validation-evidence.js").WorkoutValidationEvidence;
-  }): Promise<{ status: "completed"; xpGranted: boolean; nextSessionIndex: number }> {
+  }): Promise<{ status: "completed"; xpGranted: boolean; xpAmount: number; nextSessionIndex: number }> {
     const actorKey = key(input.actor);
     const known = this.knownWorkoutSessionIds.get(actorKey);
     if (!known || !known.has(input.workoutSessionId)) {
@@ -891,7 +891,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     }
     const completed = this.completedSessionIds.get(actorKey) || new Set<string>();
     if (completed.has(input.workoutSessionId)) {
-      return { status: "completed", xpGranted: false, nextSessionIndex: completed.size };
+      return { status: "completed", xpGranted: false, xpAmount: 0, nextSessionIndex: completed.size };
     }
     // Official context currency: profile/goal must match the confirmed
     // context and the active workout plan must be bound to that context.
@@ -925,7 +925,9 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
       action: "workoutValidationCompleted",
       resultCode: "COMPLETED",
     });
-    return { status: "completed", xpGranted, nextSessionIndex: completed.size };
+    // P2 (xpAmount authority): expose the REAL inserted amount (adapted day =
+    // 50, normal day = 100); replay grants nothing so xpAmount is 0.
+    return { status: "completed", xpGranted, xpAmount: xpGranted ? amount : 0, nextSessionIndex: completed.size };
   }
   /**
    * P0 (session completion): the SOLE authority that flips a logical workout

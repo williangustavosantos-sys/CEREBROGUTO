@@ -1660,7 +1660,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     requestId: string;
     workoutSessionId: string;
     evidence: import("./workout-validation-evidence.js").WorkoutValidationEvidence;
-  }): Promise<{ status: "completed"; xpGranted: boolean; nextSessionIndex: number }> {
+  }): Promise<{ status: "completed"; xpGranted: boolean; xpAmount: number; nextSessionIndex: number }> {
     return this.withActorTransaction(input.actor, async (client) => {
       // Serialize concurrent completion attempts on the SAME session.
       await client.query(
@@ -1687,7 +1687,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       };
       // Idempotent on the session: already completed → no mutation, no XP.
       if (row.status === "completed") {
-        return { status: "completed", xpGranted: false, nextSessionIndex: await countCompleted() };
+        return { status: "completed", xpGranted: false, xpAmount: 0, nextSessionIndex: await countCompleted() };
       }
       // Official context currency: the session's plan must be bound to the
       // CURRENT confirmed context and the profile/goal must not have drifted.
@@ -1739,7 +1739,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       );
       if (!flipped.rows[0]) {
         // Lost the race to a concurrent completion — idempotent no-op.
-        return { status: "completed", xpGranted: false, nextSessionIndex: await countCompleted() };
+        return { status: "completed", xpGranted: false, xpAmount: 0, nextSessionIndex: await countCompleted() };
       }
       // XP exactly-once: complete_daily_mission per official presence day
       // (ON CONFLICT). Same session replay / different requestId / concurrent
@@ -1758,6 +1758,12 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         [input.actor.tenantId, input.actor.userId, input.requestId, amount, sourceKey],
       );
       const xpGranted = Boolean(xpInsert.rows[0]);
+      // P2 (xpAmount authority): the response exposes the REAL amount this
+      // request actually inserted — 100 (or 50 when an adapted mission was
+      // accepted earlier today) on a fresh grant, 0 when the ledger already
+      // holds the daily complete_daily_mission (replay/same-day second
+      // session). The client never assumes a fixed 100.
+      const xpAmount = xpGranted ? amount : 0;
       await client.query(`UPDATE guto_v3.users SET version=version+1 WHERE tenant_id=$1 AND id=$2`, [input.actor.tenantId, input.actor.userId]);
       await this.appendMutationEvent(client, input.actor, input.requestId, "workout.validation_completed", {
         workoutSessionId: input.workoutSessionId,
@@ -1765,10 +1771,11 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         evidenceMime: input.evidence.mime,
         evidenceByteLength: input.evidence.byteLength,
         xpGranted,
+        xpAmount,
         reasonCode: "complete_daily_mission",
         amount,
       });
-      return { status: "completed", xpGranted, nextSessionIndex: await countCompleted() };
+      return { status: "completed", xpGranted, xpAmount, nextSessionIndex: await countCompleted() };
     });
   }
 

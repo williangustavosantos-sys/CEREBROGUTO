@@ -156,7 +156,7 @@ export interface OfficialStateRepository {
     requestId: string;
     workoutSessionId: string;
     evidence: import("./workout-validation-evidence.js").WorkoutValidationEvidence;
-  }): Promise<{ status: "completed"; xpGranted: boolean; nextSessionIndex: number }>;
+  }): Promise<{ status: "completed"; xpGranted: boolean; xpAmount: number; nextSessionIndex: number }>;
   /** Counts officially completed workout sessions for rotation (durable, derived
    * from workout_sessions — the "session really happened" source of truth). */
   countCompletedWorkoutSessions(actor: ActorContext): Promise<number>;
