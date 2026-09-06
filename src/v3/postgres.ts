@@ -2778,6 +2778,65 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
   }
 
   /** Session feedback joined with REAL set rows + the prescription rep range. */
+  // ─── BETA1 PRESENCE: session-level subjective feedback + history ─────────
+  // Reuses guto_events (idempotent event log) — no new table. Deterministic
+  // decision/trend/question derive from these records in beta1-presence.ts.
+  async recordBeta1SessionFeedback(input: {
+    actor: ActorContext;
+    requestId: string;
+    workoutSessionId: string;
+    overallDifficulty: "FACIL" | "BOA" | "PESADA" | "DOR";
+    pain: boolean;
+    causeExplanation: string | null;
+    causeCategory: "user_state" | "training" | null;
+  }): Promise<{ duplicate: boolean }> {
+    return this.withActorTransaction(input.actor, async (client) => {
+      const prior = await client.query(
+        `SELECT 1 FROM guto_v3.guto_events
+          WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND event_type='beta1.session_feedback' LIMIT 1`,
+        [input.actor.tenantId, input.actor.userId, input.requestId],
+      );
+      if (prior.rows[0]) return { duplicate: true };
+      await client.query(
+        `INSERT INTO guto_v3.guto_events (tenant_id,user_id,request_id,event_type,payload)
+         VALUES ($1,$2,$3,'beta1.session_feedback',$4::jsonb)`,
+        [input.actor.tenantId, input.actor.userId, input.requestId, JSON.stringify({
+          workoutSessionId: input.workoutSessionId,
+          overallDifficulty: input.overallDifficulty,
+          pain: input.pain,
+          causeExplanation: input.causeExplanation,
+          causeCategory: input.causeCategory,
+        })],
+      );
+      return { duplicate: false };});
+  }
+
+  async loadBeta1SessionFeedbackHistory(actor: ActorContext, limit = 12): Promise<Array<{
+    workoutSessionId: string; overallDifficulty: "FACIL" | "BOA" | "PESADA" | "DOR"; pain: boolean;
+    causeExplanation: string | null; causeCategory: "user_state" | "training" | null; createdAt: string;
+  }>> {
+    const rows = await this.withActorTransaction(actor, async (client) => {
+      const result = await client.query<QueryResultRow>(
+        `SELECT payload, created_at FROM guto_v3.guto_events
+          WHERE tenant_id=$1 AND user_id=$2 AND event_type='beta1.session_feedback'
+          ORDER BY created_at DESC LIMIT $3`,
+        [actor.tenantId, actor.userId, limit],
+      );
+      return result.rows;
+    });
+    return rows.map((row) => {
+      const payload = jsonObject(row.payload);
+      return {
+        workoutSessionId: String(payload.workoutSessionId ?? ""),
+        overallDifficulty: String(payload.overallDifficulty || "BOA") as "FACIL" | "BOA" | "PESADA" | "DOR",
+        pain: payload.pain === true,
+        causeExplanation: payload.causeExplanation == null ? null : String(payload.causeExplanation),
+        causeCategory: payload.causeCategory === "training" || payload.causeCategory === "user_state" ? payload.causeCategory as "user_state" | "training" : null,
+      createdAt: new Date(row.created_at as string).toISOString(),
+      };
+    });
+  }
+
   async loadSessionExecutionFeedback(actor: ActorContext, workoutSessionId: string): Promise<Array<{
     exerciseId: string;
     difficultyLabel: import("./beta1-progression.js").DifficultyLabel | null;

@@ -3,6 +3,7 @@ import { googleAI } from "@genkit-ai/google-genai";
 import { GoogleGenAI } from "@google/genai";
 import { DecisionEnvelopeSchema, type DecisionEnvelope } from "./contracts.js";
 import { V3Error } from "./errors.js";
+import { humanFallbackLine } from "./beta1-presence.js";
 import { setActiveSpanAttributes, withV3Span } from "./observability/tracing.js";
 import type { TurnEnvelope } from "./types.js";
 
@@ -203,16 +204,18 @@ export class GeminiInteractionsDecisionModel implements DecisionModel {
         },
       });
       const rawOutput = interaction.output_text;
-      if (!rawOutput) throw new V3Error("V3_GEMINI_STRUCTURED_OUTPUT_MISSING", "Gemini Interactions não devolveu saída estruturada.", 502);
+      // B11: interpretation failures speak like GUTO (human, short, invites
+      // retry). Technical truth stays in the error code + logs.
+      if (!rawOutput) throw new V3Error("V3_GEMINI_STRUCTURED_OUTPUT_MISSING", humanFallbackLine(envelope.requestId), 502);
       let output: unknown;
       try {
         output = JSON.parse(rawOutput);
       } catch {
-        throw new V3Error("V3_GEMINI_STRUCTURED_OUTPUT_INVALID", "Gemini Interactions devolveu JSON inválido.", 502);
+        throw new V3Error("V3_GEMINI_STRUCTURED_OUTPUT_INVALID", humanFallbackLine(envelope.requestId), 502);
       }
       const parsed = await withV3Span("DECISION_VALIDATION", {}, async () => DecisionEnvelopeSchema.safeParse(output));
       if (!parsed.success) {
-        throw new V3Error("V3_DECISION_INVALID", "Decisão do modelo rejeitada pelo contrato Zod.", 502, {
+        throw new V3Error("V3_DECISION_INVALID", humanFallbackLine(envelope.requestId), 502, {
           issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), code: issue.code })),
         });
       }

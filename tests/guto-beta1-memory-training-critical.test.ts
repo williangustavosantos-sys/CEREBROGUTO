@@ -444,3 +444,127 @@ test("BETA1_TECHNIQUE_EXECUTION: DROP_SET extension stored separately from strai
     assert.equal(entry.setRows.filter((set) => set.techniqueType === "STRAIGHT_SET").length, 3, "progression evidence counts only straight sets");
   } finally { await cleanup(repo, actor); await repo["pool"].end(); }
 });
+
+// ─── PRESENCE: subjective feedback persists, trends, and closes the loop ────
+
+test("BETA1_PRESENCE_PERSISTENCE: session feedback persists, replays are idempotent, trend is derived", async () => {
+  const db = await getDb(); assert.ok(db);
+  const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
+  const curation = new Beta1CurationService(repo);
+  const beta1 = new Beta1WorkoutService(repo, curation);
+  const actor = await freshActor(repo);
+  try {
+    const state = await repo.loadAppState(actor);
+    const exercise = state.workout!.items.find((item) => item.position > 0)!;
+    const wsid = randomUUID();
+    await beta1.recordExecution({
+      actor, requestId: randomUUID(), workoutSessionId: wsid, exerciseId: exercise.exerciseId,
+      difficultyLabel: "PESADA", pain: false,
+      sets: [{ setNumber: 1, loadKg: 80, reps: 8, techniqueType: "STRAIGHT_SET" }],
+    });
+    const complete = await beta1.completeWorkout({ actor, requestId: randomUUID(), workoutSessionId: wsid });
+    // Presence rides along completion (additive): facts echo what was OBSERVED.
+    assert.ok(complete.presence, "completion returns presence summary");
+    assert.ok(complete.presence!.knownFactsEcho.length >= 1, "presence echoes observed facts (never asks what the system knows)");
+    assert.ok(complete.presence!.knownFactsEcho.some((line) => /executou|completou|registr/iu.test(line)), "echo references execution reality");
+
+    // Subjective feedback: FIRST PESADA ever → still MAINTAIN (one data point
+    // is not a trend — never invent cause) but asks the ONE question.
+    const requestId = randomUUID();
+    const feedback1 = await beta1.recordSessionFeedback({
+      actor, requestId, workoutSessionId: wsid, overallDifficulty: "PESADA", pain: false,
+    });
+    assert.equal(feedback1.outcome, "MAINTAIN");
+    assert.ok(feedback1.contextualQuestion, "first hard session already asks the cause question");
+
+    // Replay with the SAME requestId is idempotent (no duplicate history).
+    const replay = await beta1.recordSessionFeedback({
+      actor, requestId, workoutSessionId: wsid, overallDifficulty: "PESADA", pain: false,
+    });
+    const history = await repo.loadBeta1SessionFeedbackHistory(actor, 12);
+    assert.equal(history.length, 1, "exactly one feedback record despite replay");
+    assert.equal(replay.outcome, feedback1.outcome, "replay returns the same outcome");
+
+    // Second PESADA on another session: trend → NEEDS_INVESTIGATION, no auto-REGRESS.
+    const wsid2 = randomUUID();
+    await beta1.recordExecution({
+      actor, requestId: randomUUID(), workoutSessionId: wsid2, exerciseId: exercise.exerciseId,
+      difficultyLabel: "PESADA", pain: false,
+      sets: [{ setNumber: 1, loadKg: 80, reps: 8, techniqueType: "STRAIGHT_SET" }],
+    });
+    await beta1.completeWorkout({ actor, requestId: randomUUID(), workoutSessionId: wsid2 });
+    const feedback2 = await beta1.recordSessionFeedback({
+      actor, requestId: randomUUID(), workoutSessionId: wsid2, overallDifficulty: "PESADA", pain: false,
+    });
+    assert.equal(feedback2.outcome, "INVESTIGATE", "hard streak stays INVESTIGATE (never auto-REGRESS)");
+    assert.equal(feedback2.trend, "NEEDS_INVESTIGATION");
+    assert.ok(!JSON.stringify(feedback2).includes("REGRESS"), "no regression is prescribed at presence level");
+
+    // Reload/readback: records survive (Postgres is the authority).
+    const reloaded = await repo.loadBeta1SessionFeedbackHistory(actor, 12);
+    assert.equal(reloaded.length, 2);
+    assert.ok(reloaded.every((entry) => entry.overallDifficulty === "PESADA" && !entry.pain));
+  } finally { await cleanup(repo, actor); await repo["pool"].end(); }
+});
+
+test("BETA1_PRESENCE_LOOP: user explains cause → training ADAPT, user_state MAINTAIN; isolated per user", async () => {
+  const db = await getDb(); assert.ok(db);
+  const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
+  const curation = new Beta1CurationService(repo);
+  const beta1 = new Beta1WorkoutService(repo, curation);
+  const actorA = await freshActor(repo);
+  const actorB = await freshActor(repo);
+  try {
+    for (const actor of [actorA, actorB]) {
+      const state = await repo.loadAppState(actor);
+      const exercise = state.workout!.items.find((item) => item.position > 0)!;
+      for (const wsid of [randomUUID(), randomUUID()]) {
+        await beta1.recordExecution({
+          actor, requestId: randomUUID(), workoutSessionId: wsid, exerciseId: exercise.exerciseId,
+          difficultyLabel: "PESADA", pain: false,
+          sets: [{ setNumber: 1, loadKg: 80, reps: 8, techniqueType: "STRAIGHT_SET" }],
+        });
+        await beta1.completeWorkout({ actor, requestId: randomUUID(), workoutSessionId: wsid });
+        await beta1.recordSessionFeedback({
+          actor, requestId: randomUUID(), workoutSessionId: wsid, overallDifficulty: "PESADA", pain: false,
+        });
+      }
+    }
+    // User A: cause is their state → MAINTAIN (temporary, NOT a permanent preference).
+    const a = await beta1.recordSessionFeedback({
+      actor: actorA, requestId: randomUUID(), workoutSessionId: randomUUID(),
+      overallDifficulty: "PESADA", pain: false,
+      causeCategory: "user_state", causeExplanation: "Estou dormindo mal essa semana.",
+    });
+    assert.equal(a.outcome, "MAINTAIN");
+    assert.equal(a.contextualQuestion, null, "cause known → no further question");
+    assert.ok(a.knownFactsEcho.some((line) => line.includes("dormindo mal")), "echo references the user's own explanation");
+
+    // User B: cause is the training → ADAPT.
+    const b = await beta1.recordSessionFeedback({
+      actor: actorB, requestId: randomUUID(), workoutSessionId: randomUUID(),
+      overallDifficulty: "PESADA", pain: false,
+      causeCategory: "training", causeExplanation: "O treino que está pesado demais.",
+    });
+    assert.equal(b.outcome, "ADAPT");
+
+    // Isolation: each user sees only their own history.
+    const historyA = await repo.loadBeta1SessionFeedbackHistory(actorA, 12);
+    const historyB = await repo.loadBeta1SessionFeedbackHistory(actorB, 12);
+    assert.equal(historyA.length, 3);
+    assert.equal(historyB.length, 3);
+    assert.ok(historyA.every((entry) => entry.causeCategory !== "training"), "user A never sees user B's cause");
+    assert.ok(historyB.some((entry) => entry.causeCategory === "training"), "user B's cause is stored");
+
+    // DOR closes into SAFETY and only asks what is still missing.
+    const pain = await beta1.recordSessionFeedback({
+      actor: actorA, requestId: randomUUID(), workoutSessionId: randomUUID(),
+      overallDifficulty: "DOR", pain: true,
+    });
+    assert.equal(pain.outcome, "SAFETY");
+    assert.ok(pain.contextualQuestion, "SAFETY asks only the missing info (location)");
+  } finally {
+    await cleanup(repo, actorA); await cleanup(repo, actorB);
+    await repo["pool"].end();
+  }
+});

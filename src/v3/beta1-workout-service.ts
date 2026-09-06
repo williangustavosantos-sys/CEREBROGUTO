@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { Beta1CurationService } from "./beta1-curation-service.js";
 import { buildExerciseProgressSnapshot, type DifficultyLabel, type SetExecutionInput } from "./beta1-progression.js";
+import { buildSessionFacts, decideSessionOutcome, computeFeedbackTrend, classifyCauseExplanation, buildSessionPresence, type SessionPresenceSummary } from "./beta1-presence.js";
 import type { ActorContext, OfficialSnapshot, WorkoutEvolutionDecision } from "./types.js";
 
 /**
@@ -30,6 +31,21 @@ export interface Beta1WorkoutRepository {
     substitutionReason?: string;
     techniqueGroup?: string;
   }): Promise<{ decision: WorkoutEvolutionDecision; setCount: number }>;
+  recordBeta1SessionFeedback(input: {
+    actor: ActorContext;
+    requestId: string;
+    workoutSessionId: string;
+    overallDifficulty: "FACIL" | "BOA" | "PESADA" | "DOR";
+    pain: boolean;
+    causeExplanation: string | null;
+    causeCategory: "user_state" | "training" | null;
+  }): Promise<{ duplicate: boolean }>;
+
+  loadBeta1SessionFeedbackHistory(actor: ActorContext, limit?: number): Promise<Array<{
+    workoutSessionId: string; overallDifficulty: "FACIL" | "BOA" | "PESADA" | "DOR"; pain: boolean;
+    causeExplanation: string | null; causeCategory: "user_state" | "training" | null; createdAt: string;
+  }>>;
+
   loadSessionExecutionFeedback(actor: ActorContext, workoutSessionId: string): Promise<Array<{
     exerciseId: string;
     difficultyLabel: DifficultyLabel | null;
@@ -64,6 +80,7 @@ export interface Beta1CompletionOutcome {
   nextSessionIndex: number;
   painMemoriesPersisted: number;
   progressSnapshots: Array<{ exerciseId: string; trend: string; reasonCodes: string[] }>;
+  presence: SessionPresenceSummary | null;
 }
 
 // Child request ids must remain VALID UUIDs (guto_events.request_id is
@@ -163,6 +180,69 @@ export class Beta1WorkoutService {
         }
       }
     } catch { /* learning is additive; completion stays authoritative */ }
-    return { ...outcome, painMemoriesPersisted, progressSnapshots };
+
+    // Presence layer (deterministic): sessionFacts + outcome + the ONE
+    // contextual question for the only unknown. Never blocks completion.
+    let presence: SessionPresenceSummary | null = null;
+    try {
+      const entries = await this.repository.loadSessionExecutionFeedback(input.actor, input.workoutSessionId);
+      const history = await this.repository.loadBeta1SessionFeedbackHistory(input.actor, 12);
+      presence = buildSessionPresence({
+        facts: buildSessionFacts(entries),
+        history,
+      });
+    } catch { /* presence is additive; completion stays authoritative */ }
+    return { ...outcome, painMemoriesPersisted, progressSnapshots, presence };
+  }
+
+  /**
+   * Session-level subjective feedback (the part GUTO cannot sense). The
+   * contextual answer closes the INVESTIGATE loop: training → ADAPT,
+   * user state → MAINTAIN. Persistence is idempotent per requestId.
+   */
+  async recordSessionFeedback(input: {
+    actor: ActorContext;
+    requestId: string;
+    workoutSessionId: string;
+    overallDifficulty: "FACIL" | "BOA" | "PESADA" | "DOR";
+    pain: boolean;
+    causeExplanation?: string;
+    causeCategory?: "user_state" | "training";
+  }): Promise<SessionPresenceSummary> {
+    // PRESENCE 5/6: a free-text clarification is classified by the
+    // deterministic keyword policy (never the LLM, never a new preference).
+    const causeCategory = input.causeCategory ?? (input.causeExplanation ? classifyCauseExplanation(input.causeExplanation) : null);
+    await this.repository.recordBeta1SessionFeedback({
+      actor: input.actor,
+      requestId: input.requestId,
+      workoutSessionId: input.workoutSessionId,
+      overallDifficulty: input.overallDifficulty,
+      pain: input.pain,
+      causeExplanation: input.causeExplanation ?? null,
+      causeCategory: causeCategory ?? null,
+    });
+    const history = await this.repository.loadBeta1SessionFeedbackHistory(input.actor, 12);
+    const today = history.find((entry) => entry.workoutSessionId === input.workoutSessionId) ?? {
+      workoutSessionId: input.workoutSessionId,
+      overallDifficulty: input.overallDifficulty,
+      pain: input.pain,
+      causeExplanation: input.causeExplanation ?? null,
+      causeCategory: causeCategory ?? null,
+      createdAt: new Date().toISOString(),
+    };
+    const outcome = decideSessionOutcome({
+      todayFeedback: { overallDifficulty: today.overallDifficulty, pain: today.pain },
+      history: history.filter((entry) => entry.workoutSessionId !== input.workoutSessionId),
+      cause: today.causeCategory
+        ? { category: today.causeCategory, explanation: today.causeExplanation ?? "" }
+        : null,
+    });
+    return {
+      outcome: outcome.decision.decision,
+      reasonCode: outcome.decision.reasonCode,
+      contextualQuestion: outcome.contextualQuestion,
+      trend: computeFeedbackTrend(history),
+      knownFactsEcho: outcome.knownFactsEcho,
+    };
   }
 }

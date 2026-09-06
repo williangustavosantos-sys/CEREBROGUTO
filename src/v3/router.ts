@@ -3,7 +3,7 @@ import express, { type NextFunction, type Request, type RequestHandler, type Res
 import { z } from "zod";
 import { CalibrationMutationSchema, FirstContactConfirmationSchema, FirstContactCorrectionSchema, FirstContactResponseSchema, V3MemoryMutationSchema, V3TurnRequestSchema } from "./contracts.js";
 import { V3CutoverService } from "./cutover-service.js";
-import { asV3Error, V3Error } from "./errors.js";
+import { asV3Error, userFacingV3Message, V3Error } from "./errors.js";
 import { parseWorkoutValidationEvidence } from "./workout-validation-evidence.js";
 import { ProfileServiceV3 } from "./executors.js";
 import { isLangfuseConfigured } from "./observability/instrumentation.js";
@@ -378,6 +378,7 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
           nextSessionIndex: outcome.nextSessionIndex,
           painMemoriesPersisted: outcome.painMemoriesPersisted,
           progressSnapshots: outcome.progressSnapshots,
+          presence: outcome.presence,
         };
       });
       res.setHeader("x-guto-trace-id", result.traceId);
@@ -410,6 +411,39 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
           decision: outcome.decision,
           setCount: outcome.setCount,
         };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  // B2/B5/B7/B8: session-level subjective feedback (what GUTO cannot sense).
+  // Persists idempotently, then returns the deterministic outcome + trend so
+  // the UI can close the INVESTIGATE loop conversationally.
+  router.post("/guto/v3/workout/session-feedback", async (req, res, next) => {
+    try {
+      const BodySchema = z.object({
+        requestId: z.string().uuid(),
+        workoutSessionId: z.string().uuid(),
+        overallDifficulty: z.enum(["FACIL", "BOA", "PESADA", "DOR"]),
+        pain: z.boolean().default(false),
+        causeExplanation: z.string().trim().min(1).max(500).optional(),
+        causeCategory: z.enum(["user_state", "training"]).optional(),
+      }).strict();
+      const input = BodySchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "beta1_session_feedback" } }, async () => {
+        const presence = await withV3Span("BETA1_SESSION_FEEDBACK", {}, () =>
+          getV3Runtime().beta1Workout.recordSessionFeedback({
+            actor,
+            requestId: input.requestId,
+            workoutSessionId: input.workoutSessionId,
+            overallDifficulty: input.overallDifficulty,
+            pain: input.pain,
+            causeExplanation: input.causeExplanation,
+            causeCategory: input.causeCategory,
+          }));
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), presence };
       });
       res.setHeader("x-guto-trace-id", result.traceId);
       res.json(result);
@@ -723,15 +757,19 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
     });
   });
 
-  router.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  router.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
     const parsed = error instanceof z.ZodError
       ? new V3Error("V3_INVALID_REQUEST", "Contrato de requisição V3 inválido.", 400, {
           issues: error.issues.map((issue) => ({ path: issue.path.join("."), code: issue.code })),
         })
       : asV3Error(error);
+    // B12: engineering layer keeps the true error (code/trace/status), the
+    // user layer gets a short human line — never a raw technical message.
+    const requestId = typeof req.headers["x-request-id"] === "string" ? req.headers["x-request-id"] : "";
+    console.error(`[v3-error] code=${parsed.code} status=${parsed.status} path=${req.path}`, error);
     res.status(parsed.status).json({
       error: parsed.code,
-      message: parsed.message,
+      message: userFacingV3Message(parsed, requestId || parsed.code),
       brainVersion: "guto-cerebro-v3",
       traceId: currentTraceId(),
       ...(parsed.details ? { details: parsed.details } : {}),

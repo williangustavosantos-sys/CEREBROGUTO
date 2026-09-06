@@ -1,3 +1,5 @@
+import { humanFallbackLine } from "./beta1-presence.js";
+
 export class V3Error extends Error {
   constructor(
     public readonly code: string,
@@ -8,6 +10,16 @@ export class V3Error extends Error {
     super(message);
     this.name = "V3Error";
   }
+}
+
+/**
+ * B11/B12: two layers. The USER gets a short human GUTO line (never a raw
+ * technical message); LOGS keep code + stack + details. The requestId-stable
+ * pick avoids wording flip-flops between retries of the same request.
+ */
+export function userFacingV3Message(error: unknown, requestId: string): string {
+  if (error instanceof V3Error) return error.message;
+  return humanFallbackLine(requestId);
 }
 
 export function asV3Error(error: unknown): V3Error {
