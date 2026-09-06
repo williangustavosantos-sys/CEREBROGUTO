@@ -112,7 +112,7 @@ USING (tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid AND 
 WITH CHECK (tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid AND user_id = nullif(current_setting('app.user_id', true), '')::uuid);
 
 GRANT SELECT,INSERT,UPDATE ON guto_v3.user_memories TO guto_v3_app;
-GRANT SELECT,INSERT ON guto_v3.user_memories_history TO guto_v3_app;
+GRANT SELECT,INSERT,UPDATE ON guto_v3.user_memories_history TO guto_v3_app;
 GRANT SELECT,INSERT ON guto_v3.workout_set_executions TO guto_v3_app;
 
 -- A policy da wse é (re)assertada no FIM deste arquivo, depois de TODO o DDL:
