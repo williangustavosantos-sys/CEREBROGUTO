@@ -24,6 +24,39 @@ const ActiveContextMutationSchema = z.discriminatedUnion("clear", [
 ]);
 
 const RequestIdSchema = z.object({ requestId: z.string().uuid() });
+
+// ─── BETA1 contracts (memory curation + execution logging + self-report) ────
+const Beta1SetSchema = z.object({
+  setNumber: z.number().int().min(1).max(20),
+  loadKg: z.number().min(0).max(1000).optional(),
+  reps: z.number().int().min(0).max(200).optional(),
+  techniqueType: z.enum(["STRAIGHT_SET", "SUPERSET", "DROP_SET", "REST_PAUSE"]).default("STRAIGHT_SET"),
+  techniqueGroup: z.string().max(64).optional(),
+}).strict();
+
+const Beta1ExecutionFeedbackSchema = z.object({
+  requestId: z.string().uuid(),
+  workoutSessionId: z.string().uuid(),
+  exerciseId: z.string().min(1).max(160),
+  difficultyLabel: z.enum(["FACIL", "BOA", "PESADA", "DOR"]),
+  pain: z.boolean().optional(),
+  sets: z.array(Beta1SetSchema).max(40),
+  substitutedFromExerciseId: z.string().max(160).optional(),
+  substitutionReason: z.string().max(300).optional(),
+  techniqueGroup: z.string().max(64).optional(),
+}).strict();
+
+const Beta1CompleteSchema = z.object({
+  requestId: z.string().uuid(),
+  workoutSessionId: z.string().uuid(),
+  completionMode: z.literal("self_report"),
+}).strict();
+
+const Beta1CurateMemorySchema = z.object({
+  requestId: z.string().uuid(),
+  message: z.string().min(1).max(4000),
+  sourceType: z.enum(["conversation", "first_contact", "food_swap", "explicit_profile_edit"]).optional(),
+}).strict();
 const RelationshipLifecycleEvaluateSchema = RequestIdSchema.strict();
 export function parseRelationshipLifecycleEvaluationBody(value: unknown): { requestId: string } {
   return RelationshipLifecycleEvaluateSchema.parse(value);
@@ -322,6 +355,102 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
   // P0 (workout validation authority / founder gate): the SINGLE endpoint the
   // frontend uses to close a real workout. Requires selfie evidence, then
   // completes the session and records its XP atomically (exactly once).
+  // ─── BETA1 Golden Path: execution logging + self-report completion ────────
+  // The memory gate moved selfie OUT of the Beta 1 critical path. This is the
+  // ONE official public authority to close a session in Beta 1 (selfie route
+  // below stays untouched for BETA_2). Preconditions and exactly-once live in
+  // completeBeta1WorkoutSession (ownership, context currency, execution
+  // present, XP still daily-exactly-once via the shared ledger authority).
+  router.post("/guto/v3/workout/complete", async (req, res, next) => {
+    try {
+      const input = Beta1CompleteSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "beta1_workout_complete" } }, async () => {
+        const outcome = await withV3Span("BETA1_WORKOUT_COMPLETE", { "guto.operation": "beta1_completion" }, () =>
+          getV3Runtime().beta1Workout.completeWorkout({ actor, requestId: input.requestId, workoutSessionId: input.workoutSessionId }));
+        return {
+          brainVersion: "guto-cerebro-v3",
+          requestId: input.requestId,
+          traceId: currentTraceId(),
+          status: outcome.status,
+          xpGranted: outcome.xpGranted,
+          xpAmount: outcome.xpAmount,
+          nextSessionIndex: outcome.nextSessionIndex,
+          painMemoriesPersisted: outcome.painMemoriesPersisted,
+          progressSnapshots: outcome.progressSnapshots,
+        };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/workout/execution-feedback", async (req, res, next) => {
+    try {
+      const input = Beta1ExecutionFeedbackSchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "beta1_execution_feedback" } }, async () => {
+        const outcome = await withV3Span("BETA1_EXECUTION_FEEDBACK", { "guto.operation": "beta1_execution" }, () =>
+          getV3Runtime().beta1Workout.recordExecution({
+            actor,
+            requestId: input.requestId,
+            workoutSessionId: input.workoutSessionId,
+            exerciseId: input.exerciseId,
+            difficultyLabel: input.difficultyLabel,
+            pain: input.pain,
+            sets: input.sets.map((set) => ({ setNumber: set.setNumber, loadKg: set.loadKg, reps: set.reps, techniqueType: set.techniqueType, techniqueGroup: set.techniqueGroup })),
+            substitutedFromExerciseId: input.substitutedFromExerciseId,
+            substitutionReason: input.substitutionReason,
+            techniqueGroup: input.techniqueGroup,
+          }));
+        return {
+          brainVersion: "guto-cerebro-v3",
+          requestId: input.requestId,
+          traceId: currentTraceId(),
+          decision: outcome.decision,
+          setCount: outcome.setCount,
+        };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/memory/curate", async (req, res, next) => {
+    try {
+      const input = Beta1CurateMemorySchema.parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "beta1_memory_curate" } }, async () => {
+        const persisted = await withV3Span("BETA1_MEMORY_CURATE", { "guto.operation": "memory_curation" }, () =>
+          getV3Runtime().beta1Curation.curateFromTurn(actor, input.requestId, input.message, input.sourceType ?? "conversation"));
+        return {
+          brainVersion: "guto-cerebro-v3",
+          requestId: input.requestId,
+          traceId: currentTraceId(),
+          persisted: persisted.map((memory) => ({ id: memory.id, category: memory.category, key: memory.key, status: memory.status, version: memory.version, supersedesId: memory.supersedesId })),
+        };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
+  router.post("/guto/v3/memory/snapshot", async (req, res, next) => {
+    try {
+      const BodySchema = z.object({ queryKind: z.enum(["workout", "diet", "chat"]).default("chat") }).strict();
+      const input = BodySchema.parse(req.body ?? {});
+      const actor = await resolveActor(req);
+      const requestId = randomUUID();
+      const result = await withV3Trace({ requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "beta1_memory_snapshot" } }, async () => {
+        const snapshot = await withV3Span("BETA1_MEMORY_SNAPSHOT", {}, () =>
+          getV3Runtime().beta1Curation.buildRelevantMemorySnapshot(actor, input.queryKind));
+        return { brainVersion: "guto-cerebro-v3", requestId, traceId: currentTraceId(), snapshot };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
   router.post("/guto/v3/workout/validate", async (req, res, next) => {
     try {
       const input = WorkoutValidationSchema.parse(req.body);

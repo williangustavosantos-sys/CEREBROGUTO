@@ -9,6 +9,8 @@ import { registerV3Evaluators } from "./evaluators.js";
 import { InngestDurableEventPublisher } from "./durable-events.js";
 import { readV3AuthConfigFromEnvironment, V3AuthService } from "./auth.js";
 import { PostgresV3AuthStore } from "./postgres-auth.js";
+import { Beta1CurationService } from "./beta1-curation-service.js";
+import { Beta1WorkoutService } from "./beta1-workout-service.js";
 
 let sharedPool: ReturnType<typeof createV3Pool> | null = null;
 let authService: V3AuthService | null = null;
@@ -40,6 +42,8 @@ export function createV3Runtime() {
   const contextBuilder = new GutoContextBuilderV3(repository, operational, relationshipMemory, candidates);
   const decisionModel = new GeminiInteractionsDecisionModel();
   const durableEvents = new InngestDurableEventPublisher();
+  const beta1Curation = new Beta1CurationService(repository);
+  const beta1Workout = new Beta1WorkoutService(repository, beta1Curation);
   const gutoTurnFlow = createGutoTurnFlow({
     ai,
     repository,
@@ -48,8 +52,9 @@ export function createV3Runtime() {
     contextBuilder,
     decisionModel,
     durableEvents,
+    beta1Curation,
   });
-  return { ai, repository, auth, operational, relationshipMemory, contextBuilder, decisionModel, durableEvents, gutoTurnFlow, behavioralEvaluator };
+  return { ai, repository, auth, operational, relationshipMemory, contextBuilder, decisionModel, durableEvents, gutoTurnFlow, behavioralEvaluator, beta1Curation, beta1Workout };
 }
 
 export type V3Runtime = ReturnType<typeof createV3Runtime>;

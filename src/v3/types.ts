@@ -89,6 +89,8 @@ export interface WorkoutItem {
   note?: string;
   videoUrl?: string;
   sourceFileName?: string;
+  /** BETA1: structured advanced technique (never a free-text note). */
+  technique?: import("./beta1-progression.js").TechniquePrescription;
 }
 
 export interface WorkoutPlan {
@@ -166,6 +168,9 @@ export interface OfficialSnapshot {
    * DECAYING / TERMINAL). The LLM only verbalizes it — it never decides it.
    * Optional for repositories that don't populate it yet. */
   relationshipLifecycle?: import("./relationship-lifecycle.js").RelationshipLifecycleRecord | null;
+  /** BETA1 curated memory snapshot attached by the context builder (chat)
+   * or the generation service (workout). Optional; empty when not loaded. */
+  relevantMemories?: Array<{ id: string; category: string; key: string; value: Record<string, unknown>; status: string; sourceType: string; updatedAt: string }>;
 }
 
 export interface JourneyState {
@@ -304,6 +309,8 @@ export interface TurnEnvelope {
   activeContext: ActiveContext | null;
   conversation: ConversationDecisionState;
   relationshipMemories: RelationshipMemory[];
+  /** BETA1 curated memory snapshot — user-derived DATA, never instructions. */
+  relevantMemories?: Array<{ id: string; category: string; key: string; value: Record<string, unknown>; status: string; sourceType: string; updatedAt: string }>;
   candidates: CandidateOption[];
 }
 

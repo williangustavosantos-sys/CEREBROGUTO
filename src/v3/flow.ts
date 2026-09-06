@@ -75,6 +75,8 @@ export interface GutoTurnFlowDependencies {
   policyGate?: PolicyGateV3;
   executor?: DeterministicExecutorV3;
   durableEvents?: DurableEventPublisher;
+  /** BETA1 curated memory curation (deterministic parser + policy). */
+  beta1Curation?: { curateFromTurn(actor: ActorContext, requestId: string, message: string, sourceType?: "conversation" | "first_contact" | "food_swap" | "explicit_profile_edit"): Promise<unknown> };
 }
 
 function finalSpeech(action: string, modelSpeech: string, clarification: string | undefined, executorMessage: string, confirmed: boolean): string {
@@ -160,6 +162,15 @@ export function createGutoTurnFlow(deps: GutoTurnFlowDependencies) {
           action: gate.decision.action,
           resultCode: execution.code,
         }));
+
+        // BETA1: after the turn, run the deterministic curation parser. Only
+        // EXPLICIT declarations over the closed pattern set persist (memory is
+        // NOT a transcript). Failures never break the conversational turn.
+        if (deps.beta1Curation) {
+          await withV3Span("BETA1_MEMORY_CURATE", {}, async () => {
+            await deps.beta1Curation!.curateFromTurn(actor, input.requestId, input.message).catch(() => undefined);
+          });
+        }
 
         if (conversationRepository) {
           const nextConversation = applyConversationDecision(envelope.conversation, {

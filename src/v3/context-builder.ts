@@ -4,11 +4,16 @@ import type { OperationalStateStore } from "./operational-state.js";
 import type { RelationshipMemoryStore } from "./relationship-memory.js";
 import type { OfficialStateRepository } from "./repository.js";
 import { supportsConversationState } from "./repository.js";
+import { memoryCategoriesForQuery } from "./beta1-memory.js";
 import { emptyConversationDecisionState } from "./conversation-state.js";
 import type { ConversationDecisionState } from "./conversation-state.js";
 import type { ActorContext, OfficialSnapshot, TurnEnvelope } from "./types.js";
 import { withV3Span } from "./observability/tracing.js";
 import { V3Error } from "./errors.js";
+
+function supportsCuratedMemory(repository: OfficialStateRepository): repository is OfficialStateRepository & { loadRelevantMemories: (input: { actor: ActorContext; categories: string[]; limit: number }) => Promise<Array<{ id: string; category: string; key: string; value: Record<string, unknown>; status: string; sourceType: string; updatedAt: string }>> } {
+  return typeof (repository as { loadRelevantMemories?: unknown }).loadRelevantMemories === "function";
+}
 
 function messageNeedsWorkout(message: string): boolean {
   return /trein|exerc|ocupad|máquina|maquina|halter|série|serie|reps?/iu.test(message);
@@ -28,7 +33,7 @@ export class GutoContextBuilderV3 {
 
   async build(actor: ActorContext, requestId: string, message: string): Promise<{ envelope: TurnEnvelope; snapshot: OfficialSnapshot }> {
     const conversationRepository = supportsConversationState(this.repository) ? this.repository : null;
-    const [snapshot, activeContext, relationshipMemories, conversation] = await Promise.all([
+    const [snapshot, activeContext, relationshipMemories, conversation, relevantMemories] = await Promise.all([
       withV3Span("POSTGRES_TRANSACTION", { "guto.operation": "official_snapshot" }, () => this.repository.loadOfficialSnapshot(actor)),
       withV3Span("ACTIVE_CONTEXT_LOAD", {}, () => this.operational.getActiveContext(actor)),
       withV3Span("RELATIONSHIP_MEMORY_RETRIEVAL", {}, async () => {
@@ -41,6 +46,21 @@ export class GutoContextBuilderV3 {
       conversationRepository
         ? withV3Span("CONVERSATION_STATE_LOAD", {}, () => conversationRepository.loadConversationDecisionState(actor))
         : Promise.resolve<ConversationDecisionState>(emptyConversationDecisionState()),
+      // BETA1 curated memory: bounded, category-scoped, deterministic. Memory
+      // is user-derived DATA injected into the envelope — never a system
+      // instruction. Failure degrades gracefully to an empty snapshot.
+      withV3Span("RELEVANT_MEMORY_RETRIEVAL", {}, async () => {
+        try {
+          if (!supportsCuratedMemory(this.repository)) return [];
+          return await this.repository.loadRelevantMemories({
+            actor,
+            categories: memoryCategoriesForQuery("chat"),
+            limit: 8,
+          });
+        } catch {
+          return [];
+        }
+      }),
     ]);
 
     if (!snapshot.confirmedContext || snapshot.firstContact.status !== "COMPLETED") {
@@ -89,6 +109,7 @@ export class GutoContextBuilderV3 {
       activeContext,
       conversation,
       relationshipMemories,
+      relevantMemories,
       candidates: candidateOptions,
     };
 
@@ -97,6 +118,7 @@ export class GutoContextBuilderV3 {
       "guto.active_context_version": activeContext?.version || 0,
       "guto.plan_version": activeContext?.planVersion || 0,
       "guto.relationship_memory_count": relationshipMemories.length,
+      "guto.relevant_memory_count": relevantMemories.length,
       "guto.candidate_count": candidateOptions.length,
       "guto.conversation_state_version": conversation.version,
     }, async () => ({ envelope, snapshot }));

@@ -12,9 +12,10 @@ import { V3_FOOD_NUTRITION } from "./candidate-provider.js";
 import { V3Error } from "./errors.js";
 import { generateOfficialDietDraft } from "./nutrition/official-engine.js";
 import { conflictsWithFoodDeclaration } from "./food-declaration-policy.js";
+import { dropSetEligibility, restPauseEligibility, supersetEligibility } from "./beta1-progression.js";
 import { WORKOUT_PRESCRIPTION_POLICY_VERSION, frequencySplitFor, prescriptionContext, sessionTemplateFor, templateFocus } from "./workout-prescription.js";
 import type { DietPlanDraft, WorkoutPlanDraft } from "./repository.js";
-import type { OfficialSnapshot } from "./types.js";
+import type { OfficialSnapshot, WorkoutItem } from "./types.js";
 
 function locale(value: string): CatalogLanguage & FoodLanguage {
   return value === "en-US" || value === "it-IT" ? value : "pt-BR";
@@ -46,11 +47,37 @@ function riskTokens(snapshot: OfficialSnapshot): Set<string> {
     .filter((value): value is string => Boolean(value)));
 }
 
+/** BETA1: curated memories may exclude exercises (e.g. academia sem hack squat). */
+function excludedExerciseIdsFromMemories(snapshot: OfficialSnapshot): Set<string> {
+  const excluded = new Set<string>();
+  const EQUIPMENT_ALIASES: ReadonlyArray<[RegExp, string]> = [
+    [/hack|hack squat/iu, "hack_squat"],
+    [/smith/iu, "smith_machine"],
+    [/leg\s?press|legpress/iu, "leg_press"],
+    [/poli|cable/iu, "cable_station"],
+  ];
+  for (const memory of snapshot.relevantMemories || []) {
+    if (memory.category !== "TRAINING_ENVIRONMENT" || memory.status !== "ACTIVE") continue;
+    const equipment = String(memory.value.equipment || "");
+    const available = memory.value.available === true;
+    if (!equipment || available) continue;
+    const alias = EQUIPMENT_ALIASES.find(([pattern]) => pattern.test(equipment))?.[1] || equipment;
+    for (const exercise of ValidatedExerciseCatalog) {
+      const haystack = `${exercise.id} ${exercise.canonicalNamePt || ""} ${Object.values(exercise.namesByLanguage || {}).join(" ")}`;
+      if (haystack.toLowerCase().includes(alias.replace(/_/g, " ")) || haystack.toLowerCase().includes(alias)) {
+        excluded.add(exercise.id);
+      }
+    }
+  }
+  return excluded;
+}
+
 export function generateWorkoutDraft(snapshot: OfficialSnapshot, options: { sessionIndex?: number } = {}): WorkoutPlanDraft {
   if (!snapshot.confirmedContext) throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Contexto confirmado necessário para gerar treino.", 409);
   const language = locale(snapshot.profile.language);
   const location = trainingLocation(snapshot.profile.trainingLocation);
   const risks = riskTokens(snapshot);
+  const environmentExclusions = excludedExerciseIdsFromMemories(snapshot);
   const frequency = snapshot.profile.weeklyFrequencyDaysPerWeek ?? snapshot.confirmedContext.weeklyFrequencyDaysPerWeek ?? 3;
   const ctx = prescriptionContext({
     trainingStatus: snapshot.profile.trainingStatus,
@@ -68,7 +95,8 @@ export function generateWorkoutDraft(snapshot: OfficialSnapshot, options: { sess
     ValidatedExerciseCatalog.filter((exercise) =>
       exercise.muscleGroup === group &&
       getExerciseLocations(exercise).includes(location) &&
-      !getExerciseRiskTags(exercise).some((risk) => risks.has(risk)));
+      !getExerciseRiskTags(exercise).some((risk) => risks.has(risk)) &&
+      !environmentExclusions.has(exercise.id));
   const preferredId = location === "gym" && focusGroups.includes("peito") ? "supino_reto_maquina" : null;
   // Session variety for repeated templates (e.g. Upper x2 on 4x): rotate the
   // selection index per session so the same focus group picks a different
@@ -114,6 +142,44 @@ export function generateWorkoutDraft(snapshot: OfficialSnapshot, options: { sess
     throw new V3Error("V3_WORKOUT_CATALOG_INSUFFICIENT", "Catálogo seguro insuficiente para gerar o treino.", 409);
   }
   const sets = ctx.experience.sets;
+  // BETA1 advanced techniques: structured objects with deterministic policy —
+  // NEVER a free-text note. At most ONE intensifier (DROP_SET or REST_PAUSE)
+  // per session; machines/cables/isolators only; never for beginners.
+  // SUPERSET pairs the two accessory-like items when eligible (A1/A2). The
+  // base straight work keeps progression authority; technique extensions are
+  // recorded separately (technique_type) and excluded from progression input.
+  const items: WorkoutPlanDraft["items"] = selected.map((exercise, position) => ({
+    exerciseId: exercise.id,
+    name: getExerciseName(exercise.id, language),
+    purpose: exercise.movementPattern || exercise.muscleGroup,
+    muscleGroup: exercise.muscleGroup,
+    position,
+    sets: position === 0 ? 1 : sets,
+    reps: position === 0 ? "5-8 min" : ctx.repRange,
+    canonicalNamePt: exercise.canonicalNamePt,
+    rest: position === 0 ? "0:30min" : "1:30min",
+    cue: exercise.movementPattern ? `Executa ${exercise.movementPattern} com controle e sem dor.` : "Execução controlada e sem dor.",
+    note: "A técnica manda. Interrompe se houver dor.",
+    videoUrl: exercise.videoUrl,
+    sourceFileName: exercise.sourceFileName,
+  }));
+  const techniqueCandidates = items.filter((item) => item.position > 0);
+  const intensifier = techniqueCandidates.find((item) =>
+    dropSetEligibility(item as WorkoutItem, snapshot.profile.trainingStatus).eligible)
+    || techniqueCandidates.find((item) =>
+    restPauseEligibility(item as WorkoutItem, snapshot.profile.trainingStatus).eligible);
+  if (intensifier) {
+    if (dropSetEligibility(intensifier as WorkoutItem, snapshot.profile.trainingStatus).eligible) {
+      intensifier.technique = { type: "DROP_SET", applyOn: "LAST_SET", drops: 1, loadReductionPercent: 20, targetRepsAfterDrop: ctx.repRange };
+    } else {
+      intensifier.technique = { type: "REST_PAUSE", baseSetTarget: ctx.repRange, pauseSeconds: "15-20", miniSets: 1, miniSetTarget: "3-5" };
+    }
+  }
+  if (supersetEligibility(snapshot.profile.trainingStatus).eligible && techniqueCandidates.length >= 2 && !intensifier) {
+    const [a1, a2] = techniqueCandidates;
+    a1.technique = { type: "SUPERSET", groupId: "SS-A", orderWithinGroup: 1 };
+    a2.technique = { type: "SUPERSET", groupId: "SS-A", orderWithinGroup: 2 };
+  }
   return {
     title: snapshot.goal.code === "hypertrophy" ? "Treino de hipertrofia" : "Treino oficial GUTO",
     generatedFrom: {
@@ -132,21 +198,7 @@ export function generateWorkoutDraft(snapshot: OfficialSnapshot, options: { sess
       confirmedContextId: snapshot.confirmedContext.id,
       confirmedContextVersion: snapshot.confirmedContext.version,
     },
-    items: selected.map((exercise, position) => ({
-      exerciseId: exercise.id,
-      name: getExerciseName(exercise.id, language),
-      purpose: exercise.movementPattern || exercise.muscleGroup,
-      muscleGroup: exercise.muscleGroup,
-      position,
-      sets: position === 0 ? 1 : sets,
-      reps: position === 0 ? "5-8 min" : ctx.repRange,
-      canonicalNamePt: exercise.canonicalNamePt,
-      rest: position === 0 ? "0:30min" : "1:30min",
-      cue: exercise.movementPattern ? `Executa ${exercise.movementPattern} com controle e sem dor.` : "Execução controlada e sem dor.",
-      note: "A técnica manda. Interrompe se houver dor.",
-      videoUrl: exercise.videoUrl,
-      sourceFileName: exercise.sourceFileName,
-    })),
+    items,
   };
 }
 

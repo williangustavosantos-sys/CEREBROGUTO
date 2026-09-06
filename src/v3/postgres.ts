@@ -8,6 +8,7 @@ import { materializeFirstContact } from "./first-contact.js";
 import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from "./facts.js";
 import { assertRelationshipLifecycleState, evaluateOfficialRelationshipReturn, evaluateRelationshipLifecycleState, shouldSuppressProactivity, type RelationshipLifecycleRecord } from "./relationship-lifecycle.js";
 import { decideWorkoutEvolution } from "./workout-evolution.js";
+import { mapLegacyDifficultyInverse } from "./beta1-progression.js";
 import { assertValidAdaptedExecution, resolveSessionEffectiveLocation } from "./session-execution-policy.js";
 import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
 import type {
@@ -646,6 +647,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         note: item.note || undefined,
         videoUrl: item.video_url || undefined,
         sourceFileName: item.source_file_name || undefined,
+        technique: item.technique == null ? undefined : (jsonObject(item.technique) as unknown as import("./beta1-progression.js").TechniquePrescription),
       })),
     };
   }
@@ -961,7 +963,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         [input.actor.tenantId, input.actor.userId, input.workoutDraft.title, JSON.stringify(input.workoutDraft.generatedFrom), context.id, context.version],
       );
       for (const item of input.workoutDraft.items) {
-        await client.query(`INSERT INTO guto_v3.workout_plan_items (tenant_id,plan_id,exercise_id,name,purpose,muscle_group,position,sets,reps,canonical_name_pt,rest_text,cue,note,video_url,source_file_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, [input.actor.tenantId, workout.rows[0]!.id, item.exerciseId, item.name, item.purpose, item.muscleGroup, item.position, item.sets || null, item.reps || null, item.canonicalNamePt || null, item.rest || null, item.cue || null, item.note || null, item.videoUrl || null, item.sourceFileName || null]);
+        await client.query(`INSERT INTO guto_v3.workout_plan_items (tenant_id,plan_id,exercise_id,name,purpose,muscle_group,position,sets,reps,canonical_name_pt,rest_text,cue,note,video_url,source_file_name,technique) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)`, [input.actor.tenantId, workout.rows[0]!.id, item.exerciseId, item.name, item.purpose, item.muscleGroup, item.position, item.sets || null, item.reps || null, item.canonicalNamePt || null, item.rest || null, item.cue || null, item.note || null, item.videoUrl || null, item.sourceFileName || null, item.technique ? JSON.stringify(item.technique) : null]);
       }
       const diet = await client.query<{ id: string; version: string }>(
         `INSERT INTO guto_v3.diet_plans (tenant_id,user_id,status,total_calories,protein_grams,carbs_grams,fat_grams,calculation_method,generated_from,confirmed_context_id,confirmed_context_version)
@@ -1074,7 +1076,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         [input.actor.tenantId, input.actor.userId, input.workoutDraft.title, JSON.stringify(input.workoutDraft.generatedFrom), context.id, context.version],
       );
       for (const item of input.workoutDraft.items) {
-        await client.query(`INSERT INTO guto_v3.workout_plan_items (tenant_id,plan_id,exercise_id,name,purpose,muscle_group,position,sets,reps,canonical_name_pt,rest_text,cue,note,video_url,source_file_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, [input.actor.tenantId, workout.rows[0]!.id, item.exerciseId, item.name, item.purpose, item.muscleGroup, item.position, item.sets || null, item.reps || null, item.canonicalNamePt || null, item.rest || null, item.cue || null, item.note || null, item.videoUrl || null, item.sourceFileName || null]);
+        await client.query(`INSERT INTO guto_v3.workout_plan_items (tenant_id,plan_id,exercise_id,name,purpose,muscle_group,position,sets,reps,canonical_name_pt,rest_text,cue,note,video_url,source_file_name,technique) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)`, [input.actor.tenantId, workout.rows[0]!.id, item.exerciseId, item.name, item.purpose, item.muscleGroup, item.position, item.sets || null, item.reps || null, item.canonicalNamePt || null, item.rest || null, item.cue || null, item.note || null, item.videoUrl || null, item.sourceFileName || null, item.technique ? JSON.stringify(item.technique) : null]);
       }
       const diet = await client.query<{ id: string; version: string }>(
         `INSERT INTO guto_v3.diet_plans (tenant_id,user_id,status,total_calories,protein_grams,carbs_grams,fat_grams,calculation_method,generated_from,confirmed_context_id,confirmed_context_version)
@@ -1226,9 +1228,9 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       for (const item of input.draft.items) {
         await client.query(
           `INSERT INTO guto_v3.workout_plan_items
-             (tenant_id,plan_id,exercise_id,name,purpose,muscle_group,position,sets,reps,canonical_name_pt,rest_text,cue,note,video_url,source_file_name)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-          [input.actor.tenantId, planRow.id, item.exerciseId, item.name, item.purpose, item.muscleGroup, item.position, item.sets || null, item.reps || null, item.canonicalNamePt || null, item.rest || null, item.cue || null, item.note || null, item.videoUrl || null, item.sourceFileName || null],
+             (tenant_id,plan_id,exercise_id,name,purpose,muscle_group,position,sets,reps,canonical_name_pt,rest_text,cue,note,video_url,source_file_name,technique)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)`,
+          [input.actor.tenantId, planRow.id, item.exerciseId, item.name, item.purpose, item.muscleGroup, item.position, item.sets || null, item.reps || null, item.canonicalNamePt || null, item.rest || null, item.cue || null, item.note || null, item.videoUrl || null, item.sourceFileName || null, item.technique ? JSON.stringify(item.technique) : null],
         );
       }
       await client.query(
@@ -2320,5 +2322,545 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
        VALUES ($1,'user',$2,$3,$4::jsonb)`,
       [actor.tenantId, actor.userId, eventType, JSON.stringify({ requestId, ...payload })],
     );
+  }
+
+  // ─── BETA1: curated persistent memory (Postgres-authoritative) ────────────
+
+  async persistCuratedMemory(input: {
+    actor: ActorContext;
+    requestId: string;
+    candidate: import("./beta1-memory.js").CuratedMemoryCandidate;
+    sourceType: import("./beta1-memory.js").MemorySourceType;
+  }): Promise<import("./beta1-memory.js").PersistedMemory> {
+    return this.withActorTransaction(input.actor, async (client) => {
+      // Serialize supersession of the same category+key (race-safe against
+      // concurrent corrections on the same key).
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':memory:' || $3 || ':' || $4, 0))`,
+        [input.actor.tenantId, input.actor.userId, input.candidate.category, input.candidate.key],
+      );
+      const previous = await client.query<QueryResultRow>(
+        `SELECT id, version FROM guto_v3.user_memories
+          WHERE tenant_id=$1 AND user_id=$2 AND category=$3 AND key=$4 AND status='ACTIVE'
+          ORDER BY version DESC LIMIT 1`,
+        [input.actor.tenantId, input.actor.userId, input.candidate.category, input.candidate.key],
+      );
+      const previousId = previous.rows[0]?.id ? String(previous.rows[0].id) : null;
+      const nextVersion = previous.rows[0] ? asNumber(previous.rows[0].version) + 1 : 1;
+      if (previousId) {
+        // Supersession: mark the old ACTIVE as SUPERSEDED (history preserved),
+        // then insert the new truth pointing back at it. The conditional
+        // UPDATE is the durable second barrier against concurrent corrections.
+        const flipped = await client.query<{ id: string }>(
+          `UPDATE guto_v3.user_memories SET status='SUPERSEDED', updated_at=now()
+           WHERE id=$1::uuid AND status='ACTIVE' RETURNING id`,
+          [previousId],
+        );
+        if (!flipped.rows[0]) {
+          throw new V3Error("V3_MEMORY_SUPERSESSION_RACE", "A memória mudou durante a correção; tente novamente.", 409);
+        }
+        // History mirror: the row was mirrored on insert; the flip just moves
+        // its status, so history keeps ONE row per version with the final state.
+        await client.query(
+          `UPDATE guto_v3.user_memories_history SET status='SUPERSEDED', updated_at=now()
+           WHERE id=$1::uuid`,
+          [previousId],
+        );
+      }
+      const inserted = await client.query<QueryResultRow>(
+        `INSERT INTO guto_v3.user_memories
+          (tenant_id,user_id,category,key,value,status,confidence,source_type,source_request_id,version,last_confirmed_at,supersedes_id)
+         VALUES ($1,$2,$3,$4,$5::jsonb,'ACTIVE',$6,$7,$8,$9,now(),$10)
+         RETURNING id,version,created_at,updated_at`,
+        [input.actor.tenantId, input.actor.userId, input.candidate.category, input.candidate.key,
+          JSON.stringify(input.candidate.value), input.candidate.confidence, input.sourceType, input.requestId,
+          nextVersion, previousId],
+      );
+      const row = inserted.rows[0]!;
+      // History mirror of the new ACTIVE truth (same transaction as the live row).
+      await client.query(
+        `INSERT INTO guto_v3.user_memories_history
+          (id,tenant_id,user_id,category,key,value,status,confidence,source_type,source_request_id,source_event_id,version,created_at,updated_at,last_confirmed_at,supersedes_id)
+         SELECT id,tenant_id,user_id,category,key,value,status,confidence,source_type,source_request_id,source_event_id,version,created_at,updated_at,last_confirmed_at,supersedes_id
+           FROM guto_v3.user_memories WHERE id=$1::uuid`,
+        [String(row.id)],
+      );
+      await this.appendMutationEvent(client, input.actor, input.requestId, "memory.persisted", {
+        category: input.candidate.category,
+        key: input.candidate.key,
+        memoryId: String(row.id),
+        supersededId: previousId,
+      });
+      return {
+        id: String(row.id),
+        tenantId: input.actor.tenantId,
+        userId: input.actor.userId,
+        category: input.candidate.category,
+        key: input.candidate.key,
+        value: input.candidate.value,
+        status: "ACTIVE",
+        confidence: input.candidate.confidence,
+        sourceType: input.sourceType,
+        sourceRequestId: input.requestId,
+        sourceEventId: null,
+        version: asNumber(row.version),
+        createdAt: new Date(row.created_at).toISOString(),
+        updatedAt: new Date(row.updated_at).toISOString(),
+        lastConfirmedAt: new Date(row.updated_at).toISOString(),
+        supersedesId: previousId,
+      };
+    });
+  }
+
+  async loadRelevantMemories(input: {
+    actor: ActorContext;
+    categories: string[];
+    limit: number;
+  }): Promise<Array<Pick<import("./beta1-memory.js").PersistedMemory, "id" | "category" | "key" | "value" | "status" | "sourceType" | "updatedAt">>> {
+    const capped = Math.min(Math.max(1, input.limit), 24);
+    return this.withActorTransaction(input.actor, async (client) => {
+      const rows = await client.query<QueryResultRow>(
+        `SELECT id,category,key,value,status,source_type,updated_at
+           FROM guto_v3.user_memories
+          WHERE tenant_id=$1 AND user_id=$2 AND status='ACTIVE'
+            AND category = ANY($3::text[])
+          ORDER BY CASE category
+              WHEN 'TRAINING_LIMITATIONS' THEN 0
+              WHEN 'TRAINING_PREFERENCES' THEN 1
+              WHEN 'TRAINING_ENVIRONMENT' THEN 2
+              WHEN 'TRAINING_LEARNINGS' THEN 3
+            WHEN 'ROUTINE' THEN 4
+              ELSE 5 END,
+            updated_at DESC, id DESC
+          LIMIT $4`,
+        [input.actor.tenantId, input.actor.userId, input.categories, capped],
+      );
+      return rows.rows.map((row) => ({
+        id: String(row.id),
+        category: String(row.category) as import("./beta1-memory.js").MemoryCategory,
+        key: String(row.key),
+        value: jsonObject(row.value),
+        status: String(row.status) as import("./beta1-memory.js").MemoryStatus,
+        sourceType: String(row.source_type) as import("./beta1-memory.js").MemorySourceType,
+        updatedAt: new Date(row.updated_at).toISOString(),
+      }));
+    });
+  }
+
+  async listMemoryHistory(actor: ActorContext, limit = 50): Promise<Array<import("./beta1-memory.js").PersistedMemory>> {
+    const capped = Math.min(Math.max(1, limit), 200);
+    return this.withActorTransaction(actor, async (client) => {
+      const rows = await client.query<QueryResultRow>(
+        `SELECT id,category,key,value,status,confidence,source_type,source_request_id,version,created_at,updated_at,last_confirmed_at,supersedes_id
+           FROM guto_v3.user_memories_history
+          WHERE tenant_id=$1 AND user_id=$2
+          ORDER BY updated_at DESC, id DESC LIMIT $3`,
+        [actor.tenantId, actor.userId, capped],
+      );
+      return rows.rows.map((row) => ({
+        id: String(row.id),
+        tenantId: actor.tenantId,
+        userId: actor.userId,
+        category: String(row.category) as import("./beta1-memory.js").MemoryCategory,
+        key: String(row.key),
+        value: jsonObject(row.value),
+        status: String(row.status) as import("./beta1-memory.js").MemoryStatus,
+        confidence: String(row.confidence),
+        sourceType: String(row.source_type) as import("./beta1-memory.js").MemorySourceType,
+        sourceRequestId: row.source_request_id == null ? null : String(row.source_request_id),
+        sourceEventId: null,
+        version: asNumber(row.version),
+        createdAt: new Date(row.created_at).toISOString(),
+        updatedAt: new Date(row.updated_at).toISOString(),
+        lastConfirmedAt: new Date(row.last_confirmed_at).toISOString(),
+        supersedesId: row.supersedes_id == null ? null : String(row.supersedes_id),
+      }));
+    });
+  }
+
+  // ─── BETA1: set-level execution + self-report completion authority ────────
+
+  /**
+   * BETA1 execution logging: REAL set-level execution (never inferred from the
+   * prescription) + structured subjective difficulty (FÁCIL/BOA/PESADA/DOR).
+   * Pain recorded here becomes a curated TRAINING_LIMITATIONS memory via the
+   * Beta1WorkoutService (outside this transaction). Idempotent on requestId.
+   */
+  async recordBeta1ExecutionFeedback(input: {
+    actor: ActorContext;
+    requestId: string;
+    workoutSessionId: string;
+    exerciseId: string;
+    difficultyLabel: import("./beta1-progression.js").DifficultyLabel;
+    pain?: boolean;
+    sets: import("./beta1-progression.js").SetExecutionInput[];
+    substitutedFromExerciseId?: string;
+    substitutionReason?: string;
+    techniqueGroup?: string;
+  }): Promise<{ decision: import("./types.js").WorkoutEvolutionDecision; setCount: number }> {
+    return this.withActorTransaction(input.actor, async (client) => {
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':beta1-exec:' || $3 || ':' || $4, 0))`,
+        [input.actor.tenantId, input.actor.userId, input.workoutSessionId, input.exerciseId],
+      );
+      const prior = await client.query<{ payload: Record<string, unknown> }>(
+        `SELECT payload FROM guto_v3.guto_events
+          WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND event_type='beta1.execution_feedback'
+          LIMIT 1`,
+        [input.actor.tenantId, input.actor.userId, input.requestId],
+      );
+      const priorPayload = prior.rows[0]?.payload;
+      if (priorPayload && typeof priorPayload === "object") {
+        const cached = priorPayload as { decision?: import("./types.js").WorkoutEvolutionDecision; setCount?: number };
+        if (cached.decision && typeof cached.setCount === "number") return { decision: cached.decision, setCount: cached.setCount };
+      }
+      // MODELO B (same authority as recordWorkoutExerciseEvent): the client /
+      // runtime-generated workoutSessionId is used LITERALLY as the PK of
+      // workout_sessions — the FIRST execution feedback of a session creates
+      // the row; concurrent feedback with the same id never duplicates it.
+      const activePlan = await client.query<QueryResultRow>(
+        `SELECT id FROM guto_v3.workout_plans WHERE tenant_id=$1 AND user_id=$2 AND status='active' ORDER BY created_at DESC LIMIT 1`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      if (!activePlan.rows[0]) throw new V3Error("V3_WORKOUT_NOT_FOUND", "Treino oficial ativo não encontrado.", 409);
+      await client.query(
+        `INSERT INTO guto_v3.workout_sessions (id,tenant_id,user_id,plan_id,status,started_at,completed_at)
+         VALUES ($1::uuid,$2,$3,$4,'started',now(),null)
+         ON CONFLICT (id) DO NOTHING`,
+        [input.workoutSessionId, input.actor.tenantId, input.actor.userId, activePlan.rows[0].id],
+      );
+      const session = await client.query<QueryResultRow>(
+        `SELECT id,tenant_id,user_id,plan_id,status FROM guto_v3.workout_sessions WHERE id=$1::uuid LIMIT 1`,
+        [input.workoutSessionId],
+      );
+      if (!session.rows[0]) throw new V3Error("V3_WORKOUT_SESSION_NOT_FOUND", "Sessão de treino não encontrada.", 404);
+      if (String(session.rows[0].tenant_id) !== input.actor.tenantId || String(session.rows[0].user_id) !== input.actor.userId) {
+        throw new V3Error("V3_FOREIGN_WORKOUT_SESSION", "Não é possível registrar execução em sessão de outro usuário.", 409);
+      }
+      if (session.rows[0].status === "completed") {
+        throw new V3Error("V3_WORKOUT_SESSION_ALREADY_COMPLETED", "Sessão já concluída; execução não pode ser alterada.", 409);
+      }
+      const plan = await client.query<QueryResultRow>(
+        `SELECT * FROM guto_v3.workout_plans WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND status='active' LIMIT 1`,
+        [input.actor.tenantId, input.actor.userId, session.rows[0].plan_id],
+      );
+      if (!plan.rows[0]) throw new V3Error("V3_WORKOUT_NOT_FOUND", "Treino oficial ativo não encontrado para esta sessão.", 409);
+      if (input.substitutedFromExerciseId) {
+        // Same adapted-execution authority as recordWorkoutExerciseEvent.
+        const basePlan = await this.loadWorkout(client, plan.rows[0]);
+        const snapshot = await this.loadOfficialSnapshotWithinTransaction(client, input.actor);
+        const profileLocation = snapshot.confirmedContext?.trainingLocation || snapshot.profile.trainingLocation;
+        const effectiveLocation = resolveSessionEffectiveLocation({ exerciseId: input.exerciseId, completed: true, context: {} }, undefined, profileLocation);
+        assertValidAdaptedExecution({
+          event: {
+            exerciseId: input.exerciseId,
+            completed: true,
+            substitutedFromExerciseId: input.substitutedFromExerciseId,
+            substitutionReason: input.substitutionReason,
+          },
+          basePlan,
+          snapshot,
+          effectiveLocation,
+        });
+      } else {
+        const exercise = await client.query(
+          `SELECT 1 FROM guto_v3.workout_plan_items WHERE tenant_id=$1 AND plan_id=$2 AND exercise_id=$3`,
+          [input.actor.tenantId, plan.rows[0].id, input.exerciseId],
+        );
+        if (!exercise.rows[0]) throw new V3Error("V3_WORKOUT_EXERCISE_NOT_ACTIVE", "Exercício não pertence ao treino oficial ativo.", 409);
+      }
+      // Aggregate row (keeps legacy readers/decisions working) + REAL set rows.
+      const straightSets = input.sets.filter((set) => set.techniqueType === "STRAIGHT_SET");
+      const bestSet = straightSets.reduce<{ reps: number; load: number } | null>((best, set) => {
+        const reps = set.reps ?? 0;
+        const load = set.loadKg ?? 0;
+        if (!best || reps > best.reps || (reps === best.reps && load > best.load)) return { reps, load };
+        return best;
+      }, null);
+      const perceived = mapLegacyDifficultyInverse(input.difficultyLabel);
+      const exerciseRow = await client.query<{ id: string }>(
+        `INSERT INTO guto_v3.workout_session_exercises
+          (tenant_id,user_id,session_id,exercise_id,load_value,repetitions,sets_completed,completed,perceived_difficulty,difficulty_label,substituted_from_exercise_id,substitution_reason,context_snapshot)
+         VALUES ($1,$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb) RETURNING id`,
+        [input.actor.tenantId, input.actor.userId, input.workoutSessionId, input.exerciseId,
+          bestSet?.load ?? null, bestSet?.reps ?? null, straightSets.length, true,
+          perceived, input.difficultyLabel, input.substitutedFromExerciseId ?? null, input.substitutionReason ?? null,
+          JSON.stringify({ pain: input.pain === true, difficultyLabel: input.difficultyLabel, techniqueGroup: input.techniqueGroup ?? null })],
+      );
+      let setCount = 0;
+      for (const set of input.sets) {
+        await client.query(
+          `INSERT INTO guto_v3.workout_set_executions
+            (tenant_id,user_id,session_id,session_exercise_id,exercise_id,set_number,load_kg,reps,technique_type,technique_group)
+           VALUES ($1,$2,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10)
+           ON CONFLICT (tenant_id,session_id,exercise_id,set_number,technique_type,technique_group) DO NOTHING`,
+          [input.actor.tenantId, input.actor.userId, input.workoutSessionId, exerciseRow.rows[0]!.id,
+            input.exerciseId, set.setNumber, set.loadKg ?? null, set.reps ?? null, set.techniqueType, set.techniqueGroup ?? null],
+        );
+        setCount += 1;
+      }
+      // Deterministic evolution decision from the SAME authority as the V3 flow.
+      const recent = await client.query<QueryResultRow>(
+        `SELECT load_value,repetitions,sets_completed,completed,perceived_difficulty,substituted_from_exercise_id,substitution_reason
+           FROM guto_v3.workout_session_exercises
+          WHERE tenant_id=$1 AND user_id=$2 AND exercise_id=$3
+          ORDER BY created_at DESC, id DESC LIMIT 4`,
+        [input.actor.tenantId, input.actor.userId, input.exerciseId],
+      );
+      const history = recent.rows.reverse().map((row) => ({
+        exerciseId: input.exerciseId,
+        loadValue: row.load_value == null ? undefined : Number(row.load_value),
+        repetitions: row.repetitions == null ? undefined : Number(row.repetitions),
+        setsCompleted: row.sets_completed == null ? undefined : Number(row.sets_completed),
+        completed: Boolean(row.completed),
+        perceivedDifficulty: row.perceived_difficulty == null ? undefined : Number(row.perceived_difficulty),
+        substitutedFromExerciseId: row.substituted_from_exercise_id || undefined,
+        substitutionReason: row.substitution_reason || undefined,
+      }));
+      const event: import("./types.js").WorkoutExerciseSessionEvent = {
+        exerciseId: input.exerciseId,
+        workoutSessionId: input.workoutSessionId,
+        loadValue: bestSet?.load,
+        repetitions: bestSet?.reps,
+        setsCompleted: straightSets.length,
+        completed: true,
+        perceivedDifficulty: perceived ?? undefined,
+        substitutedFromExerciseId: input.substitutedFromExerciseId,
+        substitutionReason: input.substitutionReason,
+        context: { pain: input.pain === true, difficultyLabel: input.difficultyLabel, safetyConcern: input.pain === true || input.difficultyLabel === "DOR" },
+      };
+      const decision = decideWorkoutEvolution(event, history.slice(0, -1));
+      await client.query(
+        `INSERT INTO guto_v3.workout_evolution_decisions
+          (tenant_id,user_id,exercise_id,decision,reason_code,source_session_exercise_id,context_snapshot)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`,
+        [input.actor.tenantId, input.actor.userId, decision.exerciseId, decision.decision, decision.reasonCode, exerciseRow.rows[0]!.id,
+          JSON.stringify({ ...event.context || {}, nextPrescription: decision.nextPrescription || null })],
+      );
+      await this.appendMutationEvent(client, input.actor, input.requestId, "beta1.execution_feedback", {
+        workoutSessionId: input.workoutSessionId,
+        exerciseId: input.exerciseId,
+        difficultyLabel: input.difficultyLabel,
+        pain: input.pain === true,
+        setCount,
+        decision,
+      });
+      return { decision, setCount };
+    });
+  }
+
+  /**
+   * BETA1 self-report completion authority: the OFFICIAL Golden Path way to
+   * close a session WITHOUT selfie (selfie/validate is BETA_2 preserved).
+   * Preconditions: ownership, active plan binding, CURRENT confirmed context,
+   * at least one recorded execution. Completion is exactly-once (advisory lock
+   * on session identity + conditional UPDATE + optional requestId dedupe);
+   * XP keeps the existing daily exactly-once authority (xp_ledger ON CONFLICT)
+   * and is NOT part of the completion decision. Rotation continues to be the
+   * durable count of completed sessions.
+   */
+  async completeBeta1WorkoutSession(input: {
+    actor: ActorContext;
+    requestId: string;
+    workoutSessionId: string;
+    completionMode: "self_report";
+  }): Promise<{ status: "completed"; xpGranted: boolean; xpAmount: number; nextSessionIndex: number }> {
+    return this.withActorTransaction(input.actor, async (client) => {
+      // Serialize concurrent completion attempts on the SAME session.
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':' || $3, 0))`,
+        [input.actor.tenantId, input.actor.userId, input.workoutSessionId],
+      );
+      const session = await client.query<QueryResultRow>(
+        `SELECT id,status,plan_id,tenant_id,user_id FROM guto_v3.workout_sessions WHERE id=$1::uuid LIMIT 1`,
+        [input.workoutSessionId],
+      );
+      if (!session.rows[0]) throw new V3Error("V3_WORKOUT_SESSION_NOT_FOUND", "Sessão de treino não encontrada.", 404);
+      const row = session.rows[0];
+      if (String(row.tenant_id) !== input.actor.tenantId || String(row.user_id) !== input.actor.userId) {
+        throw new V3Error("V3_FOREIGN_WORKOUT_SESSION", "Não é possível concluir uma sessão de treino de outro usuário.", 409);
+      }
+      const countCompleted = async (): Promise<number> => {
+        const counted = await client.query<{ count: string }>(
+          `SELECT COUNT(*)::text AS count FROM guto_v3.workout_sessions
+            WHERE tenant_id=$1 AND user_id=$2 AND status='completed'`,
+          [input.actor.tenantId, input.actor.userId],
+        );
+        return asNumber(counted.rows[0]?.count) || 0;
+      };
+      if (row.status === "completed") {
+        return { status: "completed" as const, xpGranted: false, xpAmount: 0, nextSessionIndex: await countCompleted() };
+      }
+      // At least one REAL execution must exist (no empty completions).
+      const executions = await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM guto_v3.workout_session_exercises
+          WHERE tenant_id=$1 AND user_id=$2 AND session_id=$3::uuid`,
+        [input.actor.tenantId, input.actor.userId, input.workoutSessionId],
+      );
+      if ((asNumber(executions.rows[0]?.count) || 0) < 1) {
+        throw new V3Error("V3_WORKOUT_EXECUTION_REQUIRED", "Registre pelo menos um exercício antes de concluir o treino.", 409);
+      }
+      // Official context currency: same authority as validateAndCompleteWorkoutSession.
+      const planResult = await client.query<{ confirmed_context_version: string | null }>(
+        `SELECT confirmed_context_version FROM guto_v3.workout_plans
+          WHERE tenant_id=$1 AND user_id=$2 AND id=$3::uuid AND status='active' LIMIT 1`,
+        [input.actor.tenantId, input.actor.userId, row.plan_id],
+      );
+      const planCtxVersion = planResult.rows[0]?.confirmed_context_version == null ? null : asNumber(planResult.rows[0].confirmed_context_version);
+      const current = await client.query<QueryResultRow>(
+        `SELECT f.status AS first_contact_status,
+                f.confirmed_context_version,
+                c.version AS context_version,
+                c.profile_version,
+                c.goal_version,
+                p.version AS current_profile_version,
+                g.version AS current_goal_version
+           FROM guto_v3.first_contact_state f
+           LEFT JOIN guto_v3.confirmed_user_contexts c
+             ON c.tenant_id=f.tenant_id AND c.user_id=f.user_id
+            AND c.id=f.confirmed_context_id AND c.version=f.confirmed_context_version
+           JOIN guto_v3.user_profile p ON p.tenant_id=f.tenant_id AND p.user_id=f.user_id
+           JOIN guto_v3.user_goals g ON g.tenant_id=f.tenant_id AND g.user_id=f.user_id
+          WHERE f.tenant_id=$1 AND f.user_id=$2`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      const ctxRow = current.rows[0];
+      const contextIsCurrent = Boolean(
+        ctxRow &&
+        ctxRow.first_contact_status === "COMPLETED" &&
+        ctxRow.confirmed_context_version != null &&
+        asNumber(ctxRow.context_version) === asNumber(ctxRow.confirmed_context_version) &&
+        asNumber(ctxRow.profile_version) === asNumber(ctxRow.current_profile_version) &&
+        asNumber(ctxRow.goal_version) === asNumber(ctxRow.current_goal_version) &&
+        planCtxVersion != null &&
+        asNumber(ctxRow.context_version) === planCtxVersion,
+      );
+      if (!contextIsCurrent) {
+        throw new V3Error("V3_CONTEXT_RECONFIRMATION_REQUIRED", "O perfil mudou. Confirme novamente o contexto antes de concluir o treino.", 409);
+      }
+      const flipped = await client.query<{ id: string }>(
+        `UPDATE guto_v3.workout_sessions
+            SET status='completed', completed_at=now(), updated_at=now(), completion_mode=$4
+          WHERE tenant_id=$1 AND user_id=$2 AND id=$3::uuid AND status IN ('started','planned')
+          RETURNING id`,
+        [input.actor.tenantId, input.actor.userId, input.workoutSessionId, input.completionMode],
+      );
+      if (!flipped.rows[0]) {
+        // Lost the race to a concurrent completion — idempotent no-op.
+        return { status: "completed" as const, xpGranted: false, xpAmount: 0, nextSessionIndex: await countCompleted() };
+      }
+      // XP exactly-once: same daily ledger authority as the validation path
+      // (ON CONFLICT on the daily source_key). NOT a completion precondition.
+      const sourceKey = this.todayKey();
+      const adapted = await client.query(
+        `SELECT 1 FROM guto_v3.xp_ledger WHERE tenant_id=$1 AND user_id=$2 AND reason_code='accept_adapted_mission' AND source_key=$3`,
+        [input.actor.tenantId, input.actor.userId, sourceKey],
+      );
+      const amount = adapted.rows[0] ? 50 : 100;
+      const xpInsert = await client.query<{ id: string }>(
+        `INSERT INTO guto_v3.xp_ledger (tenant_id,user_id,request_id,amount,reason_code,source_key)
+         VALUES ($1,$2,$3,$4,'complete_daily_mission',$5)
+         ON CONFLICT (tenant_id,user_id,reason_code,source_key) DO NOTHING
+         RETURNING id`,
+        [input.actor.tenantId, input.actor.userId, input.requestId, amount, sourceKey],
+      );
+      const xpGranted = Boolean(xpInsert.rows[0]);
+      const xpAmount = xpGranted ? amount : 0;
+      await client.query(`UPDATE guto_v3.users SET version=version+1 WHERE tenant_id=$1 AND id=$2`, [input.actor.tenantId, input.actor.userId]);
+      await this.appendMutationEvent(client, input.actor, input.requestId, "workout.beta1_session_completed", {
+        workoutSessionId: input.workoutSessionId,
+        completionMode: input.completionMode,
+        xpGranted,
+        xpAmount,
+      });
+      return { status: "completed" as const, xpGranted, xpAmount, nextSessionIndex: await countCompleted() };
+    });
+  }
+
+  /** Session feedback joined with REAL set rows + the prescription rep range. */
+  async loadSessionExecutionFeedback(actor: ActorContext, workoutSessionId: string): Promise<Array<{
+    exerciseId: string;
+    difficultyLabel: import("./beta1-progression.js").DifficultyLabel | null;
+    pain: boolean;
+    completed: boolean;
+    setRows: Array<{ setNumber: number; loadKg: number | null; reps: number | null; techniqueType: string }>;
+    repRangeLow: number;
+    repRangeHigh: number;
+  }>> {
+    return this.withActorTransaction(actor, async (client) => {
+      const exercises = await client.query<QueryResultRow>(
+        `SELECT e.id,e.exercise_id,e.completed,e.difficulty_label,e.context_snapshot,
+                i.reps AS prescribed_reps
+           FROM guto_v3.workout_session_exercises e
+           JOIN guto_v3.workout_sessions s ON s.id=e.session_id AND s.tenant_id=e.tenant_id AND s.user_id=e.user_id
+           LEFT JOIN guto_v3.workout_plans p ON p.id=s.plan_id
+           LEFT JOIN guto_v3.workout_plan_items i ON i.plan_id=p.id AND i.exercise_id=e.exercise_id
+          WHERE e.tenant_id=$1 AND e.user_id=$2 AND e.session_id=$3::uuid
+          ORDER BY e.created_at, e.id`,
+        [actor.tenantId, actor.userId, workoutSessionId],
+      );
+      const result: Array<{ exerciseId: string; difficultyLabel: import("./beta1-progression.js").DifficultyLabel | null; pain: boolean; completed: boolean; setRows: Array<{ setNumber: number; loadKg: number | null; reps: number | null; techniqueType: string }>; repRangeLow: number; repRangeHigh: number }> = [];
+      for (const exercise of exercises.rows) {
+        const setRows = await client.query<QueryResultRow>(
+          `SELECT set_number,load_kg,reps,technique_type FROM guto_v3.workout_set_executions
+            WHERE tenant_id=$1 AND user_id=$2 AND session_id=$3::uuid AND exercise_id=$4
+            ORDER BY set_number`,
+          [actor.tenantId, actor.userId, workoutSessionId, String(exercise.exercise_id)],
+        );
+        // PRESCRIPTION parsing is deterministic: "8-12" -> 8,12 (never 812).
+        const prescribedReps = String(exercise.prescribed_reps || "");
+        const range = /(\d{1,2})\s*[-–]\s*(\d{1,2})/u.exec(prescribedReps);
+        const repRangeLow = range ? Number(range[1]) : 8;
+        const repRangeHigh = range ? Number(range[2]) : 12;
+        const context = jsonObject(exercise.context_snapshot);
+        result.push({
+          exerciseId: String(exercise.exercise_id),
+          difficultyLabel: (exercise.difficulty_label == null ? null : String(exercise.difficulty_label)) as import("./beta1-progression.js").DifficultyLabel | null,
+          pain: context.pain === true,
+          completed: Boolean(exercise.completed),
+          setRows: setRows.rows.map((setRow) => ({
+            setNumber: asNumber(setRow.set_number),
+            loadKg: setRow.load_kg == null ? null : Number(setRow.load_kg),
+            reps: setRow.reps == null ? null : asNumber(setRow.reps),
+            techniqueType: String(setRow.technique_type || "STRAIGHT_SET"),
+          })),
+          repRangeLow,
+          repRangeHigh,
+        });
+      }
+      return result;
+    });
+  }
+
+  async loadWorkoutItem(actor: ActorContext, planId: string, exerciseId: string): Promise<{
+    id: string;
+    exerciseId: string;
+    name: string;
+    purpose: string;
+    muscleGroup: string;
+    position: number;
+    reps?: string;
+    canonicalNamePt?: string;
+  } | null> {
+    return this.withActorTransaction(actor, async (client) => {
+      const row = await client.query<QueryResultRow>(
+        `SELECT id,exercise_id,name,purpose,muscle_group,position,reps,canonical_name_pt
+           FROM guto_v3.workout_plan_items
+          WHERE tenant_id=$1 AND plan_id=$2::uuid AND exercise_id=$3 LIMIT 1`,
+        [actor.tenantId, planId, exerciseId],
+      );
+      if (!row.rows[0]) return null;
+      const item = row.rows[0];
+      return {
+        id: String(item.id),
+        exerciseId: String(item.exercise_id),
+        name: String(item.name),
+        purpose: String(item.purpose),
+        muscleGroup: String(item.muscle_group),
+        position: asNumber(item.position),
+        reps: item.reps == null ? undefined : String(item.reps),
+        canonicalNamePt: item.canonical_name_pt == null ? undefined : String(item.canonical_name_pt),
+      };
+    });
   }
 }

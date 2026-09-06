@@ -152,6 +152,11 @@ export class DeterministicExecutorV3 {
 
   private async generateWorkout(envelope: TurnEnvelope, snapshot: OfficialSnapshot): Promise<ExecutorResult> {
     if (!snapshot.confirmedContext) throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Contexto confirmado necessário.", 409);
+    // BETA1: the envelope already carries the curated memory snapshot from the
+    // context builder; thread it into the generation snapshot so equipment
+    // exclusions (e.g. "academia sem hack squat") apply on chat-triggered
+    // regeneration too.
+    if (envelope.relevantMemories?.length) snapshot.relevantMemories = envelope.relevantMemories;
     const draft = generateWorkoutDraft(snapshot);
     const plan = await withV3Span("POSTGRES_TRANSACTION", { "guto.operation": "generate_workout" }, () =>
       this.workout.generate({ actor: snapshot.actor, requestId: envelope.requestId, context: snapshot.confirmedContext!, draft }));

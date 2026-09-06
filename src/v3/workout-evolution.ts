@@ -9,7 +9,11 @@ import type { WorkoutEvolutionDecision, WorkoutExerciseSessionEvent, WorkoutNext
  * the executor may apply to the next session.
  */
 
-const EASY_DIFFICULTY_MAX = 7;
+// BOA (RPE ~8) com reps no topo da faixa conta como sessão fácil: o feedback
+// subjetivo Beta1 mapeia FÁCIL→7 e BOA→8 na escala legada 1-10. Exigir ≤7
+// nunca progrediria um usuário que fecha 12/12/12 "BOA" — o caso canônico
+// de double progression.
+const EASY_DIFFICULTY_MAX = 8;
 const HARD_DIFFICULTY_MIN = 9;
 const TOP_REP_MIN = 12;
 const MIN_SETS_COMPLETED = 3;

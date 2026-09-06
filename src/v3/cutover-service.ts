@@ -3,6 +3,7 @@ import { CalibrationMutationSchema, type FirstContactConfirmation, type FirstCon
 import { V3Error } from "./errors.js";
 import { interpretFirstContactCalibrationCorrection } from "./facts.js";
 import { generateDietDraft, generateWorkoutDraft } from "./generation-engines.js";
+import { memoryCategoriesForQuery } from "./beta1-memory.js";
 import type { OfficialStateRepository } from "./repository.js";
 import type { ActorContext, ConfirmedUserContext, OfficialSnapshot, V3AppState } from "./types.js";
 import type { CalibrationMutation } from "./contracts.js";
@@ -39,6 +40,20 @@ function hasCalibrationPatch(input: V3MemoryMutation): boolean {
 
 export class V3CutoverService {
   constructor(private readonly repository: OfficialStateRepository) {}
+
+  /** BETA1: workout generation consumes curated memory (equipment exclusions
+   * like "minha academia não tem hack squat" + preferences) via the snapshot. */
+  private async workoutSnapshotWithMemory(actor: ActorContext): Promise<import("./types.js").OfficialSnapshot> {
+    const snapshot = await this.repository.loadOfficialSnapshot(actor);
+    try {
+      if (typeof (this.repository as { loadRelevantMemories?: unknown }).loadRelevantMemories === "function") {
+        snapshot.relevantMemories = await (this.repository as unknown as {
+          loadRelevantMemories(input: { actor: ActorContext; categories: string[]; limit: number }): Promise<import("./types.js").OfficialSnapshot["relevantMemories"]>;
+        }).loadRelevantMemories({ actor, categories: memoryCategoriesForQuery("workout"), limit: 12 });
+      }
+    } catch { /* memory is additive; generation proceeds without it */ }
+    return snapshot;
+  }
 
   async load(actor: ActorContext): Promise<V3AppState> {
     return this.repository.loadAppState(actor);
@@ -314,6 +329,15 @@ export class V3CutoverService {
       trainingLocation: "gym",
     };
     const snapshot = calibrationSnapshot(state, context);
+    // BETA1: reconfirmation also carries curated memory into the workout draft
+    // (equipment exclusions), so a corrected environment is honored immediately.
+    try {
+      if (typeof (this.repository as { loadRelevantMemories?: unknown }).loadRelevantMemories === "function") {
+        snapshot.relevantMemories = await (this.repository as unknown as {
+          loadRelevantMemories(input: { actor: ActorContext; categories: string[]; limit: number }): Promise<OfficialSnapshot["relevantMemories"]>;
+        }).loadRelevantMemories({ actor, categories: memoryCategoriesForQuery("workout"), limit: 12 });
+      }
+    } catch { /* additive */ }
     await this.repository.reconfirmContext({
       actor,
       requestId,
@@ -339,7 +363,7 @@ export class V3CutoverService {
   }
 
   async generateWorkout(actor: ActorContext, requestId: string): Promise<V3AppState> {
-    const snapshot = await this.repository.loadOfficialSnapshot(actor);
+    const snapshot = await this.workoutSnapshotWithMemory(actor);
     if (!snapshot.confirmedContext || snapshot.firstContact.status !== "COMPLETED") {
       throw new V3Error("V3_CONFIRMED_CONTEXT_REQUIRED", "Confirme o contexto do usuário antes de gerar o treino.", 409);
     }
