@@ -40,7 +40,7 @@ const Beta1ExecutionFeedbackSchema = z.object({
   exerciseId: z.string().min(1).max(160),
   difficultyLabel: z.enum(["FACIL", "BOA", "PESADA", "DOR"]),
   pain: z.boolean().optional(),
-  sets: z.array(Beta1SetSchema).max(40),
+  sets: z.array(Beta1SetSchema).min(1).max(40),
   substitutedFromExerciseId: z.string().max(160).optional(),
   substitutionReason: z.string().max(300).optional(),
   techniqueGroup: z.string().max(64).optional(),
@@ -361,6 +361,20 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
   // below stays untouched for BETA_2). Preconditions and exactly-once live in
   // completeBeta1WorkoutSession (ownership, context currency, execution
   // present, XP still daily-exactly-once via the shared ledger authority).
+  router.post("/guto/v3/workout/start", async (req, res, next) => {
+    try {
+      const input = RequestIdSchema.strict().parse(req.body);
+      const actor = await resolveActor(req);
+      const result = await withV3Trace({ requestId: input.requestId, externalSubject: actor.externalSubject, attributes: { "guto.input_category": "beta1_workout_start" } }, async () => {
+        const session = await withV3Span("BETA1_WORKOUT_START", { "guto.operation": "beta1_session_start" }, () =>
+          getV3Runtime().beta1Workout.startOrResumeSession({ actor, requestId: input.requestId }));
+        return { brainVersion: "guto-cerebro-v3", requestId: input.requestId, traceId: currentTraceId(), ...session };
+      });
+      res.setHeader("x-guto-trace-id", result.traceId);
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
   router.post("/guto/v3/workout/complete", async (req, res, next) => {
     try {
       const input = Beta1CompleteSchema.parse(req.body);

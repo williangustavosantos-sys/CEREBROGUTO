@@ -124,7 +124,7 @@ export function decideSessionOutcome(input: {
 }): SessionOutcome {
   const history = [...input.history].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const hardRun = countTrailingHard(history);
-  const painToday = input.todayFeedback?.pain === true;
+  const painToday = input.todayFeedback?.pain === true || input.todayFeedback?.overallDifficulty === "DOR";
   const hardToday = input.todayFeedback?.overallDifficulty === "PESADA";
 
   // SAFETY first: pain is never negotiated, never auto-adapted silently.

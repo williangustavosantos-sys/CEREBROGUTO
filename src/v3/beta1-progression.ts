@@ -183,13 +183,15 @@ const PAIN_RECENT_WINDOW = 2;
 
 export function decideDoubleProgression(evidence: ProgressionEvidence, item: WorkoutItem): ProgressionDecision {
   const { exerciseId, repRangeHigh, repRangeLow } = evidence;
-  const sessions = evidence.sessions.filter((session) => session.completed && !session.pain);
+  const recentSafety = evidence.sessions
+    .slice(-PAIN_RECENT_WINDOW)
+    .some((session) => session.pain || session.difficultyLabel === "DOR");
+  if (recentSafety) {
+    return { exerciseId, decision: "REVIEW", reasonCode: "PAIN_SAFETY_BRANCH", fromLoadKg: latestLoad(evidence), toLoadKg: null, explanation: "Dor recente registrada; não progredir até nova avaliação (safety policy).", evidenceSessionCount: evidence.sessions.length };
+  }
+  const sessions = evidence.sessions.filter((session) => session.completed && !session.pain && session.difficultyLabel !== "DOR");
   if (sessions.length === 0) {
     return { exerciseId, decision: "REVIEW", reasonCode: "INSUFFICIENT_DATA", fromLoadKg: null, toLoadKg: null, explanation: "Sem execuções completas registradas; nada a decidir ainda.", evidenceSessionCount: evidence.sessions.length };
-  }
-  const recentPain = evidence.sessions.slice(-PAIN_RECENT_WINDOW).some((session) => session.pain);
-  if (recentPain) {
-    return { exerciseId, decision: "REVIEW", reasonCode: "PAIN_SAFETY_BRANCH", fromLoadKg: latestLoad(evidence), toLoadKg: null, explanation: "Dor recente registrada; não progredir até nova avaliação (safety policy).", evidenceSessionCount: evidence.sessions.length };
   }
   const current = sessions[sessions.length - 1];
   const fromLoad = current.loadKg;

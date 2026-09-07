@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { Beta1CurationService } from "./beta1-curation-service.js";
+import { V3Error } from "./errors.js";
 import { buildExerciseProgressSnapshot, type DifficultyLabel, type SetExecutionInput } from "./beta1-progression.js";
 import { buildSessionFacts, decideSessionOutcome, computeFeedbackTrend, classifyCauseExplanation, buildSessionPresence, type SessionPresenceSummary } from "./beta1-presence.js";
 import type { ActorContext, OfficialSnapshot, WorkoutEvolutionDecision } from "./types.js";
@@ -13,6 +14,7 @@ import type { ActorContext, OfficialSnapshot, WorkoutEvolutionDecision } from ".
  */
 
 export interface Beta1WorkoutRepository {
+  startOrResumeBeta1WorkoutSession(input: { actor: ActorContext; requestId: string }): Promise<{ workoutSessionId: string; resumed: boolean }>;
   completeBeta1WorkoutSession(input: {
     actor: ActorContext;
     requestId: string;
@@ -97,6 +99,11 @@ export class Beta1WorkoutService {
     private readonly curation: Beta1CurationService,
   ) {}
 
+  /** Backend-owned session identity: start once, resume across reload/new clients. */
+  async startOrResumeSession(input: { actor: ActorContext; requestId: string }): Promise<{ workoutSessionId: string; resumed: boolean }> {
+    return this.repository.startOrResumeBeta1WorkoutSession(input);
+  }
+
   /** One execution = one exercise of the session, with REAL set rows. */
   async recordExecution(input: {
     actor: ActorContext;
@@ -110,10 +117,8 @@ export class Beta1WorkoutService {
     substitutionReason?: string;
     techniqueGroup?: string;
   }): Promise<{ decision: WorkoutEvolutionDecision; setCount: number }> {
-    if (!input.sets.length) {
-      // A completed feedback with no sets is still a valid completion signal,
-      // but the repository requires the aggregate row; sets may be empty only
-      // when the exercise could not be quantified (e.g. stretching).
+    if (input.sets.length < 1) {
+      throw new V3Error("V3_BETA1_SETS_REQUIRED", "Registre pelo menos uma série real antes de concluir o exercício.", 409);
     }
     return this.repository.recordBeta1ExecutionFeedback(input);
   }
@@ -163,7 +168,7 @@ export class Beta1WorkoutService {
           } catch { /* duplicate same-day memory is fine */ }
         }
         const straightSets = entry.setRows.filter((set) => set.techniqueType === "STRAIGHT_SET" && set.reps != null);
-        if (straightSets.length > 0) {
+        if (straightSets.length > 0 && entry.difficultyLabel) {
           const snapshot = buildExerciseProgressSnapshot(entry.exerciseId, {
             exerciseId: entry.exerciseId,
             repRangeLow: entry.repRangeLow,
@@ -171,7 +176,7 @@ export class Beta1WorkoutService {
             sessions: [{
               loadKg: straightSets[0]?.loadKg ?? null,
               repsPerSet: straightSets.map((set) => set.reps ?? 0),
-              difficultyLabel: entry.difficultyLabel || "BOA",
+              difficultyLabel: entry.difficultyLabel,
               pain: entry.pain,
               completed: entry.completed,
             }],

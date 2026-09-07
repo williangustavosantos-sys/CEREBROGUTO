@@ -164,14 +164,25 @@ export function generateWorkoutDraft(snapshot: OfficialSnapshot, options: { sess
     sourceFileName: exercise.sourceFileName,
   }));
   const techniqueCandidates = items.filter((item) => item.position > 0);
-  const intensifier = techniqueCandidates.find((item) =>
-    dropSetEligibility(item as WorkoutItem, snapshot.profile.trainingStatus).eligible)
-    || techniqueCandidates.find((item) =>
+  const dropSetCandidate = techniqueCandidates.find((item) =>
+    dropSetEligibility(item as WorkoutItem, snapshot.profile.trainingStatus).eligible);
+  const restPauseCandidate = techniqueCandidates.find((item) =>
     restPauseEligibility(item as WorkoutItem, snapshot.profile.trainingStatus).eligible);
+  // Deterministic rotation keeps both intensifiers reachable while preserving
+  // the one-intensifier cap. Odd logical sessions prefer REST_PAUSE; even
+  // sessions prefer DROP_SET, with a safe fallback when only one is eligible.
+  const preferRestPause = ctx.sessionIndex % 2 === 1;
+  const intensifier = preferRestPause
+    ? (restPauseCandidate ?? dropSetCandidate)
+    : (dropSetCandidate ?? restPauseCandidate);
   if (intensifier) {
-    if (dropSetEligibility(intensifier as WorkoutItem, snapshot.profile.trainingStatus).eligible) {
+    const canRestPause = restPauseEligibility(intensifier as WorkoutItem, snapshot.profile.trainingStatus).eligible;
+    const canDropSet = dropSetEligibility(intensifier as WorkoutItem, snapshot.profile.trainingStatus).eligible;
+    if (preferRestPause && canRestPause) {
+      intensifier.technique = { type: "REST_PAUSE", baseSetTarget: ctx.repRange, pauseSeconds: "15-20", miniSets: 1, miniSetTarget: "3-5" };
+    } else if (canDropSet) {
       intensifier.technique = { type: "DROP_SET", applyOn: "LAST_SET", drops: 1, loadReductionPercent: 20, targetRepsAfterDrop: ctx.repRange };
-    } else {
+    } else if (canRestPause) {
       intensifier.technique = { type: "REST_PAUSE", baseSetTarget: ctx.repRange, pauseSeconds: "15-20", miniSets: 1, miniSetTarget: "3-5" };
     }
   }

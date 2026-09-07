@@ -8,7 +8,8 @@ import { materializeFirstContact } from "./first-contact.js";
 import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from "./facts.js";
 import { assertRelationshipLifecycleState, evaluateOfficialRelationshipReturn, evaluateRelationshipLifecycleState, shouldSuppressProactivity, type RelationshipLifecycleRecord } from "./relationship-lifecycle.js";
 import { decideWorkoutEvolution } from "./workout-evolution.js";
-import { mapLegacyDifficultyInverse } from "./beta1-progression.js";
+import { decideDoubleProgression, mapLegacyDifficultyInverse } from "./beta1-progression.js";
+import { memoryConceptKey, memoryEquivalentKeys } from "./beta1-memory.js";
 import { assertValidAdaptedExecution, resolveSessionEffectiveLocation } from "./session-execution-policy.js";
 import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
 import type {
@@ -2332,39 +2333,36 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     candidate: import("./beta1-memory.js").CuratedMemoryCandidate;
     sourceType: import("./beta1-memory.js").MemorySourceType;
   }): Promise<import("./beta1-memory.js").PersistedMemory> {
+    const canonicalKey = memoryConceptKey(input.candidate.category, input.candidate.key);
+    const equivalentKeys = memoryEquivalentKeys(input.candidate.category, canonicalKey);
     return this.withActorTransaction(input.actor, async (client) => {
-      // Serialize supersession of the same category+key (race-safe against
-      // concurrent corrections on the same key).
+      // Serialize by semantic concept, not merely by historical storage key.
       await client.query(
         `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':memory:' || $3 || ':' || $4, 0))`,
-        [input.actor.tenantId, input.actor.userId, input.candidate.category, input.candidate.key],
+        [input.actor.tenantId, input.actor.userId, input.candidate.category, canonicalKey],
       );
       const previous = await client.query<QueryResultRow>(
         `SELECT id, version FROM guto_v3.user_memories
-          WHERE tenant_id=$1 AND user_id=$2 AND category=$3 AND key=$4 AND status='ACTIVE'
-          ORDER BY version DESC LIMIT 1`,
-        [input.actor.tenantId, input.actor.userId, input.candidate.category, input.candidate.key],
+          WHERE tenant_id=$1 AND user_id=$2 AND category=$3 AND key = ANY($4::text[]) AND status='ACTIVE'
+          ORDER BY version DESC, updated_at DESC, id DESC`,
+        [input.actor.tenantId, input.actor.userId, input.candidate.category, equivalentKeys],
       );
       const previousId = previous.rows[0]?.id ? String(previous.rows[0].id) : null;
-      const nextVersion = previous.rows[0] ? asNumber(previous.rows[0].version) + 1 : 1;
-      if (previousId) {
-        // Supersession: mark the old ACTIVE as SUPERSEDED (history preserved),
-        // then insert the new truth pointing back at it. The conditional
-        // UPDATE is the durable second barrier against concurrent corrections.
+      const nextVersion = previous.rows.length ? Math.max(...previous.rows.map((row) => asNumber(row.version))) + 1 : 1;
+      if (previous.rows.length > 0) {
+        const previousIds = previous.rows.map((row) => String(row.id));
         const flipped = await client.query<{ id: string }>(
           `UPDATE guto_v3.user_memories SET status='SUPERSEDED', updated_at=now()
-           WHERE id=$1::uuid AND status='ACTIVE' RETURNING id`,
-          [previousId],
+           WHERE id = ANY($1::uuid[]) AND status='ACTIVE' RETURNING id`,
+          [previousIds],
         );
-        if (!flipped.rows[0]) {
+        if (flipped.rowCount !== previousIds.length) {
           throw new V3Error("V3_MEMORY_SUPERSESSION_RACE", "A memória mudou durante a correção; tente novamente.", 409);
         }
-        // History mirror: the row was mirrored on insert; the flip just moves
-        // its status, so history keeps ONE row per version with the final state.
         await client.query(
           `UPDATE guto_v3.user_memories_history SET status='SUPERSEDED', updated_at=now()
-           WHERE id=$1::uuid`,
-          [previousId],
+           WHERE id = ANY($1::uuid[])`,
+          [previousIds],
         );
       }
       const inserted = await client.query<QueryResultRow>(
@@ -2372,7 +2370,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
           (tenant_id,user_id,category,key,value,status,confidence,source_type,source_request_id,version,last_confirmed_at,supersedes_id)
          VALUES ($1,$2,$3,$4,$5::jsonb,'ACTIVE',$6,$7,$8,$9,now(),$10)
          RETURNING id,version,created_at,updated_at`,
-        [input.actor.tenantId, input.actor.userId, input.candidate.category, input.candidate.key,
+        [input.actor.tenantId, input.actor.userId, input.candidate.category, canonicalKey,
           JSON.stringify(input.candidate.value), input.candidate.confidence, input.sourceType, input.requestId,
           nextVersion, previousId],
       );
@@ -2387,7 +2385,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       );
       await this.appendMutationEvent(client, input.actor, input.requestId, "memory.persisted", {
         category: input.candidate.category,
-        key: input.candidate.key,
+        key: canonicalKey,
         memoryId: String(row.id),
         supersededId: previousId,
       });
@@ -2396,7 +2394,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         tenantId: input.actor.tenantId,
         userId: input.actor.userId,
         category: input.candidate.category,
-        key: input.candidate.key,
+        key: canonicalKey,
         value: input.candidate.value,
         status: "ACTIVE",
         confidence: input.candidate.confidence,
@@ -2486,6 +2484,42 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
    * Pain recorded here becomes a curated TRAINING_LIMITATIONS memory via the
    * Beta1WorkoutService (outside this transaction). Idempotent on requestId.
    */
+  async startOrResumeBeta1WorkoutSession(input: {
+    actor: ActorContext;
+    requestId: string;
+  }): Promise<{ workoutSessionId: string; resumed: boolean }> {
+    return this.withActorTransaction(input.actor, async (client) => {
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':beta1-session', 0))`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      const activePlan = await client.query<QueryResultRow>(
+        `SELECT id FROM guto_v3.workout_plans
+          WHERE tenant_id=$1 AND user_id=$2 AND status='active'
+          ORDER BY created_at DESC LIMIT 1`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      if (!activePlan.rows[0]) throw new V3Error("V3_WORKOUT_NOT_FOUND", "Treino oficial ativo não encontrado.", 409);
+      const existing = await client.query<{ id: string }>(
+        `SELECT id FROM guto_v3.workout_sessions
+          WHERE tenant_id=$1 AND user_id=$2 AND plan_id=$3::uuid AND status IN ('planned','started')
+          ORDER BY COALESCE(started_at,created_at) DESC, created_at DESC LIMIT 1`,
+        [input.actor.tenantId, input.actor.userId, activePlan.rows[0].id],
+      );
+      if (existing.rows[0]) {
+        return { workoutSessionId: String(existing.rows[0].id), resumed: true };
+      }
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO guto_v3.workout_sessions (tenant_id,user_id,plan_id,status,started_at,completed_at)
+         VALUES ($1,$2,$3::uuid,'started',now(),null) RETURNING id`,
+        [input.actor.tenantId, input.actor.userId, activePlan.rows[0].id],
+      );
+      const workoutSessionId = String(inserted.rows[0]!.id);
+      await this.appendMutationEvent(client, input.actor, input.requestId, "workout.beta1_session_started", { workoutSessionId });
+      return { workoutSessionId, resumed: false };
+    });
+  }
+
   async recordBeta1ExecutionFeedback(input: {
     actor: ActorContext;
     requestId: string;
@@ -2498,6 +2532,9 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     substitutionReason?: string;
     techniqueGroup?: string;
   }): Promise<{ decision: import("./types.js").WorkoutEvolutionDecision; setCount: number }> {
+    if (input.sets.length < 1) {
+      throw new V3Error("V3_BETA1_SETS_REQUIRED", "Registre pelo menos uma série real antes de concluir o exercício.", 409);
+    }
     return this.withActorTransaction(input.actor, async (client) => {
       await client.query(
         `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':beta1-exec:' || $3 || ':' || $4, 0))`,
@@ -2514,21 +2551,9 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         const cached = priorPayload as { decision?: import("./types.js").WorkoutEvolutionDecision; setCount?: number };
         if (cached.decision && typeof cached.setCount === "number") return { decision: cached.decision, setCount: cached.setCount };
       }
-      // MODELO B (same authority as recordWorkoutExerciseEvent): the client /
-      // runtime-generated workoutSessionId is used LITERALLY as the PK of
-      // workout_sessions — the FIRST execution feedback of a session creates
-      // the row; concurrent feedback with the same id never duplicates it.
-      const activePlan = await client.query<QueryResultRow>(
-        `SELECT id FROM guto_v3.workout_plans WHERE tenant_id=$1 AND user_id=$2 AND status='active' ORDER BY created_at DESC LIMIT 1`,
-        [input.actor.tenantId, input.actor.userId],
-      );
-      if (!activePlan.rows[0]) throw new V3Error("V3_WORKOUT_NOT_FOUND", "Treino oficial ativo não encontrado.", 409);
-      await client.query(
-        `INSERT INTO guto_v3.workout_sessions (id,tenant_id,user_id,plan_id,status,started_at,completed_at)
-         VALUES ($1::uuid,$2,$3,$4,'started',now(),null)
-         ON CONFLICT (id) DO NOTHING`,
-        [input.workoutSessionId, input.actor.tenantId, input.actor.userId, activePlan.rows[0].id],
-      );
+      // Session identity is backend-owned. Execution may only attach to a
+      // session previously issued by startOrResumeBeta1WorkoutSession; an
+      // arbitrary client UUID never creates durable session state.
       const session = await client.query<QueryResultRow>(
         `SELECT id,tenant_id,user_id,plan_id,status FROM guto_v3.workout_sessions WHERE id=$1::uuid LIMIT 1`,
         [input.workoutSessionId],
@@ -2585,7 +2610,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         [input.actor.tenantId, input.actor.userId, input.workoutSessionId, input.exerciseId,
           bestSet?.load ?? null, bestSet?.reps ?? null, straightSets.length, true,
           perceived, input.difficultyLabel, input.substitutedFromExerciseId ?? null, input.substitutionReason ?? null,
-          JSON.stringify({ pain: input.pain === true, difficultyLabel: input.difficultyLabel, techniqueGroup: input.techniqueGroup ?? null })],
+          JSON.stringify({ pain: input.pain === true || input.difficultyLabel === "DOR", difficultyLabel: input.difficultyLabel, techniqueGroup: input.techniqueGroup ?? null })],
       );
       let setCount = 0;
       for (const set of input.sets) {
@@ -2599,24 +2624,9 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         );
         setCount += 1;
       }
-      // Deterministic evolution decision from the SAME authority as the V3 flow.
-      const recent = await client.query<QueryResultRow>(
-        `SELECT load_value,repetitions,sets_completed,completed,perceived_difficulty,substituted_from_exercise_id,substitution_reason
-           FROM guto_v3.workout_session_exercises
-          WHERE tenant_id=$1 AND user_id=$2 AND exercise_id=$3
-          ORDER BY created_at DESC, id DESC LIMIT 4`,
-        [input.actor.tenantId, input.actor.userId, input.exerciseId],
-      );
-      const history = recent.rows.reverse().map((row) => ({
-        exerciseId: input.exerciseId,
-        loadValue: row.load_value == null ? undefined : Number(row.load_value),
-        repetitions: row.repetitions == null ? undefined : Number(row.repetitions),
-        setsCompleted: row.sets_completed == null ? undefined : Number(row.sets_completed),
-        completed: Boolean(row.completed),
-        perceivedDifficulty: row.perceived_difficulty == null ? undefined : Number(row.perceived_difficulty),
-        substitutedFromExerciseId: row.substituted_from_exercise_id || undefined,
-        substitutionReason: row.substitution_reason || undefined,
-      }));
+      // BETA1 progression authority: derive the decision from ALL real STRAIGHT_SET
+      // work sets. The aggregate bestSet above is legacy compatibility only and
+      // MUST NOT decide progression.
       const event: import("./types.js").WorkoutExerciseSessionEvent = {
         exerciseId: input.exerciseId,
         workoutSessionId: input.workoutSessionId,
@@ -2627,9 +2637,90 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         perceivedDifficulty: perceived ?? undefined,
         substitutedFromExerciseId: input.substitutedFromExerciseId,
         substitutionReason: input.substitutionReason,
-        context: { pain: input.pain === true, difficultyLabel: input.difficultyLabel, safetyConcern: input.pain === true || input.difficultyLabel === "DOR" },
+        context: {
+          pain: input.pain === true || input.difficultyLabel === "DOR",
+          difficultyLabel: input.difficultyLabel,
+          safetyConcern: input.pain === true || input.difficultyLabel === "DOR",
+        },
       };
-      const decision = decideWorkoutEvolution(event, history.slice(0, -1));
+      let decision: import("./types.js").WorkoutEvolutionDecision;
+      if (input.substitutedFromExerciseId) {
+        // Substitution semantics stay on the established deterministic authority.
+        decision = decideWorkoutEvolution(event, []);
+      } else {
+        const itemResult = await client.query<QueryResultRow>(
+          `SELECT id,exercise_id,name,purpose,muscle_group,position,reps,canonical_name_pt
+             FROM guto_v3.workout_plan_items
+            WHERE tenant_id=$1 AND plan_id=$2::uuid AND exercise_id=$3 LIMIT 1`,
+          [input.actor.tenantId, plan.rows[0].id, input.exerciseId],
+        );
+        if (!itemResult.rows[0]) throw new V3Error("V3_WORKOUT_EXERCISE_NOT_ACTIVE", "Exercício não pertence ao treino oficial ativo.", 409);
+        const itemRow = itemResult.rows[0];
+        const prescribedReps = String(itemRow.reps || "");
+        const range = /(\d{1,2})\s*[-–]\s*(\d{1,2})/u.exec(prescribedReps);
+        const repRangeLow = range ? Number(range[1]) : 8;
+        const repRangeHigh = range ? Number(range[2]) : 12;
+        const evidenceRows = await client.query<QueryResultRow>(
+          `SELECT id,session_id,completed,difficulty_label,context_snapshot,created_at
+             FROM guto_v3.workout_session_exercises
+            WHERE tenant_id=$1 AND user_id=$2 AND exercise_id=$3 AND difficulty_label IS NOT NULL
+            ORDER BY created_at DESC,id DESC LIMIT 4`,
+          [input.actor.tenantId, input.actor.userId, input.exerciseId],
+        );
+        const sessions: import("./beta1-progression.js").ProgressionEvidence["sessions"] = [];
+        for (const executionRow of [...evidenceRows.rows].reverse()) {
+          const realSets = await client.query<QueryResultRow>(
+            `SELECT set_number,load_kg,reps
+               FROM guto_v3.workout_set_executions
+              WHERE tenant_id=$1 AND user_id=$2 AND session_id=$3::uuid AND session_exercise_id=$4::uuid
+                AND technique_type='STRAIGHT_SET'
+              ORDER BY set_number`,
+            [input.actor.tenantId, input.actor.userId, executionRow.session_id, executionRow.id],
+          );
+          const workSets = realSets.rows.filter((setRow) => setRow.reps != null);
+          const difficultyLabel = String(executionRow.difficulty_label) as import("./beta1-progression.js").DifficultyLabel;
+          const context = jsonObject(executionRow.context_snapshot);
+          sessions.push({
+            loadKg: workSets.find((setRow) => setRow.load_kg != null)?.load_kg == null
+              ? null
+              : Number(workSets.find((setRow) => setRow.load_kg != null)!.load_kg),
+            repsPerSet: workSets.map((setRow) => asNumber(setRow.reps)),
+            difficultyLabel,
+            pain: context.pain === true || difficultyLabel === "DOR",
+            completed: Boolean(executionRow.completed),
+          });
+        }
+        const progression = decideDoubleProgression({
+          exerciseId: input.exerciseId,
+          repRangeLow,
+          repRangeHigh,
+          sessions,
+        }, {
+          id: String(itemRow.id),
+          exerciseId: String(itemRow.exercise_id),
+          name: String(itemRow.name),
+          purpose: String(itemRow.purpose),
+          muscleGroup: String(itemRow.muscle_group),
+          position: asNumber(itemRow.position),
+          reps: itemRow.reps == null ? undefined : String(itemRow.reps),
+          canonicalNamePt: itemRow.canonical_name_pt == null ? undefined : String(itemRow.canonical_name_pt),
+        });
+        const mappedDecision: import("./types.js").WorkoutEvolutionDecisionCode =
+          progression.decision === "PROGRESS" || progression.decision === "MAINTAIN" || progression.decision === "REGRESS" || progression.decision === "REVIEW"
+            ? progression.decision
+            : "REVIEW";
+        let nextPrescription: import("./types.js").WorkoutNextPrescription;
+        if (mappedDecision === "PROGRESS" && progression.fromLoadKg != null && progression.toLoadKg != null) {
+          nextPrescription = { exerciseId: input.exerciseId, action: "increase_load", loadDeltaKg: Number((progression.toLoadKg - progression.fromLoadKg).toFixed(1)), reason: progression.explanation };
+        } else if (mappedDecision === "REGRESS" && progression.fromLoadKg != null && progression.toLoadKg != null) {
+          nextPrescription = { exerciseId: input.exerciseId, action: "reduce_load", loadDeltaKg: Number((progression.toLoadKg - progression.fromLoadKg).toFixed(1)), reason: progression.explanation };
+        } else if (mappedDecision === "REVIEW") {
+          nextPrescription = { exerciseId: input.exerciseId, action: "review", reason: progression.explanation };
+        } else {
+          nextPrescription = { exerciseId: input.exerciseId, action: "maintain", reason: progression.explanation };
+        }
+        decision = { exerciseId: input.exerciseId, decision: mappedDecision, reasonCode: progression.reasonCode, nextPrescription };
+      }
       await client.query(
         `INSERT INTO guto_v3.workout_evolution_decisions
           (tenant_id,user_id,exercise_id,decision,reason_code,source_session_exercise_id,context_snapshot)
@@ -2791,49 +2882,66 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     causeCategory: "user_state" | "training" | null;
   }): Promise<{ duplicate: boolean }> {
     return this.withActorTransaction(input.actor, async (client) => {
-      const prior = await client.query(
-        `SELECT 1 FROM guto_v3.guto_events
-          WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND event_type='beta1.session_feedback' LIMIT 1`,
-        [input.actor.tenantId, input.actor.userId, input.requestId],
+      const session = await client.query<QueryResultRow>(
+        `SELECT id,tenant_id,user_id,status FROM guto_v3.workout_sessions WHERE id=$1::uuid LIMIT 1`,
+        [input.workoutSessionId],
       );
-      if (prior.rows[0]) return { duplicate: true };
+      if (!session.rows[0]) throw new V3Error("V3_WORKOUT_SESSION_NOT_FOUND", "Sessão de treino não encontrada.", 404);
+      if (String(session.rows[0].tenant_id) !== input.actor.tenantId || String(session.rows[0].user_id) !== input.actor.userId) {
+        throw new V3Error("V3_FOREIGN_WORKOUT_SESSION", "Não é possível registrar feedback em sessão de outro usuário.", 409);
+      }
+      if (String(session.rows[0].status) !== "completed") {
+        throw new V3Error("V3_WORKOUT_SESSION_NOT_COMPLETED", "Conclua a sessão antes de registrar o feedback final.", 409);
+      }
+      const existing = await client.query(
+        `SELECT 1 FROM guto_v3.workout_session_feedback
+          WHERE tenant_id=$1 AND user_id=$2 AND session_id=$3::uuid LIMIT 1`,
+        [input.actor.tenantId, input.actor.userId, input.workoutSessionId],
+      );
       await client.query(
-        `INSERT INTO guto_v3.guto_events (tenant_id,user_id,request_id,event_type,payload)
-         VALUES ($1,$2,$3,'beta1.session_feedback',$4::jsonb)`,
-        [input.actor.tenantId, input.actor.userId, input.requestId, JSON.stringify({
-          workoutSessionId: input.workoutSessionId,
-          overallDifficulty: input.overallDifficulty,
-          pain: input.pain,
-          causeExplanation: input.causeExplanation,
-          causeCategory: input.causeCategory,
-        })],
+        `INSERT INTO guto_v3.workout_session_feedback
+          (tenant_id,user_id,session_id,overall_difficulty,pain,cause_explanation,cause_category)
+         VALUES ($1,$2,$3::uuid,$4,$5,$6,$7)
+         ON CONFLICT (tenant_id,user_id,session_id) DO UPDATE SET
+           overall_difficulty=EXCLUDED.overall_difficulty,
+           pain=EXCLUDED.pain,
+           cause_explanation=EXCLUDED.cause_explanation,
+           cause_category=EXCLUDED.cause_category,
+           updated_at=now()`,
+        [input.actor.tenantId, input.actor.userId, input.workoutSessionId, input.overallDifficulty, input.pain, input.causeExplanation, input.causeCategory],
       );
-      return { duplicate: false };});
+      await this.appendMutationEvent(client, input.actor, input.requestId, "beta1.session_feedback", {
+        workoutSessionId: input.workoutSessionId,
+        overallDifficulty: input.overallDifficulty,
+        pain: input.pain,
+        causeExplanation: input.causeExplanation,
+        causeCategory: input.causeCategory,
+        correction: Boolean(existing.rows[0]),
+      });
+      return { duplicate: Boolean(existing.rows[0]) };
+    });
   }
 
   async loadBeta1SessionFeedbackHistory(actor: ActorContext, limit = 12): Promise<Array<{
     workoutSessionId: string; overallDifficulty: "FACIL" | "BOA" | "PESADA" | "DOR"; pain: boolean;
     causeExplanation: string | null; causeCategory: "user_state" | "training" | null; createdAt: string;
   }>> {
-    const rows = await this.withActorTransaction(actor, async (client) => {
-      const result = await client.query<QueryResultRow>(
-        `SELECT payload, created_at FROM guto_v3.guto_events
-          WHERE tenant_id=$1 AND user_id=$2 AND event_type='beta1.session_feedback'
-          ORDER BY created_at DESC LIMIT $3`,
+    return this.withActorTransaction(actor, async (client) => {
+      const rows = await client.query<QueryResultRow>(
+        `SELECT session_id,overall_difficulty,pain,cause_explanation,cause_category,updated_at
+           FROM guto_v3.workout_session_feedback
+          WHERE tenant_id=$1 AND user_id=$2
+          ORDER BY updated_at DESC,id DESC LIMIT $3`,
         [actor.tenantId, actor.userId, limit],
       );
-      return result.rows;
-    });
-    return rows.map((row) => {
-      const payload = jsonObject(row.payload);
-      return {
-        workoutSessionId: String(payload.workoutSessionId ?? ""),
-        overallDifficulty: String(payload.overallDifficulty || "BOA") as "FACIL" | "BOA" | "PESADA" | "DOR",
-        pain: payload.pain === true,
-        causeExplanation: payload.causeExplanation == null ? null : String(payload.causeExplanation),
-        causeCategory: payload.causeCategory === "training" || payload.causeCategory === "user_state" ? payload.causeCategory as "user_state" | "training" : null,
-      createdAt: new Date(row.created_at as string).toISOString(),
-      };
+      return rows.rows.map((row) => ({
+        workoutSessionId: String(row.session_id),
+        overallDifficulty: String(row.overall_difficulty) as "FACIL" | "BOA" | "PESADA" | "DOR",
+        pain: row.pain === true,
+        causeExplanation: row.cause_explanation == null ? null : String(row.cause_explanation),
+        causeCategory: row.cause_category === "training" || row.cause_category === "user_state" ? row.cause_category as "user_state" | "training" : null,
+        createdAt: new Date(row.updated_at as string).toISOString(),
+      }));
     });
   }
 

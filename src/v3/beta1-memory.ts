@@ -71,6 +71,17 @@ export interface RelevantMemorySnapshot {
   memories: Array<Pick<PersistedMemory, "id" | "category" | "key" | "value" | "status" | "sourceType" | "updatedAt">>;
 }
 
+const CARDIO_PREFERENCE_KEYS = ["cardio_preference", "preferred_cardio", "liked_cardio", "disliked_cardio"] as const;
+
+export function memoryConceptKey(category: MemoryCategory, key: string): string {
+  if (category === "TRAINING_PREFERENCES" && (CARDIO_PREFERENCE_KEYS as readonly string[]).includes(key)) return "cardio_preference";
+  return key;
+}
+
+export function memoryEquivalentKeys(category: MemoryCategory, key: string): string[] {
+  return memoryConceptKey(category, key) === "cardio_preference" && category === "TRAINING_PREFERENCES" ? [...CARDIO_PREFERENCE_KEYS] : [key];
+}
+
 // ─── Deterministic curation (explicit declarations ONLY) ─────────────────────
 
 const CARDIO_KEYS: ReadonlyArray<[RegExp, string]> = [
@@ -129,49 +140,28 @@ export function resolveCuratedMemoryCandidates(message: string): CuratedMemoryCa
   const text = normalized(message);
   const candidates: CuratedMemoryCandidate[] = [];
 
-  // ── Cardio preference (like/dislike, explicit) ──
+  // ── Cardio preference (single semantic slot, explicit only) ──
   const likesList: string[] = [];
   const dislikesList: string[] = [];
   const likeMatch = /(?:gosto de|curto|prefiro|amo|comecei a gostar de|adoro)\s+(.{0,60})/u.exec(text);
   const dislikeMatch = /(?:odeio|nao gosto de|nao curto|detesto|nao quero|evito)\s+(.{0,60})/u.exec(text);
   const scanWindow = (window: string, target: string[]) => {
-    for (const [pattern, key] of CARDIO_KEYS) {
-      if (pattern.test(window)) target.push(key);
-    }
+    for (const [pattern, key] of CARDIO_KEYS) if (pattern.test(window)) target.push(key);
   };
   if (likeMatch?.[1]) scanWindow(likeMatch[1], likesList);
   if (dislikeMatch?.[1]) scanWindow(dislikeMatch[1], dislikesList);
-  // "Prefiro X a Y" / "prefiro X do que Y" — direct A-over-B preference.
   const preferMatch = /prefiro\s+(.{2,40}?)\s+(?:a|do que|em vez de|no lugar de)\s+(.{2,40})/u.exec(text);
+  let directPreference = false;
   if (preferMatch) {
-    const preferred: string[] = [];
-    const avoided: string[] = [];
-    scanWindow(preferMatch[1], preferred);
-    scanWindow(preferMatch[2], avoided);
+    const preferred: string[] = [], avoided: string[] = [];
+    scanWindow(preferMatch[1], preferred); scanWindow(preferMatch[2], avoided);
     if (preferred[0] && avoided[0] && preferred[0] !== avoided[0]) {
-      candidates.push({
-        category: "TRAINING_PREFERENCES",
-        key: "preferred_cardio",
-        value: { preferred: preferred[0], avoided: avoided[0], declaration: message.trim() },
-        confidence: "explicit",
-      });
+      directPreference = true;
+      candidates.push({ category: "TRAINING_PREFERENCES", key: "cardio_preference", value: { preferred: preferred[0], avoided: avoided[0], declaration: message.trim() }, confidence: "explicit" });
     }
   }
-  if (likesList.length > 0) {
-    candidates.push({
-      category: "TRAINING_PREFERENCES",
-      key: "liked_cardio",
-      value: { liked: likesList, declaration: message.trim() },
-      confidence: "explicit",
-    });
-  }
-  if (dislikesList.length > 0) {
-    candidates.push({
-      category: "TRAINING_PREFERENCES",
-      key: "disliked_cardio",
-      value: { disliked: dislikesList, declaration: message.trim() },
-      confidence: "explicit",
-    });
+  if (!directPreference && (likesList.length > 0 || dislikesList.length > 0)) {
+    candidates.push({ category: "TRAINING_PREFERENCES", key: "cardio_preference", value: { ...(likesList.length ? { liked: [...new Set(likesList)] } : {}), ...(dislikesList.length ? { disliked: [...new Set(dislikesList)] } : {}), declaration: message.trim() }, confidence: "explicit" });
   }
 
   // ── Equipment availability (environment) ──

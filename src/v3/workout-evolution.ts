@@ -88,13 +88,13 @@ export function decideWorkoutEvolution(
   if (!event.completed) {
     return { exerciseId: event.exerciseId, decision: "REVIEW", reasonCode: "EXERCISE_NOT_COMPLETED", nextPrescription: nextPrescriptionFor(event.exerciseId, "REVIEW", event, "Execução não completada; revisar antes de progredir.") };
   }
-  if ((event.perceivedDifficulty || 0) >= HARD_DIFFICULTY_MIN) {
-    return { exerciseId: event.exerciseId, decision: "REGRESS", reasonCode: "HIGH_PERCEIVED_DIFFICULTY", nextPrescription: nextPrescriptionFor(event.exerciseId, "REGRESS", event, "Esforço muito alto; reduzir a dose na próxima sessão.") };
-  }
-  // Pain is a safety concern, not high RPE: a PHYSICAL_CONSTRAINT context
-  // always lands on REVIEW so the executor never auto-progresses.
+  // SAFETY is absolute: pain/DOR must be handled before effort-based regression.
+  // A safety concern is never converted into an automatic dose reduction.
   if (event.context?.safetyConcern === true) {
     return { exerciseId: event.exerciseId, decision: "REVIEW", reasonCode: "PAIN_OR_SAFETY_CONCERN", nextPrescription: nextPrescriptionFor(event.exerciseId, "REVIEW", event, "Dor ou desconforto relatado; não progredir até avaliação.") };
+  }
+  if ((event.perceivedDifficulty || 0) >= HARD_DIFFICULTY_MIN) {
+    return { exerciseId: event.exerciseId, decision: "REGRESS", reasonCode: "HIGH_PERCEIVED_DIFFICULTY", nextPrescription: nextPrescriptionFor(event.exerciseId, "REGRESS", event, "Esforço muito alto; reduzir a dose na próxima sessão.") };
   }
   const easy = isEasyCompleted(event);
   if (easy) {
