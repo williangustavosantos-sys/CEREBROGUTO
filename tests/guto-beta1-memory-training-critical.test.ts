@@ -830,3 +830,23 @@ test("RLS_ADVERSARIAL: actor isolation blocks memory/session cross-user and cros
     await cleanup(repo, actorA); await cleanup(repo, actorB); await cleanup(repo, actorOtherTenant); await repo["pool"].end();
   }
 });
+
+test("PRESENCE retains recorded exercise pain after general session feedback", async () => {
+  const db = await getDb(); assert.ok(db);
+  const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
+  const beta1 = new Beta1WorkoutService(repo, new Beta1CurationService(repo));
+  const actor = await freshActor(repo);
+  try {
+    const state = await repo.loadAppState(actor);
+    const exerciseId = state.workout!.items.find((item) => item.position > 0)!.exerciseId;
+    const workoutSessionId = await startBeta1Session(beta1, actor);
+    await beta1.recordExecution({ actor, requestId: randomUUID(), workoutSessionId, exerciseId,
+      difficultyLabel: "DOR", pain: true,
+      sets: [{ setNumber: 1, loadKg: 20, reps: 8, techniqueType: "STRAIGHT_SET" }] });
+    assert.equal((await beta1.completeWorkout({ actor, requestId: randomUUID(), workoutSessionId })).presence?.outcome, "SAFETY");
+    for (const overallDifficulty of ["PESADA", "BOA", "FACIL"] as const) {
+      const presence = await beta1.recordSessionFeedback({ actor, requestId: randomUUID(), workoutSessionId, overallDifficulty, pain: false });
+      assert.equal(presence.outcome, "SAFETY", "general effort does not retract pain recorded in an exercise");
+    }
+  } finally { await cleanup(repo, actor); await repo["pool"].end(); }
+});

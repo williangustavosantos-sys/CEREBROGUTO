@@ -235,8 +235,11 @@ export class Beta1WorkoutService {
       causeCategory: causeCategory ?? null,
       createdAt: new Date().toISOString(),
     };
+    // General effort feedback does not retract pain recorded in an exercise.
+    const execution = await this.repository.loadSessionExecutionFeedback(input.actor, input.workoutSessionId);
+    const executionPain = execution.some((entry) => entry.pain || entry.difficultyLabel === "DOR");
     const outcome = decideSessionOutcome({
-      todayFeedback: { overallDifficulty: today.overallDifficulty, pain: today.pain },
+      todayFeedback: { overallDifficulty: today.overallDifficulty, pain: today.pain || executionPain },
       history: history.filter((entry) => entry.workoutSessionId !== input.workoutSessionId),
       cause: today.causeCategory
         ? { category: today.causeCategory, explanation: today.causeExplanation ?? "" }
