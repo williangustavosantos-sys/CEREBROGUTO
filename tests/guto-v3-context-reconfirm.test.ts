@@ -99,6 +99,29 @@ async function expectV3Error(promise: Promise<unknown>, code: string): Promise<V
   assert.fail(`esperado V3Error ${code}, nenhum erro lançado`);
 }
 
+test("context builder entrega a mesma memória curada ao modelo e ao executor", async () => {
+  const { actor, repository } = await completedUserAt74();
+  const memory = [{
+    id: "30000000-0000-4000-8000-000000000019",
+    category: "TRAINING_PREFERENCES",
+    key: "cardio_preference",
+    value: { liked: ["treadmill"], declaration: "Agora prefiro esteira." },
+    status: "ACTIVE",
+    sourceType: "conversation",
+    updatedAt: new Date().toISOString(),
+  }];
+  Object.assign(repository, { loadRelevantMemories: async () => memory });
+
+  const { envelope, snapshot } = await chatBuilder(repository).build(
+    actor,
+    "30000000-0000-4000-8000-000000000018",
+    "Monte uma sessão curta respeitando minha preferência salva.",
+  );
+
+  assert.deepEqual(snapshot.relevantMemories, envelope.relevantMemories);
+  assert.match(JSON.stringify(snapshot.relevantMemories), /treadmill/);
+});
+
 test("reconfirm A: edição pós-conclusão deixa o contexto stale e o chat rejeita com V3_CONTEXT_RECONFIRMATION_REQUIRED", async () => {
   const { actor, repository, service } = await completedUserAt74();
   await service.saveMemory(actor, { requestId: ids.postWeight, weightKg: 75 } as Parameters<V3CutoverService["saveMemory"]>[1]);

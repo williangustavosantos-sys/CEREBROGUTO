@@ -79,6 +79,11 @@ export class GutoContextBuilderV3 {
     const includeWorkout = activeContext?.kind === "workout" || messageNeedsWorkout(message);
     const includeDiet = activeContext?.kind === "diet" || messageNeedsDiet(message);
 
+    // Executors receive the official snapshot, while the decision model reads
+    // the envelope. Keep both views on the same bounded ACTIVE-memory read so a
+    // confirmed action can actually honor the preference used to decide it.
+    snapshot.relevantMemories = relevantMemories;
+
     const envelope: TurnEnvelope = {
       brainVersion: BrainVersion,
       requestId,

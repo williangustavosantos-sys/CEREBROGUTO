@@ -321,3 +321,23 @@ test("LOCATION_AUTHORITY CASE 5: invalid location string is ignored (falls back 
   assert.equal(decision.decision, "SUBSTITUTE");
   void state;
 });
+
+test("BETA1 MEMORY: active treadmill preference replaces only the session warm-up", async () => {
+  const { repository, actor } = await founder();
+  const state = await repository.loadAppState(actor);
+  const snapshot = await repository.loadOfficialSnapshot(actor);
+  snapshot.relevantMemories = [{
+    id: randomUUID(),
+    category: "TRAINING_PREFERENCES",
+    key: "cardio_preference",
+    value: { liked: ["treadmill"], declaration: "Agora prefiro esteira." },
+    status: "ACTIVE",
+    sourceType: "conversation",
+    updatedAt: new Date().toISOString(),
+  }];
+
+  const session = buildSessionWorkout({ baseWorkout: state.workout!, snapshot });
+
+  assert.equal(session.items[0]!.exerciseId, "caminhada_esteira_inclinada");
+  assert.equal(state.workout!.items[0]!.exerciseId, "bike_academia", "base plan remains immutable");
+});
