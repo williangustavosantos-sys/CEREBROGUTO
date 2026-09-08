@@ -28,3 +28,13 @@ export function asV3Error(error: unknown): V3Error {
     cause: error instanceof Error ? error.name : "unknown",
   });
 }
+
+/** Zod errors can cross package/realm boundaries in the bundled runtime. */
+export function isZodLikeError(error: unknown): error is { issues: Array<{ path: PropertyKey[]; code: string }> } {
+  return error instanceof Error && error.name === "ZodError" && Array.isArray((error as { issues?: unknown }).issues);
+}
+
+/** Technical diagnostics stay in logs; only intentional domain details are public. */
+export function publicV3ErrorDetails(source: unknown, parsed: V3Error): Record<string, unknown> | undefined {
+  return source instanceof V3Error && parsed.status < 500 ? parsed.details : undefined;
+}

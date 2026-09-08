@@ -3,7 +3,7 @@ import express, { type NextFunction, type Request, type RequestHandler, type Res
 import { z } from "zod";
 import { CalibrationMutationSchema, FirstContactConfirmationSchema, FirstContactCorrectionSchema, FirstContactResponseSchema, V3MemoryMutationSchema, V3TurnRequestSchema } from "./contracts.js";
 import { V3CutoverService } from "./cutover-service.js";
-import { asV3Error, userFacingV3Message, V3Error } from "./errors.js";
+import { asV3Error, isZodLikeError, publicV3ErrorDetails, userFacingV3Message, V3Error } from "./errors.js";
 import { parseWorkoutValidationEvidence } from "./workout-validation-evidence.js";
 import { ProfileServiceV3 } from "./executors.js";
 import { isLangfuseConfigured } from "./observability/instrumentation.js";
@@ -772,7 +772,7 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
   });
 
   router.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
-    const parsed = error instanceof z.ZodError
+    const parsed = error instanceof z.ZodError || isZodLikeError(error)
       ? new V3Error("V3_INVALID_REQUEST", "Contrato de requisição V3 inválido.", 400, {
           issues: error.issues.map((issue) => ({ path: issue.path.join("."), code: issue.code })),
         })
@@ -786,7 +786,7 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
       message: userFacingV3Message(parsed, requestId || parsed.code),
       brainVersion: "guto-cerebro-v3",
       traceId: currentTraceId(),
-      ...(parsed.details ? { details: parsed.details } : {}),
+      ...(publicV3ErrorDetails(error, parsed) ? { details: publicV3ErrorDetails(error, parsed) } : {}),
     });
   });
 
