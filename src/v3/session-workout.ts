@@ -103,6 +103,17 @@ function cloneItem(item: WorkoutItem): WorkoutItem {
   return { ...item, id: `${item.id}-session`, position: item.position };
 }
 
+function preferredCardioExerciseId(snapshot: OfficialSnapshot): string | null {
+  const memory = (snapshot.relevantMemories || []).find((entry) =>
+    entry.status === "ACTIVE" && entry.category === "TRAINING_PREFERENCES" && entry.key === "cardio_preference");
+  if (!memory) return null;
+  const values = [memory.value.preferred, ...(Array.isArray(memory.value.liked) ? memory.value.liked : [])]
+    .map((value) => String(value).toLowerCase());
+  if (values.includes("treadmill")) return "caminhada_esteira_inclinada";
+  if (values.includes("bike")) return "bike_academia";
+  return null;
+}
+
 /** Deterministic estimated session duration (minutes) from sets, reps, rest. */
 export function estimateSessionMinutes(items: WorkoutItem[]): number {
   const parseReps = (reps: string | undefined): number => {
@@ -137,6 +148,28 @@ export function buildSessionWorkout(input: BuildSessionWorkoutInput): SessionWor
   const unavailable = new Set(input.unavailableExerciseIds || []);
 
   let items: WorkoutItem[] = baseWorkout.items.map(cloneItem);
+
+  // A preferência curada mais recente é aplicada somente à cópia da sessão.
+  // O plano oficial permanece imutável e o catálogo continua sendo a autoridade
+  // de disponibilidade, localização e mídia do exercício escolhido.
+  const preferredCardioId = preferredCardioExerciseId(snapshot);
+  if (preferredCardioId) {
+    const preferred = getCatalogById(preferredCardioId);
+    const warmupIndex = items.findIndex((item) => item.muscleGroup === "aquecimento");
+    if (preferred && warmupIndex >= 0 && getExerciseLocations(preferred).includes(effectiveLocation)) {
+      const current = items[warmupIndex]!;
+      items[warmupIndex] = {
+        ...current,
+        exerciseId: preferred.id,
+        name: preferred.namesByLanguage[snapshot.profile.language] || preferred.namesByLanguage["pt-BR"],
+        purpose: preferred.movementPattern || current.purpose,
+        muscleGroup: preferred.muscleGroup,
+        videoUrl: preferred.videoUrl,
+        sourceFileName: preferred.sourceFileName,
+        canonicalNamePt: preferred.canonicalNamePt,
+      };
+    }
+  }
 
   // 1. MACHINE OCCUPIED — substitute each unavailable exercise with a
   //    same-stimulus candidate (movement-pattern first, catalog-only, video).
