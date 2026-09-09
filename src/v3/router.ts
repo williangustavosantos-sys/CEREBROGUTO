@@ -9,6 +9,7 @@ import { ProfileServiceV3 } from "./executors.js";
 import { isLangfuseConfigured } from "./observability/instrumentation.js";
 import { currentTraceId, withV3Span, withV3Trace } from "./observability/tracing.js";
 import { getV3AuthService, getV3Runtime } from "./runtime.js";
+import { previewIdentity } from "./preview-identity.js";
 import type { ActorContext } from "./types.js";
 
 const ActiveContextMutationSchema = z.discriminatedUnion("clear", [
@@ -226,6 +227,7 @@ export function createV3Router(options: { authenticatedRateLimit?: RequestHandle
       enabled: v3Enabled(),
       v3Only: configured.v3Only,
       ready,
+      previewIdentity: previewIdentity(),
       configured,
       postgres,
       redis,
