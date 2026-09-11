@@ -1,3 +1,4 @@
+import { interpretFoodDeclaration, interpretPhysicalDeclaration } from "./declaration-semantics.js";
 import { V3Error } from "./errors.js";
 
 /**
@@ -101,18 +102,17 @@ export function resolveDeclaredOperationalFacts(message: string): FactChange[] {
     changes.push(declared("EXPERIENCE_LEVEL", code, { code }));
   }
 
-  if (/\b(vegetarian|vegetariano|vegetariana|vegano|vegana|vegan|sem gluten|gluten free|intoleran|alerg)/u.test(text)) {
-    changes.push(declared("FOOD_CONSTRAINT", text, { declaration: message.trim() }));
+  const foodAssertion = interpretFoodDeclaration(message);
+  if (foodAssertion.state === "PRESENT" && /\b(vegetarian|vegetariano|vegetariana|vegano|vegana|vegan|sem gluten|gluten free|intoleran|alerg)/u.test(text)) {
+    changes.push(declared("FOOD_CONSTRAINT", text, { declaration: message.trim(), assertionState: foodAssertion.state }));
   }
   if (/\b(nao como|nao consumo|non mangio|avoid|evito)\b/u.test(text)) {
     changes.push(declared("FOOD_EXCLUSION", text, { declaration: message.trim() }));
   }
-  const region = /(joelho|knee|lombar|lower back|schiena bassa|ombro|shoulder|spalla|tornozelo|ankle|caviglia|punho|wrist|polso|coluna|neck|collo)/u.exec(text)?.[1];
-  // Pain detection covers common inflections across PT/IT/EN (dor, dói, doendo,
-  // doer, dolore, dolor, hurts, hurting, istighfare), so a literal "está doendo
-  // minha lombar" enters the safety path just like "dor na lombar".
-  if (region && /(do[ée]|doendo|doer|doendo|dolor|dolore|male|facendo male|fastidio|hurts?|hurt(ing)?|pain|istighfare|incomod|nao consigo|limita)\b/u.test(text)) {
-    changes.push(declared("PHYSICAL_CONSTRAINT", region, { bodyRegion: region, declaration: message.trim() }));
+  for (const signal of interpretPhysicalDeclaration(message).regions) {
+    changes.push(declared("PHYSICAL_CONSTRAINT", signal.bodyRegion, {
+      bodyRegion: signal.bodyRegion, active: signal.active, declaration: message.trim(),
+    }));
   }
   const sessionLocation = /(hoje|today|oggi).{0,36}\b(casa|home|park|parque|gym|academia)\b/u.exec(text)?.[2];
   if (sessionLocation) changes.push(declared("LOCATION", sessionLocation, { location: sessionLocation }, "session"));

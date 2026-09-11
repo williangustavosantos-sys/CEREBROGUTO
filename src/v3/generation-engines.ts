@@ -1,3 +1,4 @@
+import { activePhysicalDeclaration } from "./declaration-semantics.js";
 import {
   ValidatedExerciseCatalog,
   getExerciseLocations,
@@ -30,9 +31,9 @@ function trainingLocation(value: string): CatalogLocation {
 
 function riskTokens(snapshot: OfficialSnapshot): Set<string> {
   const declaredFacts = (snapshot.currentFacts || [])
-    .filter((fact) => fact.factType === "PHYSICAL_CONSTRAINT")
+    .filter((fact) => fact.factType === "PHYSICAL_CONSTRAINT" && fact.value.active !== false)
     .map((fact) => String(fact.value.declaration || fact.canonicalValue));
-  const declared = [snapshot.confirmedContext?.limitationDeclaration || "", ...declaredFacts].join(" ");
+  const declared = [snapshot.confirmedContext?.limitationDeclaration || "", ...declaredFacts].map(activePhysicalDeclaration).join(" ");
   const normalized = declared.toLocaleLowerCase("pt-BR");
   const operationalAliases = [
     [/joelh|knee/iu, ["knee", "knee_load", "knee_sensitive"]],
@@ -42,7 +43,7 @@ function riskTokens(snapshot: OfficialSnapshot): Set<string> {
   ] as const;
   return new Set([...snapshot.healthConstraints.flatMap((constraint) => [
     constraint.bodyRegion?.toLowerCase(),
-    ...constraint.description.toLowerCase().split(/[^a-z0-9_]+/),
+    ...activePhysicalDeclaration(constraint.description).split(/[^a-z0-9_]+/),
   ]), ...normalized.split(/[^a-z0-9_]+/), ...operationalAliases.flatMap(([pattern, tags]) => pattern.test(normalized) ? tags : [])]
     .filter((value): value is string => Boolean(value)));
 }

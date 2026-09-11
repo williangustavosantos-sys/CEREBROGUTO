@@ -73,7 +73,7 @@ function createPool(port: number, max: number): pg.Pool {
   return new pg.Pool({ host: "127.0.0.1", port, user: "guto_v3_runtime", password: "runtime", database: "postgres", max, idleTimeoutMillis: 20_000, connectionTimeoutMillis: 8_000 });
 }
 
-async function freshActor(repo: PostgresOfficialStateRepository, opts: { trainingLevel?: "beginner" | "returning" | "consistent" | "advanced" } = {}): Promise<ActorContext> {
+async function freshActor(repo: PostgresOfficialStateRepository, opts: { trainingLevel?: "beginner" | "returning" | "consistent" | "advanced"; foodDeclaration?: string; limitationDeclaration?: string } = {}): Promise<ActorContext> {
   const actor = await repo.provisionActor({ externalSubject: `pg-beta1-${randomUUID()}`, role: "student", tenantKey: "GUTO_CORE", tenantName: "GUTO Core" });
   const svc = new V3CutoverService(repo);
   await svc.acceptConsent(actor, randomUUID());
@@ -86,8 +86,8 @@ async function freshActor(repo: PostgresOfficialStateRepository, opts: { trainin
   });
   await svc.saveMemory(actor, { requestId: randomUUID(), name: "Beta", xpEvent: "grant_initial_xp" });
   await svc.startFirstContact(actor, randomUUID());
-  await svc.respondFirstContact(actor, { requestId: randomUUID(), expectedStep: "food_restrictions", answer: "Sem restrições." });
-  await svc.respondFirstContact(actor, { requestId: randomUUID(), expectedStep: "training_limitations", answer: "Sem limitações." });
+  await svc.respondFirstContact(actor, { requestId: randomUUID(), expectedStep: "food_restrictions", answer: opts.foodDeclaration ?? "Sem restrições." });
+  await svc.respondFirstContact(actor, { requestId: randomUUID(), expectedStep: "training_limitations", answer: opts.limitationDeclaration ?? "Sem limitações." });
   await svc.confirmFirstContact(actor, { requestId: randomUUID(), confirmed: true });
   await svc.generateWorkout(actor, randomUUID());
   return actor;
@@ -114,6 +114,35 @@ async function getDb() {
 }
 
 test.after(async () => { if (dbHandle) { await dbHandle.stop().catch(() => {}); dbHandle = null; } });
+
+test("FIRST_CONTACT_POLARITY: known absence persists without phantom constraints after a new runtime", async () => {
+  const db = await getDb();
+  const repo = new PostgresOfficialStateRepository(createPool(db.port, 2));
+  const actor = await freshActor(repo, {
+    foodDeclaration: "Não tenho restrições alimentares. Como ovos e leite normalmente.",
+    limitationDeclaration: "Não sinto dor e não tenho limitações para treinar.",
+  });
+  const freshRuntime = new PostgresOfficialStateRepository(createPool(db.port, 2));
+  try {
+    const state = await freshRuntime.loadAppState(actor);
+    assert.deepEqual(state.healthConstraints, []);
+    assert.equal(state.firstContact.status, "COMPLETED");
+    assert.ok(state.workout?.items.length);
+    assert.ok(state.diet?.meals.length);
+    assert.equal(state.currentFacts?.length, 2);
+    assert.ok(state.currentFacts?.every(fact => fact.value.assertionState === "ABSENT"));
+    const curation = new Beta1CurationService(freshRuntime);
+    await curation.curateFromTurn(actor, randomUUID(), "Não gosto de bike.");
+    let memories = await curation.buildRelevantMemorySnapshot(actor, "workout");
+    assert.deepEqual(memories.memories.find(memory => memory.key === "cardio_preference")?.value.disliked, ["bike"]);
+    await curation.curateFromTurn(actor, randomUUID(), "Adesso mi piace la bicicletta.");
+    memories = await curation.buildRelevantMemorySnapshot(actor, "workout");
+    assert.deepEqual(memories.memories.find(memory => memory.key === "cardio_preference")?.value.liked, ["bike"]);
+    const history = await freshRuntime.listMemoryHistory(actor, 20);
+    assert.equal(history.filter(memory => memory.key === "cardio_preference" && memory.status === "ACTIVE").length, 1);
+    assert.equal(history.filter(memory => memory.key === "cardio_preference" && memory.status === "SUPERSEDED").length, 1);
+  } finally { await freshRuntime["pool"].end(); await repo["pool"].end(); }
+});
 
 // ─── MEMORY 1/5/6: persistence + provenance (survives new connections) ──────
 

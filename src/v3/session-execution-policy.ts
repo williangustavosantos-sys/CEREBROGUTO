@@ -1,3 +1,4 @@
+import { activePhysicalDeclaration } from "./declaration-semantics.js";
 import {
   getCatalogById,
   getExerciseLocations,
@@ -46,9 +47,9 @@ function userBodyRegionText(snapshot: OfficialSnapshot): string {
   return [
     snapshot.confirmedContext?.limitationDeclaration || "",
     ...(snapshot.currentFacts || [])
-      .filter((fact) => fact.factType === "PHYSICAL_CONSTRAINT")
-      .map((fact) => String(fact.value.bodyRegion || fact.value.declaration || "")),
-  ].join(" ");
+      .filter((fact) => fact.factType === "PHYSICAL_CONSTRAINT" && fact.value.active !== false)
+      .map((fact) => String(fact.value.declaration || fact.value.bodyRegion || "")),
+  ].map(activePhysicalDeclaration).join(" ");
 }
 
 /** Canonical session locations (matches CatalogLocation). */

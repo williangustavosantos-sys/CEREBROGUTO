@@ -1,3 +1,4 @@
+import { interpretFoodDeclaration, interpretPhysicalDeclaration } from "./declaration-semantics.js";
 import type { CalibrationMutation } from "./contracts.js";
 import { randomUUID } from "node:crypto";
 import { V3Error } from "./errors.js";
@@ -393,19 +394,21 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
           constraint.kind !== "food_restriction" && constraint.kind !== "limitation"),
         {
           id: `first-contact-food-${context.id}`,
-          kind: "food_restriction",
+          kind: "food_restriction" as const,
           description: context.foodDeclaration,
-          severity: "unknown",
+          severity: "unknown" as const,
           confirmed: true,
         },
         {
           id: `first-contact-limitation-${context.id}`,
-          kind: "limitation",
+          kind: "limitation" as const,
           description: context.limitationDeclaration,
-          severity: "unknown",
+          severity: "unknown" as const,
           confirmed: true,
         },
-      ];
+      ].filter(constraint => (constraint.kind === "food_restriction"
+        ? interpretFoodDeclaration(constraint.description)
+        : interpretPhysicalDeclaration(constraint.description)).state !== "ABSENT");
       this.snapshots.set(key(input.actor), persistedSnapshot);
     }
     this.firstContacts.set(key(input.actor), materializeFirstContact({
