@@ -10,7 +10,7 @@ import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from
 import { assertRelationshipLifecycleState, evaluateOfficialRelationshipReturn, evaluateRelationshipLifecycleState, shouldSuppressProactivity, type RelationshipLifecycleRecord } from "./relationship-lifecycle.js";
 import { decideWorkoutEvolution } from "./workout-evolution.js";
 import { decideDoubleProgression, mapLegacyDifficultyInverse } from "./beta1-progression.js";
-import { memoryConceptKey, memoryEquivalentKeys } from "./beta1-memory.js";
+import { memoryConceptKey, memoryEquivalentKeys, isCrossDomainLegacyFoodMemory } from "./beta1-memory.js";
 import { assertValidAdaptedExecution, resolveSessionEffectiveLocation } from "./session-execution-policy.js";
 import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
 import type {
@@ -2424,6 +2424,23 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
   }): Promise<Array<Pick<import("./beta1-memory.js").PersistedMemory, "id" | "category" | "key" | "value" | "status" | "sourceType" | "updatedAt">>> {
     const capped = Math.min(Math.max(1, input.limit), 24);
     return this.withActorTransaction(input.actor, async (client) => {
+      // Older runtimes could classify a cardio dislike as food. Revalidate
+      // before retrieval, under row lock, so no brain consumer receives that
+      // known-invalid inference. Preserve its value/provenance in history.
+      const legacy = await client.query<QueryResultRow>(
+        `SELECT id,value FROM guto_v3.user_memories
+          WHERE tenant_id=$1 AND user_id=$2 AND status='ACTIVE'
+            AND category='FOOD_PREFERENCES' AND key='disliked_food' FOR UPDATE`,
+        [input.actor.tenantId, input.actor.userId],
+      );
+      for (const memory of legacy.rows) {
+        if (!isCrossDomainLegacyFoodMemory(jsonObject(memory.value))) continue;
+        await client.query(`UPDATE guto_v3.user_memories SET status='RETRACTED',updated_at=now() WHERE id=$1`, [memory.id]);
+        await client.query(`UPDATE guto_v3.user_memories_history SET status='RETRACTED',updated_at=now() WHERE id=$1`, [memory.id]);
+        await this.appendMutationEvent(client, input.actor, randomUUID(), "memory.retracted", {
+          memoryId: String(memory.id), reason: "legacy_cross_domain_inference", interpretationVersion: "declaration_semantics_v1",
+        });
+      }
       const rows = await client.query<QueryResultRow>(
         `SELECT id,category,key,value,status,source_type,updated_at
            FROM guto_v3.user_memories
