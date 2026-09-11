@@ -4,6 +4,7 @@ import pg, { type PoolClient, type QueryResultRow } from "pg";
 import type { CalibrationMutation } from "./contracts.js";
 import { emptyConversationDecisionState, type ConversationDecisionState, type ConversationKnownFact } from "./conversation-state.js";
 import { V3Error } from "./errors.js";
+import { interpretFoodDeclaration, interpretPhysicalDeclaration } from "./declaration-semantics.js";
 import { materializeFirstContact } from "./first-contact.js";
 import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from "./facts.js";
 import { assertRelationshipLifecycleState, evaluateOfficialRelationshipReturn, evaluateRelationshipLifecycleState, shouldSuppressProactivity, type RelationshipLifecycleRecord } from "./relationship-lifecycle.js";
@@ -494,7 +495,13 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
           ? value.description
           : typeof value.declaration === "string" ? value.declaration
           : bodyRegion ? `Limitação declarada: ${bodyRegion}` : String(row.fact_type);
-        const kind: HealthConstraint["kind"] = row.fact_type === "food_restriction" ? "food_restriction" : "limitation";
+        const foodFact = ["food_restriction", "FOOD_CONSTRAINT", "FOOD_EXCLUSION"].includes(row.fact_type);
+        const assertion = foodFact ? interpretFoodDeclaration(description) : interpretPhysicalDeclaration(description);
+        // An absence declaration is durable knowledge, not a health constraint.
+        // Reinterpret old untyped rows too, so a reload cannot resurrect a
+        // phantom limitation persisted by an older runtime.
+        if (value.active === false || assertion.state === "ABSENT") continue;
+        const kind: HealthConstraint["kind"] = foodFact ? "food_restriction" : "limitation";
         const identity = `${kind}:${bodyRegion || ""}:${description}`;
         if (!knownConstraintValues.has(identity)) {
           healthConstraints.push({
@@ -952,8 +959,8 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         [input.contextId, input.actor.tenantId, input.actor.userId, nextVersion, input.expectedProfileVersion, input.expectedGoalVersion, contact.rows[0].food_declaration, contact.rows[0].limitation_declaration, source.weekly_frequency, JSON.stringify(input.confirmedSnapshot)],
       );
       const context = this.mapConfirmedContext(contextResult.rows[0]!);
-      await this.persistFact(client, input.actor, { factType: "food_restriction", value: { declaration: context.foodDeclaration }, source: "user_declared", confirmationStatus: "FACT_CONFIRMED", supersedeCurrent: true });
-      await this.persistFact(client, input.actor, { factType: "physical_constraint", value: { declaration: context.limitationDeclaration }, source: "user_declared", confirmationStatus: "FACT_CONFIRMED", supersedeCurrent: true });
+      await this.persistFact(client, input.actor, { factType: "food_restriction", value: { declaration: context.foodDeclaration, assertionState: interpretFoodDeclaration(context.foodDeclaration).state }, source: "user_declared", confirmationStatus: "FACT_CONFIRMED", supersedeCurrent: true });
+      await this.persistFact(client, input.actor, { factType: "physical_constraint", value: { declaration: context.limitationDeclaration, assertionState: interpretPhysicalDeclaration(context.limitationDeclaration).state }, source: "user_declared", confirmationStatus: "FACT_CONFIRMED", supersedeCurrent: true });
 
       await client.query(`UPDATE guto_v3.workout_plans SET status='superseded' WHERE tenant_id=$1 AND user_id=$2 AND status='active'`, [input.actor.tenantId, input.actor.userId]);
       await client.query(`UPDATE guto_v3.diet_plans SET status='superseded' WHERE tenant_id=$1 AND user_id=$2 AND status='active'`, [input.actor.tenantId, input.actor.userId]);

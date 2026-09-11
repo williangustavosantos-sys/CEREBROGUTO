@@ -1,3 +1,5 @@
+import { declarationClauses, preferenceStance, interpretPhysicalDeclaration, namedFoodExcluded } from "./declaration-semantics.js";
+import { OFFICIAL_FOOD_CATALOG } from "./nutrition/catalog.js";
 import { V3Error } from "./errors.js";
 import type { ActorContext } from "./types.js";
 
@@ -14,8 +16,8 @@ import type { ActorContext } from "./types.js";
  *   candidates ONLY from explicit user declarations over a closed pattern set;
  *   the backend decides what persists (strict schema + policy).
  * - Memory is NOT a transcript: vague phrases never become durable memory.
- * - Content is DATA, never instruction: values are validated enums, never
- *   free text promoted into prompts.
+ * - Declaration text is untrusted evidence, never prompt instructions.
+ * - Shared proposition semantics handles polarity before domain persistence.
  */
 
 export const MEMORY_CATEGORIES = [
@@ -94,17 +96,6 @@ const CARDIO_KEYS: ReadonlyArray<[RegExp, string]> = [
   [/\bnadar|swim/iu, "swimming"],
 ];
 
-const BODY_REGIONS: ReadonlyArray<[RegExp, string]> = [
-  [/\bjoelho|knee/iu, "knee"],
-  [/\b(lombar|lower\s?back)/iu, "lower_back"],
-  [/\bombro|shoulder/iu, "shoulder"],
-  [/\btornozel|ankle/iu, "ankle"],
-  [/\bpunho|wrist/iu, "wrist"],
-  [/\bcoluna|spine|neck|pesco[çc]o/iu, "spine"],
-  [/\bquadril|hip\b/iu, "hip"],
-  [/\bcotovelo|elbow/iu, "elbow"],
-];
-
 const EQUIPMENT_KEYS: ReadonlyArray<[RegExp, string]> = [
   [/\bhack\s?squat|hacks?\b/iu, "hack_squat"],
   [/\bsmith/iu, "smith_machine"],
@@ -143,14 +134,21 @@ export function resolveCuratedMemoryCandidates(message: string): CuratedMemoryCa
   // ── Cardio preference (single semantic slot, explicit only) ──
   const likesList: string[] = [];
   const dislikesList: string[] = [];
-  const likeMatch = /(?:gosto de|curto|prefiro|amo|comecei a gostar de|adoro)\s+(.{0,60})/u.exec(text);
-  const dislikeMatch = /(?:odeio|nao gosto de|nao curto|detesto|nao quero|evito)\s+(.{0,60})/u.exec(text);
   const scanWindow = (window: string, target: string[]) => {
     for (const [pattern, key] of CARDIO_KEYS) if (pattern.test(window)) target.push(key);
   };
-  if (likeMatch?.[1]) scanWindow(likeMatch[1], likesList);
-  if (dislikeMatch?.[1]) scanWindow(dislikeMatch[1], dislikesList);
-  const preferMatch = /prefiro\s+(.{2,40}?)\s+(?:a|do que|em vez de|no lugar de)\s+(.{2,40})/u.exec(text);
+  for (const clause of declarationClauses(message)) {
+    for (const [pattern, key] of CARDIO_KEYS) {
+      const stance = preferenceStance(clause, pattern);
+      if (!stance) continue;
+      const target = stance === "dislike" ? dislikesList : likesList;
+      const opposite = stance === "dislike" ? likesList : dislikesList;
+      const prior = opposite.indexOf(key);
+      if (prior >= 0) opposite.splice(prior, 1);
+      target.push(key);
+    }
+  }
+  const preferMatch = /(?:prefiro|preferisco|prefer)\s+(.{2,40}?)\s+(?:a|do que|em vez de|no lugar de)\s+(.{2,40})/u.exec(text);
   let directPreference = false;
   if (preferMatch) {
     const preferred: string[] = [], avoided: string[] = [];
@@ -214,20 +212,9 @@ export function resolveCuratedMemoryCandidates(message: string): CuratedMemoryCa
   }
 
   // ── Training limitations (pain/discomfort by body region) ──
-  for (const [pattern, region] of BODY_REGIONS) {
-    const regionHit = pattern.exec(text);
-    if (!regionHit) continue;
-    const painVerbs = /(?:do[ée]|doendo|dor|dolor|incomod|machuc|lesion|pinic)/iu;
-    const negativeVerbs = /(?:nao posso|nao devo|evitar|evito|nao faco)/iu;
-    if (painVerbs.test(text) || negativeVerbs.test(text)) {
-      candidates.push({
-        category: "TRAINING_LIMITATIONS",
-        key: `body_region_${region}`,
-        value: { bodyRegion: region, declaration: message.trim() },
-        confidence: "explicit",
-      });
-      break;
-    }
+  for (const signal of interpretPhysicalDeclaration(message).regions) {
+    candidates.push({ category: "TRAINING_LIMITATIONS", key: `body_region_${signal.bodyRegion}`,
+      value: { bodyRegion: signal.bodyRegion, active: signal.active, declaration: message.trim() }, confidence: "explicit" });
   }
 
   // ── Routine (usual training time) ──
@@ -247,16 +234,11 @@ export function resolveCuratedMemoryCandidates(message: string): CuratedMemoryCa
   }
 
   // ── Food dislikes (explicit) ──
-  const foodDislike = /(?:odeio|detesto|nao como|nao gosto de|nao quero)\s+(.{0,40})/u.exec(text);
-  if (foodDislike?.[1]) {
-    const food = foodDislike[1].replace(/[^a-z\u00e0-\u017f\s]/gu, "").trim();
-    if (food.length >= 3 && food.split(/\s+/).length <= 3) {
-      candidates.push({
-        category: "FOOD_PREFERENCES",
-        key: "disliked_food",
-        value: { dislikedFood: food, declaration: message.trim() },
-        confidence: "explicit",
-      });
+  for (const food of OFFICIAL_FOOD_CATALOG) {
+    const names = [food.id, food.canonicalName, ...Object.values(food.aliases).filter((value): value is string => Boolean(value))];
+    if (namedFoodExcluded(message, names)) {
+      candidates.push({ category: "FOOD_PREFERENCES", key: `food_${food.id}`,
+        value: { foodId: food.id, dislikedFood: food.canonicalName, excluded: true, declaration: message.trim() }, confidence: "explicit" });
     }
   }
 
