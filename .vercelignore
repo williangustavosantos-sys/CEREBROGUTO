@@ -1,0 +1,7 @@
+# Local credentials and QA artifacts must never enter a deployment upload.
+.env*
+**/.env*
+tmp/
+**/tmp/
+.git/
+node_modules/
