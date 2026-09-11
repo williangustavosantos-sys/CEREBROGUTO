@@ -105,6 +105,17 @@ const EQUIPMENT_KEYS: ReadonlyArray<[RegExp, string]> = [
   [/\bremo|rowing machine/iu, "rowing_machine"],
 ];
 
+/** Revalidate the legacy untyped food slot only when another domain is known.
+ * Unknown foods are retained; absence from the catalog alone is not evidence
+ * that a user's real restriction was false. */
+export function isCrossDomainLegacyFoodMemory(value: Record<string, unknown>): boolean {
+  const food = typeof value.dislikedFood === "string" ? normalized(value.dislikedFood) : "";
+  if (!food || ![...CARDIO_KEYS, ...EQUIPMENT_KEYS].some(([pattern]) => pattern.test(food))) return false;
+  return !OFFICIAL_FOOD_CATALOG.some(item =>
+    [item.id, item.canonicalName, ...Object.values(item.aliases)].some(name =>
+      typeof name === "string" && normalized(name) === food));
+}
+
 function normalized(message: string): string {
   return message.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("pt-BR").trim();
 }

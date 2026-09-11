@@ -144,6 +144,30 @@ test("FIRST_CONTACT_POLARITY: known absence persists without phantom constraints
   } finally { await freshRuntime["pool"].end(); await repo["pool"].end(); }
 });
 
+test("MEMORY_REVALIDATION: an old cardio-as-food inference is retracted, preserving real food declarations and history", async () => {
+  const db = await getDb();
+  const repo = new PostgresOfficialStateRepository(createPool(db.port, 2));
+  const actor = await freshActor(repo);
+  try {
+    // Represents the actual old runtime output, not a new parser fixture.
+    const wrong = await repo.persistCuratedMemory({ actor, requestId: randomUUID(), sourceType: "conversation",
+      candidate: { category: "FOOD_PREFERENCES", key: "disliked_food", confidence: "explicit",
+        value: { dislikedFood: "bike", declaration: "Não gosto de bike." } } });
+    const snapshot = await repo.loadRelevantMemories({ actor, categories: ["FOOD_PREFERENCES"], limit: 12 });
+    assert.equal(snapshot.length, 0);
+    const historical = (await repo.listMemoryHistory(actor)).find(memory => memory.id === wrong.id);
+    assert.equal(historical?.status, "RETRACTED");
+    assert.equal(historical?.value.dislikedFood, "bike");
+    await repo.persistCuratedMemory({ actor, requestId: randomUUID(), sourceType: "conversation",
+      candidate: { category: "FOOD_PREFERENCES", key: "disliked_food", confidence: "explicit",
+        value: { dislikedFood: "banana", declaration: "Não gosto de banana." } } });
+    const preserved = await repo.loadRelevantMemories({ actor, categories: ["FOOD_PREFERENCES"], limit: 12 });
+    assert.equal(preserved.length, 1);
+    assert.equal(preserved[0]?.value.dislikedFood, "banana");
+    assert.equal((await repo.listMemoryHistory(actor)).filter(memory => memory.id === wrong.id).length, 1);
+  } finally { await repo["pool"].end(); }
+});
+
 // ─── MEMORY 1/5/6: persistence + provenance (survives new connections) ──────
 
 test("BETA1_MEMORY_PERSISTENCE: declared preference persists with provenance and survives new connections", async () => {
