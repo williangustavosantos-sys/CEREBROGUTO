@@ -242,45 +242,22 @@ const HARD: WorkoutExerciseSessionEvent = { exerciseId: "ex1", completed: true, 
 const FAILED: WorkoutExerciseSessionEvent = { exerciseId: "ex1", completed: false };
 const NORMAL: WorkoutExerciseSessionEvent = { exerciseId: "ex1", completed: true, repetitions: 10, setsCompleted: 3, perceivedDifficulty: 8 };
 
-test("EASY_ONCE: a single easy session maintains and does NOT progress", () => {
-  const decision = decideWorkoutEvolution(EASY);
-  assert.equal(decision.decision, "MAINTAIN");
-  assert.equal(decision.reasonCode, "SINGLE_EASY_SESSION_NOT_ENOUGH");
-});
-
-test("EASY_CONSISTENT: two consecutive easy completed sessions progress with a concrete next prescription", () => {
-  const decision = decideWorkoutEvolution(EASY2, [EASY]);
-  assert.equal(decision.decision, "PROGRESS");
-  assert.equal(decision.nextPrescription?.action, "add_reps");
-  assert.ok((decision.nextPrescription?.targetReps || 0) > EASY2.repetitions!);
-});
-
-test("HARD: difficulty 9/10 regresses with a reduction prescription", () => {
-  const decision = decideWorkoutEvolution(HARD);
-  assert.equal(decision.decision, "REGRESS");
-  assert.equal(decision.nextPrescription?.action, "reduce_reps");
-  assert.ok((decision.nextPrescription?.targetReps || 99) < HARD.repetitions!);
-});
-
-test("FAILED: incomplete sets/reps reviews and never progresses", () => {
-  const decision = decideWorkoutEvolution(FAILED);
-  assert.equal(decision.decision, "REVIEW");
-  assert.equal(decision.nextPrescription?.action, "review");
-});
-
-test("NORMAL: appropriate dose maintains", () => {
-  const decision = decideWorkoutEvolution(NORMAL);
-  assert.equal(decision.decision, "MAINTAIN");
-  assert.equal(decision.nextPrescription?.action, "maintain");
+test("COMPATIBILITY: aggregate summaries never manufacture progression or regression", () => {
+  for (const event of [EASY, EASY2, HARD, NORMAL, FAILED]) {
+    const decision = decideWorkoutEvolution(event, [EASY]);
+    assert.equal(decision.decision, "REVIEW");
+    assert.equal(decision.nextPrescription?.action, "review");
+  }
 });
 
 test("PAIN is safety, not RPE: safety concern never auto-progresses", () => {
   const pain = decideWorkoutEvolution({ ...EASY, context: { safetyConcern: true } }, [EASY]);
   assert.equal(pain.decision, "REVIEW");
+  assert.equal(pain.reasonCode, "PAIN_SAFETY_BRANCH");
 });
 
 // ─── FULL BETA JOURNEY ──────────────────────────────────────────────────
-test("FULL BETA JOURNEY: generation -> session -> occupied swap -> evolution -> next prescription, base preserved", () => {
+test("SESSION ADAPTATION: generation -> occupied swap preserves base; summaries do not fabricate progression", () => {
   const state = snapshot({ trainingStatus: "returning", frequency: 4, goal: "muscle_gain" });
   const draft = generateWorkoutDraft(state);
   const base = asPlan(draft);
@@ -292,12 +269,12 @@ test("FULL BETA JOURNEY: generation -> session -> occupied swap -> evolution -> 
   const occupiedId = base.items.find((item) => item.muscleGroup === "peito")!.exerciseId;
   const session = buildSessionWorkout({ baseWorkout: base, snapshot: state, unavailableExerciseIds: [occupiedId] });
   assert.ok(session.adaptationReasons.includes("MACHINE_OCCUPIED"));
-  // Record two consecutive easy sessions on the replaced exercise.
+  // These summaries are not real work-set evidence.
   const exerciseId = session.items[0].exerciseId;
   const first = decideWorkoutEvolution({ ...EASY, exerciseId });
-  assert.equal(first.decision, "MAINTAIN");
+  assert.equal(first.decision, "REVIEW");
   const second = decideWorkoutEvolution({ ...EASY2, exerciseId }, [EASY]);
-  assert.equal(second.decision, "PROGRESS");
+  assert.equal(second.decision, "REVIEW");
   assert.ok(second.nextPrescription);
   // Base workout is never destroyed by any adaptation.
   assert.equal(base.items.some((item) => item.exerciseId === occupiedId), true, "base still has the original occupied exercise");

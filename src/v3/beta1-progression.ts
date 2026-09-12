@@ -1,4 +1,4 @@
-import type { WorkoutItem } from "./types.js";
+import type { WorkoutItem, WorkoutEvolutionDecision, WorkoutNextPrescription } from "./types.js";
 
 /**
  * BETA1 deterministic progression engine + advanced-technique policy.
@@ -132,7 +132,7 @@ export const MAX_INTENSIFIER_TECHNIQUES_PER_SESSION = 1;
 
 /** Plausible load increments per equipment class (never assume 2.5 kg for all). */
 export function loadIncrementKg(item: WorkoutItem, currentLoad: number): number {
-  const haystack = `${item.name} ${item.purpose} ${item.canonicalNamePt || ""}`;
+  const haystack = `${item.name} ${item.purpose} ${item.canonicalNamePt || ""}`.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   if (/halter|dumbbell/iu.test(haystack)) {
     return currentLoad < 10 ? 1 : currentLoad < 20 ? 2 : 2.5;
   }
@@ -152,7 +152,7 @@ export interface ProgressionEvidence {
   sessions: Array<{
     loadKg: number | null;
     repsPerSet: number[];
-    difficultyLabel: DifficultyLabel;
+    difficultyLabel: DifficultyLabel | null;
     pain: boolean;
     completed: boolean;
   }>;
@@ -189,8 +189,16 @@ export function decideDoubleProgression(evidence: ProgressionEvidence, item: Wor
   if (recentSafety) {
     return { exerciseId, decision: "REVIEW", reasonCode: "PAIN_SAFETY_BRANCH", fromLoadKg: latestLoad(evidence), toLoadKg: null, explanation: "Dor recente registrada; não progredir até nova avaliação (safety policy).", evidenceSessionCount: evidence.sessions.length };
   }
-  const sessions = evidence.sessions.filter((session) => session.completed && !session.pain && session.difficultyLabel !== "DOR");
-  if (sessions.length === 0) {
+  // Keep interruptions in the sequence: filtering them out would manufacture a streak.
+  const sessions = evidence.sessions;
+  const requiredSets = item.sets;
+  const hasWork = (session: ProgressionEvidence["sessions"][number]) =>
+    session.completed && session.difficultyLabel != null &&
+    session.loadKg != null && Number.isFinite(session.loadKg) && session.loadKg >= 0 &&
+    Number.isInteger(requiredSets) && requiredSets! > 0 && session.repsPerSet.length === requiredSets &&
+    session.repsPerSet.every(rep => Number.isInteger(rep) && rep >= 0);
+  if (sessions.length === 0 || !hasWork(sessions[sessions.length - 1]) ||
+      !Number.isFinite(repRangeLow) || !Number.isFinite(repRangeHigh) || repRangeLow <= 0 || repRangeHigh < repRangeLow) {
     return { exerciseId, decision: "REVIEW", reasonCode: "INSUFFICIENT_DATA", fromLoadKg: null, toLoadKg: null, explanation: "Sem execuções completas registradas; nada a decidir ainda.", evidenceSessionCount: evidence.sessions.length };
   }
   const current = sessions[sessions.length - 1];
@@ -198,7 +206,9 @@ export function decideDoubleProgression(evidence: ProgressionEvidence, item: Wor
   const atTop = (reps: number[]) => reps.length > 0 && reps.every((rep) => rep >= repRangeHigh);
   const belowRange = (reps: number[]) => reps.length > 0 && reps.filter((rep) => rep < repRangeLow).length >= Math.ceil(reps.length / 2);
 
-  const topStreak = countTrailingWhere(sessions, (session) => atTop(session.repsPerSet) && session.difficultyLabel !== "PESADA");
+  const topStreak = countTrailingWhere(sessions, (session) => hasWork(session) &&
+    session.loadKg === fromLoad && fromLoad != null && fromLoad > 0 &&
+    atTop(session.repsPerSet) && session.difficultyLabel !== "PESADA");
   if (topStreak >= CONSECUTIVE_TOP_REQUIRED && fromLoad != null) {
     const increment = loadIncrementKg(item, fromLoad);
     return { exerciseId, decision: "PROGRESS", reasonCode: "REP_RANGE_TOP_REACHED_CONSISTENTLY", fromLoadKg: fromLoad, toLoadKg: Number((fromLoad + increment).toFixed(1)), explanation: `Topo da faixa ${repRangeLow}-${repRangeHigh} atingido em ${topStreak} sessões consecutivas com esforço controlado; subir ${increment} kg.`, evidenceSessionCount: evidence.sessions.length };
@@ -211,6 +221,33 @@ export function decideDoubleProgression(evidence: ProgressionEvidence, item: Wor
     return { exerciseId, decision: "REGRESS", reasonCode: current.difficultyLabel === "PESADA" ? "HIGH_EFFORT_RECURRENT" : "REPS_FAILING_BELOW_RANGE", fromLoadKg: fromLoad, toLoadKg: reduction, explanation: `Reps abaixo da faixa ou esforço alto; reduzir carga (~10%) e reconstruir reps na faixa.`, evidenceSessionCount: evidence.sessions.length };
   }
   return { exerciseId, decision: "MAINTAIN", reasonCode: "REPS_WITHIN_RANGE_APPROPRIATE_DOSE", fromLoadKg: fromLoad, toLoadKg: fromLoad, explanation: `Reps dentro da faixa com esforço apropriado; dose atual mantida.`, evidenceSessionCount: evidence.sessions.length };
+}
+
+/** Only repetition prescriptions qualify; minutes/seconds are not rep ranges. */
+export function progressionRepRange(item: WorkoutItem): { repRangeLow: number; repRangeHigh: number } | null {
+  const match = /^\s*(\d{1,3})(?:\s*[-–]\s*(\d{1,3}))?\s*(?:reps?|repetições|ripetizioni)?\s*$/iu.exec(item.reps || "");
+  if (!match) return null;
+  const low = Number(match[1]);
+  const high = Number(match[2] || match[1]);
+  return low > 0 && high >= low ? { repRangeLow: low, repRangeHigh: high } : null;
+}
+
+/** One mapping for every public adapter. Absolute targets prevent delta replay. */
+export function toWorkoutEvolutionDecision(progression: ProgressionDecision): WorkoutEvolutionDecision {
+  const decision = ["PROGRESS", "REGRESS", "MAINTAIN", "REVIEW"].includes(progression.decision)
+    ? progression.decision as WorkoutEvolutionDecision["decision"] : "REVIEW";
+  const nextPrescription: WorkoutNextPrescription = {
+    exerciseId: progression.exerciseId,
+    action: decision === "REVIEW" ? "review" : "maintain",
+    reason: progression.explanation,
+  };
+  if ((decision === "PROGRESS" || decision === "REGRESS") && progression.fromLoadKg != null && progression.toLoadKg != null) {
+    nextPrescription.action = decision === "PROGRESS" ? "increase_load" : "reduce_load";
+    nextPrescription.loadDeltaKg = Number((progression.toLoadKg - progression.fromLoadKg).toFixed(1));
+    nextPrescription.targetLoadKg = progression.toLoadKg;
+    nextPrescription.fromLoadKg = progression.fromLoadKg;
+  }
+  return { exerciseId: progression.exerciseId, decision, reasonCode: progression.reasonCode, nextPrescription };
 }
 
 function latestLoad(evidence: ProgressionEvidence): number | null {

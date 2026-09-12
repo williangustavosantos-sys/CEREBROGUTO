@@ -239,7 +239,7 @@ test("PG_CONCURRENT_IDEMPOTENCY: two real connections, same requestId → one lo
   }
 });
 
-test("PG_CONCURRENT_IDEMPOTENCY: duplicate does not create false PROGRESS; NEW requestId counts", async (t) => {
+test("PG_CONCURRENT_IDEMPOTENCY: duplicate does not create false PROGRESS; new requestId alone is not evidence", async (t) => {
   const db = await getDb();
   assert.ok(db, "Postgres engine must be available (declared devDependency)");
   const { port } = db;
@@ -252,10 +252,10 @@ test("PG_CONCURRENT_IDEMPOTENCY: duplicate does not create false PROGRESS; NEW r
       exerciseId, completed: true, repetitions: 12, setsCompleted: 3, perceivedDifficulty: 5,
     };
 
-    // First real execution — easy but alone -> MAINTAIN.
+    // First aggregate summary: insufficient evidence -> REVIEW.
     const firstId = randomUUID();
     const first = await repository.recordWorkoutExerciseEvent({ actor, requestId: firstId, event });
-    assert.equal(first.decision, "MAINTAIN");
+    assert.equal(first.decision, "REVIEW");
 
     // SAME execution replayed concurrently 2x under the SAME requestId.
     await Promise.allSettled([
@@ -269,11 +269,11 @@ test("PG_CONCURRENT_IDEMPOTENCY: duplicate does not create false PROGRESS; NEW r
     );
     assert.equal(Number(historyCount.rows[0]!.n), 1, "no duplicated history from concurrent replays");
 
-    // A second REAL execution (NEW requestId) is the one that may progress.
+    // A new requestId is not proof of a new qualifying execution.
     const second = await repository.recordWorkoutExerciseEvent({
       actor, requestId: randomUUID(), event: { ...event, repetitions: 13 },
     });
-    assert.equal(second.decision, "PROGRESS", "a NEW real execution counts and can progress");
+    assert.equal(second.decision, "REVIEW", "a new request identity cannot manufacture per-set evidence");
   } finally {
     await cleanup(repository, actor);
     await repository["pool"].end();

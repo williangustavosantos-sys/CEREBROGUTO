@@ -165,23 +165,23 @@ test("CONCURRENT_IDEMPOTENCY: same requestId fired twice concurrently yields one
   ]);
   const fulfilled = [a, b].filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<{ decision: string }>[];
   assert.ok(fulfilled.length >= 1, "at least one request succeeds");
-  for (const r of fulfilled) assert.equal(r.value.decision, "MAINTAIN");
+  for (const r of fulfilled) assert.equal(r.value.decision, "REVIEW");
 
   // Exactly ONE logical execution recorded for the duplicated requestId.
   const executions = repository.events.filter((event) => event.action === "workoutEvolution" && event.requestId === requestId);
   assert.equal(executions.length, 1, "duplicate requestId must not create a second logical execution");
 });
 
-test("CONCURRENT_IDEMPOTENCY: duplicate does not create false PROGRESS; a NEW requestId counts", async () => {
+test("CONCURRENT_IDEMPOTENCY: duplicate does not create false PROGRESS; a new requestId alone is not evidence", async () => {
   const { repository, actor } = await founder();
   const state = await repository.loadAppState(actor);
   const exerciseId = state.workout!.items[0]!.exerciseId;
   const event: WorkoutExerciseSessionEvent = { exerciseId, completed: true, repetitions: 12, setsCompleted: 3, perceivedDifficulty: 5 };
 
-  // First real execution — easy but alone -> MAINTAIN.
+  // First aggregate summary: insufficient evidence -> REVIEW.
   const firstId = randomUUID();
   const first = await repository.recordWorkoutExerciseEvent({ actor, requestId: firstId, event });
-  assert.equal(first.decision, "MAINTAIN");
+  assert.equal(first.decision, "REVIEW");
 
   // The SAME execution replayed concurrently under the SAME requestId must
   // never turn history into PROGRESS.
@@ -193,9 +193,9 @@ test("CONCURRENT_IDEMPOTENCY: duplicate does not create false PROGRESS; a NEW re
   const executions = repository.events.filter((event) => event.action === "workoutEvolution" && event.requestId === requestId);
   assert.equal(executions.length, 1, "replay adds no second logical execution");
 
-  // A second REAL execution (new requestId) is the one that may progress.
+  // A second aggregate summary still contains no recorded sets.
   const second = await repository.recordWorkoutExerciseEvent({ actor, requestId: randomUUID(), event: { ...event, repetitions: 13 } });
-  assert.equal(second.decision, "PROGRESS");
+  assert.equal(second.decision, "REVIEW");
 });
 
 // ─── P0 A bis — SESSION EFFECTIVE LOCATION AUTHORITY ─────────────────────
