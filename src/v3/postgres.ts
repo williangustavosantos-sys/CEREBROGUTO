@@ -1,7 +1,7 @@
 import { officialDayKey } from "./official-day.js";
 import { evolveFoodState, foodStateChange, isFoodFact, type CurrentFoodState } from "./current-food-state.js";
 import { performance } from "node:perf_hooks";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import pg, { type PoolClient, type QueryResultRow } from "pg";
 import type { CalibrationMutation } from "./contracts.js";
 import { emptyConversationDecisionState, type ConversationDecisionState, type ConversationKnownFact } from "./conversation-state.js";
@@ -11,7 +11,7 @@ import { materializeFirstContact } from "./first-contact.js";
 import { assertFactChange, impactsFor, type FactChange, type RecordedFact } from "./facts.js";
 import { assertRelationshipLifecycleState, evaluateOfficialRelationshipReturn, evaluateRelationshipLifecycleState, shouldSuppressProactivity, type RelationshipLifecycleRecord } from "./relationship-lifecycle.js";
 import { decideWorkoutEvolution } from "./workout-evolution.js";
-import { decideDoubleProgression, mapLegacyDifficultyInverse } from "./beta1-progression.js";
+import { progressionRepRange, mapLegacyDifficulty, mapLegacyDifficultyInverse } from "./beta1-progression.js";
 import { memoryConceptKey, memoryEquivalentKeys, isCrossDomainLegacyFoodMemory } from "./beta1-memory.js";
 import { assertValidAdaptedExecution, resolveSessionEffectiveLocation } from "./session-execution-policy.js";
 import type { ConversationStateRepository, DietPlanDraft, FoodReplacement, OfficialStateRepository, WorkoutPlanDraft } from "./repository.js";
@@ -59,6 +59,21 @@ export function createV3Pool(connectionString = process.env.DATABASE_URL || ""):
     connectionTimeoutMillis: 8_000,
     ssl: process.env.GUTO_V3_PG_SSL === "disable" ? false : { rejectUnauthorized: false },
   });
+}
+
+function executionSignature(input: Pick<import("./beta1-progression.js").ExerciseExecutionInput,
+  "exerciseId" | "difficultyLabel" | "pain" | "sets" | "substitutedFromExerciseId" | "substitutionReason"> & {
+    workoutSessionId: string; techniqueGroup?: string;
+  }): string {
+  const sets = input.sets.map(set => ({ setNumber: set.setNumber, loadKg: set.loadKg ?? null, reps: set.reps ?? null,
+    techniqueType: set.techniqueType, techniqueGroup: set.techniqueGroup ?? null,
+  })).sort((a, b) => a.setNumber - b.setNumber || a.techniqueType.localeCompare(b.techniqueType) || (a.techniqueGroup || "").localeCompare(b.techniqueGroup || ""));
+  return createHash("sha256").update(JSON.stringify({ workoutSessionId: input.workoutSessionId,
+    exerciseId: input.exerciseId, difficultyLabel: input.difficultyLabel,
+    pain: input.pain === true || input.difficultyLabel === "DOR",
+    substitutedFromExerciseId: input.substitutedFromExerciseId ?? null, substitutionReason: input.substitutionReason ?? null,
+    techniqueGroup: input.techniqueGroup ?? null, sets,
+  })).digest("hex");
 }
 
 export class PostgresOfficialStateRepository implements OfficialStateRepository, ConversationStateRepository {
@@ -1436,6 +1451,72 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     });
   }
 
+  /** Both public execution paths consult this exact persisted evidence authority.
+   * One session contributes once; compatibility best-set summaries contribute no
+   * fabricated sets. Pain survives additional reports within the same session.
+   */
+  private async decideRecordedWorkoutProgression(
+    client: PoolClient,
+    actor: ActorContext,
+    event: import("./types.js").WorkoutExerciseSessionEvent,
+    plan: WorkoutPlan,
+  ): Promise<import("./types.js").WorkoutEvolutionDecision> {
+    const item = plan.items.find(entry => entry.exerciseId === event.exerciseId);
+    const sessionRows = await client.query<QueryResultRow>(
+      `SELECT s.id FROM guto_v3.workout_sessions s
+        WHERE s.tenant_id=$1 AND s.user_id=$2 AND s.plan_id=$3::uuid
+          AND EXISTS (SELECT 1 FROM guto_v3.workout_session_exercises e
+            WHERE e.tenant_id=$1 AND e.user_id=$2 AND e.session_id=s.id AND e.exercise_id=$4)
+        ORDER BY s.created_at DESC,s.id DESC LIMIT 4`,
+      [actor.tenantId, actor.userId, plan.id, event.exerciseId],
+    );
+    const sessions: import("./beta1-progression.js").ProgressionEvidence["sessions"] = [];
+    const sessionExerciseIds: string[] = [];
+    for (const session of [...sessionRows.rows].reverse()) {
+      const reports = await client.query<QueryResultRow>(
+        `SELECT e.* FROM guto_v3.workout_session_exercises e
+         WHERE e.tenant_id=$1 AND e.user_id=$2 AND e.session_id=$3::uuid AND e.exercise_id=$4
+         ORDER BY e.created_at,e.id`,
+        [actor.tenantId, actor.userId, session.id, event.exerciseId],
+      );
+      const latest = reports.rows.at(-1)!;
+      const recorded = reports.rows.filter(row => row.difficulty_label != null).at(-1);
+      const source = recorded || latest;
+      sessionExerciseIds.push(String(source.id));
+      const sets = recorded ? await client.query<QueryResultRow>(
+        `SELECT set_number,load_kg,reps FROM guto_v3.workout_set_executions
+         WHERE tenant_id=$1 AND user_id=$2 AND session_exercise_id=$3::uuid AND technique_type='STRAIGHT_SET'
+         ORDER BY set_number`, [actor.tenantId, actor.userId, recorded.id],
+      ) : { rows: [] };
+      const loads = sets.rows.map(row => row.load_kg == null ? null : Number(row.load_kg));
+      const uniqueSets = new Set(sets.rows.map(row => Number(row.set_number))).size === sets.rows.length &&
+        sets.rows.every(row => Number(row.set_number) >= 1 && Number(row.set_number) <= (item?.sets ?? 0));
+      const difficulty = source.difficulty_label == null
+        ? mapLegacyDifficulty(source.perceived_difficulty == null ? undefined : Number(source.perceived_difficulty))
+        : source.difficulty_label as import("./beta1-progression.js").DifficultyLabel;
+      sessions.push({
+        loadKg: loads.length && loads.every(load => load != null && Number.isFinite(load) && load === loads[0]) ? loads[0] : null,
+        repsPerSet: sets.rows.map(row => row.reps == null ? NaN : Number(row.reps)),
+        difficultyLabel: difficulty,
+        pain: reports.rows.some(row => {
+          const context = jsonObject(row.context_snapshot);
+          return context.pain === true || context.safetyConcern === true || row.difficulty_label === "DOR" || Number(row.perceived_difficulty) === 10;
+        }),
+        completed: Boolean(source.completed) && Boolean(latest.completed) && uniqueSets,
+      });
+    }
+    const range = item ? progressionRepRange(item) : null;
+    const decision = decideWorkoutEvolution(event, [], item, {
+      exerciseId: event.exerciseId, repRangeLow: range?.repRangeLow ?? NaN,
+      repRangeHigh: range?.repRangeHigh ?? NaN, sessions,
+    });
+    return { ...decision, evidence: {
+      authority: "beta1-double-progression-v1", planId: plan.id, planVersion: plan.version,
+      confirmedContextVersion: plan.confirmedContextVersion ?? null,
+      sessionIds: [...sessionRows.rows].reverse().map(row => String(row.id)), sessionExerciseIds,
+    } };
+  }
+
   async recordWorkoutExerciseEvent(input: { actor: ActorContext; requestId: string; event: import("./types.js").WorkoutExerciseSessionEvent }): Promise<import("./types.js").WorkoutEvolutionDecision> {
     return this.withActorTransaction(input.actor, async (client) => {
       // P0 (concurrent idempotency): serialize concurrent requests with the
@@ -1468,6 +1549,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
             decision: cached.decision as import("./types.js").WorkoutEvolutionDecisionCode,
             reasonCode: cached.reasonCode,
             nextPrescription: cached.nextPrescription as import("./types.js").WorkoutNextPrescription | undefined,
+            evidence: cached.evidence,
           };
         }
       }
@@ -1507,33 +1589,6 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         );
         if (!exercise.rows[0]) throw new V3Error("V3_WORKOUT_EXERCISE_NOT_ACTIVE", "Exercício não pertence ao treino oficial ativo.", 409);
       }
-      // P0#4: decide from the current event plus the recent history of the SAME
-      // exercise, so PROGRESS requires 2+ consecutive easy completed sessions.
-      const recent = await client.query<{
-        load_value: string | null;
-        repetitions: string | null;
-        sets_completed: string | null;
-        completed: boolean;
-        perceived_difficulty: string | null;
-        substituted_from_exercise_id: string | null;
-        substitution_reason: string | null;
-      }>(
-        `SELECT load_value,repetitions,sets_completed,completed,perceived_difficulty,substituted_from_exercise_id,substitution_reason
-           FROM guto_v3.workout_session_exercises
-          WHERE tenant_id=$1 AND user_id=$2 AND exercise_id=$3
-          ORDER BY created_at DESC, id DESC LIMIT 4`,
-        [input.actor.tenantId, input.actor.userId, input.event.exerciseId],
-      );
-      const history = recent.rows.reverse().map((row) => ({
-        exerciseId: input.event.exerciseId,
-        loadValue: row.load_value == null ? undefined : Number(row.load_value),
-        repetitions: row.repetitions == null ? undefined : Number(row.repetitions),
-        setsCompleted: row.sets_completed == null ? undefined : Number(row.sets_completed),
-        completed: row.completed,
-        perceivedDifficulty: row.perceived_difficulty == null ? undefined : Number(row.perceived_difficulty),
-        substitutedFromExerciseId: row.substituted_from_exercise_id || undefined,
-        substitutionReason: row.substitution_reason || undefined,
-      }));
       // P0 (session completion): one workout_sessions row per LOGICAL session,
       // not per exercise. MODELO B: the client/runtime-generated workoutSessionId
       // is used LITERALLY as the PK (id) of the workout_sessions row. This lets
@@ -1597,13 +1652,13 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
           input.event.perceivedDifficulty ?? null, input.event.substitutedFromExerciseId ?? null, input.event.substitutionReason ?? null,
           JSON.stringify(input.event.context || {})],
       );
-      const decision = decideWorkoutEvolution(input.event, history);
+      const decision = await this.decideRecordedWorkoutProgression(client, input.actor, input.event, await this.loadWorkout(client, plan.rows[0]));
       await client.query(
         `INSERT INTO guto_v3.workout_evolution_decisions
           (tenant_id,user_id,exercise_id,decision,reason_code,source_session_exercise_id,context_snapshot)
          VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`,
         [input.actor.tenantId, input.actor.userId, decision.exerciseId, decision.decision, decision.reasonCode, inserted.rows[0]!.id,
-          JSON.stringify({ ...(input.event.context || {}), nextPrescription: decision.nextPrescription || null })],
+          JSON.stringify({ ...(input.event.context || {}), nextPrescription: decision.nextPrescription || null, progressionEvidence: decision.evidence })],
       );
       await this.appendMutationEvent(client, input.actor, input.requestId, "workout.evolution_decided", { ...decision });
       return decision;
@@ -2563,6 +2618,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     if (input.sets.length < 1) {
       throw new V3Error("V3_BETA1_SETS_REQUIRED", "Registre pelo menos uma série real antes de concluir o exercício.", 409);
     }
+    const signature = executionSignature(input);
     return this.withActorTransaction(input.actor, async (client) => {
       await client.query(
         `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':beta1-exec:' || $3 || ':' || $4, 0))`,
@@ -2576,8 +2632,51 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       );
       const priorPayload = prior.rows[0]?.payload;
       if (priorPayload && typeof priorPayload === "object") {
-        const cached = priorPayload as { decision?: import("./types.js").WorkoutEvolutionDecision; setCount?: number };
-        if (cached.decision && typeof cached.setCount === "number") return { decision: cached.decision, setCount: cached.setCount };
+        const cached = priorPayload as { decision?: import("./types.js").WorkoutEvolutionDecision; setCount?: number; executionSignature?: string };
+        if (cached.executionSignature && cached.executionSignature !== signature) {
+          throw new V3Error("V3_BETA1_EXECUTION_IMMUTABLE", "Esta execução já foi registrada com outros dados. Não foi alterada.", 409);
+        }
+        if (cached.executionSignature === signature && cached.decision && typeof cached.setCount === "number") return { decision: cached.decision, setCount: cached.setCount };
+      }
+      // Semantic identity is (actor, session, exercise), not requestId. An
+      // immutable accepted execution survives a lost response or a new client.
+      const existing = await client.query<QueryResultRow>(
+        `SELECT * FROM guto_v3.workout_session_exercises
+         WHERE tenant_id=$1 AND user_id=$2 AND session_id=$3::uuid AND exercise_id=$4 AND difficulty_label IS NOT NULL
+         ORDER BY created_at DESC,id DESC LIMIT 1`,
+        [input.actor.tenantId, input.actor.userId, input.workoutSessionId, input.exerciseId],
+      );
+      if (existing.rows[0]) {
+        const row = existing.rows[0];
+        const context = jsonObject(row.context_snapshot);
+        const sets = await client.query<QueryResultRow>(
+          `SELECT * FROM guto_v3.workout_set_executions WHERE tenant_id=$1 AND user_id=$2 AND session_exercise_id=$3::uuid`,
+          [input.actor.tenantId, input.actor.userId, row.id],
+        );
+        const storedSignature = executionSignature({
+          workoutSessionId: input.workoutSessionId, exerciseId: input.exerciseId,
+          difficultyLabel: row.difficulty_label, pain: context.pain === true,
+          substitutedFromExerciseId: row.substituted_from_exercise_id ?? undefined,
+          substitutionReason: row.substitution_reason ?? undefined,
+          techniqueGroup: typeof context.techniqueGroup === "string" ? context.techniqueGroup : undefined,
+          sets: sets.rows.map(set => ({ setNumber: Number(set.set_number), loadKg: set.load_kg == null ? undefined : Number(set.load_kg),
+            reps: set.reps == null ? undefined : Number(set.reps), techniqueType: set.technique_type,
+            techniqueGroup: set.technique_group ?? undefined,
+          })),
+        });
+        if (signature !== storedSignature) throw new V3Error("V3_BETA1_EXECUTION_IMMUTABLE", "Esta execução já foi registrada com outros dados. Não foi alterada.", 409);
+        const priorDecision = await client.query<QueryResultRow>(
+          `SELECT * FROM guto_v3.workout_evolution_decisions WHERE tenant_id=$1 AND user_id=$2 AND source_session_exercise_id=$3::uuid
+           ORDER BY created_at DESC,id DESC LIMIT 1`, [input.actor.tenantId, input.actor.userId, row.id],
+        );
+        const saved = priorDecision.rows[0];
+        if (!saved) throw new V3Error("V3_BETA1_EXECUTION_DECISION_MISSING", "A execução existe, mas sua decisão precisa ser reconciliada.", 409);
+        const savedContext = jsonObject(saved.context_snapshot);
+        return { setCount: sets.rows.length, decision: {
+          exerciseId: input.exerciseId, decision: saved.decision, reasonCode: saved.reason_code,
+          nextPrescription: savedContext.nextPrescription as import("./types.js").WorkoutNextPrescription,
+          evidence: savedContext.progressionEvidence as import("./types.js").WorkoutEvolutionDecision["evidence"],
+        } };
       }
       // Session identity is backend-owned. Execution may only attach to a
       // session previously issued by startOrResumeBeta1WorkoutSession; an
@@ -2622,6 +2721,17 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         );
         if (!exercise.rows[0]) throw new V3Error("V3_WORKOUT_EXERCISE_NOT_ACTIVE", "Exercício não pertence ao treino oficial ativo.", 409);
       }
+      const basePrescription = await this.loadWorkout(client, plan.rows[0]);
+      const prescribed = basePrescription.items.find(item => item.exerciseId === (input.substitutedFromExerciseId || input.exerciseId));
+      const coordinates = new Set<string>();
+      for (const set of input.sets) {
+        const coordinate = `${set.setNumber}:${set.techniqueType}:${set.techniqueGroup ?? ""}`;
+        if (coordinates.has(coordinate) || !Number.isInteger(set.setNumber) || set.setNumber < 1 ||
+            (set.techniqueType === "STRAIGHT_SET" && (!prescribed?.sets || set.setNumber > prescribed.sets))) {
+          throw new V3Error("V3_BETA1_INVALID_WORK_SET", "A série não corresponde à prescrição desta execução.", 409);
+        }
+        coordinates.add(coordinate);
+      }
       // Aggregate row (keeps legacy readers/decisions working) + REAL set rows.
       const straightSets = input.sets.filter((set) => set.techniqueType === "STRAIGHT_SET");
       const bestSet = straightSets.reduce<{ reps: number; load: number } | null>((best, set) => {
@@ -2646,7 +2756,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
           `INSERT INTO guto_v3.workout_set_executions
             (tenant_id,user_id,session_id,session_exercise_id,exercise_id,set_number,load_kg,reps,technique_type,technique_group)
            VALUES ($1,$2,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10)
-           ON CONFLICT (tenant_id,session_id,exercise_id,set_number,technique_type,technique_group) DO NOTHING`,
+           `,
           [input.actor.tenantId, input.actor.userId, input.workoutSessionId, exerciseRow.rows[0]!.id,
             input.exerciseId, set.setNumber, set.loadKg ?? null, set.reps ?? null, set.techniqueType, set.techniqueGroup ?? null],
         );
@@ -2671,90 +2781,13 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
           safetyConcern: input.pain === true || input.difficultyLabel === "DOR",
         },
       };
-      let decision: import("./types.js").WorkoutEvolutionDecision;
-      if (input.substitutedFromExerciseId) {
-        // Substitution semantics stay on the established deterministic authority.
-        decision = decideWorkoutEvolution(event, []);
-      } else {
-        const itemResult = await client.query<QueryResultRow>(
-          `SELECT id,exercise_id,name,purpose,muscle_group,position,reps,canonical_name_pt
-             FROM guto_v3.workout_plan_items
-            WHERE tenant_id=$1 AND plan_id=$2::uuid AND exercise_id=$3 LIMIT 1`,
-          [input.actor.tenantId, plan.rows[0].id, input.exerciseId],
-        );
-        if (!itemResult.rows[0]) throw new V3Error("V3_WORKOUT_EXERCISE_NOT_ACTIVE", "Exercício não pertence ao treino oficial ativo.", 409);
-        const itemRow = itemResult.rows[0];
-        const prescribedReps = String(itemRow.reps || "");
-        const range = /(\d{1,2})\s*[-–]\s*(\d{1,2})/u.exec(prescribedReps);
-        const repRangeLow = range ? Number(range[1]) : 8;
-        const repRangeHigh = range ? Number(range[2]) : 12;
-        const evidenceRows = await client.query<QueryResultRow>(
-          `SELECT id,session_id,completed,difficulty_label,context_snapshot,created_at
-             FROM guto_v3.workout_session_exercises
-            WHERE tenant_id=$1 AND user_id=$2 AND exercise_id=$3 AND difficulty_label IS NOT NULL
-            ORDER BY created_at DESC,id DESC LIMIT 4`,
-          [input.actor.tenantId, input.actor.userId, input.exerciseId],
-        );
-        const sessions: import("./beta1-progression.js").ProgressionEvidence["sessions"] = [];
-        for (const executionRow of [...evidenceRows.rows].reverse()) {
-          const realSets = await client.query<QueryResultRow>(
-            `SELECT set_number,load_kg,reps
-               FROM guto_v3.workout_set_executions
-              WHERE tenant_id=$1 AND user_id=$2 AND session_id=$3::uuid AND session_exercise_id=$4::uuid
-                AND technique_type='STRAIGHT_SET'
-              ORDER BY set_number`,
-            [input.actor.tenantId, input.actor.userId, executionRow.session_id, executionRow.id],
-          );
-          const workSets = realSets.rows.filter((setRow) => setRow.reps != null);
-          const difficultyLabel = String(executionRow.difficulty_label) as import("./beta1-progression.js").DifficultyLabel;
-          const context = jsonObject(executionRow.context_snapshot);
-          sessions.push({
-            loadKg: workSets.find((setRow) => setRow.load_kg != null)?.load_kg == null
-              ? null
-              : Number(workSets.find((setRow) => setRow.load_kg != null)!.load_kg),
-            repsPerSet: workSets.map((setRow) => asNumber(setRow.reps)),
-            difficultyLabel,
-            pain: context.pain === true || difficultyLabel === "DOR",
-            completed: Boolean(executionRow.completed),
-          });
-        }
-        const progression = decideDoubleProgression({
-          exerciseId: input.exerciseId,
-          repRangeLow,
-          repRangeHigh,
-          sessions,
-        }, {
-          id: String(itemRow.id),
-          exerciseId: String(itemRow.exercise_id),
-          name: String(itemRow.name),
-          purpose: String(itemRow.purpose),
-          muscleGroup: String(itemRow.muscle_group),
-          position: asNumber(itemRow.position),
-          reps: itemRow.reps == null ? undefined : String(itemRow.reps),
-          canonicalNamePt: itemRow.canonical_name_pt == null ? undefined : String(itemRow.canonical_name_pt),
-        });
-        const mappedDecision: import("./types.js").WorkoutEvolutionDecisionCode =
-          progression.decision === "PROGRESS" || progression.decision === "MAINTAIN" || progression.decision === "REGRESS" || progression.decision === "REVIEW"
-            ? progression.decision
-            : "REVIEW";
-        let nextPrescription: import("./types.js").WorkoutNextPrescription;
-        if (mappedDecision === "PROGRESS" && progression.fromLoadKg != null && progression.toLoadKg != null) {
-          nextPrescription = { exerciseId: input.exerciseId, action: "increase_load", loadDeltaKg: Number((progression.toLoadKg - progression.fromLoadKg).toFixed(1)), reason: progression.explanation };
-        } else if (mappedDecision === "REGRESS" && progression.fromLoadKg != null && progression.toLoadKg != null) {
-          nextPrescription = { exerciseId: input.exerciseId, action: "reduce_load", loadDeltaKg: Number((progression.toLoadKg - progression.fromLoadKg).toFixed(1)), reason: progression.explanation };
-        } else if (mappedDecision === "REVIEW") {
-          nextPrescription = { exerciseId: input.exerciseId, action: "review", reason: progression.explanation };
-        } else {
-          nextPrescription = { exerciseId: input.exerciseId, action: "maintain", reason: progression.explanation };
-        }
-        decision = { exerciseId: input.exerciseId, decision: mappedDecision, reasonCode: progression.reasonCode, nextPrescription };
-      }
+      const decision = await this.decideRecordedWorkoutProgression(client, input.actor, event, basePrescription);
       await client.query(
         `INSERT INTO guto_v3.workout_evolution_decisions
           (tenant_id,user_id,exercise_id,decision,reason_code,source_session_exercise_id,context_snapshot)
          VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`,
         [input.actor.tenantId, input.actor.userId, decision.exerciseId, decision.decision, decision.reasonCode, exerciseRow.rows[0]!.id,
-          JSON.stringify({ ...event.context || {}, nextPrescription: decision.nextPrescription || null })],
+          JSON.stringify({ ...event.context || {}, nextPrescription: decision.nextPrescription || null, progressionEvidence: decision.evidence })],
       );
       await this.appendMutationEvent(client, input.actor, input.requestId, "beta1.execution_feedback", {
         workoutSessionId: input.workoutSessionId,
@@ -2762,6 +2795,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         difficultyLabel: input.difficultyLabel,
         pain: input.pain === true,
         setCount,
+        executionSignature: signature,
         decision,
       });
       return { decision, setCount };

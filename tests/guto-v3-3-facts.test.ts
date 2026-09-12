@@ -157,23 +157,23 @@ test("V3.3 session location is a fact but never changes the base gym profile", a
   assert.equal(state.confirmedContext?.version, before.confirmedContext!.version + 1);
 });
 
-test("V3.3 workout evolution is deterministic: PROGRESS needs 2 consecutive easy sessions and failures review", async () => {
+test("V3.3 compatibility summaries cannot replace recorded sets for progression", async () => {
   const { repository, actor } = await founder();
   const state = await repository.loadAppState(actor);
   const exerciseId = state.workout!.items[0]!.exerciseId;
-  // A single easy session is NOT enough to progress (P0#4).
+  // A summary carries no actual per-set evidence.
   const first = await repository.recordWorkoutExerciseEvent({
     actor, requestId: randomUUID(), event: { exerciseId, completed: true, repetitions: 12, setsCompleted: 3, perceivedDifficulty: 5 },
   });
-  assert.equal(first.decision, "MAINTAIN");
-  assert.equal(first.reasonCode, "SINGLE_EASY_SESSION_NOT_ENOUGH");
-  // The second consecutive easy session triggers PROGRESS with a concrete next prescription.
+  assert.equal(first.decision, "REVIEW");
+  assert.equal(first.reasonCode, "INSUFFICIENT_DATA");
+  // More summaries do not turn missing evidence into recorded sets.
   const second = await repository.recordWorkoutExerciseEvent({
     actor, requestId: randomUUID(), event: { exerciseId, completed: true, repetitions: 13, setsCompleted: 3, perceivedDifficulty: 5 },
   });
-  assert.equal(second.decision, "PROGRESS");
-  assert.equal(second.nextPrescription?.action, "add_reps");
-  assert.ok((second.nextPrescription?.targetReps || 0) > 13);
+  assert.equal(second.decision, "REVIEW");
+  assert.equal(second.nextPrescription?.action, "review");
+  assert.equal(second.nextPrescription?.targetLoadKg, undefined);
   // An incomplete execution always reviews and never progresses.
   const review = await repository.recordWorkoutExerciseEvent({
     actor, requestId: randomUUID(), event: { exerciseId, completed: false },

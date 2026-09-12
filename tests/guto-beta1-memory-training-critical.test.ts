@@ -384,36 +384,37 @@ test("BETA1_PAIN_SAFETY: pain during execution persists a TRAINING_LIMITATIONS m
 
 // ─── PROGRESSION: history drives the decision (top reached twice → PROGRESS) ─
 
-test("BETA1_PROGRESSION: two consecutive top-of-range sessions then PROGRESS decision with evidence", async () => {
-  const db = await getDb(); assert.ok(db);
+test("BETA1_PROGRESSION: real work sets, distinct sessions and compatibility use one decision", async () => {
+  const db = await getDb();
   const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
-  const curation = new Beta1CurationService(repo);
-  const beta1 = new Beta1WorkoutService(repo, curation);
+  const beta1 = new Beta1WorkoutService(repo, new Beta1CurationService(repo));
   const actor = await freshActor(repo);
   try {
     const state = await repo.loadAppState(actor);
-    const exerciseId = state.workout!.items.find((item) => item.position > 0)!.exerciseId;
-    // Session 1: 80kg 10/10/9 PESADA
-    let wsid = await startBeta1Session(beta1, actor);
-    await beta1.recordExecution({ actor, requestId: randomUUID(), workoutSessionId: wsid, exerciseId, difficultyLabel: "PESADA", sets: [
-      { setNumber: 1, loadKg: 80, reps: 10, techniqueType: "STRAIGHT_SET" },
-      { setNumber: 2, loadKg: 80, reps: 10, techniqueType: "STRAIGHT_SET" },
-      { setNumber: 3, loadKg: 80, reps: 9, techniqueType: "STRAIGHT_SET" }] });
-    await beta1.completeWorkout({ actor, requestId: randomUUID(), workoutSessionId: wsid });
-    // Session 2: 80kg 10/10/10 BOA (reps at top? 10 < 12 → still within range)
-    wsid = await startBeta1Session(beta1, actor);
-    await beta1.recordExecution({ actor, requestId: randomUUID(), workoutSessionId: wsid, exerciseId, difficultyLabel: "BOA", sets: [
-      { setNumber: 1, loadKg: 80, reps: 12, techniqueType: "STRAIGHT_SET" },
-      { setNumber: 2, loadKg: 80, reps: 12, techniqueType: "STRAIGHT_SET" },
-      { setNumber: 3, loadKg: 80, reps: 12, techniqueType: "STRAIGHT_SET" }] });
-    // Record the second top session through the legacy decision path
-    const decision = await repo.recordWorkoutExerciseEvent({ actor, requestId: randomUUID(), event: { exerciseId, workoutSessionId: wsid, completed: true, loadValue: 80, repetitions: 12, setsCompleted: 3, perceivedDifficulty: 8 } });
-    assert.ok(decision, "legacy decision path still works alongside Beta1");
-    await beta1.completeWorkout({ actor, requestId: randomUUID(), workoutSessionId: wsid });
-    // After two 12/12/12 BOA sessions the evolution decision must be PROGRESS on the next event
-    const nextDecision = await repo.recordWorkoutExerciseEvent({ actor, requestId: randomUUID(), event: { exerciseId, workoutSessionId: randomUUID(), completed: true, loadValue: 80, repetitions: 12, setsCompleted: 3, perceivedDifficulty: 8 } });
-    assert.equal(nextDecision.decision, "PROGRESS", "double progression: top reached consistently → PROGRESS");
-    assert.equal(nextDecision.reasonCode, "CONSISTENT_LOW_DIFFICULTY_COMPLETION");
+    const item = state.workout!.items.find(item => /m[aá]quina/i.test(item.name) && item.sets && /^\d+-\d+$/.test(item.reps || ""))!;
+    assert.ok(item, "real resistance prescription required");
+    const high = Number(item.reps!.split("-")[1]);
+    let lastSession = "";
+    for (let occurrence = 0; occurrence < 2; occurrence++) {
+      const wsid = await startBeta1Session(beta1, actor);
+      const input = { actor, requestId: randomUUID(), workoutSessionId: wsid, exerciseId: item.exerciseId,
+        difficultyLabel: "BOA" as const, sets: Array.from({ length: item.sets! }, (_, i) => ({
+          setNumber: i + 1, loadKg: 50, reps: high, techniqueType: "STRAIGHT_SET" as const,
+        })) };
+      const result = await beta1.recordExecution(input);
+      assert.equal(result.decision.decision, occurrence === 0 ? "MAINTAIN" : "PROGRESS");
+      assert.deepEqual(await beta1.recordExecution(input), result, "same request replays exactly");
+      // Another public path reads the same stored sets, never the summary's best reps.
+      const compatible = await repo.recordWorkoutExerciseEvent({ actor, requestId: randomUUID(), event: {
+        exerciseId: item.exerciseId, workoutSessionId: wsid, completed: true,
+        repetitions: 999, setsCompleted: 99, loadValue: 999, perceivedDifficulty: 5,
+      } });
+      assert.deepEqual(compatible, result.decision, "both public paths decide from identical durable sets");
+      if (occurrence === 1) assert.equal(result.decision.nextPrescription?.targetLoadKg, 55);
+      await beta1.completeWorkout({ actor, requestId: randomUUID(), workoutSessionId: wsid });
+      lastSession = wsid;
+    }
+    assert.ok(lastSession);
   } finally { await cleanup(repo, actor); await repo["pool"].end(); }
 });
 
@@ -429,7 +430,7 @@ test("BETA1_REGRESSION: 8/6/5 PESADA does not PROGRESS (REGRESS or MAINTAIN only
     const state = await repo.loadAppState(actor);
     const exerciseId = state.workout!.items.find((item) => item.position > 0)!.exerciseId;
     const { decideDoubleProgression } = await import("../src/v3/beta1-progression.js");
-    const catalogItem = { id: "x", exerciseId, name: "Supino reto máquina", purpose: "empurrar", muscleGroup: "peito", position: 1 };
+    const catalogItem = { id: "x", exerciseId, name: "Supino reto máquina", purpose: "empurrar", muscleGroup: "peito", position: 1, sets: 3 };
     const decision = decideDoubleProgression({
       exerciseId,
       repRangeLow: 8,
@@ -704,7 +705,7 @@ test("P1-04 DOR_SAFETY_PRIORITY: pain/DOR wins before regression and progression
     perceivedDifficulty: 10, context: { safetyConcern: true, difficultyLabel: "DOR" },
   });
   assert.equal(legacy.decision, "REVIEW", "DOR + poor reps → safety REVIEW, never REGRESS");
-  assert.equal(legacy.reasonCode, "PAIN_OR_SAFETY_CONCERN");
+  assert.equal(legacy.reasonCode, "PAIN_SAFETY_BRANCH");
 
   const perSet = decideDoubleProgression({
     exerciseId: "leg_press", repRangeLow: 8, repRangeHigh: 12,
@@ -940,4 +941,48 @@ test("FOOD_STATE_DRIFT: current declaration replaces its predecessor and changes
       } finally { await runtime["pool"].end(); }
     }
   } finally { await repo["pool"].end(); }
+});
+
+test("PROGRESSION_EXECUTION_IDENTITY: semantic retry cannot add evidence; changed content is an explicit conflict", async () => {
+  const db = await getDb();
+  const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
+  const beta1 = new Beta1WorkoutService(repo, new Beta1CurationService(repo));
+  const actor = await freshActor(repo);
+  try {
+    const state = await repo.loadAppState(actor);
+    const item = state.workout!.items.find(item => /m[aá]quina/i.test(item.name) && item.sets && /^\d+-\d+$/.test(item.reps || ""))!;
+    const wsid = await startBeta1Session(beta1, actor);
+    const input = { actor, requestId: randomUUID(), workoutSessionId: wsid, exerciseId: item.exerciseId,
+      difficultyLabel: "BOA" as const, sets: Array.from({ length: item.sets! }, (_, i) => ({
+        setNumber: i + 1, loadKg: 50, reps: Number(item.reps!.split("-")[1]), techniqueType: "STRAIGHT_SET" as const,
+      })) };
+    const first = await beta1.recordExecution(input);
+    const retries = await Promise.all([1, 2].map(() => beta1.recordExecution({ ...input, requestId: randomUUID() })));
+    for (const retry of retries) assert.deepEqual(retry, first);
+    const persisted = await repo.loadSessionExecutionFeedback(actor, wsid);
+    assert.equal(persisted.length, 1, "one authoritative exercise execution, regardless of requestId");
+    assert.equal(persisted[0].setRows.length, item.sets);
+    for (const requestId of [input.requestId, randomUUID()]) await assert.rejects(
+      () => beta1.recordExecution({ ...input, requestId, sets: input.sets.map(set => ({ ...set, reps: 2 })) }),
+      (error: unknown) => (error as { code?: string }).code === "V3_BETA1_EXECUTION_IMMUTABLE",
+    );
+    assert.deepEqual(await repo.loadSessionExecutionFeedback(actor, wsid), persisted, "rejected correction never silently changes truth");
+  } finally { await cleanup(repo, actor); await repo["pool"].end(); }
+});
+
+test("PROGRESSION_SET_NUMBERS: out-of-prescription work sets cannot qualify", async () => {
+  const db = await getDb();
+  const repo = new PostgresOfficialStateRepository(createPool(db.port, 10));
+  const beta1 = new Beta1WorkoutService(repo, new Beta1CurationService(repo));
+  const actor = await freshActor(repo);
+  try {
+    const state = await repo.loadAppState(actor);
+    const item = state.workout!.items.find(item => /m[aá]quina/i.test(item.name) && item.sets && /^\d+-\d+$/.test(item.reps || ""))!;
+    const wsid = await startBeta1Session(beta1, actor);
+    await assert.rejects(() => beta1.recordExecution({ actor, requestId: randomUUID(), workoutSessionId: wsid,
+      exerciseId: item.exerciseId, difficultyLabel: "BOA", sets: Array.from({ length: item.sets! }, (_, i) => ({
+        setNumber: item.sets! + i + 1, loadKg: 50, reps: 12, techniqueType: "STRAIGHT_SET" as const,
+      })) }), (error: unknown) => (error as { code?: string }).code === "V3_BETA1_INVALID_WORK_SET");
+    assert.deepEqual(await repo.loadSessionExecutionFeedback(actor, wsid), []);
+  } finally { await cleanup(repo, actor); await repo["pool"].end(); }
 });

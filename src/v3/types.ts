@@ -237,6 +237,8 @@ export interface WorkoutNextPrescription {
   action: WorkoutNextPrescriptionAction;
   targetReps?: number;
   loadDeltaKg?: number;
+  fromLoadKg?: number;
+  targetLoadKg?: number;
   reason: string;
 }
 
@@ -246,6 +248,15 @@ export interface WorkoutEvolutionDecision {
   reasonCode: string;
   /** Concrete next-session dose produced by the decision (P0#4). */
   nextPrescription?: WorkoutNextPrescription;
+  /** Server-derived evidence binding; clients cannot provide this authority. */
+  evidence?: {
+    authority: "beta1-double-progression-v1";
+    planId: string;
+    planVersion: number;
+    confirmedContextVersion: number | null;
+    sessionIds: string[];
+    sessionExerciseIds: string[];
+  };
 }
 
 export interface V3AppState {

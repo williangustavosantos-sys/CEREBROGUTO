@@ -737,7 +737,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     }
     const prior = this.workoutSessionEvents.get(keyed) || [];
     const history = prior.filter((event) => event.exerciseId === input.event.exerciseId).slice(-4);
-    const decision = decideWorkoutEvolution(input.event, history);
+    const decision = decideWorkoutEvolution(input.event, history, basePlan.items.find(item => item.exerciseId === input.event.exerciseId));
     this.workoutSessionEvents.set(keyed, [...prior, input.event]);
     this.events.push({ actorKey: key(input.actor), requestId: input.requestId, action: "workoutEvolution", resultCode: decision.decision });
     return decision;
