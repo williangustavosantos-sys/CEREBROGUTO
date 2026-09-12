@@ -1,9 +1,10 @@
 import { type CatalogLanguage } from "../../exercise-catalog.js";
-import { getFoodById, resolveFoodIdByName, type FoodLanguage } from "../food-catalog.js";
-import { suggestFoodSubstitutes } from "../food-availability.js";
-import { conflictsWithFoodDeclaration } from "./food-declaration-policy.js";
+import { type FoodLanguage } from "../food-catalog.js";
+import { currentFoodDeclaration } from "./current-food-state.js";
+import { literalTerm, normalizeDeclaration } from "./declaration-semantics.js";
+import { filterFoodsByDeclaration } from "./nutrition/restrictions.js";
 import { decideExerciseSubstitution, decideFoodSubstitution } from "./substitution-engine.js";
-import { selectCandidateFoods } from "./nutrition/catalog.js";
+import { selectCandidateFoods, officialFoodName } from "./nutrition/catalog.js";
 import type { ActiveContext, CandidateOption, OfficialSnapshot } from "./types.js";
 
 export interface CandidateProvider {
@@ -17,40 +18,19 @@ interface FoodNutritionReference {
   fatPer100g: number;
 }
 
-export const V3_FOOD_NUTRITION: Record<string, FoodNutritionReference> = {
-  banana: { caloriesPer100g: 89, proteinPer100g: 1.1, carbsPer100g: 22.8, fatPer100g: 0.3 },
-  apple: { caloriesPer100g: 52, proteinPer100g: 0.3, carbsPer100g: 13.8, fatPer100g: 0.2 },
-  berries: { caloriesPer100g: 57, proteinPer100g: 0.7, carbsPer100g: 14.5, fatPer100g: 0.3 },
-  wholegrain_bread: { caloriesPer100g: 247, proteinPer100g: 13, carbsPer100g: 41, fatPer100g: 4.2 },
-  oats: { caloriesPer100g: 389, proteinPer100g: 16.9, carbsPer100g: 66.3, fatPer100g: 6.9 },
-  rice: { caloriesPer100g: 128, proteinPer100g: 2.7, carbsPer100g: 28, fatPer100g: 0.3 },
-  potato: { caloriesPer100g: 87, proteinPer100g: 1.9, carbsPer100g: 20.1, fatPer100g: 0.1 },
-  sweet_potato: { caloriesPer100g: 86, proteinPer100g: 1.6, carbsPer100g: 20.1, fatPer100g: 0.1 },
-  eggs: { caloriesPer100g: 143, proteinPer100g: 12.6, carbsPer100g: 0.7, fatPer100g: 9.5 },
-  tofu: { caloriesPer100g: 120, proteinPer100g: 12, carbsPer100g: 2.9, fatPer100g: 7 },
-  lentils: { caloriesPer100g: 116, proteinPer100g: 9, carbsPer100g: 20, fatPer100g: 0.4 },
-  beans: { caloriesPer100g: 127, proteinPer100g: 8.7, carbsPer100g: 22.8, fatPer100g: 0.5 },
-};
+// Compatibility export derived from the official nutrition authority.
+export const V3_FOOD_NUTRITION: Record<string, FoodNutritionReference> = Object.fromEntries(selectCandidateFoods().map(food => [food.id, {
+  caloriesPer100g: food.nutritionPer100g.calories, proteinPer100g: food.nutritionPer100g.protein,
+  carbsPer100g: food.nutritionPer100g.carbs, fatPer100g: food.nutritionPer100g.fat,
+}]));
 
 function language(value: string): CatalogLanguage & FoodLanguage {
   return value === "it-IT" || value === "en-US" ? value : "pt-BR";
 }
-
-function foodCandidate(foodId: string, locale: FoodLanguage): CandidateOption | null {
-  const food = getFoodById(foodId);
-  const nutrition = V3_FOOD_NUTRITION[foodId];
-  // Only candidates the shared LP solver can actually place may be offered:
-  // the solver pool is the V3 official catalog, which is a strict subset of
-  // the legacy availability catalog. Offering a food absent from it makes the
-  // solver report a false INFEASIBLE for a candidate it can never select.
-  if (!food || !nutrition || !selectCandidateFoods().some((item) => item.id === foodId)) return null;
-  return {
-    id: food.id,
-    label: food.names[locale] || food.names["en-US"],
-    kind: "food",
-    purpose: food.category,
-    metadata: { category: food.category, ...nutrition },
-  };
+function foodCandidate(foodId: string, locale: FoodLanguage): CandidateOption {
+  const food = selectCandidateFoods().find(food => food.id === foodId)!;
+  return { id: food.id, label: officialFoodName(food.id, locale), kind: "food", purpose: food.role,
+    metadata: { category: food.role, ...V3_FOOD_NUTRITION[food.id] } };
 }
 
 // Catalogs are immutable reference data only; this provider never reads or
@@ -70,22 +50,15 @@ export class ConservativeCatalogCandidateProviderV3 implements CandidateProvider
     if (activeContext.kind === "diet" && snapshot.diet?.id === activeContext.planId) {
       const current = snapshot.diet.meals.flatMap((meal) => meal.items).find((item) => item.id === activeContext.itemId);
       if (!current) return [];
-      // Forbidden set = confirmed-context declaration UNION any active
-      // FOOD_CONSTRAINT / FOOD_EXCLUSION facts. Every official exclusion must
-      // gate candidates shown to the model BEFORE any solver/adjudication.
-      const forbiddenDeclaration = [
-        snapshot.confirmedContext?.foodDeclaration || "",
-        ...(snapshot.currentFacts || [])
-          .filter((fact) => fact.factType === "FOOD_CONSTRAINT" || fact.factType === "FOOD_EXCLUSION")
-          .map((fact) => String(fact.value.declaration || fact.canonicalValue)),
-      ].join(" ");
-      const explicitlyProposed = resolveFoodIdByName(message);
-      const suggested = suggestFoodSubstitutes({ originalFoodId: current.foodId, useContext: "meal_substitution" });
-      const ids = [explicitlyProposed, ...suggested.map((food) => food.id)]
-        .filter((id): id is string => Boolean(id))
-        .filter((id, index, all) => all.indexOf(id) === index && !rejected.has(id))
-        .filter((id) => !conflictsWithFoodDeclaration(id, forbiddenDeclaration));
-      const candidates = ids.map((id) => foodCandidate(id, locale)).filter((item): item is CandidateOption => item !== null).slice(0, 8);
+      const currentFood = selectCandidateFoods().find(food => food.id === current.foodId);
+      if (!currentFood) return [];
+      const normalizedMessage = normalizeDeclaration(message);
+      const eligible = filterFoodsByDeclaration(selectCandidateFoods(), currentFoodDeclaration(snapshot))
+        .filter(food => food.role === currentFood.role && food.id !== current.foodId && !rejected.has(food.id));
+      const explicitlyProposed = eligible.find(food => [food.id, food.canonicalName, ...food.aliases]
+        .some(name => literalTerm(name).test(normalizedMessage)));
+      const ordered = explicitlyProposed ? [explicitlyProposed, ...eligible.filter(food => food.id !== explicitlyProposed.id)] : eligible;
+      const candidates = ordered.slice(0, 8).map(food => foodCandidate(food.id, locale));
       return decideFoodSubstitution({ snapshot, current, message, candidates }).candidates;
     }
     return [];

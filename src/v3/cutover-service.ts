@@ -1,3 +1,4 @@
+import { officialDayKey } from "./official-day.js";
 import { randomUUID } from "node:crypto";
 import { CalibrationMutationSchema, type FirstContactConfirmation, type FirstContactCorrection, type FirstContactResponse, type V3MemoryMutation } from "./contracts.js";
 import { V3Error } from "./errors.js";
@@ -135,12 +136,7 @@ export class V3CutoverService {
       if (input.xpEvent === "complete_daily_mission") {
         throw new V3Error("V3_WORKOUT_VALIDATION_REQUIRED", "Conclusão de missão exige a validação oficial do treino com prova (selfie).", 409);
       }
-      const sourceKey = new Intl.DateTimeFormat("en-CA", {
-        timeZone: process.env.GUTO_TIME_ZONE || "Europe/Rome",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).format(new Date());
+      const sourceKey = officialDayKey(new Date());
       await this.repository.recordXp({ actor, requestId: input.requestId, reasonCode: input.xpEvent, sourceKey });
     }
 

@@ -6,6 +6,7 @@ export function conflictsWithFoodDeclaration(foodId: string, declaration: string
   const food = getFoodById(foodId);
   if (!food) return true;
   const { restrictions } = interpretFoodDeclaration(declaration);
+  if (restrictions.has("soy_free") && food.allergens?.includes("soy")) return true;
   if (restrictions.has("no_meat") && ["chicken_breast", "bresaola"].includes(food.id)) return true;
   if (restrictions.has("no_fish") && ["tuna_canned", "white_fish"].includes(food.id)) return true;
   if (restrictions.has("no_egg") && food.allergens?.includes("egg")) return true;

@@ -15,6 +15,7 @@ export interface OfficialFoodCatalogItem {
     containsEgg: boolean;
     containsMeat: boolean;
     strictGlutenFreeEligible: boolean;
+    containsSoy?: boolean;
   };
   role: FoodRole;
   state: "raw" | "cooked" | "prepared" | "packaged";
@@ -29,6 +30,9 @@ export const OFFICIAL_CATALOG_VERSION = "guto_food_catalog_usda_curated_v1";
 
 /** Initial curated generic-food catalog. Values are imported/normalized from USDA FDC references. */
 export const OFFICIAL_FOOD_CATALOG: OfficialFoodCatalogItem[] = [
+  // USDA FDC 172475 (SR Legacy), checked 2026-09-12. Generic firm calcium-set
+  // tofu; soy is an explicit ingredient, never inferred safe from missing data.
+  { id: "tofu", canonicalName: "Firm tofu", aliases: ["tofu", "tofu firme", "tofu compatto", "soja", "soia", "soy"], source: "USDA_FOODDATA_CENTRAL", sourceRecordId: "172475", sourceLicense: "CC0_1.0", catalogVersion: OFFICIAL_CATALOG_VERSION, nutritionPer100g: { calories: 144, protein: 17.27, carbs: 2.78, fat: 8.72, fiber: 2.3 }, dietaryProperties: { containsGluten: false, containsLactose: false, containsEgg: false, containsMeat: false, containsSoy: true, strictGlutenFreeEligible: false }, role: "protein_primary", state: "raw", minGrams: 0, maxGrams: 400, mealAffinity: ["lunch", "dinner"], enabled: true, dataQuality: "curated_fixture_migration" },
   { id: "oats", canonicalName: "Oats", aliases: ["aveia", "avena"], source: "USDA_FOODDATA_CENTRAL", sourceRecordId: "USDA-SR-oats", sourceLicense: "CC0_1.0", catalogVersion: OFFICIAL_CATALOG_VERSION, nutritionPer100g: { calories: 389, protein: 16.9, carbs: 66.3, fat: 6.9, fiber: 10.6 }, dietaryProperties: { containsGluten: false, containsLactose: false, containsEgg: false, containsMeat: false, strictGlutenFreeEligible: false }, role: "carb_primary", state: "raw", minGrams: 20, maxGrams: 120, mealAffinity: ["breakfast", "snack"], enabled: true, dataQuality: "curated_fixture_migration" },
   { id: "rice", canonicalName: "Rice", aliases: ["arroz", "riso"], source: "USDA_FOODDATA_CENTRAL", sourceRecordId: "USDA-SR-rice-cooked", sourceLicense: "CC0_1.0", catalogVersion: OFFICIAL_CATALOG_VERSION, nutritionPer100g: { calories: 130, protein: 2.7, carbs: 28.2, fat: 0.3, fiber: 2.3 }, dietaryProperties: { containsGluten: false, containsLactose: false, containsEgg: false, containsMeat: false, strictGlutenFreeEligible: true }, role: "carb_primary", state: "cooked", minGrams: 50, maxGrams: 400, mealAffinity: ["lunch", "dinner"], enabled: true, dataQuality: "curated_fixture_migration" },
   { id: "potato", canonicalName: "Potato", aliases: ["batata", "patata"], source: "USDA_FOODDATA_CENTRAL", sourceRecordId: "USDA-SR-potato", sourceLicense: "CC0_1.0", catalogVersion: OFFICIAL_CATALOG_VERSION, nutritionPer100g: { calories: 87, protein: 1.9, carbs: 20, fat: 0.1, fiber: 1.9 }, dietaryProperties: { containsGluten: false, containsLactose: false, containsEgg: false, containsMeat: false, strictGlutenFreeEligible: true }, role: "carb_primary", state: "cooked", minGrams: 80, maxGrams: 400, mealAffinity: ["lunch", "dinner"], enabled: true, dataQuality: "curated_fixture_migration" },
@@ -49,4 +53,26 @@ export const OFFICIAL_FOOD_CATALOG: OfficialFoodCatalogItem[] = [
 export function selectCandidateFoods(excludedIds: readonly string[] = [], limit = 50): OfficialFoodCatalogItem[] {
   const excluded = new Set(excludedIds);
   return OFFICIAL_FOOD_CATALOG.filter((food) => food.enabled && !excluded.has(food.id)).slice(0, Math.min(limit, 50));
+}
+
+export function officialFoodName(foodId: string, language: string): string {
+  const values: Record<string, Record<string, string>> = {
+    tofu: { "pt-BR": "Tofu firme", "it-IT": "Tofu compatto", "en-US": "Firm tofu" },
+    oats: { "pt-BR": "Aveia", "it-IT": "Avena", "en-US": "Oats" },
+    rice: { "pt-BR": "Arroz", "it-IT": "Riso", "en-US": "Rice" },
+    potato: { "pt-BR": "Batata", "it-IT": "Patata", "en-US": "Potato" },
+    pasta: { "pt-BR": "Massa", "it-IT": "Pasta", "en-US": "Pasta" },
+    wholegrain_bread: { "pt-BR": "Pão integral", "it-IT": "Pane integrale", "en-US": "Whole grain bread" },
+    chicken: { "pt-BR": "Frango", "it-IT": "Pollo", "en-US": "Chicken" },
+    eggs: { "pt-BR": "Ovos", "it-IT": "Uova", "en-US": "Eggs" },
+    tuna: { "pt-BR": "Atum", "it-IT": "Tonno", "en-US": "Tuna" },
+    beans: { "pt-BR": "Feijão", "it-IT": "Fagioli", "en-US": "Beans" },
+    lentils: { "pt-BR": "Lentilhas", "it-IT": "Lenticchie", "en-US": "Lentils" },
+    yogurt: { "pt-BR": "Iogurte grego", "it-IT": "Yogurt greco", "en-US": "Greek yogurt" },
+    banana: { "pt-BR": "Banana", "it-IT": "Banana", "en-US": "Banana" },
+    apple: { "pt-BR": "Maçã", "it-IT": "Mela", "en-US": "Apple" },
+    orange: { "pt-BR": "Laranja", "it-IT": "Arancia", "en-US": "Orange" },
+    olive_oil: { "pt-BR": "Azeite", "it-IT": "Olio d'oliva", "en-US": "Olive oil" },
+  };
+  return values[foodId]?.[language] || foodId;
 }
