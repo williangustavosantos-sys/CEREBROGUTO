@@ -47,7 +47,7 @@ export function foodTermExcluded(clause: string, term: RegExp): boolean | undefi
   return scopedOperator(clause, match.index, FOOD_OPERATORS);
 }
 
-function literalTerm(value: string): RegExp {
+export function literalTerm(value: string): RegExp {
   return new RegExp(`\\b${normalizeDeclaration(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}s?\\b`, "u");
 }
 
@@ -63,8 +63,9 @@ export function namedFoodExcluded(declaration: string, names: readonly string[])
   return excluded;
 }
 
-export type FoodRestriction = "gluten_free" | "lactose_free" | "no_egg" | "no_meat" | "no_fish";
-const FOOD_GROUPS: readonly (readonly [FoodRestriction, RegExp])[] = [
+export type FoodRestriction = "gluten_free" | "lactose_free" | "no_egg" | "no_meat" | "no_fish" | "soy_free";
+export const FOOD_GROUPS: readonly (readonly [FoodRestriction, RegExp])[] = [
+  ["soy_free", /\b(?:soja|soia|soy|soybean)\b/u],
   ["gluten_free", /\b(?:gluten|glutine)\b/u],
   ["lactose_free", /\b(?:lactose|lattosio|leite|latte|milk|dairy)\b/u],
   ["no_egg", /\b(?:ovo|ovos|egg|eggs|uovo|uova)\b/u],
@@ -72,7 +73,7 @@ const FOOD_GROUPS: readonly (readonly [FoodRestriction, RegExp])[] = [
   ["no_fish", /\b(?:peixe|peixes|fish|pesce|atum|tuna|tonno)\b/u],
 ];
 
-function labelAffirmed(clause: string, pattern: RegExp): boolean | undefined {
+export function labelAffirmed(clause: string, pattern: RegExp): boolean | undefined {
   const match = pattern.exec(clause);
   if (!match) return undefined;
   const before = clause.slice(0, match.index);

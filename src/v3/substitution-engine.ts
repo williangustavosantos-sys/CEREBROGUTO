@@ -1,6 +1,8 @@
 import { getCatalogById, getExerciseName, suggestExerciseSubstitutes, type CatalogLanguage } from "../../exercise-catalog.js";
 import { getFoodById, type FoodLanguage } from "../food-catalog.js";
-import { conflictsWithFoodDeclaration } from "./food-declaration-policy.js";
+import { currentFoodDeclaration } from "./current-food-state.js";
+import { selectCandidateFoods } from "./nutrition/catalog.js";
+import { filterFoodsByDeclaration } from "./nutrition/restrictions.js";
 import { calculateFoodReplacement } from "./nutrition-engine.js";
 import type { CandidateOption, DietItem, OfficialSnapshot, WorkoutItem } from "./types.js";
 
@@ -62,10 +64,8 @@ export function decideExerciseSubstitution(input: { snapshot: OfficialSnapshot; 
 }
 
 export function decideFoodSubstitution(input: { snapshot: OfficialSnapshot; current: DietItem; message: string; candidates: CandidateOption[] }): FoodSubstitutionDecision {
-  const declaration = [input.snapshot.confirmedContext?.foodDeclaration || "", ...(input.snapshot.currentFacts || [])
-    .filter((fact) => fact.factType === "FOOD_CONSTRAINT" || fact.factType === "FOOD_EXCLUSION")
-    .map((fact) => String(fact.value.declaration || fact.canonicalValue))].join(" ");
-  const safe = input.candidates.filter((candidate) => candidate.kind === "food" && !conflictsWithFoodDeclaration(candidate.id, declaration));
+  const eligibleIds = new Set(filterFoodsByDeclaration(selectCandidateFoods(), currentFoodDeclaration(input.snapshot)).map(food => food.id));
+  const safe = input.candidates.filter(candidate => candidate.kind === "food" && eligibleIds.has(candidate.id));
   return { kind: "food", currentFoodId: input.current.foodId, candidates: safe, reasonCode: "MACRO_EQUIVALENT_AND_RESTRICTION_SAFE" };
 }
 

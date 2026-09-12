@@ -903,3 +903,41 @@ test("PRESENCE retains recorded exercise pain after general session feedback", a
     }
   } finally { await cleanup(repo, actor); await repo["pool"].end(); }
 });
+
+test("FOOD_STATE_DRIFT: current declaration replaces its predecessor and changes the next official diet", async () => {
+  const { resolveDeclaredOperationalFacts } = await import("../src/v3/facts.js");
+  const db = await getDb();
+  const repo = new PostgresOfficialStateRepository(createPool(db.port, 2));
+  const actor = await freshActor(repo, { foodDeclaration: "Sou vegetariano. Não como batata." });
+  const service = new V3CutoverService(repo);
+  try {
+    const initial = await repo.loadAppState(actor);
+    const originalWorkout = initial.workout!.id;
+    for (const [message, excluded, included] of [
+      ["Agora sou vegano.", ["eggs", "yogurt", "chicken", "tuna", "potato"], []],
+      ["Adesso sono vegetariano.", ["chicken", "tuna", "potato"], ["eggs", "yogurt"]],
+      ["Agora como batata normalmente.", ["chicken", "tuna"], ["potato", "eggs", "yogurt"]],
+      ["Non mangio patata.", ["chicken", "tuna", "potato"], ["eggs", "yogurt"]],
+    ] as const) {
+      const before = await repo.loadAppState(actor);
+      const changes = resolveDeclaredOperationalFacts(message);
+      assert.ok(changes.some(change => change.factType.startsWith("FOOD_")), `recognized update: ${message}`);
+      const result = await repo.applyFactChanges({ actor, requestId: randomUUID(), expectedContextVersion: before.confirmedContext!.version, changes });
+      assert.deepEqual(result.affectedDomains, ["NUTRITION"]);
+      const stale = await repo.loadAppState(actor);
+      assert.equal(stale.workout!.id, originalWorkout);
+      assert.ok(!stale.diet || stale.diet.confirmedContextVersion !== stale.confirmedContext!.version, "dependent plan stays unavailable or stale until recomputation");
+      await service.generateDiet(actor, randomUUID());
+      const runtime = new PostgresOfficialStateRepository(createPool(db.port, 2));
+      try {
+        const current = await runtime.loadAppState(actor);
+        const ids = current.diet!.meals.flatMap(meal => meal.items.map(item => item.foodId));
+        for (const id of excluded) assert.ok(!ids.includes(id), `${message}: ${id} excluded`);
+        for (const id of included) assert.ok(ids.includes(id), `${message}: ${id} restored in actual plan`);
+        assert.equal(current.diet!.confirmedContextVersion, current.confirmedContext!.version);
+        const history = await runtime.listFactHistory(actor);
+        assert.ok(history.some(fact => fact.factType.startsWith("FOOD_") && fact.supersededAt));
+      } finally { await runtime["pool"].end(); }
+    }
+  } finally { await repo["pool"].end(); }
+});

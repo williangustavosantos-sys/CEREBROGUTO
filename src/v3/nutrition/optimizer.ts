@@ -22,8 +22,13 @@ export async function generateOfficialNutrition(target: NutritionTarget, exclude
   return result;
 }
 
-export async function reoptimizeOfficialNutrition(previous: OptimizationResult, target: NutritionTarget, excludedIds: readonly string[] = []): Promise<OptimizationResult> {
+export async function reoptimizeOfficialNutrition(previous: OptimizationResult, target: NutritionTarget, excludedIds: readonly string[] = [], requiredFoodId?: string): Promise<OptimizationResult> {
   const foods = selectCandidateFoods(excludedIds).map(toSolverFood);
+  if (requiredFoodId) {
+    const required = foods.find(food => food.id === requiredFoodId);
+    if (!required) throw new V3Error("V3_FOOD_EXCLUSION_VIOLATION", "Alimento selecionado indisponível para esta dieta.", 409);
+    required.minGrams = Math.max(required.minGrams, 50);
+  }
   const result = await solveNutritionOptimization({ mode: "REOPTIMIZE", previousPlan: previous, target, foods, excludedFoodIds: [...excludedIds], roundingGrams: 5 });
   if (result.status === "INFEASIBLE") throw new V3Error("NUTRITION_PLAN_INFEASIBLE", "Não foi possível substituir o alimento sem quebrar as metas.", 409, result.solverMetadata);
   if (result.status === "TIME_LIMIT") throw new V3Error("NUTRITION_SOLVER_TIME_LIMIT", "A substituição nutricional excedeu o tempo seguro.", 503, result.solverMetadata);

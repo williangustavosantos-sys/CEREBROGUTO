@@ -1,3 +1,5 @@
+import { officialDayKey } from "./official-day.js";
+import { evolveFoodState, foodStateChange, isFoodFact, type CurrentFoodState } from "./current-food-state.js";
 import { performance } from "node:perf_hooks";
 import { randomUUID } from "node:crypto";
 import pg, { type PoolClient, type QueryResultRow } from "pg";
@@ -624,12 +626,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
   }
 
   private todayKey(): string {
-    return new Intl.DateTimeFormat("en-CA", {
-      timeZone: process.env.GUTO_TIME_ZONE || "Europe/Rome",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).format(this.clock());
+    return officialDayKey(this.clock());
   }
 
   private async loadWorkout(client: PoolClient, row: QueryResultRow): Promise<WorkoutPlan> {
@@ -2022,8 +2019,13 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
       const current = this.mapConfirmedContext(currentRow);
       const recorded: RecordedFact[] = [];
       let foodDeclaration = current.foodDeclaration;
+      const savedFoodState = jsonObject(currentRow.context_snapshot).foodState;
+      let foodState: CurrentFoodState = Array.isArray(savedFoodState)
+        ? savedFoodState as CurrentFoodState : evolveFoodState([], current.foodDeclaration, true);
       let limitationDeclaration = current.limitationDeclaration;
-      for (const change of input.changes) {
+      for (const originalChange of input.changes) {
+        const change = isFoodFact(originalChange.factType) ? foodStateChange(foodState, originalChange) : originalChange;
+        if (isFoodFact(change.factType)) foodState = change.value.foodState as CurrentFoodState;
         const fact = await this.persistFact(client, input.actor, {
           factType: change.factType,
           value: { canonicalValue: change.canonicalValue, ...change.value, scope: change.scope || "profile" },
@@ -2043,14 +2045,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         } else if (change.factType === "EXPERIENCE_LEVEL") {
           await client.query(`UPDATE guto_v3.user_profile SET training_status=$1,version=version+1 WHERE tenant_id=$2 AND user_id=$3`, [change.canonicalValue, input.actor.tenantId, input.actor.userId]);
         } else if (change.factType === "FOOD_CONSTRAINT" || change.factType === "FOOD_EXCLUSION") {
-          // Exclusions are ADDITIVE, never a silent replacement: a later
-          // declaration must not erase an earlier, still-valid one. Each
-          // declared exclusion is appended to the running declaration so the
-          // confirmed context (forbidden set) is the union of ALL of them.
-          const declared = String(change.value.declaration || change.canonicalValue || "");
-          if (declared && !foodDeclaration.includes(declared)) {
-            foodDeclaration = foodDeclaration ? `${foodDeclaration} ${declared}` : declared;
-          }
+          foodDeclaration = String(change.value.declaration);
         } else if (change.factType === "PHYSICAL_CONSTRAINT") {
           limitationDeclaration = String(change.value.declaration || limitationDeclaration);
         }
@@ -2076,6 +2071,7 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
         goal: source.goal_snapshot,
         factIds: currentFacts.rows.map((row) => row.user_fact_id),
         factChangeRequestId: input.requestId,
+        foodState,
       };
       const contextResult = await client.query<QueryResultRow>(
         `INSERT INTO guto_v3.confirmed_user_contexts
@@ -2111,14 +2107,20 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
           [context.id, context.version, input.actor.tenantId, input.actor.userId],
         );
       }
-      if (!impactedSet.has("WORKOUT") && !impactedSet.has("NUTRITION")) {
-        await client.query(
-          `UPDATE guto_v3.active_plan_versions
-              SET confirmed_context_id=$1,confirmed_context_version=$2,version=version+1
-            WHERE tenant_id=$3 AND user_id=$4`,
-          [context.id, context.version, input.actor.tenantId, input.actor.userId],
-        );
-      }
+      // This pointer represents plans validated against ONE context. Detach
+      // affected plans until recomputation commits; retain their rows/history.
+      // Rebinding only the unaffected plan while leaving this pointer on the
+      // old context violates the composite context foreign keys at COMMIT.
+      await client.query(
+        `UPDATE guto_v3.active_plan_versions SET
+           workout_plan_id=CASE WHEN $3 THEN NULL ELSE workout_plan_id END,
+           workout_plan_version=CASE WHEN $3 THEN NULL ELSE workout_plan_version END,
+           diet_plan_id=CASE WHEN $4 THEN NULL ELSE diet_plan_id END,
+           diet_plan_version=CASE WHEN $4 THEN NULL ELSE diet_plan_version END,
+           confirmed_context_id=$1,confirmed_context_version=$2,version=version+1
+         WHERE tenant_id=$5 AND user_id=$6`,
+        [context.id, context.version, impactedSet.has("WORKOUT"), impactedSet.has("NUTRITION"), input.actor.tenantId, input.actor.userId],
+      );
       await this.appendMutationEvent(client, input.actor, input.requestId, "facts.confirmed", {
         contextId: context.id,
         contextVersion: context.version,
@@ -2261,11 +2263,13 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     },
   ): Promise<RecordedFact | null> {
     const valueJson = JSON.stringify(input.value);
+    const types = isFoodFact(input.factType)
+      ? ["FOOD_RESTRICTION", "FOOD_CONSTRAINT", "FOOD_EXCLUSION"] : [input.factType.toUpperCase()];
     const existing = await client.query<{ user_fact_id: string; value_json: unknown }>(
       `SELECT user_fact_id,value_json FROM guto_v3.user_facts
-        WHERE tenant_id=$1 AND user_id=$2 AND fact_type=$3 AND superseded_at IS NULL
+        WHERE tenant_id=$1 AND user_id=$2 AND upper(fact_type)=ANY($3::text[]) AND superseded_at IS NULL
         ORDER BY recorded_at DESC FOR UPDATE`,
-      [actor.tenantId, actor.userId, input.factType],
+      [actor.tenantId, actor.userId, types],
     );
     const duplicate = existing.rows.find((row) => JSON.stringify(row.value_json) === valueJson);
     if (duplicate) {
@@ -2295,8 +2299,8 @@ export class PostgresOfficialStateRepository implements OfficialStateRepository,
     if (input.supersedeCurrent && existing.rows.length) {
       await client.query(
         `UPDATE guto_v3.user_facts SET valid_to=now(),superseded_at=now(),superseded_by=$1
-          WHERE tenant_id=$2 AND user_id=$3 AND fact_type=$4 AND superseded_at IS NULL AND user_fact_id <> $1`,
-        [inserted.rows[0]!.user_fact_id, actor.tenantId, actor.userId, input.factType],
+          WHERE tenant_id=$2 AND user_id=$3 AND upper(fact_type)=ANY($4::text[]) AND superseded_at IS NULL AND user_fact_id <> $1`,
+        [inserted.rows[0]!.user_fact_id, actor.tenantId, actor.userId, types],
       );
     }
     const row = inserted.rows[0]!;

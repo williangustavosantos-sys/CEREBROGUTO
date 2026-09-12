@@ -275,7 +275,8 @@ test("PUBLIC_BYPASS: the sessions/complete route no longer invokes the repositor
 
 // ─── XP AMOUNT AUTHORITY (adapted mission day) ──────────────────────────────
 
-test("XP_AMOUNT: adapted mission day validates at +50 (not an assumed 100)", async () => {
+test("XP_AMOUNT: adapted mission day validates at +50 across the UTC/local day boundary", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-11T22:30:00Z") });
   const h = await harness();
   // Accept the adapted mission on the SAME official day before validating.
   await h.service.saveMemory(h.actor, { requestId: randomUUID(), xpEvent: "accept_adapted_mission" });

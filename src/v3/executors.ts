@@ -1,10 +1,10 @@
+import { currentFoodDeclaration } from "./current-food-state.js";
 import { randomUUID } from "node:crypto";
 import type { DecisionEnvelope } from "./contracts.js";
 import { V3Error } from "./errors.js";
 import { assertNutritionPlanValid, calculateNutritionPlan } from "./nutrition-engine.js";
 import { calculateNutritionTarget } from "./nutrition/target-policy.js";
 import { filterFoodsByDeclaration } from "./nutrition/restrictions.js";
-import { conflictsWithFoodDeclaration } from "./food-declaration-policy.js";
 import { selectCandidateFoods } from "./nutrition/catalog.js";
 import { reoptimizeOfficialNutrition, nutritionTargetFromProfile } from "./nutrition/optimizer.js";
 import { validateOfficialNutrition } from "./nutrition/validator.js";
@@ -268,7 +268,7 @@ export class DeterministicExecutorV3 {
     if (!current) throw new V3Error("V3_DIET_ITEM_NOT_FOUND", "Alimento oficial não encontrado.", 409);
     if (candidate.kind !== "food") throw new V3Error("V3_INVALID_FOOD_CANDIDATE", "Candidato não é alimento.", 409);
     const target = nutritionTargetFromProfile(calculateNutritionTarget(snapshot.profile, snapshot.goal));
-    const declaration = [snapshot.confirmedContext?.foodDeclaration || "", ...(snapshot.currentFacts || []).map((fact) => String(fact.value.declaration || fact.canonicalValue))].join(" ");
+    const declaration = currentFoodDeclaration(snapshot);
     const eligible = filterFoodsByDeclaration(selectCandidateFoods(), declaration);
     const excludedIds = selectCandidateFoods().filter((food) => !eligible.some((allowed) => allowed.id === food.id) || food.id === current.foodId).map((food) => food.id);
     const previous = {
@@ -288,7 +288,7 @@ export class DeterministicExecutorV3 {
     // somehow supplied it. The optimizer input below deliberately un-excludes
     // only the SELECTED candidate, so that fast-path must not be allowed to
     // resurrect a food the user officially forbids.
-    if (conflictsWithFoodDeclaration(candidate.id, declaration)) {
+    if (!candidateCatalog || !eligible.some(food => food.id === candidate.id)) {
       throw new V3Error("V3_FOOD_EXCLUSION_VIOLATION", "O candidato pertence a uma restrição alimentar oficial ainda válida.", 409);
     }
     // Only ineligible foods and the replaced (unavailable) item are excluded.
@@ -303,7 +303,7 @@ export class DeterministicExecutorV3 {
     // Foods the user already rejected in this conversation also stay out, so
     // the LP cannot silently re-add an item the user swapped away.
     const previouslyRejected = new Set(context.rejectedCandidateIds || []);
-    const optimized = await reoptimizeOfficialNutrition(previous, target, [...new Set(swapExcludedIds.filter((id) => id !== candidate.id && !previouslyRejected.has(id)))]);
+    const optimized = await reoptimizeOfficialNutrition(previous, target, [...new Set([...swapExcludedIds, ...previouslyRejected])], candidate.id);
     validateOfficialNutrition(optimized, target);
     const replacement = optimized.foods.find((food) => food.foodId === candidate.id);
     if (!replacement) throw new V3Error("NUTRITION_PLAN_INFEASIBLE", "O candidato não pertence a uma solução válida.", 409);

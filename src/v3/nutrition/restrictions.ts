@@ -3,18 +3,19 @@ import type { OfficialFoodCatalogItem } from "./catalog.js";
 import { interpretFoodDeclaration, namedFoodExcluded, type FoodRestriction } from "../declaration-semantics.js";
 
 export type DietaryRestriction = FoodRestriction;
-const FLESH_FOOD_IDS = new Set(["chicken", "tuna"]);
+const FISH_FOOD_IDS = new Set(["tuna"]);
 
 export function normalizeDietaryRestrictions(declaration: string): Set<DietaryRestriction> {
   return interpretFoodDeclaration(declaration).restrictions;
 }
 
 export function isFoodEligibleForRestrictions(food: OfficialFoodCatalogItem, restrictions: ReadonlySet<DietaryRestriction>): boolean {
+  if (restrictions.has("soy_free") && food.dietaryProperties.containsSoy) return false;
   if (restrictions.has("gluten_free") && !food.dietaryProperties.strictGlutenFreeEligible) return false;
   if (restrictions.has("lactose_free") && food.dietaryProperties.containsLactose) return false;
   if (restrictions.has("no_egg") && food.dietaryProperties.containsEgg) return false;
   if (restrictions.has("no_meat") && food.dietaryProperties.containsMeat) return false;
-  if (restrictions.has("no_fish") && FLESH_FOOD_IDS.has(food.id)) return false;
+  if (restrictions.has("no_fish") && FISH_FOOD_IDS.has(food.id)) return false;
   return true;
 }
 

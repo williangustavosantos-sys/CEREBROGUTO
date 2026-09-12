@@ -1,3 +1,5 @@
+import { officialDayKey } from "./official-day.js";
+import { evolveFoodState, foodStateChange, isFoodFact, type CurrentFoodState } from "./current-food-state.js";
 import { interpretFoodDeclaration, interpretPhysicalDeclaration } from "./declaration-semantics.js";
 import type { CalibrationMutation } from "./contracts.js";
 import { randomUUID } from "node:crypto";
@@ -55,7 +57,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
 
   constructor(private readonly clock: () => Date = () => new Date()) {}
 
-  private todayKey(): string { return this.clock().toISOString().slice(0, 10); }
+  private todayKey(): string { return officialDayKey(this.clock()); }
 
   seed(snapshot: OfficialSnapshot): void {
     this.snapshots.set(key(snapshot.actor), structuredClone(snapshot));
@@ -136,7 +138,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     };
     const xpEvents = structuredClone(this.xpLedger.get(key(actor)) || []);
     const totalXp = xpEvents.reduce((sum, event) => sum + event.amount, 0);
-    const today = new Date().toISOString().slice(0, 10);
+    const today = this.todayKey();
     return {
       actor: structuredClone(actor),
       memoryVersion: snapshot?.memoryVersion || 1,
@@ -607,13 +609,21 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     const now = new Date().toISOString();
     const history = this.facts.get(key(input.actor)) || [];
     const recorded: RecordedFact[] = [];
-    for (const change of input.changes) {
+    let foodState: CurrentFoodState = (history.find(fact => !fact.supersededAt && Array.isArray(fact.value.foodState))?.value.foodState as CurrentFoodState | undefined)
+      ?? evolveFoodState([], current.foodDeclaration, true);
+    let foodDeclaration = current.foodDeclaration;
+    for (const originalChange of input.changes) {
+      const change = isFoodFact(originalChange.factType) ? foodStateChange(foodState, originalChange) : originalChange;
+      if (isFoodFact(change.factType)) {
+        foodState = change.value.foodState as CurrentFoodState;
+        foodDeclaration = String(change.value.declaration);
+      }
       assertFactChange(change);
       const equivalent = history.find((fact) => !fact.supersededAt && fact.factType === change.factType && fact.canonicalValue === change.canonicalValue && fact.scope === change.scope);
       if (equivalent) { recorded.push(structuredClone(equivalent)); continue; }
       const next: RecordedFact = { ...change, id: randomUUID(), validFrom: now, validTo: null, recordedAt: now, supersededAt: null, supersededBy: null };
       for (const previous of history) {
-        if (!previous.supersededAt && previous.factType === change.factType && previous.scope === change.scope) {
+        if (!previous.supersededAt && (previous.factType === change.factType || (isFoodFact(previous.factType) && isFoodFact(change.factType))) && previous.scope === change.scope) {
           previous.validTo = now;
           previous.supersededAt = now;
           previous.supersededBy = next.id;
@@ -635,6 +645,7 @@ export class InMemoryOfficialStateRepository implements OfficialStateRepository,
     }
     const nextContext: ConfirmedUserContext = {
       ...current,
+      foodDeclaration,
       id: randomUUID(),
       version: current.version + 1,
       confirmedAt: now,

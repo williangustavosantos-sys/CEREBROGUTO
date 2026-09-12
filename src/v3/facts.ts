@@ -1,4 +1,5 @@
-import { interpretFoodDeclaration, interpretPhysicalDeclaration } from "./declaration-semantics.js";
+import { foodStateAssertions } from "./current-food-state.js";
+import { interpretPhysicalDeclaration } from "./declaration-semantics.js";
 import { V3Error } from "./errors.js";
 
 /**
@@ -102,12 +103,8 @@ export function resolveDeclaredOperationalFacts(message: string): FactChange[] {
     changes.push(declared("EXPERIENCE_LEVEL", code, { code }));
   }
 
-  const foodAssertion = interpretFoodDeclaration(message);
-  if (foodAssertion.state === "PRESENT" && /\b(vegetarian|vegetariano|vegetariana|vegano|vegana|vegan|sem gluten|gluten free|intoleran|alerg)/u.test(text)) {
-    changes.push(declared("FOOD_CONSTRAINT", text, { declaration: message.trim(), assertionState: foodAssertion.state }));
-  }
-  if (/\b(nao como|nao consumo|non mangio|avoid|evito)\b/u.test(text)) {
-    changes.push(declared("FOOD_EXCLUSION", text, { declaration: message.trim() }));
+  if (foodStateAssertions(message).length) {
+    changes.push(declared("FOOD_CONSTRAINT", text, { declaration: message.trim() }));
   }
   for (const signal of interpretPhysicalDeclaration(message).regions) {
     changes.push(declared("PHYSICAL_CONSTRAINT", signal.bodyRegion, {
